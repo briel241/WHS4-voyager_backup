@@ -1,0 +1,307 @@
+options:
+  parameters:
+    author: 'voyager_3'
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    copyright: ''
+    description: 'Hello BPSK 송신 (Node A)'
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: hello_tx
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: 'Hello BPSK 송신 (Node A)'
+    window_size: (1400,900)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: import_os
+  id: import
+  parameters:
+    comment: ''
+    imports: "import os"
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 140]
+    rotation: 0
+    state: enabled
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: '샘플레이트'
+    value: 1e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 12]
+    rotation: 0
+    state: enabled
+- name: sps
+  id: variable
+  parameters:
+    comment: '심볼당 샘플 -> 심볼률 250 ksym/s'
+    value: 4
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [330, 12]
+    rotation: 0
+    state: enabled
+- name: excess_bw
+  id: variable
+  parameters:
+    comment: 'RRC 롤오프'
+    value: 0.35
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [420, 12]
+    rotation: 0
+    state: enabled
+- name: center_freq
+  id: variable
+  parameters:
+    comment: '1e9 로 바꿔도 되지만 주파수 오차가 8배 커진다'
+    value: 157.2e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [540, 12]
+    rotation: 0
+    state: enabled
+- name: bpsk
+  id: variable_constellation
+  parameters:
+    comment: 'BPSK 성상도 — 송수신이 같은 것을 써야 한다'
+    type: bpsk
+    sym_map: [0, 1]
+    const_points: [-1, 1]
+    rot_sym: 2
+    dims: 1
+    precision: 8
+    npwr: 1.0
+    soft_dec_lut: None
+    normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [720, 12]
+    rotation: 0
+    state: enabled
+- name: tx_dev
+  id: variable
+  parameters:
+    comment: '송신 장비'
+    value: "'serial=34D03DD'"
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 84]
+    rotation: 0
+    state: enabled
+- name: tx_gain
+  id: variable
+  parameters:
+    comment: '★ 안 되면 여기부터 올린다 (0 은 최소값)'
+    value: 20
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [380, 84]
+    rotation: 0
+    state: enabled
+- name: tx_ampl
+  id: variable
+  parameters:
+    comment: 'DAC 풀스케일 대비'
+    value: 0.5
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 84]
+    rotation: 0
+    state: enabled
+- name: readme
+  id: note
+  parameters:
+    comment: ''
+    note: "BPSK Hello 송신 (Node A)   -   링크 점검용, VDE-TER 규격과 무관
+
+Vector Source  : Hello 의 아스키 코드를 무한 반복
+Const Modulator: 바이트를 비트로 풀고(MSB first) 차동부호화 후 BPSK+RRC
+Multiply Const : 디지털 단 진폭 조절
+USRP Sink      : RF 송신
+
+안 되면 tx_gain 을 20 -> 30 -> 40 으로 올릴 것 (0 은 최소값)
+★ 안테나 없이 동축 + 30dB 감쇠기 경로에서만 실행
+
+수신측: hello_rx.grc / 확인: tools/find_pattern.py ~/hello_rx.bin
+자세한 설명: docs/hello_bpsk_check.md"
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [40, 560]
+    rotation: 0
+    state: enabled
+- name: hello_src
+  id: blocks_vector_source_x
+  parameters:
+    comment: '''Hello'' 의 아스키 값. 계속 반복 송신한다'
+    type: byte
+    vector: [72, 101, 108, 108, 111]
+    repeat: 'True'
+    tags: []
+    vlen: 1
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [40, 260]
+    rotation: 0
+    state: enabled
+- name: modulator
+  id: digital_constellation_modulator
+  parameters:
+    comment: '바이트를 MSB first 로 풀어 BPSK 로 싣고 RRC 성형까지 한다'
+    constellation: bpsk
+    differential: 'True'
+    samples_per_symbol: sps
+    excess_bw: excess_bw
+    verbose: 'False'
+    log: 'False'
+    truncate: 'False'
+    maxoutbuf: 0
+    minoutbuf: 0
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [250, 260]
+    rotation: 0
+    state: enabled
+- name: amp
+  id: blocks_multiply_const_vxx
+  parameters:
+    comment: ''
+    type: complex
+    const: tx_ampl
+    vlen: 1
+    maxoutbuf: 0
+    minoutbuf: 0
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 260]
+    rotation: 0
+    state: enabled
+- name: usrp_sink
+  id: uhd_usrp_sink
+  parameters:
+    comment: '★ 안테나 없이 동축+감쇠기 경로에서만 실행할 것'
+    type: fc32
+    otw: ''
+    stream_args: ''
+    stream_chans: []
+    dev_addr: tx_dev
+    dev_args: ''
+    sync: ''
+    clock_rate: 0e0
+    num_mboards: 1
+    nchan: 1
+    start_time: -1
+    clock_source0: ''
+    time_source0: ''
+    sd_spec0: ''
+    center_freq0: center_freq
+    gain0: tx_gain
+    gain_type0: default
+    ant0: 'TX/RX'
+    bw0: 0
+    lo_export0: False
+    lo_source0: internal
+    samp_rate: samp_rate
+    len_tag_name: ''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [700, 260]
+    rotation: 0
+    state: enabled
+- name: tx_spectrum
+  id: qtgui_freq_sink_x
+  parameters:
+    comment: '송신 파형 확인용'
+    type: complex
+    name: "송신 스펙트럼"
+    fftsize: 2048
+    wintype: window.WIN_BLACKMAN_hARRIS
+    fc: 0
+    bw: samp_rate
+    nconnections: 1
+    update_time: 0.10
+    average: 0.2
+    grid: 'True'
+    autoscale: 'True'
+    ymin: -140
+    ymax: 10
+    gui_hint: ''
+    showports: 'False'
+    freqhalf: 'True'
+    legend: 'True'
+    axislabels: 'True'
+    ctrlpanel: 'False'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_level: 0.0
+    tr_chan: 0
+    tr_tag: ''
+    label1: ''
+    width1: 1
+    color1: "blue"
+    alpha1: 1.0
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [700, 380]
+    rotation: 0
+    state: enabled
+
+connections:
+- [hello_src, '0', modulator, '0']
+- [modulator, '0', amp, '0']
+- [amp, '0', usrp_sink, '0']
+- [amp, '0', tx_spectrum, '0']
+
+metadata:
+  file_format: 1
+  grc_version: 3.10.12.0
