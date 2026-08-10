@@ -1,1 +1,3 @@
 grc/*.py
+VDETER_Link/error_correction/__pycache__/
+VDETER_Link/error_correction/*.pyc
