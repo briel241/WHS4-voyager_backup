@@ -9,7 +9,7 @@
 | 현재 기준선 | `F9A8 + Hello` BPSK 송수신 성공 체인                                   |
 | 2단계 목표  | 기존 PHY를 유지하면서 Type 92/93 링크 계층 Message Builder/Parser 구현 |
 | GRC 설정    | `grc_block_configuration.md` 참조                                      |
-| 후속 단계   | `future_stage_requirements.md` 참조                                    |
+| 후속 단계   | `implementation_plan.md` 참조                                         |
 
 ## 1. 요구사항
 
