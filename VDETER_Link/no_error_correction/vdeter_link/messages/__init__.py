@@ -1,0 +1,1 @@
+"""Type별 VDE-TER Message 모델과 codec 패키지"""
