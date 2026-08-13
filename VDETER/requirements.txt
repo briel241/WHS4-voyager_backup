@@ -1,0 +1,2 @@
+# GNU Radio and PMT are supplied by the radio development environment.
+numpy>=1.24
