@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import config
+from ..link import config
 from ..link.messages.type_92 import Type92Message
 from ..link.messages.type_93 import Type93Message
 

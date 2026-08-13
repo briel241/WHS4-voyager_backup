@@ -1,9 +1,9 @@
-"""2단계 송신 모드와 Message 기본값 설정"""
+"""링크 계층 송신 모드와 Message 기본값 설정."""
 
 from __future__ import annotations
 
-from .link.messages.type_92 import Type92Message
-from .link.messages.type_93 import Type93Message
+from .messages.type_92 import Type92Message
+from .messages.type_93 import Type93Message
 
 # 필드 크기만 만족하면 되는 임의 시험값
 SOURCE_ID = 1001  # 4 byte

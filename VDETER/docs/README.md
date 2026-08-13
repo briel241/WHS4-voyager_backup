@@ -12,6 +12,6 @@
 | `vdeter_link/utils/` | `src/vdeter/common/` |
 | `vdeter_link/adapters/` | `src/vdeter/radio/` |
 | `vdeter_link/cli/` | `src/vdeter/cli/` |
-| `vdeter_link/config.py` | `src/vdeter/config.py` |
+| `vdeter_link/config.py` | `src/vdeter/link/config.py` |
 
 새 문서와 코드 예시는 현재 경로와 `vdeter` 패키지명을 기준으로 작성한다.

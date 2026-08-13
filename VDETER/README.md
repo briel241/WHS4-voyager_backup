@@ -15,7 +15,8 @@ VDETER/
 │  ├─ common/                 # bit/byte 공통 유틸리티
 │  ├─ link/
 │  │  ├─ messages/            # Type 92/93 codec과 registry
-│  │  └─ packet/              # Packet builder/parser
+│  │  ├─ packet/              # Packet builder/parser
+│  │  └─ config.py            # 링크 송신 모드와 Message 기본값
 │  ├─ profiles/               # 표준별 Message/Link ID 프로파일
 │  ├─ phy/
 │  │  ├─ burst/               # F9A8 기반 Temporary Burst
@@ -23,8 +24,7 @@ VDETER/
 │  │  └─ modulation/          # 변복조 구현 예정
 │  ├─ mac/                    # MAC 구현 예정
 │  ├─ radio/                  # GNU Radio TX/RX adapter
-│  ├─ cli/                    # 대화식 송신 입력
-│  └─ config.py
+│  └─ cli/                    # 대화식 송신 입력
 ├─ configs/                   # 장비·운용 환경별 설정
 ├─ apps/                      # 사용자 실행 진입점
 ├─ grc/

@@ -14,7 +14,7 @@ from threading import Event, Thread
 import numpy as np
 from gnuradio import gr
 
-from .. import config
+from ..link import config
 from ..phy.burst import temporary_builder
 from ..cli.console_tx import TxRequest, read_request
 from ..link.messages.registry import MESSAGE_CODECS

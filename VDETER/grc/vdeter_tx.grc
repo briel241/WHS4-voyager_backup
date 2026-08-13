@@ -240,7 +240,7 @@ blocks:
       USRP Sink      : Transmits the RF signal
 
       TX_MODE='interactive': enter Message count, Type, Payload, and repeat count in the terminal.
-      TX_MODE='fixed': use TX_MESSAGES and TX_REPEAT_COUNT in vdeter/config.py.
+      TX_MODE='fixed': use TX_MESSAGES and TX_REPEAT_COUNT in vdeter/link/config.py.
       Repeat count applies to the complete Burst, not to individual Messages.
 
       Run only through the TX/RX - 30 dB attenuator - coaxial cable - RX2 path without antennas.
