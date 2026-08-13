@@ -1,0 +1,1006 @@
+options:
+  parameters:
+    alias: ''
+    author: ''
+    catch_exceptions: 'True'
+    comment: ''
+    copyright: ''
+    description: ''
+    gen_linking: dynamic
+    generate_options: qt_gui
+    generator_class_name: PythonQtGuiGenerator
+    generator_module: gnuradio.grc.workflows.python_qt_gui
+    hier_block_src_path: '.:'
+    id: vde
+    max_nouts: '0'
+    output_language: python
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    thread_safe_setters: ''
+    title: Not titled yet
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: ''
+    value: '32000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 12]
+    rotation: 0
+    state: enabled
+- name: analog_random_source_x_0
+  id: analog_random_source_x
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    max: '2'
+    maxoutbuf: '0'
+    min: '0'
+    minoutbuf: '0'
+    num_samps: '432'
+    repeat: 'False'
+    type: byte
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [296, 228.0]
+    rotation: 0
+    state: enabled
+- name: blocks_message_debug_0
+  id: blocks_message_debug
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    en_uvec: 'True'
+    log_level: info
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1736, 56.0]
+    rotation: 0
+    state: enabled
+- name: blocks_stream_to_tagged_stream_0
+  id: blocks_stream_to_tagged_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    len_tag_key: '"packet_len"'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    packet_len: '432'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 244.0]
+    rotation: 0
+    state: enabled
+- name: epy_block_0
+  id: epy_block
+  parameters:
+    LinkID: '12'
+    _source_code: "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\nVDE-TER\
+      \ Turbo FEC Encoder for GNU Radio\n=======================================\n\
+      \nTarget profile\n--------------\n- VDE-TER Link ID 11\n- FEC input length:\
+      \ 432 bits\n- Turbo FEC rate: 1/2\n- Main punctured output: 864 bits\n- Termination/tail\
+      \ output: 10 bits\n- Total FEC output: 874 bits\n\nGNU Radio I/O\n-------------\n\
+      This file defines an Embedded Python Block named ``blk`` when GNU Radio is\n\
+      available.\n\nInput message port  : \"in\"\nOutput message port : \"out\"\n\n\
+      Input PDU data must be a PMT u8vector containing 432 *unpacked* bits:\n    [0,\
+      \ 1, 1, 0, ...]   # 432 items, each item is 0 or 1\n\nOutput PDU data is a PMT\
+      \ u8vector containing 874 coded bits:\n    [0, 1, 0, 1, ...]   # 874 items\n\
+      \nScope\n-----\nThis block performs ONLY the Turbo FEC encoding stage.\nCRC\
+      \ generation, byte-bit order conversion, scrambling, Link ID coding,\nsyncword\
+      \ insertion, modulation, and RRC filtering belong in separate blocks.\n\nReferences\n\
+      ----------\n1) ITU-R Recommendation M.2092-2 (02/2026), VDES common PHY FEC/Turbo\
+      \ coding.\n2) Public implementation used as a cross-check:\n   collinlokken/grc-ais-vdes-framebuilder,\
+      \ vde-ter-framebuilder.py\n\nNotes for later extension\n-------------------------\n\
+      Profile parameters are kept in PROFILES so that additional Link IDs can be\n\
+      added later without rewriting the encoder core.\n\"\"\"\n\nfrom __future__ import\
+      \ annotations\n\nfrom typing import Dict, List, Sequence, Tuple\n\n# GNU Radio\
+      \ is optional so that the encoder core can be unit-tested with\n# ordinary Python\
+      \ on a machine where GNU Radio is not installed.\ntry:\n    import pmt\n   \
+      \ from gnuradio import gr\n    _GNURADIO_AVAILABLE = True\nexcept ImportError:\n\
+      \    pmt = None\n    gr = None\n    _GNURADIO_AVAILABLE = False\n\n\n# ---------------------------------------------------------------------------\n\
+      # [\uAC01\uC8FC 1] Link ID\uBCC4 Turbo FEC \uD30C\uB77C\uBBF8\uD130\n# ---------------------------------------------------------------------------\n\
+      #\n# Link ID 11:\n#   K = 432        : Turbo encoder\uC5D0 \uB4E4\uC5B4\uAC00\
+      \uB294 \uC815\uBCF4 \uBE44\uD2B8 \uC218\n#   k1=2, k2=216  : K = k1 * k2, interleaver\
+      \ \uACC4\uC0B0 \uD30C\uB77C\uBBF8\uD130\n#   primes         : \uADDC\uACA9\uC758\
+      \ permutation \uACC4\uC0B0\uC5D0 \uC0AC\uC6A9\uD558\uB294 \uC815\uC218 \uC9D1\
+      \uD569\n#\n# puncture:\n#   \uB450 RSC encoder\uC758 \uD55C clock \uCD9C\uB825\
+      \ \uC21C\uC11C\uB97C\n#   [X, Y0, Y1, X', Y0', Y1'] \uB85C \uB193\uC558\uC744\
+      \ \uB54C,\n#   1 = \uC804\uC1A1, 0 = \uC0AD\uC81C(puncture)\uB97C \uC758\uBBF8\
+      \uD55C\uB2E4.\n#\n# Link ID 11\uC758 main puncturing\uC740 2-clock \uC8FC\uAE30\
+      \uB85C \uBC18\uBCF5\uB418\uBA70\n# \uAC01 input bit\uB9C8\uB2E4 \uD3C9\uADE0\
+      \ 2 coded bit\uB97C \uB0A8\uACA8 rate 1/2\uB97C \uB9CC\uB4E0\uB2E4.\n#\n# tail_puncture:\n\
+      #   RSC \uC0C1\uD0DC\uB97C 0\uC73C\uB85C \uC885\uB8CC(termination)\uC2DC\uD0A4\
+      \uB294 6 clock\n#   (encoder 1: 3 clocks + encoder 2: 3 clocks)\uC5D0 \uC801\
+      \uC6A9\uD55C\uB2E4.\n#   Link ID 11\uC5D0\uC11C\uB294 \uCD1D 10 tail bits\uAC00\
+      \ \uB0A8\uB294\uB2E4.\n#\nPROFILES: Dict[int, dict] = {\n    11: {\n       \
+      \ \"fec_input_bits\": 432,\n        \"k1\": 2,\n        \"k2\": 216,\n     \
+      \   \"primes\": [127, 191, 241, 5, 83, 109, 107, 179],\n        \"puncture\"\
+      : [\n            [1, 1, 0, 0, 0, 0],\n            [1, 0, 0, 0, 1, 0],\n    \
+      \    ],\n        \"tail_puncture\": [\n            [1, 1, 0, 0, 0, 0],\n   \
+      \         [1, 1, 0, 0, 0, 0],\n            [1, 0, 0, 0, 0, 0],\n           \
+      \ [0, 0, 0, 1, 1, 0],\n            [0, 0, 0, 1, 1, 0],\n            [0, 0, 0,\
+      \ 1, 0, 0],\n        ],\n        \"expected_main_bits\": 864,\n        \"expected_tail_bits\"\
+      : 10,\n        \"expected_total_bits\": 874,\n    },\n}\n\n\ndef _validate_bits(bits:\
+      \ Sequence[int], expected_len: int) -> List[int]:\n    \"\"\"\n    [\uAC01\uC8FC\
+      \ 2] \uC785\uB825 \uAC80\uC99D \uD568\uC218.\n\n    Turbo encoder \uC785\uB825\
+      \uC740 packed byte(\uC608: 0xA3)\uAC00 \uC544\uB2C8\uB77C,\n    0 \uB610\uB294\
+      \ 1 \uAC12\uC744 \uD558\uB098\uC529 \uAC00\uC9C4 'unpacked bit vector'\uC774\
+      \uB2E4.\n\n    \uC608:\n        [1, 0, 1, 0]  -> 4 bits\n    \"\"\"\n    out\
+      \ = [int(b) for b in bits]\n\n    if len(out) != expected_len:\n        raise\
+      \ ValueError(\n            f\"Expected {expected_len} input bits, got {len(out)}.\"\
+      \n        )\n\n    if any(b not in (0, 1) for b in out):\n        raise ValueError(\"\
+      Every input item must be 0 or 1.\")\n\n    return out\n\n\ndef _build_permutation(profile:\
+      \ dict) -> List[int]:\n    \"\"\"\n    [\uAC01\uC8FC 3] VDES Turbo interleaver\
+      \ permutation \uC0DD\uC131.\n\n    s = 1 ... K\uC5D0 \uB300\uD574 \uADDC\uACA9\
+      \uC758 permutation \uC2DD\uC73C\uB85C pi(s)\uB97C \uACC4\uC0B0\uD55C\uB2E4.\n\
+      \    \uBC18\uD658\uAC12\uC740 Python\uC5D0\uC11C \uBC14\uB85C \uC4F0\uAE30 \uC704\
+      \uD574 0-based index\uB85C \uBC14\uAFBC\uB2E4.\n\n    interleaved[s-1] = input[pi(s)-1]\n\
+      \    \"\"\"\n    k1 = int(profile[\"k1\"])\n    k2 = int(profile[\"k2\"])\n\
+      \    primes = profile[\"primes\"]\n    K = k1 * k2\n\n    if k1 % 2 != 0:\n\
+      \        raise ValueError(\"k1 must be even for the VDES permutation formula.\"\
+      )\n\n    half_k1 = k1 // 2\n    permutation: List[int] = []\n\n    for s in\
+      \ range(1, K + 1):\n        m = (s - 1) % 2\n        i = (s - 1) // (2 * k2)\n\
+      \        j = ((s - 1) // 2) - i * k2\n        t = (19 * i + 1) % half_k1\n \
+      \       q = (t % 8) + 1\n        c = (primes[q - 1] * j + 21 * m) % k2\n   \
+      \     pi_s = 2 * (t + c * half_k1 + 1) - m\n\n        permutation.append(int(pi_s)\
+      \ - 1)\n\n    # permutation\uC774 0..K-1\uC744 \uC815\uD655\uD788 \uD55C \uBC88\
+      \uC529 \uD3EC\uD568\uD558\uB294\uC9C0 \uD655\uC778.\n    if sorted(permutation)\
+      \ != list(range(K)):\n        raise RuntimeError(\"Generated interleaver permutation\
+      \ is not bijective.\")\n\n    return permutation\n\n\ndef _interleave(bits:\
+      \ Sequence[int], permutation: Sequence[int]) -> List[int]:\n    \"\"\"\n   \
+      \ [\uAC01\uC8FC 4] \uB450 \uBC88\uC9F8 RSC encoder\uC5D0 \uB123\uC744 \uC785\
+      \uB825 \uC21C\uC11C\uB97C \uC7AC\uBC30\uC5F4\uD55C\uB2E4.\n\n    Turbo Code\uB294\
+      \ \uAC19\uC740 \uC815\uBCF4\uC5F4\uC744\n      - Encoder 1: \uC6D0\uB798 \uC21C\
+      \uC11C\n      - Encoder 2: interleaved \uC21C\uC11C\n    \uB85C \uAC01\uAC01\
+      \ \uC778\uCF54\uB529\uD55C\uB2E4.\n    \"\"\"\n    return [int(bits[index])\
+      \ for index in permutation]\n\n\ndef _rsc_encode(\n    bits: Sequence[int],\n\
+      ) -> Tuple[List[int], List[int], List[int], List[int], List[int], List[int]]:\n\
+      \    \"\"\"\n    [\uAC01\uC8FC 5] VDES\uC6A9 8-state RSC(Recursive Systematic\
+      \ Convolutional) encoder.\n\n    \uAC01 input bit\uB9C8\uB2E4 3\uAC1C \uCD9C\
+      \uB825\uC744 \uACC4\uC0B0:\n        X  : systematic bit (= \uC785\uB825 bit)\n\
+      \        Y0 : parity output 0\n        Y1 : parity output 1\n\n    \uB0B4\uBD80\
+      \ \uBA54\uBAA8\uB9AC D[0:3]\uB294 \uBAA8\uB450 0\uC5D0\uC11C \uC2DC\uC791\uD55C\
+      \uB2E4.\n\n    \uC815\uBCF4\uC5F4\uC744 \uBAA8\uB450 \uCC98\uB9AC\uD55C \uB4A4\
+      \uC5D0\uB294 3 clock\uC758 termination \uB3D9\uC791\uC744 \uC218\uD589\uD558\
+      \uC5EC\n    \uB0B4\uBD80 \uC0C1\uD0DC\uB97C 000\uC73C\uB85C \uB418\uB3CC\uB9AC\
+      \uAE30 \uC704\uD55C tail \uCD9C\uB825\uB3C4 \uC0DD\uC131\uD55C\uB2E4.\n\n  \
+      \  \uBC18\uD658:\n        X, Y0, Y1, X_tail, Y0_tail, Y1_tail\n    \"\"\"\n\
+      \    D = [0, 0, 0]\n\n    X: List[int] = []\n    Y0: List[int] = []\n    Y1:\
+      \ List[int] = []\n\n    for raw_bit in bits:\n        bit = int(raw_bit) & 1\n\
+      \n        # Recursive feedback.\n        feedback = D[2] ^ D[1] ^ bit\n\n  \
+      \      # Systematic + parity outputs.\n        x = bit\n        y0 = feedback\
+      \ ^ D[0] ^ D[2]\n        y1 = feedback ^ D[0] ^ D[1] ^ D[2]\n\n        X.append(x)\n\
+      \        Y0.append(y0)\n        Y1.append(y1)\n\n        # Shift register update:\n\
+      \        # [D0, D1, D2] <- [feedback, old D0, old D1]\n        D = [feedback,\
+      \ D[0], D[1]]\n\n    # ------------------------------------------------------------------\n\
+      \    # [\uAC01\uC8FC 6] RSC termination / tail generation\n    # ------------------------------------------------------------------\n\
+      \    # \uC815\uBCF4\uC5F4 \uCC98\uB9AC\uAC00 \uB05D\uB09C \uB4A4 3 clock \uB3D9\
+      \uC548 encoder\uB97C zero state\uB85C \uBCF5\uADC0\uC2DC\uD0A8\uB2E4.\n    #\
+      \ tail systematic input\uC740 \uD604\uC7AC state\uC5D0\uC11C D1 XOR D2\uB85C\
+      \ \uC815\uD574\uC9C0\uACE0,\n    # feedback node\uC5D0\uB294 \uACB0\uACFC\uC801\
+      \uC73C\uB85C 0\uC774 \uB4E4\uC5B4\uAC00 state\uAC00 3\uBC88 shift\uB418\uBA70\
+      \ 000\uC774 \uB41C\uB2E4.\n    #\n    X_tail: List[int] = []\n    Y0_tail: List[int]\
+      \ = []\n    Y1_tail: List[int] = []\n\n    for _ in range(3):\n        x_tail\
+      \ = D[1] ^ D[2]\n        feedback = 0\n\n        y0_tail = feedback ^ D[0] ^\
+      \ D[2]\n        y1_tail = feedback ^ D[0] ^ D[1] ^ D[2]\n\n        X_tail.append(x_tail)\n\
+      \        Y0_tail.append(y0_tail)\n        Y1_tail.append(y1_tail)\n\n      \
+      \  D = [feedback, D[0], D[1]]\n\n    if D != [0, 0, 0]:\n        raise RuntimeError(\"\
+      RSC termination failed to return state to zero.\")\n\n    return X, Y0, Y1,\
+      \ X_tail, Y0_tail, Y1_tail\n\n\ndef _apply_puncture(\n    streams: Sequence[Sequence[int]],\n\
+      \    pattern: Sequence[Sequence[int]],\n) -> List[int]:\n    \"\"\"\n    [\uAC01\
+      \uC8FC 7] Main data puncturing.\n\n    streams\uC758 \uC21C\uC11C:\n       \
+      \ [X, Y0, Y1, X', Y0', Y1']\n\n    pattern \uAC12\uC758 \uC758\uBBF8:\n    \
+      \    0 -> \uD574\uB2F9 bit \uC0AD\uC81C\n        1 -> \uD574\uB2F9 bit 1\uD68C\
+      \ \uCD9C\uB825\n        2,3,... -> \uD574\uB2F9 bit\uB97C \uADF8 \uD69F\uC218\
+      \uB9CC\uD07C \uBC18\uBCF5 \uCD9C\uB825\n\n    \uD604\uC7AC Link ID 11\uC5D0\uC11C\
+      \uB294 0/1\uB9CC \uC0AC\uC6A9\uD558\uC9C0\uB9CC,\n    \uCD94\uD6C4 \uB2E4\uB978\
+      \ puncturing/repetition profile\uB85C \uD655\uC7A5\uD558\uAE30 \uC27D\uAC8C\
+      \ \uC77C\uBC18\uD654\uD588\uB2E4.\n    \"\"\"\n    if len(streams) != 6:\n \
+      \       raise ValueError(\"Exactly 6 RSC streams are required.\")\n\n    K =\
+      \ len(streams[0])\n    if any(len(stream) != K for stream in streams):\n   \
+      \     raise ValueError(\"All six RSC streams must have the same length.\")\n\
+      \n    output: List[int] = []\n\n    for n in range(K):\n        row = pattern[n\
+      \ % len(pattern)]\n\n        if len(row) != 6:\n            raise ValueError(\"\
+      Each puncturing row must have 6 entries.\")\n\n        for stream_index, repeat_count\
+      \ in enumerate(row):\n            repeat_count = int(repeat_count)\n       \
+      \     if repeat_count < 0:\n                raise ValueError(\"Puncturing entries\
+      \ cannot be negative.\")\n\n            output.extend(\n                [int(streams[stream_index][n])]\
+      \ * repeat_count\n            )\n\n    return output\n\n\ndef _apply_tail_puncture(\n\
+      \    tail1: Tuple[Sequence[int], Sequence[int], Sequence[int]],\n    tail2:\
+      \ Tuple[Sequence[int], Sequence[int], Sequence[int]],\n    pattern: Sequence[Sequence[int]],\n\
+      ) -> List[int]:\n    \"\"\"\n    [\uAC01\uC8FC 8] \uB450 RSC encoder\uC758 termination\
+      \ tail puncturing.\n\n    \uCD1D 6 tail clocks:\n      clock 0~2 : Encoder 1\uC758\
+      \ X,Y0,Y1 tail\n      clock 3~5 : Encoder 2\uC758 X',Y0',Y1' tail\n\n    Link\
+      \ ID 11\uC5D0\uC11C\uB294 puncturing \uACB0\uACFC \uCD1D 10 bit\uAC00 \uCD9C\
+      \uB825\uB41C\uB2E4.\n    \"\"\"\n    if len(pattern) != 6:\n        raise ValueError(\"\
+      Tail puncturing pattern must contain 6 rows.\")\n\n    if any(len(s) != 3 for\
+      \ s in tail1 + tail2):\n        raise ValueError(\"Each RSC encoder must generate\
+      \ exactly 3 tail clocks.\")\n\n    output: List[int] = []\n\n    # Encoder 1\
+      \ termination clocks.\n    for clock in range(3):\n        row = pattern[clock]\n\
+      \        sources = [\n            tail1[0][clock],\n            tail1[1][clock],\n\
+      \            tail1[2][clock],\n            0, 0, 0,\n        ]\n\n        for\
+      \ value, repeat_count in zip(sources, row):\n            output.extend([int(value)]\
+      \ * int(repeat_count))\n\n    # Encoder 2 termination clocks.\n    for clock\
+      \ in range(3):\n        row = pattern[clock + 3]\n        sources = [\n    \
+      \        0, 0, 0,\n            tail2[0][clock],\n            tail2[1][clock],\n\
+      \            tail2[2][clock],\n        ]\n\n        for value, repeat_count\
+      \ in zip(sources, row):\n            output.extend([int(value)] * int(repeat_count))\n\
+      \n    return output\n\n\ndef turbo_encode(bits: Sequence[int], link_id: int\
+      \ = 11) -> List[int]:\n    \"\"\"\n    [\uAC01\uC8FC 9] \uC678\uBD80\uC5D0\uC11C\
+      \ \uD638\uCD9C\uD558\uB294 \uD575\uC2EC \uD568\uC218.\n\n    \uCC98\uB9AC \uC21C\
+      \uC11C:\n        432-bit FEC input\n            -> RSC Encoder #1\n        \
+      \    -> Interleaver\n            -> RSC Encoder #2\n            -> rate-1/2\
+      \ puncturing\n            -> RSC termination/tail puncturing\n            ->\
+      \ 874 coded bits\n\n    \uC8FC\uC758:\n    - CRC\uB97C \uACC4\uC0B0\uD558\uC9C0\
+      \ \uC54A\uB294\uB2E4.\n    - byte \uB2E8\uC704 bit-order reversal\uC744 \uD558\
+      \uC9C0 \uC54A\uB294\uB2E4.\n    - scrambling\uC744 \uD558\uC9C0 \uC54A\uB294\
+      \uB2E4.\n    - \u03C0/4-QPSK \uBCC0\uC870\uB97C \uD558\uC9C0 \uC54A\uB294\uB2E4\
+      .\n    \"\"\"\n    if link_id not in PROFILES:\n        raise ValueError(\n\
+      \            f\"Unsupported Link ID {link_id}. \"\n            f\"Currently\
+      \ implemented: {sorted(PROFILES)}\"\n        )\n\n    profile = PROFILES[link_id]\n\
+      \    K = int(profile[\"fec_input_bits\"])\n\n    input_bits = _validate_bits(bits,\
+      \ K)\n    permutation = _build_permutation(profile)\n\n    # RSC Encoder #1:\
+      \ \uC6D0\uB798 bit \uC21C\uC11C.\n    x, y0, y1, xt, y0t, y1t = _rsc_encode(input_bits)\n\
+      \n    # RSC Encoder #2: interleaved bit \uC21C\uC11C.\n    interleaved = _interleave(input_bits,\
+      \ permutation)\n    xp, y0p, y1p, xpt, y0pt, y1pt = _rsc_encode(interleaved)\n\
+      \n    main_bits = _apply_puncture(\n        [x, y0, y1, xp, y0p, y1p],\n   \
+      \     profile[\"puncture\"],\n    )\n\n    tail_bits = _apply_tail_puncture(\n\
+      \        (xt, y0t, y1t),\n        (xpt, y0pt, y1pt),\n        profile[\"tail_puncture\"\
+      ],\n    )\n\n    encoded = main_bits + tail_bits\n\n    # \uAE38\uC774\uB294\
+      \ \uAD6C\uD604 \uC624\uB958\uB97C \uAC00\uC7A5 \uBE68\uB9AC \uC7A1\uC744 \uC218\
+      \ \uC788\uB294 sanity check.\n    if len(main_bits) != profile[\"expected_main_bits\"\
+      ]:\n        raise RuntimeError(\n            f\"Unexpected main FEC length:\
+      \ {len(main_bits)} \"\n            f\"(expected {profile['expected_main_bits']}).\"\
+      \n        )\n\n    if len(tail_bits) != profile[\"expected_tail_bits\"]:\n \
+      \       raise RuntimeError(\n            f\"Unexpected FEC tail length: {len(tail_bits)}\
+      \ \"\n            f\"(expected {profile['expected_tail_bits']}).\"\n       \
+      \ )\n\n    if len(encoded) != profile[\"expected_total_bits\"]:\n        raise\
+      \ RuntimeError(\n            f\"Unexpected total FEC length: {len(encoded)}\
+      \ \"\n            f\"(expected {profile['expected_total_bits']}).\"\n      \
+      \  )\n\n    return encoded\n\n\n# ===========================================================================\n\
+      # GNU Radio Embedded Python Block\n# ===========================================================================\n\
+      #\n# GRC\uC5D0\uC11C Embedded Python Block\uC744 \uB9CC\uB4E4\uACE0 \uC774 \uD30C\
+      \uC77C \uB0B4\uC6A9\uC744 \uB123\uC73C\uBA74,\n# message port \"in\"\uC73C\uB85C\
+      \ 432-bit u8vector PDU\uB97C \uBC1B\uACE0\n# message port \"out\"\uC73C\uB85C\
+      \ 874-bit u8vector PDU\uB97C \uB0B4\uBCF4\uB0B8\uB2E4.\n#\nif _GNURADIO_AVAILABLE:\n\
+      \n    class blk(gr.basic_block):\n        \"\"\"\n        VDE-TER Turbo FEC\
+      \ Encoder (PDU)\n        Default: Link ID 11\n        \"\"\"\n\n        def\
+      \ __init__(self, LinkID=11, verbose=False):\n            # [\uAC01\uC8FC 10]\
+      \ LinkID\uB97C parameter\uB85C \uB454 \uC774\uC720:\n            # \uD604\uC7AC\
+      \uB294 11\uB9CC \uAD6C\uD604\uD588\uC9C0\uB9CC \uC774\uD6C4 PROFILES\uC5D0 \uB2E4\
+      \uB978 Link ID\uB97C \uCD94\uAC00\uD558\uBA74\n            # \uAC19\uC740 block\
+      \ interface\uB97C \uC720\uC9C0\uD560 \uC218 \uC788\uB2E4.\n            gr.basic_block.__init__(\n\
+      \                self,\n                name=\"VDE-TER Turbo FEC Encoder\",\n\
+      \                in_sig=None,\n                out_sig=None,\n            )\n\
+      \n            self.LinkID = int(LinkID)\n            self.verbose = bool(verbose)\n\
+      \n            if self.LinkID not in PROFILES:\n                raise ValueError(\n\
+      \                    f\"Unsupported Link ID {self.LinkID}. \"\n            \
+      \        f\"Implemented profiles: {sorted(PROFILES)}\"\n                )\n\n\
+      \            # PDU message ports.\n            self.message_port_register_in(pmt.intern(\"\
+      in\"))\n            self.message_port_register_out(pmt.intern(\"out\"))\n  \
+      \          self.set_msg_handler(pmt.intern(\"in\"), self._handle_pdu)\n\n  \
+      \      def _handle_pdu(self, msg):\n            \"\"\"\n            [\uAC01\uC8FC\
+      \ 11] GNU Radio PDU \uCC98\uB9AC \uD568\uC218.\n\n            PDU \uD615\uC2DD\
+      :\n                (metadata, u8vector)\n\n            metadata\uB294 \uADF8\
+      \uB300\uB85C \uBCF4\uC874\uD574\uC11C output PDU\uB85C \uC804\uB2EC\uD55C\uB2E4\
+      .\n            \"\"\"\n            try:\n                if not pmt.is_pair(msg):\n\
+      \                    raise ValueError(\n                        \"Input must\
+      \ be a PDU pair: (metadata, u8vector).\"\n                    )\n\n        \
+      \        meta = pmt.car(msg)\n                data = pmt.cdr(msg)\n\n      \
+      \          if not pmt.is_u8vector(data):\n                    raise ValueError(\n\
+      \                        \"PDU payload must be a PMT u8vector of unpacked bits.\"\
+      \n                    )\n\n                bits = list(pmt.u8vector_elements(data))\n\
+      \                encoded = turbo_encode(bits, self.LinkID)\n\n             \
+      \   out_vec = pmt.init_u8vector(len(encoded), encoded)\n                out_pdu\
+      \ = pmt.cons(meta, out_vec)\n\n                self.message_port_pub(pmt.intern(\"\
+      out\"), out_pdu)\n\n                if self.verbose:\n                    print(\n\
+      \                        f\"[VDE-TER Turbo FEC] Link ID {self.LinkID}: \"\n\
+      \                        f\"{len(bits)} -> {len(encoded)} bits\"\n         \
+      \           )\n\n            except Exception as exc:\n                # Embedded\
+      \ Python Block \uB514\uBC84\uAE45 \uC2DC \uD130\uBBF8\uB110\uC5D0\uC11C \uC6D0\
+      \uC778\uC744 \uBC14\uB85C \uBCFC \uC218 \uC788\uAC8C \uD55C\uB2E4.\n       \
+      \         print(f\"[VDE-TER Turbo FEC ERROR] {exc}\")\n\n\ndef _self_test()\
+      \ -> None:\n    \"\"\"\n    GNU Radio \uC5C6\uC774\uB3C4 \uC2E4\uD589 \uAC00\
+      \uB2A5\uD55C \uCD5C\uC18C self-test.\n\n    \uD655\uC778 \uD56D\uBAA9:\n   \
+      \ 1) 432 bits \uC785\uB825 \uD5C8\uC6A9\n    2) \uACB0\uACFC\uAC00 \uC815\uD655\
+      \uD788 874 bits\uC778\uC9C0\n    3) \uCD9C\uB825\uC774 \uBAA8\uB450 0/1\uC778\
+      \uC9C0\n    4) all-zero \uC785\uB825\uC5D0\uC11C RSC/tail \uCC98\uB9AC\uAC00\
+      \ \uC548\uC815\uC801\uC778\uC9C0\n    5) deterministic pseudo-pattern \uC785\
+      \uB825\uC5D0\uC11C\uB3C4 \uAE38\uC774\uAC00 \uC720\uC9C0\uB418\uB294\uC9C0\n\
+      \    \"\"\"\n    zeros = [0] * 432\n    z = turbo_encode(zeros, 11)\n\n    assert\
+      \ len(z) == 874\n    assert set(z).issubset({0, 1})\n    assert z == [0] * 874\n\
+      \n    # \uB2E8\uC21C\uD558\uC9C0\uB9CC \uC7AC\uD604 \uAC00\uB2A5\uD55C \uBE44\
+      \uD2B8 \uD328\uD134.\n    test_bits = [((i * 7 + 3) ^ (i >> 2)) & 1 for i in\
+      \ range(432)]\n    coded = turbo_encode(test_bits, 11)\n\n    assert len(coded)\
+      \ == 874\n    assert set(coded).issubset({0, 1})\n\n    print(\"[PASS] Link\
+      \ ID 11 Turbo encoder self-test\")\n    print(\"       input  : 432 bits\")\n\
+      \    print(\"       output : 874 bits (864 main + 10 tail)\")\n\n\nif __name__\
+      \ == \"__main__\":\n    _self_test()\n\n"
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    verbose: 'True'
+  states:
+    _io_cache: '(''VDE-TER Turbo FEC Encoder'', ''blk'', [(''LinkID'', ''11''), (''verbose'',
+      ''False'')], [(''in'', ''message'', 1)], [(''out'', ''message'', 1)], ''\nVDE-TER
+      Turbo FEC Encoder (PDU)\nDefault: Link ID 11\n'', [''LinkID'', ''verbose''])'
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [616, 348.0]
+    rotation: 0
+    state: enabled
+- name: epy_block_1
+  id: epy_block
+  parameters:
+    LinkID: '12'
+    _source_code: "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\nVDE-TER\
+      \ Turbo FEC Decoder for GNU Radio\n=======================================\n\
+      \nTarget profile\n--------------\n- VDE-TER Link ID 11\n- FEC coded input length\
+      \ : 874 bits\n    - main punctured bits : 864\n    - termination/tail    : 10\n\
+      - Decoded output length   : 432 bits\n- Turbo iterations        : configurable\
+      \ (default 6)\n\nGNU Radio I/O\n-------------\nThis file defines an Embedded\
+      \ Python Block named ``blk`` when GNU Radio is\navailable.\n\nMessage input\
+      \ port  : \"in\"\nMessage output port : \"out\"\n\nAccepted input PDU payloads:\n\
+      \n1) PMT u8vector, length 874\n   Hard bits:\n       [0, 1, 1, 0, ...]\n   Each\
+      \ received bit is converted to an internal LLR.\n\n2) PMT f32vector, length\
+      \ 874\n   Soft LLR values from a demodulator:\n       positive LLR -> bit 0\
+      \ is more likely\n       negative LLR -> bit 1 is more likely\n\nOutput:\n \
+      \   PMT u8vector, length 432\n    decoded unpacked bits (0/1)\n\nImportant\n\
+      ---------\nThis decoder must receive the FEC codeword AFTER descrambling.\n\
+      It does NOT perform:\n- RF demodulation\n- pi/4-QPSK demapping\n- descrambling\n\
+      - CRC checking\n- byte bit-order restoration\n\nThose stages should be separate\
+      \ GNU Radio blocks.\n\nDecoder algorithm\n-----------------\nThe VDE-TER standard\
+      \ defines the Turbo encoder/code structure. A receiver is\nfree to choose a\
+      \ suitable decoding implementation. This implementation uses:\n\n    iterative\
+      \ Turbo decoding\n        + two constituent 8-state RSC decoders\n        +\
+      \ Max-Log-MAP SISO decoding\n        + interleaved/deinterleaved extrinsic LLR\
+      \ exchange\n\nMax-Log-MAP is a practical approximation of Log-MAP and is considerably\n\
+      simpler to implement in a GNU Radio Embedded Python Block.\n\nReferences\n----------\n\
+      1) ITU-R Recommendation M.2092-2 (02/2026), VDES FEC/Turbo coding.\n2) Encoder\
+      \ cross-check:\n   collinlokken/grc-ais-vdes-framebuilder,\n   vde-ter-framebuilder.py\n\
+      \nThis file is designed to correspond to:\n    vde_ter_turbo_encoder_link11.py\n\
+      \"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Dict, List,\
+      \ Sequence, Tuple\nimport numpy as np\n\n# GNU Radio is optional so the decoder\
+      \ core can be tested with plain Python.\ntry:\n    import pmt\n    from gnuradio\
+      \ import gr\n    _GNURADIO_AVAILABLE = True\nexcept ImportError:\n    pmt =\
+      \ None\n    gr = None\n    _GNURADIO_AVAILABLE = False\n\n\n# =============================================================================\n\
+      # [\uAC01\uC8FC 1] Link ID\uBCC4 FEC \uD504\uB85C\uD30C\uC77C\n# =============================================================================\n\
+      #\n# \uD604\uC7AC\uB294 Link ID 11\uB9CC \uAD6C\uD604.\n# \uC774\uD6C4 Link\
+      \ ID 12~19\uB97C \uCD94\uAC00\uD560 \uB54C \uC774 \uB515\uC154\uB108\uB9AC\uC5D0\
+      \ \uAC01 profile\uC758\n# K, interleaver, puncturing \uC815\uBCF4\uB97C \uCD94\
+      \uAC00\uD558\uBA74 decoder core\uB97C \uC7AC\uC0AC\uC6A9\uD560 \uC218 \uC788\
+      \uB2E4.\n#\nPROFILES: Dict[int, dict] = {\n    11: {\n        \"fec_input_bits\"\
+      : 432,\n        \"coded_bits\": 874,\n\n        # VDES Turbo interleaver parameters\n\
+      \        \"k1\": 2,\n        \"k2\": 216,\n        \"primes\": [127, 191, 241,\
+      \ 5, 83, 109, 107, 179],\n\n        # \uD55C clock\uC5D0\uC11C \uB450 RSC\uAC00\
+      \ \uB9CC\uB4DC\uB294 6\uAC1C \uCD9C\uB825\uC744\n        # [X, Y0, Y1, X', Y0',\
+      \ Y1'] \uC21C\uC11C\uB85C \uB193\uC558\uC744 \uB54C\n        # 1=\uC804\uC1A1\
+      , 0=puncture(\uBBF8\uC804\uC1A1)\n        \"puncture\": [\n            [1, 1,\
+      \ 0, 0, 0, 0],\n            [1, 0, 0, 0, 1, 0],\n        ],\n\n        # RSC\
+      \ termination 6 clocks\uC5D0 \uB300\uD55C puncturing pattern.\n        # Encoder\
+      \ 1 tail 3 clocks + Encoder 2 tail 3 clocks.\n        \"tail_puncture\": [\n\
+      \            [1, 1, 0, 0, 0, 0],\n            [1, 1, 0, 0, 0, 0],\n        \
+      \    [1, 0, 0, 0, 0, 0],\n            [0, 0, 0, 1, 1, 0],\n            [0, 0,\
+      \ 0, 1, 1, 0],\n            [0, 0, 0, 1, 0, 0],\n        ],\n    },\n}\n\n\n\
+      # =============================================================================\n\
+      # [\uAC01\uC8FC 2] Interleaver / Deinterleaver\n# =============================================================================\n\
+      \ndef _build_permutation(profile: dict) -> np.ndarray:\n    \"\"\"\n    VDES\
+      \ Turbo interleaver permutation pi(s)\uB97C \uC0DD\uC131\uD55C\uB2E4.\n\n  \
+      \  \uBC18\uD658:\n        permutation[out_index] = original_index\n\n    \uC989\
+      :\n        interleaved = original[permutation]\n    \"\"\"\n    k1 = int(profile[\"\
+      k1\"])\n    k2 = int(profile[\"k2\"])\n    primes = profile[\"primes\"]\n  \
+      \  K = k1 * k2\n\n    half_k1 = k1 // 2\n    if half_k1 <= 0:\n        raise\
+      \ ValueError(\"Invalid k1.\")\n\n    permutation: List[int] = []\n\n    for\
+      \ s in range(1, K + 1):\n        m = (s - 1) % 2\n        i = (s - 1) // (2\
+      \ * k2)\n        j = ((s - 1) // 2) - i * k2\n        t = (19 * i + 1) % half_k1\n\
+      \        q = (t % 8) + 1\n        c = (primes[q - 1] * j + 21 * m) % k2\n  \
+      \      pi_s = 2 * (t + c * half_k1 + 1) - m\n        permutation.append(int(pi_s)\
+      \ - 1)\n\n    permutation = np.asarray(permutation, dtype=np.int32)\n\n    if\
+      \ not np.array_equal(np.sort(permutation), np.arange(K)):\n        raise RuntimeError(\"\
+      Interleaver permutation is not bijective.\")\n\n    return permutation\n\n\n\
+      def _inverse_permutation(permutation: np.ndarray) -> np.ndarray:\n    \"\"\"\
+      \n    deinterleaver index \uC0DD\uC131.\n\n    interleaved = original[permutation]\n\
+      \    original    = interleaved[inverse]\n    \"\"\"\n    inverse = np.empty_like(permutation)\n\
+      \    inverse[permutation] = np.arange(len(permutation), dtype=np.int32)\n  \
+      \  return inverse\n\n\n# =============================================================================\n\
+      # [\uAC01\uC8FC 3] 8-state RSC trellis\n# =============================================================================\n\
+      #\n# Encoder\uC640 \uB3D9\uC77C\uD55C \uC0C1\uD0DC\uC2DD:\n#\n#   feedback =\
+      \ D2 XOR D1 XOR u\n#   X        = u\n#   Y0       = feedback XOR D0 XOR D2\n\
+      #   Y1       = feedback XOR D0 XOR D1 XOR D2\n#\n#   next state = [feedback,\
+      \ D0, D1]\n#\n# 3\uAC1C\uC758 memory bit -> 2^3 = 8 states.\n#\n\ndef _state_to_bits(state:\
+      \ int) -> Tuple[int, int, int]:\n    \"\"\"state \uBC88\uD638(0~7)\uB97C [D0,D1,D2]\uB85C\
+      \ \uBCC0\uD658.\"\"\"\n    return (\n        (state >> 2) & 1,\n        (state\
+      \ >> 1) & 1,\n        state & 1,\n    )\n\n\ndef _bits_to_state(D0: int, D1:\
+      \ int, D2: int) -> int:\n    \"\"\"[D0,D1,D2]\uB97C state \uBC88\uD638(0~7)\uB85C\
+      \ \uBCC0\uD658.\"\"\"\n    return (int(D0) << 2) | (int(D1) << 1) | int(D2)\n\
+      \n\ndef _build_trellis():\n    \"\"\"\n    \uB370\uC774\uD130 clock\uC6A9 trellis\uC640\
+      \ termination clock\uC6A9 trellis \uC0DD\uC131.\n\n    \uB370\uC774\uD130 clock:\n\
+      \        \uAC01 state\uC5D0\uC11C u=0 \uB610\uB294 u=1, \uCD1D 2\uAC1C branch.\n\
+      \n    termination clock:\n        encoder state\uB97C 000\uC73C\uB85C \uB418\
+      \uB3CC\uB9AC\uAE30 \uC704\uD574 \uC785\uB825 tail bit\uAC00\n        state\uC5D0\
+      \ \uC758\uD574 \uACB0\uC815\uB418\uBBC0\uB85C state\uB2F9 branch\uAC00 1\uAC1C\
+      \uBFD0\uC774\uB2E4.\n    \"\"\"\n    next_state = np.zeros((8, 2), dtype=np.int32)\n\
+      \    y0 = np.zeros((8, 2), dtype=np.int8)\n    y1 = np.zeros((8, 2), dtype=np.int8)\n\
+      \n    tail_next = np.zeros(8, dtype=np.int32)\n    tail_u = np.zeros(8, dtype=np.int8)\n\
+      \    tail_y0 = np.zeros(8, dtype=np.int8)\n    tail_y1 = np.zeros(8, dtype=np.int8)\n\
+      \n    for state in range(8):\n        D0, D1, D2 = _state_to_bits(state)\n\n\
+      \        # \uC77C\uBC18 information-bit transition\n        for u in (0, 1):\n\
+      \            feedback = D2 ^ D1 ^ u\n\n            next_state[state, u] = _bits_to_state(\n\
+      \                feedback, D0, D1\n            )\n\n            y0[state, u]\
+      \ = feedback ^ D0 ^ D2\n            y1[state, u] = feedback ^ D0 ^ D1 ^ D2\n\
+      \n        # termination transition:\n        # u_tail = D1 XOR D2\uB97C \uB123\
+      \uC73C\uBA74 feedback=0\uC774 \uB41C\uB2E4.\n        u_tail = D1 ^ D2\n\n  \
+      \      tail_u[state] = u_tail\n        tail_next[state] = _bits_to_state(0,\
+      \ D0, D1)\n        tail_y0[state] = D0 ^ D2\n        tail_y1[state] = D0 ^ D1\
+      \ ^ D2\n\n    # \uBAA8\uB4E0 state\uAC00 3 termination clocks \uD6C4 000\uC73C\
+      \uB85C \uAC00\uB294\uC9C0 \uD655\uC778.\n    for initial_state in range(8):\n\
+      \        state = initial_state\n        for _ in range(3):\n            state\
+      \ = int(tail_next[state])\n        if state != 0:\n            raise RuntimeError(\"\
+      Invalid RSC termination trellis.\")\n\n    return next_state, y0, y1, tail_next,\
+      \ tail_u, tail_y0, tail_y1\n\n\n(\n    _NEXT_STATE,\n    _Y0,\n    _Y1,\n  \
+      \  _TAIL_NEXT,\n    _TAIL_U,\n    _TAIL_Y0,\n    _TAIL_Y1,\n) = _build_trellis()\n\
+      \n\n# =============================================================================\n\
+      # [\uAC01\uC8FC 4] Depuncturing\n# =============================================================================\n\
+      \ndef _to_llr(\n    received: Sequence[float],\n    *,\n    hard_input: bool,\n\
+      \    hard_llr: float,\n    expected_len: int,\n) -> np.ndarray:\n    \"\"\"\n\
+      \    \uC785\uB825\uC744 LLR(Log-Likelihood Ratio)\uB85C \uBCC0\uD658.\n\n  \
+      \  \uC774 \uCF54\uB4DC\uC758 LLR convention:\n        LLR > 0  -> bit 0 \uCABD\
+      \uC774 \uB354 \uC720\uB825\n        LLR < 0  -> bit 1 \uCABD\uC774 \uB354 \uC720\
+      \uB825\n\n    hard_input=True:\n        \uC785\uB825 0 -> +hard_llr\n      \
+      \  \uC785\uB825 1 -> -hard_llr\n\n    hard_input=False:\n        \uC785\uB825\
+      \ \uC790\uCCB4\uB97C LLR\uB85C \uAC04\uC8FC.\n    \"\"\"\n    values = np.asarray(received,\
+      \ dtype=np.float64)\n\n    if len(values) != expected_len:\n        raise ValueError(\n\
+      \            f\"Expected {expected_len} coded values, got {len(values)}.\"\n\
+      \        )\n\n    if hard_input:\n        if np.any((values != 0) & (values\
+      \ != 1)):\n            raise ValueError(\"Hard input must contain only 0 or\
+      \ 1.\")\n        return np.where(values == 0, float(hard_llr), -float(hard_llr))\n\
+      \n    if not np.all(np.isfinite(values)):\n        raise ValueError(\"Soft LLR\
+      \ input contains NaN or infinity.\")\n\n    return values\n\n\ndef _depuncture(\n\
+      \    received_llr: np.ndarray,\n    profile: dict,\n) -> Tuple[np.ndarray, np.ndarray,\
+      \ np.ndarray]:\n    \"\"\"\n    punctured 874-value codeword\uB97C RSC\uBCC4\
+      \ observation\uC73C\uB85C \uBCF5\uC6D0\uD55C\uB2E4.\n\n    \uBC18\uD658:\n \
+      \       streams : shape (6, K)\n            [X, Y0, Y1, X', Y0', Y1']\n\n  \
+      \      tail1 : shape (3,3)\n            Encoder 1 termination observations\n\
+      \            [X_tail, Y0_tail, Y1_tail]\n\n        tail2 : shape (3,3)\n   \
+      \         Encoder 2 termination observations\n\n    puncture\uB41C bit\uB294\
+      \ \uC218\uC2E0 \uAD00\uCE21\uC774 \uC5C6\uC73C\uBBC0\uB85C LLR=0\uC73C\uB85C\
+      \ \uB454\uB2E4.\n    LLR=0\uC740 decoder \uC785\uC7A5\uC5D0\uC11C \"0/1 \uC5B4\
+      \uB290 \uCABD\uC778\uC9C0 \uC815\uBCF4 \uC5C6\uC74C\"\uC744 \uB73B\uD55C\uB2E4\
+      .\n    \"\"\"\n    K = int(profile[\"fec_input_bits\"])\n\n    streams = np.zeros((6,\
+      \ K), dtype=np.float64)\n    tail1 = np.zeros((3, 3), dtype=np.float64)\n  \
+      \  tail2 = np.zeros((3, 3), dtype=np.float64)\n\n    cursor = 0\n\n    # Main\
+      \ 432 clocks\n    pattern = profile[\"puncture\"]\n\n    for n in range(K):\n\
+      \        row = pattern[n % len(pattern)]\n\n        for stream_index, count\
+      \ in enumerate(row):\n            for _ in range(int(count)):\n            \
+      \    streams[stream_index, n] += received_llr[cursor]\n                cursor\
+      \ += 1\n\n    # Encoder 1 termination: first 3 tail pattern rows.\n    tail_pattern\
+      \ = profile[\"tail_puncture\"]\n\n    for clock in range(3):\n        row =\
+      \ tail_pattern[clock]\n\n        for stream_index in range(3):\n           \
+      \ for _ in range(int(row[stream_index])):\n                tail1[stream_index,\
+      \ clock] += received_llr[cursor]\n                cursor += 1\n\n    # Encoder\
+      \ 2 termination: last 3 tail pattern rows.\n    for clock in range(3):\n   \
+      \     row = tail_pattern[clock + 3]\n\n        for stream_index in range(3,\
+      \ 6):\n            for _ in range(int(row[stream_index])):\n               \
+      \ tail2[stream_index - 3, clock] += received_llr[cursor]\n                cursor\
+      \ += 1\n\n    if cursor != len(received_llr):\n        raise RuntimeError(\n\
+      \            f\"Depuncturing consumed {cursor} values, \"\n            f\"but\
+      \ input contains {len(received_llr)}.\"\n        )\n\n    return streams, tail1,\
+      \ tail2\n\n\n# =============================================================================\n\
+      # [\uAC01\uC8FC 5] Max-Log-MAP constituent decoder\n# =============================================================================\n\
+      \ndef _siso_max_log_map(\n    systematic_llr: np.ndarray,\n    parity_y0_llr:\
+      \ np.ndarray,\n    parity_y1_llr: np.ndarray,\n    tail_llr: np.ndarray,\n \
+      \   apriori_llr: np.ndarray,\n) -> np.ndarray:\n    \"\"\"\n    \uD558\uB098\
+      \uC758 RSC constituent code\uC5D0 \uB300\uD55C SISO decoder.\n\n    SISO:\n\
+      \        Soft Input Soft Output\n\n    \uC785\uB825:\n        systematic_llr\
+      \ : \uC815\uBCF4 bit\uC758 channel LLR\n        parity_y0_llr  : Y0 parity channel\
+      \ LLR\n        parity_y1_llr  : Y1 parity channel LLR\n        tail_llr    \
+      \   : termination 3 clocks \uAD00\uCE21\n        apriori_llr    : \uB2E4\uB978\
+      \ Turbo decoder\uAC00 \uC804\uB2EC\uD55C extrinsic \uC815\uBCF4\n\n    \uCD9C\
+      \uB825:\n        posterior LLR, \uAE38\uC774 K\n\n    Max-Log-MAP:\n       \
+      \ trellis\uC758 forward metric(alpha)\uC640 backward metric(beta)\uB97C \uAD6C\
+      \uD558\uACE0,\n        bit=0 \uACBD\uB85C\uC640 bit=1 \uACBD\uB85C\uC758 \uCD5C\
+      \uB300 metric \uCC28\uC774\uB85C posterior LLR\uC744 \uACC4\uC0B0.\n\n    LLR\
+      \ > 0 -> decoded bit 0\n    LLR < 0 -> decoded bit 1\n    \"\"\"\n    K = len(systematic_llr)\n\
+      \    T = K + 3                  # 3 termination clocks \uD3EC\uD568\n    NEG_INF\
+      \ = -1.0e30\n\n    # ---------------------------------------------------------------------\n\
+      \    # Branch metric gamma\n    # ---------------------------------------------------------------------\n\
+      \    #\n    # received LLR L\uACFC \uD6C4\uBCF4 bit b\uC5D0 \uB300\uD574\n \
+      \   #      0.5 * (1 - 2b) * L\n    # \uC744 \uB354\uD55C\uB2E4.\n    #\n   \
+      \ gamma = np.empty((K, 8, 2), dtype=np.float64)\n\n    for t in range(K):\n\
+      \        sys_plus_apriori = systematic_llr[t] + apriori_llr[t]\n\n        for\
+      \ state in range(8):\n            for u in (0, 1):\n                gamma[t,\
+      \ state, u] = 0.5 * (\n                    (1 - 2 * u) * sys_plus_apriori\n\
+      \                    + (1 - 2 * int(_Y0[state, u])) * parity_y0_llr[t]\n   \
+      \                 + (1 - 2 * int(_Y1[state, u])) * parity_y1_llr[t]\n      \
+      \          )\n\n    # ---------------------------------------------------------------------\n\
+      \    # Forward recursion alpha\n    # ---------------------------------------------------------------------\n\
+      \    alpha = np.full((T + 1, 8), NEG_INF, dtype=np.float64)\n\n    # RSC encoder\uB294\
+      \ state 000\uC5D0\uC11C \uC2DC\uC791.\n    alpha[0, 0] = 0.0\n\n    for t in\
+      \ range(K):\n        next_metric = np.full(8, NEG_INF, dtype=np.float64)\n\n\
+      \        for state in range(8):\n            base = alpha[t, state]\n\n    \
+      \        for u in (0, 1):\n                ns = int(_NEXT_STATE[state, u])\n\
+      \                metric = base + gamma[t, state, u]\n\n                if metric\
+      \ > next_metric[ns]:\n                    next_metric[ns] = metric\n\n     \
+      \   # \uC218\uCE58\uAC00 \uBD88\uD544\uC694\uD558\uAC8C \uCEE4\uC9C0\uB294 \uAC83\
+      \uC744 \uB9C9\uAE30 \uC704\uD55C normalization.\n        next_metric -= np.max(next_metric)\n\
+      \        alpha[t + 1] = next_metric\n\n    # 3 termination clocks\n    for tail_clock\
+      \ in range(3):\n        t = K + tail_clock\n        next_metric = np.full(8,\
+      \ NEG_INF, dtype=np.float64)\n\n        for state in range(8):\n           \
+      \ u = int(_TAIL_U[state])\n            ns = int(_TAIL_NEXT[state])\n\n     \
+      \       branch = 0.5 * (\n                (1 - 2 * u) * tail_llr[0, tail_clock]\n\
+      \                + (1 - 2 * int(_TAIL_Y0[state])) * tail_llr[1, tail_clock]\n\
+      \                + (1 - 2 * int(_TAIL_Y1[state])) * tail_llr[2, tail_clock]\n\
+      \            )\n\n            metric = alpha[t, state] + branch\n\n        \
+      \    if metric > next_metric[ns]:\n                next_metric[ns] = metric\n\
+      \n        next_metric -= np.max(next_metric)\n        alpha[t + 1] = next_metric\n\
+      \n    # ---------------------------------------------------------------------\n\
+      \    # Backward recursion beta\n    # ---------------------------------------------------------------------\n\
+      \    beta = np.full((T + 1, 8), NEG_INF, dtype=np.float64)\n\n    # termination\
+      \ \uC774\uD6C4 \uCD5C\uC885 state\uB294 000\uC73C\uB85C \uC81C\uD55C.\n    beta[T,\
+      \ 0] = 0.0\n\n    # termination \uAD6C\uAC04 backward\n    for tail_clock in\
+      \ range(2, -1, -1):\n        t = K + tail_clock\n        current = np.full(8,\
+      \ NEG_INF, dtype=np.float64)\n\n        for state in range(8):\n           \
+      \ u = int(_TAIL_U[state])\n            ns = int(_TAIL_NEXT[state])\n\n     \
+      \       branch = 0.5 * (\n                (1 - 2 * u) * tail_llr[0, tail_clock]\n\
+      \                + (1 - 2 * int(_TAIL_Y0[state])) * tail_llr[1, tail_clock]\n\
+      \                + (1 - 2 * int(_TAIL_Y1[state])) * tail_llr[2, tail_clock]\n\
+      \            )\n\n            current[state] = branch + beta[t + 1, ns]\n\n\
+      \        current -= np.max(current)\n        beta[t] = current\n\n    # information\
+      \ \uAD6C\uAC04 backward\n    for t in range(K - 1, -1, -1):\n        current\
+      \ = np.full(8, NEG_INF, dtype=np.float64)\n\n        for state in range(8):\n\
+      \            best = NEG_INF\n\n            for u in (0, 1):\n              \
+      \  ns = int(_NEXT_STATE[state, u])\n                metric = gamma[t, state,\
+      \ u] + beta[t + 1, ns]\n\n                if metric > best:\n              \
+      \      best = metric\n\n            current[state] = best\n\n        current\
+      \ -= np.max(current)\n        beta[t] = current\n\n    # ---------------------------------------------------------------------\n\
+      \    # Posterior LLR\n    # ---------------------------------------------------------------------\n\
+      \    posterior = np.empty(K, dtype=np.float64)\n\n    for t in range(K):\n \
+      \       best_bit0 = NEG_INF\n        best_bit1 = NEG_INF\n\n        for state\
+      \ in range(8):\n            for u in (0, 1):\n                ns = int(_NEXT_STATE[state,\
+      \ u])\n\n                metric = (\n                    alpha[t, state]\n \
+      \                   + gamma[t, state, u]\n                    + beta[t + 1,\
+      \ ns]\n                )\n\n                if u == 0:\n                   \
+      \ if metric > best_bit0:\n                        best_bit0 = metric\n     \
+      \           else:\n                    if metric > best_bit1:\n            \
+      \            best_bit1 = metric\n\n        posterior[t] = best_bit0 - best_bit1\n\
+      \n    return posterior\n\n\n# =============================================================================\n\
+      # [\uAC01\uC8FC 6] Iterative Turbo Decoder\n# =============================================================================\n\
+      \ndef turbo_decode(\n    received: Sequence[float],\n    link_id: int = 11,\n\
+      \    iterations: int = 6,\n    *,\n    hard_input: bool = True,\n    hard_llr:\
+      \ float = 2.0,\n) -> Tuple[List[int], np.ndarray]:\n    \"\"\"\n    \uC678\uBD80\
+      \uC5D0\uC11C \uC9C1\uC811 \uD638\uCD9C\uD560 \uC218 \uC788\uB294 Turbo decoder\
+      \ \uD575\uC2EC \uD568\uC218.\n\n    Parameters\n    ----------\n    received:\n\
+      \        hard_input=True\n            874\uAC1C\uC758 0/1 coded bits\n\n   \
+      \     hard_input=False\n            874\uAC1C\uC758 soft LLR values\n\n    link_id:\n\
+      \        \uD604\uC7AC 11 \uC9C0\uC6D0.\n        \uCD94\uD6C4 PROFILES \uD655\
+      \uC7A5\uC744 \uC704\uD574 parameter\uB85C \uC720\uC9C0.\n\n    iterations:\n\
+      \        Turbo decoder \uBC18\uBCF5 \uD69F\uC218.\n        \uAE30\uBCF8\uAC12\
+      \ 6.\n        \uC99D\uAC00\uC2DC\uD0A4\uBA74 \uC131\uB2A5\uC774 \uC88B\uC544\
+      \uC9C8 \uC218 \uC788\uC9C0\uB9CC \uCC98\uB9AC\uC2DC\uAC04\uB3C4 \uC99D\uAC00\
+      \uD55C\uB2E4.\n\n    hard_llr:\n        hard bit\uB97C \uB0B4\uBD80 LLR\uB85C\
+      \ \uBC14\uAFC0 \uB54C \uC0AC\uC6A9\uD558\uB294 \uC2E0\uB8B0\uB3C4 \uD06C\uAE30\
+      .\n        \uB2E8\uC21C bit-flip \uC2E4\uD5D8\uC6A9 \uAE30\uBCF8\uAC12 2.0.\n\
+      \        \uC2E4\uC81C \uBB34\uC120 \uB9C1\uD06C\uC5D0\uC11C\uB294 hard input\uBCF4\
+      \uB2E4 demodulator\uC758 soft LLR \uC0AC\uC6A9\uC744 \uAD8C\uC7A5.\n\n    Returns\n\
+      \    -------\n    decoded_bits:\n        \uAE38\uC774 432\uC758 0/1 list\n\n\
+      \    posterior_llr:\n        \uCD5C\uC885 decoded bit\uC758 posterior LLR.\n\
+      \        \uB514\uBC84\uAE45/\uC131\uB2A5\uBD84\uC11D \uC2DC \uC0AC\uC6A9\uD560\
+      \ \uC218 \uC788\uB2E4.\n    \"\"\"\n    if link_id not in PROFILES:\n      \
+      \  raise ValueError(\n            f\"Unsupported Link ID {link_id}. \"\n   \
+      \         f\"Implemented profiles: {sorted(PROFILES)}\"\n        )\n\n    if\
+      \ iterations < 1:\n        raise ValueError(\"iterations must be >= 1.\")\n\n\
+      \    if hard_llr <= 0:\n        raise ValueError(\"hard_llr must be > 0.\")\n\
+      \n    profile = PROFILES[link_id]\n    K = int(profile[\"fec_input_bits\"])\n\
+      \n    received_llr = _to_llr(\n        received,\n        hard_input=hard_input,\n\
+      \        hard_llr=hard_llr,\n        expected_len=int(profile[\"coded_bits\"\
+      ]),\n    )\n\n    # punctured stream\uC744 \uAC01 constituent encoder \uAD00\
+      \uCE21\uC73C\uB85C \uBCF5\uC6D0.\n    streams, tail1, tail2 = _depuncture(received_llr,\
+      \ profile)\n\n    # streams:\n    #   0 = X  (systematic)\n    #   1 = Y0\n\
+      \    #   2 = Y1\n    #   3 = X'  (Link ID 11 main puncturing\uC5D0\uC11C\uB294\
+      \ \uC804\uC1A1\uB418\uC9C0 \uC54A\uC74C)\n    #   4 = Y0'\n    #   5 = Y1'\n\
+      \    #\n    systematic_1 = streams[0]\n\n    permutation = _build_permutation(profile)\n\
+      \    inverse = _inverse_permutation(permutation)\n\n    # \uB450 \uBC88\uC9F8\
+      \ RSC\uC758 information bit\uB294 interleaved(original)\uC774\uBBC0\uB85C\n\
+      \    # systematic channel observation\uB3C4 \uB3D9\uC77C\uD55C \uC21C\uC11C\uB85C\
+      \ interleave\uD55C\uB2E4.\n    systematic_2 = systematic_1[permutation]\n\n\
+      \    # Decoder 1\uC774 Decoder 2\uC5D0\uAC8C \uBC1B\uC740 a-priori \uC815\uBCF4\
+      .\n    apriori_1 = np.zeros(K, dtype=np.float64)\n\n    posterior_2 = None\n\
+      \n    # ---------------------------------------------------------------------\n\
+      \    # Turbo iterations\n    # ---------------------------------------------------------------------\n\
+      \    for _ in range(int(iterations)):\n\n        # Constituent Decoder #1\n\
+      \        posterior_1 = _siso_max_log_map(\n            systematic_1,\n     \
+      \       streams[1],\n            streams[2],\n            tail1,\n         \
+      \   apriori_1,\n        )\n\n        # Extrinsic = posterior - systematic(channel)\
+      \ - prior\n        extrinsic_1 = posterior_1 - systematic_1 - apriori_1\n\n\
+      \        # \uACFC\uB3C4\uD55C \uAC12\uC774 \uBC18\uBCF5 \uACFC\uC815\uC5D0\uC11C\
+      \ \uD3ED\uC99D\uD558\uC9C0 \uC54A\uB3C4\uB85D \uC81C\uD55C.\n        extrinsic_1\
+      \ = np.clip(extrinsic_1, -50.0, 50.0)\n\n        # Decoder #2 \uC21C\uC11C\uB85C\
+      \ interleave.\n        apriori_2 = extrinsic_1[permutation]\n\n        # Constituent\
+      \ Decoder #2\n        posterior_2 = _siso_max_log_map(\n            systematic_2,\n\
+      \            streams[4],\n            streams[5],\n            tail2,\n    \
+      \        apriori_2,\n        )\n\n        extrinsic_2 = posterior_2 - systematic_2\
+      \ - apriori_2\n        extrinsic_2 = np.clip(extrinsic_2, -50.0, 50.0)\n\n \
+      \       # \uB2E4\uC2DC original bit \uC21C\uC11C\uB85C deinterleave\uD558\uC5EC\
+      \ Decoder #1\uC5D0 \uC804\uB2EC.\n        apriori_1 = extrinsic_2[inverse]\n\
+      \n    # Decoder #2 posterior\uB294 interleaved order.\n    # \uC6D0\uB798 432-bit\
+      \ \uC21C\uC11C\uB85C \uB418\uB3CC\uB9B0\uB2E4.\n    final_llr = posterior_2[inverse]\n\
+      \n    # \uC774 \uCF54\uB4DC\uC758 LLR convention:\n    #   >= 0 -> 0\n    #\
+      \   <  0 -> 1\n    decoded = (final_llr < 0.0).astype(np.uint8)\n\n    return\
+      \ decoded.tolist(), final_llr\n\n\n# =============================================================================\n\
+      # GNU Radio Embedded Python Block\n# =============================================================================\n\
+      \nif _GNURADIO_AVAILABLE:\n\n    class blk(gr.basic_block):\n        \"\"\"\n\
+      \        VDE-TER Turbo FEC Decoder (PDU)\n\n        Parameters exposed in GRC:\n\
+      \            LinkID      : default 11\n            iterations  : default 6\n\
+      \            hard_llr    : default 2.0\n            verbose     : print decode\
+      \ information\n        \"\"\"\n\n        def __init__(\n            self,\n\
+      \            LinkID=11,\n            iterations=6,\n            hard_llr=2.0,\n\
+      \            verbose=False,\n        ):\n            gr.basic_block.__init__(\n\
+      \                self,\n                name=\"VDE-TER Turbo FEC Decoder\",\n\
+      \                in_sig=None,\n                out_sig=None,\n            )\n\
+      \n            self.LinkID = int(LinkID)\n            self.iterations = int(iterations)\n\
+      \            self.hard_llr = float(hard_llr)\n            self.verbose = bool(verbose)\n\
+      \n            if self.LinkID not in PROFILES:\n                raise ValueError(\n\
+      \                    f\"Unsupported Link ID {self.LinkID}. \"\n            \
+      \        f\"Implemented profiles: {sorted(PROFILES)}\"\n                )\n\n\
+      \            # Message/PDU ports\n            self.message_port_register_in(pmt.intern(\"\
+      in\"))\n            self.message_port_register_out(pmt.intern(\"out\"))\n\n\
+      \            self.set_msg_handler(\n                pmt.intern(\"in\"),\n  \
+      \              self._handle_pdu,\n            )\n\n        def _handle_pdu(self,\
+      \ msg):\n            \"\"\"\n            GNU Radio PDU handler.\n\n        \
+      \    u8vector:\n                hard decision 0/1 input\n\n            f32vector:\n\
+      \                soft LLR input\n\n            metadata\uB294 \uADF8\uB300\uB85C\
+      \ output PDU\uC5D0 \uC804\uB2EC\uD55C\uB2E4.\n            \"\"\"\n         \
+      \   try:\n                if not pmt.is_pair(msg):\n                    raise\
+      \ ValueError(\n                        \"Input must be a PDU pair: (metadata,\
+      \ vector).\"\n                    )\n\n                meta = pmt.car(msg)\n\
+      \                payload = pmt.cdr(msg)\n\n                # ---------------------------------------------------------\n\
+      \                # Hard-bit PDU\n                # ---------------------------------------------------------\n\
+      \                if pmt.is_u8vector(payload):\n                    received\
+      \ = list(pmt.u8vector_elements(payload))\n\n                    decoded, final_llr\
+      \ = turbo_decode(\n                        received,\n                     \
+      \   link_id=self.LinkID,\n                        iterations=self.iterations,\n\
+      \                        hard_input=True,\n                        hard_llr=self.hard_llr,\n\
+      \                    )\n\n                    mode = \"hard\"\n\n          \
+      \      # ---------------------------------------------------------\n       \
+      \         # Soft-LLR PDU\n                # ---------------------------------------------------------\n\
+      \                elif hasattr(pmt, \"is_f32vector\") and pmt.is_f32vector(payload):\n\
+      \                    received = list(pmt.f32vector_elements(payload))\n\n  \
+      \                  decoded, final_llr = turbo_decode(\n                    \
+      \    received,\n                        link_id=self.LinkID,\n             \
+      \           iterations=self.iterations,\n                        hard_input=False,\n\
+      \                    )\n\n                    mode = \"soft-LLR\"\n\n      \
+      \          else:\n                    raise ValueError(\n                  \
+      \      \"PDU payload must be either \"\n                        \"u8vector(874\
+      \ hard bits) or \"\n                        \"f32vector(874 LLR values).\"\n\
+      \                    )\n\n                out_vec = pmt.init_u8vector(len(decoded),\
+      \ decoded)\n                out_pdu = pmt.cons(meta, out_vec)\n\n          \
+      \      self.message_port_pub(\n                    pmt.intern(\"out\"),\n  \
+      \                  out_pdu,\n                )\n\n                if self.verbose:\n\
+      \                    confidence = float(np.mean(np.abs(final_llr)))\n\n    \
+      \                print(\n                        f\"[VDE-TER Turbo Decoder]\
+      \ \"\n                        f\"Link ID {self.LinkID}, \"\n               \
+      \         f\"mode={mode}, \"\n                        f\"iterations={self.iterations},\
+      \ \"\n                        f\"{len(received)} -> {len(decoded)} bits, \"\n\
+      \                        f\"mean |LLR|={confidence:.3f}\"\n                \
+      \    )\n\n            except Exception as exc:\n                print(f\"[VDE-TER\
+      \ Turbo Decoder ERROR] {exc}\")\n\n\n# =============================================================================\n\
+      # Standalone self-test\n# =============================================================================\n\
+      \ndef _self_test() -> None:\n    \"\"\"\n    \uAC19\uC740 \uD3F4\uB354\uC758\
+      \ vde_ter_turbo_encoder_link11.py\uB97C \uC0AC\uC6A9\uD574 \uAC80\uC99D.\n\n\
+      \    Test A:\n        \uC624\uB958 \uC5C6\uB294 874-bit codeword -> \uC6D0\uBCF8\
+      \ 432 bits \uC644\uC804 \uBCF5\uC6D0\n\n    Test B:\n        874 coded bits\
+      \ \uC911 20\uAC1C\uB97C \uACE0\uC815 seed\uB85C \uB4A4\uC9D1\uC74C\n       \
+      \ -> Turbo decoder\uAC00 \uC6D0\uBCF8 432 bits\uB97C \uBCF5\uC6D0\uD558\uB294\
+      \uC9C0 \uD655\uC778\n\n    \uC8FC\uC758:\n        Turbo Code\uAC00 \uC784\uC758\
+      \uC758 20 bit \uC624\uB958\uB97C \uD56D\uC0C1 \uBCF4\uC7A5\uD574\uC11C \uACE0\
+      \uCE5C\uB2E4\uB294 \uB73B\uC740 \uC544\uB2C8\uB2E4.\n        \uC774 self-test\uB294\
+      \ encoder/decoder \uC5F0\uACB0 \uBC0F \uAE30\uBCF8 \uC624\uB958\uC815\uC815\
+      \ \uB3D9\uC791 \uD655\uC778\uC6A9\uC774\uB2E4.\n    \"\"\"\n    import importlib.util\n\
+      \    from pathlib import Path\n\n    encoder_path = Path(__file__).with_name(\n\
+      \        \"vde_ter_turbo_encoder_link11.py\"\n    )\n\n    if not encoder_path.exists():\n\
+      \        print(\n            \"[SKIP] Encoder file not found next to decoder;\
+      \ \"\n            \"decoder module itself was loaded successfully.\"\n     \
+      \   )\n        return\n\n    spec = importlib.util.spec_from_file_location(\n\
+      \        \"vde_encoder_for_test\",\n        str(encoder_path),\n    )\n    encoder\
+      \ = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(encoder)\n\
+      \n    rng = np.random.default_rng(20260810)\n\n    original = rng.integers(\n\
+      \        0, 2, size=432, dtype=np.uint8\n    ).tolist()\n\n    encoded = encoder.turbo_encode(original,\
+      \ 11)\n\n    # Test A: no channel error\n    decoded, _ = turbo_decode(\n  \
+      \      encoded,\n        link_id=11,\n        iterations=6,\n        hard_input=True,\n\
+      \        hard_llr=2.0,\n    )\n\n    errors = int(\n        np.count_nonzero(\n\
+      \            np.asarray(decoded, dtype=np.uint8)\n            != np.asarray(original,\
+      \ dtype=np.uint8)\n        )\n    )\n\n    assert errors == 0\n\n    print(\"\
+      [PASS] Test A: no-error decode\")\n    print(\"       874 coded bits -> 432\
+      \ original bits\")\n    print(\"       decoded bit errors = 0\")\n\n    # Test\
+      \ B: deterministic 20 coded-bit flips\n    corrupted = np.asarray(\n       \
+      \ encoded,\n        dtype=np.uint8,\n    )\n\n    flip_positions = rng.choice(\n\
+      \        len(corrupted),\n        size=20,\n        replace=False,\n    )\n\n\
+      \    corrupted[flip_positions] ^= 1\n\n    decoded_corrupt, _ = turbo_decode(\n\
+      \        corrupted.tolist(),\n        link_id=11,\n        iterations=6,\n \
+      \       hard_input=True,\n        hard_llr=2.0,\n    )\n\n    residual_errors\
+      \ = int(\n        np.count_nonzero(\n            np.asarray(decoded_corrupt,\
+      \ dtype=np.uint8)\n            != np.asarray(original, dtype=np.uint8)\n   \
+      \     )\n    )\n\n    assert residual_errors == 0\n\n    print(\"[PASS] Test\
+      \ B: 20 coded-bit flips corrected\")\n    print(\"       inserted channel bit\
+      \ errors = 20\")\n    print(\"       decoded bit errors          = 0\")\n\n\n\
+      if __name__ == \"__main__\":\n    _self_test()\n\n"
+    affinity: ''
+    alias: ''
+    comment: ''
+    hard_llr: '2.0'
+    iterations: '6'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    verbose: 'True'
+  states:
+    _io_cache: '(''VDE-TER Turbo FEC Decoder'', ''blk'', [(''LinkID'', ''11''), (''iterations'',
+      ''6''), (''hard_llr'', ''2.0''), (''verbose'', ''False'')], [(''in'', ''message'',
+      1)], [(''out'', ''message'', 1)], ''\nVDE-TER Turbo FEC Decoder (PDU)\n\nParameters
+      exposed in GRC:\n    LinkID      : default 11\n    iterations  : default 6\n    hard_llr    :
+      default 2.0\n    verbose     : print decode information\n'', [''LinkID'', ''hard_llr'',
+      ''iterations'', ''verbose''])'
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [320, 444.0]
+    rotation: 0
+    state: enabled
+- name: epy_block_2
+  id: epy_block
+  parameters:
+    _source_code: "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\nVDE-TER\
+      \ Test Harness: Tag Original Bits\n========================================\n\
+      Turbo Encoder\uC5D0 \uB4E4\uC5B4\uAC00\uAE30 '\uC9C1\uC804'\uC5D0 \uBD99\uC5EC\
+      \uC11C \uC0AC\uC6A9.\n\n\uC5ED\uD560:\n    \uC785\uB825 PDU\uC758 \uB370\uC774\
+      \uD130(\uC6D0\uBCF8 432bit)\uB97C \uBA54\uD0C0\uB370\uC774\uD130\uC5D0 'original'\
+      \ \uD0A4\uB85C \uBCF5\uC0AC\uD574 \uC800\uC7A5.\n    \uB370\uC774\uD130 \uC790\
+      \uCCB4\uB294 \uADF8\uB300\uB85C \uD1B5\uACFC\uC2DC\uD0B4(\uC778\uCF54\uB354\
+      \ \uC785\uB825\uC740 \uC548 \uAC74\uB4DC\uB9BC).\n\n\uC774 \uBA54\uD0C0\uB370\
+      \uC774\uD130\uB294 Encoder/Decoder\uB97C \uAC70\uCCD0\uB3C4 \uADF8\uB300\uB85C\
+      \ \uBCF4\uC874\uB418\uBBC0\uB85C(\uB450 \uBE14\uB85D \uBAA8\uB450\ncar(meta)\uB97C\
+      \ \uC548 \uAC74\uB4DC\uB9AC\uACE0 \uADF8\uB300\uB85C out_pdu\uC5D0 \uB2E4\uC2DC\
+      \ \uC500), \uCD5C\uC885 Decoder \uCD9C\uB825\uC5D0\uC11C\nmeta['original']\uC744\
+      \ \uAEBC\uB0B4 \uB514\uCF54\uB529 \uACB0\uACFC\uC640 \uB300\uC870\uD560 \uC218\
+      \ \uC788\uB2E4.\n\nMessage input port  : \"in\"\nMessage output port : \"out\"\
+      \n\"\"\"\n\nfrom __future__ import annotations\n\ntry:\n    import pmt\n   \
+      \ from gnuradio import gr\n    _GNURADIO_AVAILABLE = True\nexcept ImportError:\n\
+      \    pmt = None\n    gr = None\n    _GNURADIO_AVAILABLE = False\n\n\ndef tag_original(meta_dict:\
+      \ dict, data: list) -> dict:\n    \"\"\"meta_dict\uC5D0 'original' \uD0A4\uB85C\
+      \ data\uC758 \uBCF5\uC0AC\uBCF8\uC744 \uCD94\uAC00\uD55C \uC0C8 dict\uB97C \uBC18\
+      \uD658.\"\"\"\n    new_meta = dict(meta_dict) if meta_dict else {}\n    new_meta['original']\
+      \ = list(data)\n    return new_meta\n\n\nif _GNURADIO_AVAILABLE:\n\n    class\
+      \ blk(gr.basic_block):\n        \"\"\"VDE-TER Tag Original Bits (PDU passthrough\
+      \ + \uC6D0\uBCF8 \uD0DC\uAE45)\"\"\"\n\n        def __init__(self, verbose=False):\n\
+      \            gr.basic_block.__init__(\n                self,\n             \
+      \   name=\"VDE-TER Tag Original\",\n                in_sig=None,\n         \
+      \       out_sig=None,\n            )\n            self.verbose = bool(verbose)\n\
+      \            self.message_port_register_in(pmt.intern(\"in\"))\n           \
+      \ self.message_port_register_out(pmt.intern(\"out\"))\n            self.set_msg_handler(pmt.intern(\"\
+      in\"), self._handle_pdu)\n\n        def _handle_pdu(self, msg):\n          \
+      \  try:\n                if not pmt.is_pair(msg):\n                    raise\
+      \ ValueError(\"Input must be a PDU pair.\")\n\n                meta = pmt.car(msg)\n\
+      \                data = pmt.cdr(msg)\n\n                if not pmt.is_u8vector(data):\n\
+      \                    raise ValueError(\"PDU payload must be a u8vector.\")\n\
+      \n                bits = list(pmt.u8vector_elements(data))\n\n             \
+      \   # meta(dict pmt)\uC5D0 original \uD0A4 \uCD94\uAC00\n                new_meta\
+      \ = pmt.make_dict()\n                if pmt.is_dict(meta):\n               \
+      \     # \uAE30\uC874 meta \uD56D\uBAA9 \uBCF4\uC874\n                    keys\
+      \ = pmt.dict_keys(meta)\n                    for i in range(pmt.length(keys)):\n\
+      \                        k = pmt.nth(i, keys)\n                        v = pmt.dict_ref(meta,\
+      \ k, pmt.PMT_NIL)\n                        new_meta = pmt.dict_add(new_meta,\
+      \ k, v)\n\n                original_vec = pmt.init_u8vector(len(bits), bits)\n\
+      \                new_meta = pmt.dict_add(new_meta, pmt.intern(\"original\"),\
+      \ original_vec)\n\n                out_pdu = pmt.cons(new_meta, data)\n    \
+      \            self.message_port_pub(pmt.intern(\"out\"), out_pdu)\n\n       \
+      \         if self.verbose:\n                    print(f\"[VDE-TER Tag Original]\
+      \ tagged {len(bits)} original bits\")\n\n            except Exception as exc:\n\
+      \                print(f\"[VDE-TER Tag Original ERROR] {exc}\")\n\n\ndef _self_test():\n\
+      \    meta = {}\n    data = [0, 1, 1, 0, 1]\n    new_meta = tag_original(meta,\
+      \ data)\n    assert new_meta['original'] == data\n    print(\"[PASS] Tag Original\
+      \ self-test\")\n\n\nif __name__ == \"__main__\":\n    _self_test()\n"
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    verbose: 'True'
+  states:
+    _io_cache: "('VDE-TER Tag Original', 'blk', [('verbose', 'False')], [('in', 'message',\
+      \ 1)], [('out', 'message', 1)], 'VDE-TER Tag Original Bits (PDU passthrough\
+      \ + \uC6D0\uBCF8 \uD0DC\uAE45)', ['verbose'])"
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [328, 356.0]
+    rotation: 0
+    state: enabled
+- name: epy_block_3
+  id: epy_block
+  parameters:
+    _source_code: "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\nVDE-TER\
+      \ Test Harness: Error Injector\n=====================================\nTurbo\
+      \ Encoder\uC640 Turbo Decoder '\uC0AC\uC774'\uC5D0 \uB07C\uC6CC\uC11C \uC0AC\
+      \uC6A9.\n\n\uC5ED\uD560:\n    \uC785\uB825 PDU(874bit \uCF54\uB4DC\uC6CC\uB4DC\
+      )\uC5D0\uC11C N\uAC1C \uBE44\uD2B8\uB97C \uBB34\uC791\uC704\uB85C \uBC18\uC804\
+      (flip)\uC2DC\uCF1C\n    \"\uCC44\uB110\uC744 \uD1B5\uACFC\uD558\uBA70 \uC624\
+      \uB958\uAC00 \uC0DD\uAE34 \uC0C1\uD669\"\uC744 \uD749\uB0B4\uB0B8\uB2E4.\n \
+      \   \uBA54\uD0C0\uB370\uC774\uD130\uB294 \uADF8\uB300\uB85C \uD1B5\uACFC(\uC6D0\
+      \uBCF8 \uD0DC\uADF8 \uBCF4\uC874).\n\nMessage input port  : \"in\"\nMessage\
+      \ output port : \"out\"\n\"\"\"\n\nfrom __future__ import annotations\nimport\
+      \ random\n\ntry:\n    import pmt\n    from gnuradio import gr\n    _GNURADIO_AVAILABLE\
+      \ = True\nexcept ImportError:\n    pmt = None\n    gr = None\n    _GNURADIO_AVAILABLE\
+      \ = False\n\n\ndef inject_errors(bits: list, n_flips: int, seed=None) -> tuple:\n\
+      \    \"\"\"bits(list of 0/1) \uC911 n_flips\uAC1C\uB97C \uBB34\uC791\uC704\uB85C\
+      \ \uB4A4\uC9D1\uB294\uB2E4. (\uB4A4\uC9D1\uD78C \uB9AC\uC2A4\uD2B8, \uC704\uCE58\
+      \uBAA9\uB85D) \uBC18\uD658.\"\"\"\n    rng = random.Random(seed)\n    n_flips\
+      \ = min(n_flips, len(bits))\n    positions = rng.sample(range(len(bits)), n_flips)\n\
+      \    out = list(bits)\n    for p in positions:\n        out[p] = 1 - out[p]\n\
+      \    return out, positions\n\n\nif _GNURADIO_AVAILABLE:\n\n    class blk(gr.basic_block):\n\
+      \        \"\"\"VDE-TER Error Injector (PDU bit-flip)\"\"\"\n\n        def __init__(self,\
+      \ n_flips=5, seed=-1, verbose=False):\n            gr.basic_block.__init__(\n\
+      \                self,\n                name=\"VDE-TER Error Injector\",\n \
+      \               in_sig=None,\n                out_sig=None,\n            )\n\
+      \            self.n_flips = int(n_flips)\n            self.seed = None if int(seed)\
+      \ < 0 else int(seed)\n            self.verbose = bool(verbose)\n           \
+      \ self.message_port_register_in(pmt.intern(\"in\"))\n            self.message_port_register_out(pmt.intern(\"\
+      out\"))\n            self.set_msg_handler(pmt.intern(\"in\"), self._handle_pdu)\n\
+      \n        def _handle_pdu(self, msg):\n            try:\n                if\
+      \ not pmt.is_pair(msg):\n                    raise ValueError(\"Input must be\
+      \ a PDU pair.\")\n\n                meta = pmt.car(msg)\n                data\
+      \ = pmt.cdr(msg)\n\n                if not pmt.is_u8vector(data):\n        \
+      \            raise ValueError(\"PDU payload must be a u8vector.\")\n\n     \
+      \           bits = list(pmt.u8vector_elements(data))\n                corrupted,\
+      \ positions = inject_errors(bits, self.n_flips, self.seed)\n\n             \
+      \   out_vec = pmt.init_u8vector(len(corrupted), corrupted)\n               \
+      \ out_pdu = pmt.cons(meta, out_vec)\n                self.message_port_pub(pmt.intern(\"\
+      out\"), out_pdu)\n\n                if self.verbose:\n                    print(f\"\
+      [VDE-TER Error Injector] flipped {self.n_flips} bits \"\n                  \
+      \        f\"at positions {positions[:10]}{'...' if len(positions) > 10 else\
+      \ ''}\")\n\n            except Exception as exc:\n                print(f\"\
+      [VDE-TER Error Injector ERROR] {exc}\")\n\n\ndef _self_test():\n    bits = [0]\
+      \ * 874\n    corrupted, positions = inject_errors(bits, 5, seed=1)\n    n_diff\
+      \ = sum(1 for a, b in zip(bits, corrupted) if a != b)\n    assert n_diff ==\
+      \ 5\n    assert len(positions) == 5\n    print(\"[PASS] Error Injector self-test:\"\
+      , n_diff, \"bits flipped\")\n\n\nif __name__ == \"__main__\":\n    _self_test()\n"
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n_flips: '70'
+    seed: '-1'
+    verbose: 'True'
+  states:
+    _io_cache: ('VDE-TER Error Injector', 'blk', [('n_flips', '5'), ('seed', '-1'),
+      ('verbose', 'False')], [('in', 'message', 1)], [('out', 'message', 1)], 'VDE-TER
+      Error Injector (PDU bit-flip)', ['n_flips', 'seed', 'verbose'])
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [904, 340.0]
+    rotation: 0
+    state: enabled
+- name: epy_block_4
+  id: epy_block
+  parameters:
+    _source_code: "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\nVDE-TER\
+      \ Test Harness: Compare\n===============================\nTurbo Decoder '\uB4A4\
+      '\uC5D0 \uBD99\uC5EC\uC11C \uC0AC\uC6A9 (\uD30C\uC774\uD504\uB77C\uC778 \uB9E8\
+      \ \uB05D).\n\n\uC5ED\uD560:\n    \uC785\uB825 PDU\uC758 meta\uC5D0\uC11C 'original'(Tag\
+      \ Original \uBE14\uB85D\uC774 \uC2EC\uC5B4\uB454 \uC6D0\uBCF8 432bit)\uC744\
+      \ \uAEBC\uB0B4\uACE0,\n    data(\uB514\uCF54\uB354\uAC00 \uBCF5\uC6D0\uD55C\
+      \ 432bit)\uC640 \uBE44\uAD50\uD574\uC11C \uBA87 bit\uAC00 \uB2E4\uB978\uC9C0\
+      , \uC131\uACF5/\uC2E4\uD328\uC778\uC9C0 \uCF58\uC194\uC5D0 \uCD9C\uB825.\n\n\
+      Message input port : \"in\"\n(\uCD9C\uB825 \uD3EC\uD2B8 \uC5C6\uC74C - \uCD5C\
+      \uC885 \uC885\uB2E8 \uBE14\uB85D)\n\"\"\"\n\nfrom __future__ import annotations\n\
+      \ntry:\n    import pmt\n    from gnuradio import gr\n    _GNURADIO_AVAILABLE\
+      \ = True\nexcept ImportError:\n    pmt = None\n    gr = None\n    _GNURADIO_AVAILABLE\
+      \ = False\n\n\ndef compare_bits(original: list, decoded: list) -> tuple:\n \
+      \   \"\"\"(\uB2E4\uB978 bit \uAC1C\uC218, \uC131\uACF5\uC5EC\uBD80) \uBC18\uD658\
+      \"\"\"\n    if len(original) != len(decoded):\n        return -1, False\n  \
+      \  n_diff = sum(1 for a, b in zip(original, decoded) if a != b)\n    return\
+      \ n_diff, (n_diff == 0)\n\n\nif _GNURADIO_AVAILABLE:\n\n    class blk(gr.basic_block):\n\
+      \        \"\"\"VDE-TER Compare (\uC6D0\uBCF8 vs \uB514\uCF54\uB529 \uACB0\uACFC\
+      \ \uB300\uC870, \uC885\uB2E8 \uBE14\uB85D)\"\"\"\n\n        def __init__(self,\
+      \ verbose=True):\n            gr.basic_block.__init__(\n                self,\n\
+      \                name=\"VDE-TER Compare\",\n                in_sig=None,\n \
+      \               out_sig=None,\n            )\n            self.verbose = bool(verbose)\n\
+      \            self.message_port_register_in(pmt.intern(\"in\"))\n           \
+      \ self.set_msg_handler(pmt.intern(\"in\"), self._handle_pdu)\n\n        def\
+      \ _handle_pdu(self, msg):\n            try:\n                if not pmt.is_pair(msg):\n\
+      \                    raise ValueError(\"Input must be a PDU pair.\")\n\n   \
+      \             meta = pmt.car(msg)\n                data = pmt.cdr(msg)\n\n \
+      \               if not pmt.is_u8vector(data):\n                    raise ValueError(\"\
+      PDU payload must be a u8vector.\")\n\n                decoded = list(pmt.u8vector_elements(data))\n\
+      \n                orig_pmt = pmt.dict_ref(meta, pmt.intern(\"original\"), pmt.PMT_NIL)\n\
+      \                if pmt.eqv(orig_pmt, pmt.PMT_NIL):\n                    print(\"\
+      [VDE-TER Compare ERROR] meta\uC5D0 'original' \uD0A4\uAC00 \uC5C6\uC74C \"\n\
+      \                          \"(Tag Original \uBE14\uB85D\uC744 \uC778\uCF54\uB354\
+      \ \uC55E\uC5D0 \uC5F0\uACB0\uD588\uB294\uC9C0 \uD655\uC778)\")\n           \
+      \         return\n                original = list(pmt.u8vector_elements(orig_pmt))\n\
+      \n                n_diff, success = compare_bits(original, decoded)\n\n    \
+      \            print(\"=\" * 50)\n                print(f\"[VDE-TER Compare] original={len(original)}bit,\
+      \ \"\n                      f\"decoded={len(decoded)}bit\")\n              \
+      \  print(f\"  \uB2E4\uB978 bit \uC218 : {n_diff}\")\n                print(f\"\
+      \  \uACB0\uACFC        : {'SUCCESS (\uC644\uC804 \uBCF5\uC6D0)' if success else\
+      \ 'FAIL (\uC624\uB958 \uC794\uC874)'}\")\n                print(\"=\" * 50)\n\
+      \n            except Exception as exc:\n                print(f\"[VDE-TER Compare\
+      \ ERROR] {exc}\")\n\n\ndef _self_test():\n    original = [0, 1, 1, 0, 1]\n \
+      \   decoded_ok = [0, 1, 1, 0, 1]\n    decoded_bad = [0, 1, 0, 0, 1]\n\n    n_diff,\
+      \ ok = compare_bits(original, decoded_ok)\n    assert n_diff == 0 and ok\n\n\
+      \    n_diff, ok = compare_bits(original, decoded_bad)\n    assert n_diff ==\
+      \ 1 and not ok\n\n    print(\"[PASS] Compare self-test\")\n\n\nif __name__ ==\
+      \ \"__main__\":\n    _self_test()\n"
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    verbose: 'True'
+  states:
+    _io_cache: "('VDE-TER Compare', 'blk', [('verbose', 'True')], [('in', 'message',\
+      \ 1)], [], 'VDE-TER Compare (\uC6D0\uBCF8 vs \uB514\uCF54\uB529 \uACB0\uACFC\
+      \ \uB300\uC870, \uC885\uB2E8 \uBE14\uB85D)', ['verbose'])"
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [664, 468.0]
+    rotation: 0
+    state: enabled
+- name: pdu_tagged_stream_to_pdu_0
+  id: pdu_tagged_stream_to_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    tag: '"packet_len"'
+    type: byte
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [800, 252.0]
+    rotation: 0
+    state: enabled
+
+connections:
+- [analog_random_source_x_0, '0', blocks_stream_to_tagged_stream_0, '0']
+- [blocks_stream_to_tagged_stream_0, '0', pdu_tagged_stream_to_pdu_0, '0']
+- [epy_block_0, out, epy_block_3, in]
+- [epy_block_1, out, epy_block_4, in]
+- [epy_block_2, out, epy_block_0, in]
+- [epy_block_3, out, epy_block_1, in]
+- [pdu_tagged_stream_to_pdu_0, pdus, epy_block_2, in]
+
+metadata:
+  file_format: 1
+  grc_version: 3.10.12.0
