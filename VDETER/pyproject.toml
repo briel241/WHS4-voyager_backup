@@ -7,7 +7,19 @@ name = "vdeter"
 version = "0.1.0"
 description = "VDE-TER implementation for GNU Radio and USRP B210"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+# core(common/service/presentation/link/mac/phy/profiles/config/runtime) import에는
+# 외부 dependency가 필요하지 않다. numpy는 PHY·Radio 구현 단계에서 사용한다.
+dependencies = [
+    # Python 3.11 이상은 표준 tomllib를 사용한다 (stage0_baseline.md §8).
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# 단계 3 이후 PHY·Radio의 sample/DSP 구현에서 선택한다. 단계 0 core에는 필요하지 않다.
+dsp = ["numpy>=1.24"]
+# 단계 0 시험은 표준 unittest로 실행한다. pytest는 선택 사항이다.
+test = ["pytest>=7.0"]
+crypto = ["cryptography>=50.0,<51"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

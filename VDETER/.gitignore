@@ -5,5 +5,15 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-results/raw/*
-!results/raw/.gitkeep
+
+# Local specifications, verification assets, and historical experiments are
+# intentionally kept outside the runtime-only Git branch.
+docs/
+legacy/
+tests/
+tools/
+results/
+grc/
+src/vdeter/cli/
+apps/README.md
+configs/README.md

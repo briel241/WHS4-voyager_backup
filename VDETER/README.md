@@ -1,62 +1,58 @@
 # VDETER
 
-VDE-TER 구현을 계층별로 정리한 신규 루트 디렉터리다.
+VDE-TER 프로토콜의 단계 0~2 통합 구현이다.
 
-- `error_correction`과 초기 `bitstream` 실험은 원본 그대로 `legacy/`에 보관한다.
-- 실제 신규 구조에는 기존 `no_error_correction` 코드만 옮겼다.
-- 현재 구현은 Type 92/93 Message, Packet, 시험용 Temporary Burst 및 BPSK
-  GNU Radio TX/RX 경로다.
+현재 포함 범위는 다음과 같다.
+
+- 단계 0: 공통 계약, 계층별 인터페이스와 런타임 골격
+- 단계 1: Link 메시지, 패킷·CRC, 분할·재조립, short data, data session과 TBB
+- 단계 2: Link ID 11 PHY profile, FEC, interleaving, scrambling, π/4-QPSK와 burst 송수신 처리
+- Service, Presentation, Link, MAC, PHY, Radio 계층의 확장 가능한 인터페이스
+- Fake, Software, B210 Radio adapter 골격
+
+명세서, 시험 코드·벡터, 검증 결과와 과거 실험 코드는 이 실행 코드 브랜치에 포함하지 않는다.
 
 ## 구조
 
 ```text
 VDETER/
 ├─ src/vdeter/
-│  ├─ common/                 # bit/byte 공통 유틸리티
-│  ├─ link/
-│  │  ├─ messages/            # Type 92/93 codec과 registry
-│  │  ├─ packet/              # Packet builder/parser
-│  │  └─ config.py            # 링크 송신 모드와 Message 기본값
-│  ├─ profiles/               # 표준별 Message/Link ID 프로파일
-│  ├─ phy/
-│  │  ├─ burst/               # F9A8 기반 Temporary Burst
-│  │  ├─ fec/                 # 채널 부호화 구현 예정
-│  │  └─ modulation/          # 변복조 구현 예정
-│  ├─ mac/                    # MAC 구현 예정
-│  ├─ radio/                  # GNU Radio TX/RX adapter
-│  └─ cli/                    # 대화식 송신 입력
-├─ configs/                   # 장비·운용 환경별 설정
-├─ apps/                      # 사용자 실행 진입점
-├─ grc/
-│  ├─ vdeter_tx.grc
-│  ├─ vdeter_rx.grc
-│  └─ generated/              # GRC 생성 Python과 Embedded Block wrapper
-├─ tests/                     # 단위·통합·유선 장비 시험과 시험 벡터
-├─ tools/                     # 개발·분석용 보조 도구
-├─ results/                   # 시험 결과와 기준 데이터
-├─ docs/                      # VDETER 요구사항·계획·GRC 설정 문서
-└─ legacy/
-   ├─ error_correction/       # 기존 Turbo FEC 실험
-   ├─ bitstream/              # 초기 비트스트림 실험
-   ├─ grc/                    # 기존 저장소 루트의 초기 GRC 실험
-   └─ docs/                   # 기존 저장소 루트의 장비 안내·WBS 문서
+│  ├─ common/          # 공통 DTO, 오류, 식별자, 시간, 직렬화
+│  ├─ service/         # 외부 애플리케이션용 Service API
+│  ├─ presentation/    # Payload Format 처리와 registry
+│  ├─ link/            # 메시지, 패킷, 전송 절차와 TBB
+│  ├─ mac/             # MAC 인터페이스와 모델
+│  ├─ phy/             # Link ID 11 송수신 처리
+│  ├─ radio/           # Radio 인터페이스와 adapter
+│  ├─ profiles/        # 메시지·Payload·PHY profile
+│  ├─ config/          # TOML 설정 loader
+│  └─ runtime/         # 계층 조립과 event routing
+├─ apps/               # 실행 진입점
+├─ configs/            # endpoint 설정 예제
+├─ pyproject.toml
+└─ uv.lock
 ```
 
-## 개발 기준
+## 환경 구성
 
-신규 코드는 `src/vdeter/`에서 개발한다. `legacy/` 파일은 수정하지 않고 비교와
-회귀 확인에만 사용한다. VDETER Flowgraph 원본은 `grc/`에 있고 생성 Python은
-`grc/generated/`에 둔다. 저장소 루트에 있던 초기 GRC 실험은 `legacy/grc/`에
-보관한다.
+Python 3.10 이상과 `uv` 사용을 권장한다.
 
-`profiles/`, `phy/fec/`, `phy/modulation/`, `mac/`과 신규 최상위 디렉터리는
-향후 구현 경계를 먼저 고정한 골격이다. 디렉터리가 존재한다고 해당 기능이 구현된
-것은 아니다.
-
-Python 패키지를 사용할 환경에서는 다음처럼 editable install한다.
-
-```text
-python -m pip install -e .
+```powershell
+uv sync --extra dsp --extra crypto
 ```
 
-GNU Radio와 PMT는 일반 pip 의존성이 아니라 GNU Radio 실행환경에서 제공한다.
+`uv`를 사용하지 않는 경우 다음과 같이 설치할 수 있다.
+
+```powershell
+python -m pip install -e ".[dsp,crypto]"
+```
+
+## 실행 확인
+
+현재 제공되는 실행 진입점은 계층 조립과 설정 검증용 endpoint다.
+
+```powershell
+uv run python apps/stage0_endpoint.py configs/stage0_fake_endpoint.toml
+```
+
+B210 adapter를 실제 장비에 연결하는 기능과 상위 MASS/ROC 애플리케이션 통합은 후속 단계에서 구현한다.

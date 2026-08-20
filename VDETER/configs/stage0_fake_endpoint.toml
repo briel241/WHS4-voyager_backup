@@ -1,0 +1,68 @@
+# 단계 0 interface 시험용 endpoint 설정 (test scope)
+#
+# 이 파일은 `stage0_baseline.md` §8의 TOML-only strict 설정 예다. 여기의 station ID,
+# 주파수, Link ID와 sample format은 실제 할당값이나 규범 profile 값이 아니라 단계 0
+# interface 연결 시험용 값이다. 운영 설정으로 사용하지 않는다.
+
+schema_version = 1
+
+[endpoint]
+id = "stage0-fake-ship"
+role = "SHIP"
+station_id = 111111111      # 시험용 값. 실제 할당 MMSI가 아니다.
+scope = "TEST"
+code_version = "0.1.0"
+
+[service]
+max_payload_bytes = 65536
+max_concurrent_transfers = 8
+
+[link]
+supported_link_ids = [63]   # 시험 전용 Link ID. 규범 profile이 아니다.
+
+[mac]
+link_id = 63
+tx_channel = "stage0-test-tx"
+rx_channel = "stage0-test-rx"
+transmit_lead_nanoseconds = 1000000
+
+[phy]
+sample_rate_hz = 4000
+
+[radio]
+adapter = "FAKE"
+device_selector = ""
+clock_reference = "INTERNAL"
+sample_format = "test-iq-int16-le"
+
+[[radio.channels]]
+name = "stage0-test-tx"
+center_frequency_hz = 100000000
+sample_rate_hz = 4000
+tx_gain_db = 0
+rx_gain_db = 0
+
+[[radio.channels]]
+name = "stage0-test-rx"
+center_frequency_hz = 100100000
+sample_rate_hz = 4000
+tx_gain_db = 0
+rx_gain_db = 0
+
+[logging]
+jsonl_enabled = true
+console_enabled = false
+
+[sources]
+time = "TEST"
+random = "SEEDED"
+id = "DETERMINISTIC"
+seed = 20260819
+
+[security]
+private_key_ref = ""
+certificate_ref = ""
+trust_store_ref = ""
+
+[test]
+peer_station_id = 222222222  # 시험용 값. 실제 할당 MMSI가 아니다.
