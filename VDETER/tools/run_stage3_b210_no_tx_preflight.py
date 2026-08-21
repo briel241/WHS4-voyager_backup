@@ -51,6 +51,15 @@ def _jsonable(value):
     return value
 
 
+def _write_json_output(output_path, payload):
+    absolute_output_path = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(absolute_output_path), exist_ok=True)
+    with open(absolute_output_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    return absolute_output_path
+
+
 def _environment(package_manifest_path):
     try:
         from gnuradio import gr, uhd
@@ -160,11 +169,9 @@ def run(args):
         "environment": environment,
         "devices": records,
     }
-    with open(args.output, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
+    absolute_output_path = _write_json_output(args.output, payload)
     print(json.dumps({
-        "output": os.path.abspath(args.output), "outcome": outcome,
+        "output": absolute_output_path, "outcome": outcome,
         "devices_checked": len(records), "rf_started": False,
     }, ensure_ascii=False, indent=2))
     return 0 if outcome == "PASS" else 2
