@@ -11,7 +11,7 @@ from pathlib import Path
 
 REQUIRED_CASES = {f"TC-RADIO-{index:03d}" for index in range(1, 16)}
 REQUIRED_REQUIREMENTS = {f"RADIO-REQ-{index:02d}" for index in range(1, 12)}
-REQUIRED_DECISIONS = {f"DR-STAGE3-RADIO-{index:03d}" for index in range(1, 34)}
+REQUIRED_DECISIONS = {f"DR-STAGE3-RADIO-{index:03d}" for index in range(1, 35)}
 
 
 def load_tests(loader, tests, pattern):

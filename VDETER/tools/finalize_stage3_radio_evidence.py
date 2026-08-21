@@ -21,7 +21,7 @@ BASELINE_ID = "VDETER-STAGE3-RADIO-BL-001"
 BASELINE_VERSION = "0.2.4"
 REQUIRED_CASES = tuple(f"TC-RADIO-{value:03d}" for value in range(1, 16))
 REQUIRED_REQUIREMENTS = tuple(f"RADIO-REQ-{value:02d}" for value in range(1, 12))
-REQUIRED_DECISIONS = tuple(f"DR-STAGE3-RADIO-{value:03d}" for value in range(1, 34))
+REQUIRED_DECISIONS = tuple(f"DR-STAGE3-RADIO-{value:03d}" for value in range(1, 35))
 
 
 def _read_json(path):
@@ -91,7 +91,7 @@ def _traceability_audit():
             "traceability_evidence": value["evidence"],
         })
     if tuple(sorted(set(decisions))) != tuple(sorted(REQUIRED_DECISIONS)):
-        raise ValueError("DR-STAGE3-RADIO-001..033 coverage is incomplete")
+        raise ValueError("DR-STAGE3-RADIO-001..034 coverage is incomplete")
     if any(value not in test_case_ids for value in REQUIRED_CASES):
         raise ValueError("TC-RADIO-001..015 registry is incomplete")
     return {
