@@ -406,8 +406,8 @@ class GrUhdFlowgraphBackend:
     def configure(self, configuration) -> dict:
         """Apply settings while inactive and return actual gr-uhd readbacks."""
         stream = configuration.b210_stream
-        self._source.set_master_clock_rate(stream.master_clock_rate_hz, 0)
-        self._sink.set_master_clock_rate(stream.master_clock_rate_hz, 0)
+        self._source.set_clock_rate(stream.master_clock_rate_hz, 0)
+        self._sink.set_clock_rate(stream.master_clock_rate_hz, 0)
         self._source.set_clock_source("internal", 0)
         self._sink.set_clock_source("internal", 0)
         self._source.set_time_source("internal", 0)
@@ -498,8 +498,8 @@ class GrUhdFlowgraphBackend:
                 source_serial == sink_serial
                 and abs(source_hardware_time_ns - sink_hardware_time_ns) <= 10_000_000
             ),
-            "master_clock_rate_hz": int(round(self._source.get_master_clock_rate(0))),
-            "sink_master_clock_rate_hz": int(round(self._sink.get_master_clock_rate(0))),
+            "master_clock_rate_hz": int(round(self._source.get_clock_rate(0))),
+            "sink_master_clock_rate_hz": int(round(self._sink.get_clock_rate(0))),
             "clock_source": str(self._source.get_clock_source(0)).lower(),
             "time_source": str(self._source.get_time_source(0)).lower(),
             "sink_clock_source": str(self._sink.get_clock_source(0)).lower(),

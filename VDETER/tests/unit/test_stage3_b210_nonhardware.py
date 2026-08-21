@@ -424,6 +424,24 @@ class B210NonHardwareTest(unittest.TestCase):
             dict(failed.error.details.entries)["exception_message"],
         )
 
+    def test_b210_block_error_records_exception_message(self):
+        class _BlockFailureBackend:
+            @staticmethod
+            def discover(selector):
+                return (selector.split("=", 1)[1],)
+
+            def __init__(self, selector, cpu_format, otw_format):
+                raise AttributeError("specific gr-uhd block failure")
+
+        adapter = B210RadioAdapter(backend_factory=_BlockFailureBackend)
+        failed = adapter.configure(RadioConfigureRequest(b210_configuration()))
+
+        self.assertEqual(ErrorCode.RADIO_CONFIGURATION_FAILED, failed.error.code)
+        self.assertEqual(
+            "specific gr-uhd block failure",
+            dict(failed.error.details.entries)["exception_message"],
+        )
+
     @staticmethod
     def _wait_until(predicate, timeout=0.75):
         deadline = time.monotonic() + timeout
@@ -487,6 +505,10 @@ class B210NonHardwareTest(unittest.TestCase):
         self.assertIn("STREAM_MODE_NUM_SAMPS_AND_DONE", source)
         self.assertIn("set_command_time", source)
         self.assertIn("clear_command_time", source)
+        self.assertIn("set_clock_rate", source)
+        self.assertIn("get_clock_rate", source)
+        self.assertNotIn("set_master_clock_rate", source)
+        self.assertNotIn("get_master_clock_rate", source)
         self.assertIn("def tx_center_frequency_hz", source)
         self.assertNotIn("MultiUSRP", source.replace("``MultiUSRP``", ""))
         self.assertNotIn("import radio_bringup", source)

@@ -60,6 +60,19 @@ def _write_json_output(output_path, payload):
     return absolute_output_path
 
 
+def _failed_device_summaries(records):
+    return [
+        {
+            "role": record["role"],
+            "serial": record["serial"],
+            "configure_result": record["configure_result"],
+            "cleanup_result": record["cleanup_result"],
+        }
+        for record in records
+        if not record["configured"] or not record["cleanup_ok"]
+    ]
+
+
 def _environment(package_manifest_path):
     try:
         from gnuradio import gr, uhd
@@ -170,9 +183,11 @@ def run(args):
         "devices": records,
     }
     absolute_output_path = _write_json_output(args.output, payload)
+    failures = _failed_device_summaries(records)
     print(json.dumps({
         "output": absolute_output_path, "outcome": outcome,
         "devices_checked": len(records), "rf_started": False,
+        "failures": failures,
     }, ensure_ascii=False, indent=2))
     return 0 if outcome == "PASS" else 2
 

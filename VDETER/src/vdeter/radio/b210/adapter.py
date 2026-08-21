@@ -204,7 +204,15 @@ class B210RadioAdapter:
                     self._retain_failed_backend_locked(backend, configuration)
                 else:
                     self._state = previous_state
-                return self._error(ErrorCode.RADIO_CONFIGURATION_FAILED, ErrorCategory.DEVICE, "B210 block 생성 또는 설정 readback이 실패했습니다", details=Details.of(reason=type(error).__name__))
+                return self._error(
+                    ErrorCode.RADIO_CONFIGURATION_FAILED,
+                    ErrorCategory.DEVICE,
+                    "B210 block 생성 또는 설정 readback이 실패했습니다",
+                    details=Details.of(
+                        reason=type(error).__name__,
+                        exception_message=str(error),
+                    ),
+                )
             readback_error = _validate_readback(configuration, expected_serial, readback)
             if readback_error is not None:
                 if not self._cleanup_backend(backend, configuration.resource_limits.stop_timeout_ns):
