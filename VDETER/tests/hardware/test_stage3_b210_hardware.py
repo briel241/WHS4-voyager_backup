@@ -772,7 +772,10 @@ class B210HardwareTest(unittest.TestCase):
             rx_request = RadioRxRequest(UPPER, rx_start, 800_000_000, 76_800)
             self.assertTrue(ship.request_rx(rx_request).is_ok)
 
-            control_at = now.shifted(200_000_000)
+            # Leave enough time for the Pi's first gr-uhd TX scheduler wake-up.
+            # This case judges ship-side retune/RX continuity, not minimum-lead
+            # capability; the 50 ms rejection is covered separately by TC-012.
+            control_at = now.shifted(400_000_000)
             control_payload = bytes((0xA0 + index) % 256 for index in range(54))
             control_burst = phy.encode_packet(PhyEncodeRequest(
                 packet_ids.new_packet_id(), LinkId(11), UPPER,
