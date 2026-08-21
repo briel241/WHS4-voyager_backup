@@ -31,10 +31,12 @@ from vdeter.radio.b210 import (
     APT_PROFILE_ID,
     B210FixtureManifest,
     B210RadioAdapter,
+    FixtureValidationProfile,
     GrUhdFlowgraphBackend,
     FixtureComponent,
     FixtureDirection,
     LossEvidence,
+    NOMINAL_30DB_RISK_ACCEPTANCE_ID,
     TxPowerEvidence,
     apt_package_manifest_issues,
     apt_package_snapshot_issues,
@@ -523,7 +525,7 @@ class B210NonHardwareTest(unittest.TestCase):
         manifest = B210FixtureManifest(
             "fixture", "sha256:source", "sha256:receiver",
             (157_237_500, 161_837_500), (first, second),
-            "2026-08-21T00:00:00Z", "0.2.2", "PASS",
+            "2026-08-21T00:00:00Z", "0.2.3", "PASS",
         )
         self.assertEqual(-20_000, manifest.directions[0].p_rx_worst_millidbm)
         unsafe = FixtureComponent(
@@ -535,7 +537,7 @@ class B210NonHardwareTest(unittest.TestCase):
                 "unsafe", "sha256:source", "sha256:receiver",
                 (157_237_500, 161_837_500),
                 (FixtureDirection("A", "TX/RX", "B", "RX2", (unsafe,), 20_000, 0), second),
-                "2026-08-21T00:00:00Z", "0.2.2", "PASS",
+                "2026-08-21T00:00:00Z", "0.2.3", "PASS",
             )
 
     def test_TC_RADIO_012_calibrated_tx_bound_can_secure_a_30db_fixture(self):
@@ -564,13 +566,93 @@ class B210NonHardwareTest(unittest.TestCase):
         manifest = B210FixtureManifest(
             "fixture-30db", "sha256:source", "sha256:receiver",
             (157_237_500, 161_837_500), (calibrated, reverse),
-            "2026-08-21T00:00:00Z", "0.2.2", "PASS",
+            "2026-08-21T00:00:00Z", "0.2.3", "PASS",
         )
         self.assertEqual(-20_000, manifest.directions[0].p_rx_worst_millidbm)
 
         with self.assertRaises(InvalidValueError):
             FixtureDirection(
                 "A", "TX/RX", "B", "RX2", (component,), 10_000, 0,
+            )
+
+    def test_TC_RADIO_012_user_accepted_nominal_30db_conducted_profile_is_narrow(self):
+        root = pathlib.Path(__file__).parents[2]
+        manifest = load_fixture_manifest(
+            root
+            / "configs"
+            / "stage3_b210_fixture_manifest.30db-user-accepted.json"
+        )
+
+        self.assertEqual(
+            FixtureValidationProfile.USER_ACCEPTED_NOMINAL_30DB_CONDUCTED,
+            manifest.validation_profile,
+        )
+        self.assertEqual(
+            NOMINAL_30DB_RISK_ACCEPTANCE_ID,
+            manifest.risk_acceptance_id,
+        )
+        self.assertEqual({"34D03DD", "34D6357"}, {
+            value for direction in manifest.directions
+            for value in (direction.tx_serial, direction.rx_serial)
+        })
+        self.assertEqual(2, len({
+            direction.components[0].component_id
+            for direction in manifest.directions
+        }))
+        for direction in manifest.directions:
+            self.assertEqual(0, direction.approved_tx_gain_db)
+            self.assertEqual(20_000, direction.p_tx_bound_millidbm)
+            self.assertEqual(
+                TxPowerEvidence.USER_ACCEPTED_UNCALIBRATED,
+                direction.tx_power_evidence,
+            )
+            self.assertEqual(0, direction.path_min_loss_millidb)
+            self.assertEqual(20_000, direction.p_rx_worst_millidbm)
+            self.assertEqual(
+                LossEvidence.USER_ACCEPTED_UNVERIFIED_LABEL,
+                direction.components[0].loss_evidence,
+            )
+
+        with self.assertRaises(InvalidValueError):
+            replace(manifest, risk_acceptance_id=None)
+        with self.assertRaises(InvalidValueError):
+            replace(manifest.directions[0], approved_tx_gain_db=1)
+        with self.assertRaises(InvalidValueError):
+            replace(
+                manifest,
+                directions=(
+                    replace(
+                        manifest.directions[0],
+                        components=(
+                            replace(
+                                manifest.directions[0].components[0],
+                                component_id="ATT-B-30DB-2W-6GHZ-UNSERIALIZED",
+                            ),
+                        ),
+                    ),
+                    manifest.directions[1],
+                ),
+            )
+        with self.assertRaises(InvalidValueError):
+            replace(
+                manifest,
+                directions=(
+                    replace(
+                        manifest.directions[0],
+                        components=(
+                            replace(
+                                manifest.directions[0].components[0],
+                                maximum_input_millidbm=33_011,
+                            ),
+                        ),
+                    ),
+                    manifest.directions[1],
+                ),
+            )
+        with self.assertRaises(InvalidValueError):
+            replace(
+                manifest,
+                validation_profile=FixtureValidationProfile.CALIBRATED_PROTECTION,
             )
 
     def test_TC_RADIO_012_calibration_artifact_is_hash_verified_before_tx(self):
@@ -636,7 +718,7 @@ class B210NonHardwareTest(unittest.TestCase):
                 "center_frequencies_hz": [157237500, 161837500],
                 "directions": [direction("A", "B"), direction("B", "A")],
                 "created_at_utc": "2026-08-21T00:00:00Z",
-                "preflight_version": "0.2.2",
+                "preflight_version": "0.2.3",
                 "outcome": "PASS",
             }
             manifest["directions"][1]["tx_power_calibration_path"] = "calibration-b.json"

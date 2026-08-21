@@ -11,7 +11,7 @@ from pathlib import Path
 
 REQUIRED_CASES = {f"TC-RADIO-{index:03d}" for index in range(1, 16)}
 REQUIRED_REQUIREMENTS = {f"RADIO-REQ-{index:02d}" for index in range(1, 12)}
-REQUIRED_DECISIONS = {f"DR-STAGE3-RADIO-{index:03d}" for index in range(1, 33)}
+REQUIRED_DECISIONS = {f"DR-STAGE3-RADIO-{index:03d}" for index in range(1, 34)}
 
 
 def load_tests(loader, tests, pattern):
@@ -49,7 +49,7 @@ class Stage3RadioAuditTest(unittest.TestCase):
         payload = json.loads(evidence.read_text(encoding="utf-8"))
 
         self.assertEqual("VDETER-STAGE3-RADIO-BL-001", payload["baseline_id"])
-        self.assertEqual("0.2.2", payload["baseline_version"])
+        self.assertEqual("0.2.3", payload["baseline_version"])
         self.assertEqual("stage3-radio", payload["stage"])
         self.assertEqual("PASS", payload["overall_outcome"])
         cases_list = payload["test_cases"]
@@ -241,9 +241,72 @@ class Stage3RadioAuditTest(unittest.TestCase):
             fixture["receiver_radio_fingerprint"],
         )
         self.assertEqual(2, len(fixture["safety"]))
+        nominal_user_profile = (
+            fixture["validation_profile"]
+            == "USER_ACCEPTED_NOMINAL_30DB_CONDUCTED_V1"
+        )
+        if nominal_user_profile:
+            self.assertEqual(
+                "VDETER-STAGE3-USER-ACCEPTED-NOMINAL-30DB-CONDUCTED-001",
+                fixture["risk_acceptance_id"],
+            )
+            self.assertEqual("FUNCTIONAL_CONDUCTED_ONLY", fixture["scope"])
+            expected_directions = {
+                "34D03DD": (
+                    "34D6357", "ATT-A-30DB-2W-6GHZ-UNSERIALIZED"
+                ),
+                "34D6357": (
+                    "34D03DD", "ATT-B-30DB-2W-6GHZ-UNSERIALIZED"
+                ),
+            }
+        else:
+            self.assertEqual("CALIBRATED_PROTECTION", fixture["validation_profile"])
+            self.assertIsNone(fixture["risk_acceptance_id"])
         for direction in fixture["safety"]:
-            self.assertLessEqual(direction["p_rx_worst_millidbm"], -20_000)
             self.assertTrue(direction["components"])
+            if nominal_user_profile:
+                self.assertEqual(0, direction["approved_tx_gain_db"])
+                self.assertEqual(20_000, direction["p_tx_bound_millidbm"])
+                self.assertEqual(30_000, direction["nominal_path_loss_millidb"])
+                self.assertEqual(0, direction["path_min_loss_millidb"])
+                self.assertEqual(20_000, direction["p_rx_worst_millidbm"])
+                self.assertEqual(
+                    "USER_ACCEPTED_UNCALIBRATED",
+                    direction["tx_power_evidence"],
+                )
+                self.assertIsNone(direction["tx_power_calibration"])
+                self.assertEqual(
+                    "NOT_CLAIMED_USER_ACCEPTED",
+                    direction["protection_claim"],
+                )
+                self.assertEqual(1, len(direction["components"]))
+                component = direction["components"][0]
+                expected_rx, expected_component = expected_directions[
+                    direction["tx_serial"]
+                ]
+                self.assertEqual(expected_rx, direction["rx_serial"])
+                self.assertEqual("TX/RX", direction["tx_connector"])
+                self.assertEqual("RX2", direction["rx_connector"])
+                self.assertEqual(expected_component, component["component_id"])
+                self.assertEqual(
+                    "SMA_FIXED_ATTENUATOR_AND_UNCHARACTERIZED_CABLE_PATH",
+                    component["kind"],
+                )
+                self.assertEqual(30_000, component["nominal_loss_millidb"])
+                self.assertEqual(30_000, component["tolerance_millidb"])
+                self.assertEqual(0, component["guaranteed_min_loss_millidb"])
+                self.assertEqual(
+                    "USER_ACCEPTED_UNVERIFIED_LABEL",
+                    component["loss_evidence"],
+                )
+                self.assertEqual(0, component["minimum_frequency_hz"])
+                self.assertEqual(6_000_000_000, component["maximum_frequency_hz"])
+                self.assertEqual(33_010, component["maximum_input_millidbm"])
+                continue
+            self.assertLessEqual(direction["p_rx_worst_millidbm"], -20_000)
+            self.assertEqual(
+                "VERIFIED_CONSERVATIVE_BOUND", direction["protection_claim"]
+            )
             if direction["path_min_loss_millidb"] >= 40_000:
                 continue
             self.assertEqual(
@@ -268,6 +331,7 @@ class Stage3RadioAuditTest(unittest.TestCase):
         self.assertEqual("NOT_SUPPORTED", scope["lower_leg_tbb_receive"])
         self.assertEqual("NOT_VERIFIED", scope["dual_leg_tbb_interoperability"])
         self.assertEqual("NOT_VERIFIED", scope["radiated_rf_compliance"])
+        self.assertEqual("NOT_CLAIMED", scope["uncalibrated_fixture_protection"])
 
 
 if __name__ == "__main__":

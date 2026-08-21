@@ -305,7 +305,7 @@ class TraceabilitySchemaTest(unittest.TestCase):
 
     def test_TC_RADIO_015_stage3_scope_is_approved_and_implemented_not_verified(self):
         stage3 = self.baselines[STAGE3_RADIO_BASELINE_ID]
-        self.assertEqual("0.2.2", stage3["version"])
+        self.assertEqual("0.2.3", stage3["version"])
         self.assertEqual("APPROVED", stage3["status"])
         requirements = [
             record

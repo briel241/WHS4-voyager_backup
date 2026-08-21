@@ -26,8 +26,11 @@ from .preflight import (
     B210FixtureManifest,
     FixtureComponent,
     FixtureDirection,
+    FixtureValidationProfile,
     FIXTURE_PREFLIGHT_VERSION,
     LossEvidence,
+    NOMINAL_30DB_CONDUCTED_PROFILE,
+    NOMINAL_30DB_RISK_ACCEPTANCE_ID,
     TxPowerEvidence,
     load_fixture_manifest,
 )
@@ -58,8 +61,11 @@ __all__ = [
     "B210FixtureManifest",
     "FixtureComponent",
     "FixtureDirection",
+    "FixtureValidationProfile",
     "FIXTURE_PREFLIGHT_VERSION",
     "LossEvidence",
+    "NOMINAL_30DB_CONDUCTED_PROFILE",
+    "NOMINAL_30DB_RISK_ACCEPTANCE_ID",
     "TxPowerEvidence",
     "load_fixture_manifest",
 ]

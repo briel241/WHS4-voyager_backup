@@ -328,10 +328,20 @@ def run(run_id):
         manifest_bytes = handle.read()
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     fixture = json.loads(manifest_bytes.decode("utf-8"))
+    validation_profile = fixture.get(
+        "validation_profile", "CALIBRATED_PROTECTION"
+    )
+    user_accepted_nominal = (
+        validation_profile == "USER_ACCEPTED_NOMINAL_30DB_CONDUCTED_V1"
+    )
     fixture_safety = []
     for direction in fixture["directions"]:
         path_min_loss = sum(
             value["guaranteed_min_loss_millidb"]
+            for value in direction["components"]
+        )
+        nominal_path_loss = sum(
+            value["nominal_loss_millidb"]
             for value in direction["components"]
         )
         calibration = None
@@ -353,6 +363,7 @@ def run(run_id):
             "rx_connector": direction["rx_connector"],
             "approved_tx_gain_db": direction["approved_tx_gain_db"],
             "p_tx_bound_millidbm": direction["p_tx_bound_millidbm"],
+            "nominal_path_loss_millidb": nominal_path_loss,
             "path_min_loss_millidb": path_min_loss,
             "p_rx_worst_millidbm": (
                 direction["p_tx_bound_millidbm"] - path_min_loss
@@ -361,6 +372,10 @@ def run(run_id):
                 "tx_power_evidence", "MANUFACTURER_MAXIMUM"
             ),
             "tx_power_calibration": calibration,
+            "protection_claim": (
+                "NOT_CLAIMED_USER_ACCEPTED"
+                if user_accepted_nominal else "VERIFIED_CONSERVATIVE_BOUND"
+            ),
             "components": direction["components"],
         })
     evidence_text = "".join(
@@ -374,7 +389,7 @@ def run(run_id):
         "schema_version": 1,
         "run_id": run_id,
         "baseline_id": "VDETER-STAGE3-RADIO-BL-001",
-        "baseline_version": "0.2.2",
+        "baseline_version": "0.2.3",
         "stage": "stage3-radio-hardware",
         "overall_outcome": "PASS" if successful else "FAIL",
         "started_at": datetime.fromtimestamp(
@@ -423,6 +438,12 @@ def run(run_id):
             "outcome": fixture["outcome"],
             "created_at_utc": fixture["created_at_utc"],
             "preflight_version": fixture["preflight_version"],
+            "validation_profile": validation_profile,
+            "risk_acceptance_id": fixture.get("risk_acceptance_id"),
+            "scope": (
+                "FUNCTIONAL_CONDUCTED_ONLY"
+                if user_accepted_nominal else "CALIBRATED_CONDUCTED_PROTECTION"
+            ),
             "center_frequencies_hz": fixture["center_frequencies_hz"],
             "source_radio_fingerprint": fixture["source_radio_fingerprint"],
             "receiver_radio_fingerprint": fixture["receiver_radio_fingerprint"],

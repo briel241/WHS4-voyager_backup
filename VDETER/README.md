@@ -3,7 +3,8 @@
 Raspberry Pi 5에서 Stage 3 B210 실물시험을 수행하려면
 [`STAGE3_PI5_B210_TESTING.md`](STAGE3_PI5_B210_TESTING.md)를 따른다.
 
-VDE-TER 프로토콜의 단계 0~2 통합 구현이다.
+VDE-TER 프로토콜의 Stage 0~3 구현이다. Stage 0~2는 동결됐고 Stage 3 Radio 코드는
+구현됐으며 실제 B210 시험과 최종 evidence audit를 기다리고 있다.
 
 현재 포함 범위는 다음과 같다.
 
@@ -11,9 +12,12 @@ VDE-TER 프로토콜의 단계 0~2 통합 구현이다.
 - 단계 1: Link 메시지, 패킷·CRC, 분할·재조립, short data, data session과 TBB
 - 단계 2: Link ID 11 PHY profile, FEC, interleaving, scrambling, π/4-QPSK와 burst 송수신 처리
 - Service, Presentation, Link, MAC, PHY, Radio 계층의 확장 가능한 인터페이스
-- Fake, Software, B210 Radio adapter 골격
+- 동일 공개 계약의 Fake·Software·B210 Radio adapter
+- Python에서 직접 구성하는 headless programmatic GNU Radio/gr-uhd B210 backend
+- 현재 두 B210을 위한 사용자 승인 명목 30 dB 유선 기능시험 profile
 
-명세서, 시험 코드·벡터, 검증 결과와 과거 실험 코드는 이 실행 코드 브랜치에 포함하지 않는다.
+판정 원본 명세서, 생성된 검증 결과와 과거 실험 자료는 저장소 밖에서 관리한다. 구현 검증에
+필요한 시험 코드·고정 벡터·Pi 5 B210 실행 안내는 이 브랜치에 포함한다.
 
 ## 구조
 
@@ -58,4 +62,5 @@ python -m pip install -e ".[dsp,crypto]"
 uv run python apps/stage0_endpoint.py configs/stage0_fake_endpoint.toml
 ```
 
-B210 adapter를 실제 장비에 연결하는 기능과 상위 MASS/ROC 애플리케이션 통합은 후속 단계에서 구현한다.
+B210 adapter는 실제 장비 경로를 구현했지만 `TC-RADIO-012/013` PASS 전에는 Stage 3를
+`VERIFIED/FROZEN`으로 판정하지 않는다. 상위 MASS/ROC 애플리케이션 통합은 후속 단계다.

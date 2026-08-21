@@ -1,0 +1,61 @@
+{
+  "fixture_id": "stage3-b210-30db-34D03DD-to-34D6357",
+  "source_radio_fingerprint": "sha256:1eea19d5a3b802c8244cbf5b2373d1dc285765f573a0acaa99fe245908f6f421",
+  "receiver_radio_fingerprint": "sha256:e8def2fc3e1a054190918f761e9ec6bd1d777a3178a4bb313b814b8da31ae0a3",
+  "center_frequencies_hz": [157237500, 161837500],
+  "directions": [
+    {
+      "tx_serial": "34D03DD",
+      "tx_connector": "TX/RX",
+      "rx_serial": "34D6357",
+      "rx_connector": "RX2",
+      "p_tx_bound_millidbm": 20000,
+      "approved_tx_gain_db": 0,
+      "tx_power_evidence": "USER_ACCEPTED_UNCALIBRATED",
+      "tx_power_calibration_path": null,
+      "tx_power_calibration_sha256": null,
+      "components": [
+        {
+          "component_id": "ATT-A-30DB-2W-6GHZ-UNSERIALIZED",
+          "kind": "SMA_FIXED_ATTENUATOR_AND_UNCHARACTERIZED_CABLE_PATH",
+          "nominal_loss_millidb": 30000,
+          "tolerance_millidb": 30000,
+          "guaranteed_min_loss_millidb": 0,
+          "loss_evidence": "USER_ACCEPTED_UNVERIFIED_LABEL",
+          "minimum_frequency_hz": 0,
+          "maximum_frequency_hz": 6000000000,
+          "maximum_input_millidbm": 33010
+        }
+      ]
+    },
+    {
+      "tx_serial": "34D6357",
+      "tx_connector": "TX/RX",
+      "rx_serial": "34D03DD",
+      "rx_connector": "RX2",
+      "p_tx_bound_millidbm": 20000,
+      "approved_tx_gain_db": 0,
+      "tx_power_evidence": "USER_ACCEPTED_UNCALIBRATED",
+      "tx_power_calibration_path": null,
+      "tx_power_calibration_sha256": null,
+      "components": [
+        {
+          "component_id": "ATT-B-30DB-2W-6GHZ-UNSERIALIZED",
+          "kind": "SMA_FIXED_ATTENUATOR_AND_UNCHARACTERIZED_CABLE_PATH",
+          "nominal_loss_millidb": 30000,
+          "tolerance_millidb": 30000,
+          "guaranteed_min_loss_millidb": 0,
+          "loss_evidence": "USER_ACCEPTED_UNVERIFIED_LABEL",
+          "minimum_frequency_hz": 0,
+          "maximum_frequency_hz": 6000000000,
+          "maximum_input_millidbm": 33010
+        }
+      ]
+    }
+  ],
+  "created_at_utc": "2026-08-21T00:00:00Z",
+  "preflight_version": "0.2.3",
+  "outcome": "PASS",
+  "validation_profile": "USER_ACCEPTED_NOMINAL_30DB_CONDUCTED_V1",
+  "risk_acceptance_id": "VDETER-STAGE3-USER-ACCEPTED-NOMINAL-30DB-CONDUCTED-001"
+}

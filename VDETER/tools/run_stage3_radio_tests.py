@@ -49,6 +49,7 @@ CONFORMANCE_SCOPE = {
     "dual_leg_tbb_interoperability": "NOT_VERIFIED",
     "utc_100_microsecond_compliance": "NOT_VERIFIED",
     "radiated_rf_compliance": "NOT_VERIFIED",
+    "uncalibrated_fixture_protection": "NOT_CLAIMED",
 }
 
 # A TC is not complete merely because one method containing its ID passed.
@@ -299,7 +300,7 @@ def run(run_id: str, regression_paths=None) -> int:
         "schema_version": 1,
         "run_id": run_id,
         "baseline_id": "VDETER-STAGE3-RADIO-BL-001",
-        "baseline_version": "0.2.2",
+        "baseline_version": "0.2.3",
         "stage": "stage3-radio",
         "overall_outcome": "PARTIAL_PASS" if successful else "FAIL",
         "started_at": datetime.fromtimestamp(

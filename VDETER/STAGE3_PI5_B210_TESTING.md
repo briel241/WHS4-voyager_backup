@@ -45,18 +45,25 @@ python3 tools/run_stage3_b210_no_tx_preflight.py \
 
 이 단계는 adapter `start()`를 호출하지 않으며 TC-RADIO-012/013 PASS를 만들지 않는다.
 
-## 4. 30 dB fixture gate
+## 4. 사용자 승인 명목 30 dB 유선 fixture gate
 
-두 방향 모두 `TX/RX -> 30 dB attenuator -> RX2`로 연결한다. 실제 송신 전에는 다음을
-`configs/stage3_b210_fixture_manifest.30db-draft.json`에 반영하고 `outcome`을 `PASS`로
-만들어야 한다.
+현재 두 B210과 보유한 감쇠기 두 개에는 다음의 제한된 기능시험 profile을 적용한다.
 
-- 감쇠기 식별정보, 주파수 범위, 허용오차와 보증 최소 감쇠
-- B210 serial별 gain 0 dB·두 중심주파수·고정 waveform TX 출력 교정 상한
-- calibration artifact 경로와 SHA-256
-- `P_TX_BOUND - L_PATH_MIN <= -20 dBm`
+- ship B210은 serial `34D03DD`, control B210은 serial `34D6357`로 고정한다.
+- 두 방향 모두 `TX/RX -> 명목 30 dB 감쇠기 하나 -> RX2`로 연결한다.
+- 감쇠기 A와 B를 서로 구별해 각각 한 방향에만 고정하고, 안테나는 연결하지 않는다.
+- TX gain은 양쪽 모두 `0 dB`, 중심주파수는 `157237500 Hz`와 `161837500 Hz`만 허용한다.
+- fixture manifest는
+  `configs/stage3_b210_fixture_manifest.30db-user-accepted.json`을 사용한다.
 
-placeholder나 음수 sentinel이 남아 있으면 hardware runner가 송신 전에 거부한다.
+이 profile은 감쇠기 라벨의 `30 dB, 2 W, 최대 6 GHz`만 사용자가 수락한 조건이다. 실제
+삽입손실·허용오차와 B210 절대 출력은 교정되지 않았으므로 수신기 보호, RF 안전, 출력전력,
+감도, 방사·스펙트럼·OTA 적합성을 입증하지 않는다. manifest의 보증 최소 감쇠는 의도적으로
+`0 dB`이고 hardware runner는 이 profile을 `FUNCTIONAL_CONDUCTED_ONLY`로 기록한다.
+
+다른 serial, gain, 주파수, 안테나, 감쇠기 구성으로 바꾸면 이 승인은 무효다. 수신기 보호
+margin까지 주장하려면 `CALIBRATED_PROTECTION` profile과 교정 artifact를 별도로 사용해야
+한다.
 
 ## 5. 실물 시험
 
@@ -66,7 +73,7 @@ export VDETER_B210_USB_DISCONNECT_TEST=1
 export VDETER_B210_USB_DISCONNECT_DELAY_SECONDS=15
 export VDETER_B210_SHIP_SERIAL=34D03DD
 export VDETER_B210_CONTROL_SERIAL=34D6357
-export VDETER_B210_FIXTURE_MANIFEST=<absolute_fixture_manifest_path>
+export VDETER_B210_FIXTURE_MANIFEST="$PWD/configs/stage3_b210_fixture_manifest.30db-user-accepted.json"
 export VDETER_B210_PACKAGE_MANIFEST=<absolute_apt_manifest_path>
 
 python3 tools/run_stage3_b210_hardware_tests.py \
