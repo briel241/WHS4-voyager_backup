@@ -2,6 +2,12 @@
 
 from .adapter import B210RadioAdapter, REQUIRED_MODULES, missing_dependencies
 from .backend import GrUhdFlowgraphBackend
+from .isolated_backend import (
+    B210BackendRemoteError,
+    B210BackendTimeout,
+    B210BackendUnavailable,
+    ProcessIsolatedGrUhdBackend,
+)
 from .environment import (
     APPROVED_MACHINE,
     APPROVED_MACHINES,
@@ -38,6 +44,10 @@ from .preflight import (
 __all__ = [
     "B210RadioAdapter",
     "GrUhdFlowgraphBackend",
+    "ProcessIsolatedGrUhdBackend",
+    "B210BackendUnavailable",
+    "B210BackendTimeout",
+    "B210BackendRemoteError",
     "APPROVED_MACHINE",
     "APPROVED_MACHINES",
     "APPROVED_RASPBERRY_PI_MODEL_PREFIX",

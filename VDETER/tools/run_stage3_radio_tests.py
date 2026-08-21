@@ -35,6 +35,7 @@ MODULES = (
     "tests.integration.test_stage3_radio_medium",
     "tests.integration.test_stage3_phy_radio_codec",
     "tests.unit.test_stage3_b210_nonhardware",
+    "tests.unit.test_stage3_b210_process_isolation",
 )
 CASE_PATTERN = re.compile(r"TC_RADIO_(\d{3})")
 SOFTWARE_CASES = tuple(f"TC-RADIO-{value:03d}" for value in range(1, 12)) + (
@@ -57,6 +58,7 @@ REQUIRED_COVERAGE = {
     "TC-RADIO-001": (
         "adapters_implement_the_same_public_port",
         "programmatic_backend_has_required_gr_uhd_calls_and_no_multiusrp_or_grc",
+        "process_proxy_preserves_backend_contract_and_results",
     ),
     "TC-RADIO-002": (
         "schema_v2_is_explicit_and_canonical",
@@ -88,6 +90,7 @@ REQUIRED_COVERAGE = {
         "concurrent_stop_shares_one_cleanup",
         "stop_preserves_active_software_rx_prefix",
         "stop_delivers_received_rx_prefix_before_incomplete",
+        "blocking_child_stop_is_bounded_and_retryable",
     ),
     "TC-RADIO-006": (
         "mapping_domains_expiry_and_clock_jump",
@@ -129,6 +132,9 @@ REQUIRED_COVERAGE = {
         "backend_rx_exception_is_typed_and_fails_adapter",
         "hardware_time_loss_terminates_all_pending_work",
         "disconnect_is_detected_without_status_polling",
+        "native_abort_is_contained_as_backend_unavailable",
+        "native_process_abort_is_typed_without_status_polling",
+        "native_abort_terminalizes_pending_tx_and_rx",
         "delivery_failure_marks_submitted_tx_unknown_and_rx_incomplete",
         "sample_delivery_failure_preserves_actual_rx_count",
         "timestamped_async_error_matches_its_actual_burst",
@@ -300,7 +306,7 @@ def run(run_id: str, regression_paths=None) -> int:
         "schema_version": 1,
         "run_id": run_id,
         "baseline_id": "VDETER-STAGE3-RADIO-BL-001",
-        "baseline_version": "0.2.3",
+        "baseline_version": "0.2.4",
         "stage": "stage3-radio",
         "overall_outcome": "PARTIAL_PASS" if successful else "FAIL",
         "started_at": datetime.fromtimestamp(

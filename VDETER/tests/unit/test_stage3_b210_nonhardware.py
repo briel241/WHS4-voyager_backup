@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 import hashlib
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -17,6 +18,7 @@ from dataclasses import replace
 from tests.support.radio_stage3 import LOWER, UPPER, b210_configuration, burst_id, cf32_block, limits, utc
 from vdeter.common.contracts.radio import (
     RadioConfigureRequest,
+    RadioDeviceState,
     RadioStartRequest,
     RadioStatusRequest,
     RadioStopRequest,
@@ -33,6 +35,7 @@ from vdeter.radio.b210 import (
     B210RadioAdapter,
     FixtureValidationProfile,
     GrUhdFlowgraphBackend,
+    ProcessIsolatedGrUhdBackend,
     FixtureComponent,
     FixtureDirection,
     LossEvidence,
@@ -211,6 +214,50 @@ class _Backend:
         if expected_hardware_time_ns in self.read_results_by_window:
             return self.read_results_by_window.pop(expected_hardware_time_ns)
         return self.read_results.pop(0) if self.read_results else None
+
+
+class _NativeAbortAfterStartBackend(_Backend):
+    """Fake the exact native-abort boundary after admission succeeds."""
+
+    def hardware_time_ns(self):
+        if self.started:
+            os._exit(74)
+        return super().hardware_time_ns()
+
+
+class _IsolatedNativeAbortFactory(ProcessIsolatedGrUhdBackend):
+    @staticmethod
+    def discover(selector):
+        return (selector.split("=", 1)[1],)
+
+    def __init__(self, selector, cpu_format, otw_format):
+        super().__init__(
+            selector,
+            cpu_format,
+            otw_format,
+            _backend_type=_NativeAbortAfterStartBackend,
+        )
+
+
+class _NativeAbortWithPendingBackend(_Backend):
+    def poll_async(self):
+        if self.tx and self.rx:
+            os._exit(75)
+        return super().poll_async()
+
+
+class _IsolatedPendingAbortFactory(ProcessIsolatedGrUhdBackend):
+    @staticmethod
+    def discover(selector):
+        return (selector.split("=", 1)[1],)
+
+    def __init__(self, selector, cpu_format, otw_format):
+        super().__init__(
+            selector,
+            cpu_format,
+            otw_format,
+            _backend_type=_NativeAbortWithPendingBackend,
+        )
 
 
 class B210NonHardwareTest(unittest.TestCase):
@@ -551,7 +598,7 @@ class B210NonHardwareTest(unittest.TestCase):
         manifest = B210FixtureManifest(
             "fixture", "sha256:source", "sha256:receiver",
             (157_237_500, 161_837_500), (first, second),
-            "2026-08-21T00:00:00Z", "0.2.3", "PASS",
+            "2026-08-21T00:00:00Z", "0.2.4", "PASS",
         )
         self.assertEqual(-20_000, manifest.directions[0].p_rx_worst_millidbm)
         unsafe = FixtureComponent(
@@ -563,7 +610,7 @@ class B210NonHardwareTest(unittest.TestCase):
                 "unsafe", "sha256:source", "sha256:receiver",
                 (157_237_500, 161_837_500),
                 (FixtureDirection("A", "TX/RX", "B", "RX2", (unsafe,), 20_000, 0), second),
-                "2026-08-21T00:00:00Z", "0.2.3", "PASS",
+                "2026-08-21T00:00:00Z", "0.2.4", "PASS",
             )
 
     def test_TC_RADIO_012_calibrated_tx_bound_can_secure_a_30db_fixture(self):
@@ -592,7 +639,7 @@ class B210NonHardwareTest(unittest.TestCase):
         manifest = B210FixtureManifest(
             "fixture-30db", "sha256:source", "sha256:receiver",
             (157_237_500, 161_837_500), (calibrated, reverse),
-            "2026-08-21T00:00:00Z", "0.2.3", "PASS",
+            "2026-08-21T00:00:00Z", "0.2.4", "PASS",
         )
         self.assertEqual(-20_000, manifest.directions[0].p_rx_worst_millidbm)
 
@@ -744,7 +791,7 @@ class B210NonHardwareTest(unittest.TestCase):
                 "center_frequencies_hz": [157237500, 161837500],
                 "directions": [direction("A", "B"), direction("B", "A")],
                 "created_at_utc": "2026-08-21T00:00:00Z",
-                "preflight_version": "0.2.3",
+                "preflight_version": "0.2.4",
                 "outcome": "PASS",
             }
             manifest["directions"][1]["tx_power_calibration_path"] = "calibration-b.json"
@@ -1470,6 +1517,83 @@ class B210NonHardwareTest(unittest.TestCase):
             adapter._terminal_codes.values(),
         )
         adapter.stop(RadioStopRequest("test cleanup"))
+
+    def test_TC_RADIO_010_native_process_abort_is_typed_without_status_polling(self):
+        clock = ControlledTimeSource(
+            1_000_000_000,
+            0,
+            utc_clock_id="radio-test-utc",
+            monotonic_clock_id="radio-test-monotonic",
+        )
+        events = RecordingInternalEventSink()
+        adapter = B210RadioAdapter(
+            clock,
+            DeterministicIdSource(10_025),
+            events,
+            backend_factory=_IsolatedNativeAbortFactory,
+        )
+        configured = adapter.configure(
+            RadioConfigureRequest(b210_configuration())
+        )
+        self.assertTrue(configured.is_ok, configured)
+        started = adapter.start(RadioStartRequest())
+        self.assertTrue(started.is_ok, started)
+
+        self._wait_until(lambda: adapter._state is RadioDeviceState.FAILED)
+        errors = events.events_of(InternalEventType.LAYER_ERROR)
+        self.assertTrue(any(
+            event.error.code == ErrorCode.RADIO_DEVICE_DISCONNECTED
+            for event in errors
+        ))
+        stopped = adapter.stop(RadioStopRequest("native abort cleanup"))
+        self.assertTrue(stopped.is_ok, stopped)
+
+    def test_TC_RADIO_010_native_abort_terminalizes_pending_tx_and_rx(self):
+        clock = ControlledTimeSource(
+            1_000_000_000,
+            0,
+            utc_clock_id="radio-test-utc",
+            monotonic_clock_id="radio-test-monotonic",
+        )
+        events = RecordingInternalEventSink()
+        adapter = B210RadioAdapter(
+            clock,
+            DeterministicIdSource(10_050),
+            events,
+            backend_factory=_IsolatedPendingAbortFactory,
+        )
+        self.assertTrue(adapter.configure(
+            RadioConfigureRequest(b210_configuration())
+        ).is_ok)
+        self.assertTrue(adapter.start(RadioStartRequest()).is_ok)
+        tx_at = utc(1_300_000_000)
+        rx_at = utc(1_500_000_000)
+        self.assertTrue(adapter.schedule_tx(RadioTxRequest(
+            burst_id(505), UPPER, tx_at, cf32_block(tx_at),
+        )).is_ok)
+        self.assertTrue(adapter.request_rx(RadioRxRequest(
+            UPPER, rx_at, 1_000_000, 76_800,
+        )).is_ok)
+
+        self._wait_until(lambda: adapter._state is RadioDeviceState.FAILED)
+        codes = [
+            event.error.code
+            for event in events.events_of(InternalEventType.LAYER_ERROR)
+        ]
+        self.assertIn(ErrorCode.RADIO_TX_OUTCOME_UNKNOWN, codes)
+        self.assertGreaterEqual(
+            codes.count(ErrorCode.RADIO_DEVICE_DISCONNECTED), 2
+        )
+        status = adapter.status(RadioStatusRequest()).value
+        self.assertEqual(0, sum(
+            value.tx_outstanding_count for value in status.queue_status
+        ))
+        self.assertEqual(0, sum(
+            value.rx_window_outstanding_count for value in status.queue_status
+        ))
+        self.assertTrue(
+            adapter.stop(RadioStopRequest("pending native abort cleanup")).is_ok
+        )
 
     def test_TC_RADIO_010_delivery_failure_marks_submitted_tx_unknown_and_rx_incomplete(self):
         clock = ControlledTimeSource(1_000_000_000, 0, utc_clock_id="radio-test-utc",

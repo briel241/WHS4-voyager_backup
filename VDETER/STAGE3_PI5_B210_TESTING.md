@@ -88,6 +88,12 @@ python3 tools/run_stage3_b210_hardware_tests.py \
 
 전체 gate는 별도 승인 아래 controlled disconnect까지 포함해 실행한다.
 
+production adapter는 GNU Radio/UHD flowgraph를 parent test process가 아니라 별도 spawned
+subprocess에서 실행한다. 따라서 UHD/libusb native thread가 USB 분리 때 abort하더라도 runner는
+계속 살아 있어야 하며, child EOF를 `RADIO_DEVICE_DISCONNECTED`로 기록한 뒤 cleanup해야 한다.
+아래 시험 직전에는 두 B210을 모두 재연결하고 `uhd_find_devices`에서 두 serial이 보이는지
+확인한다.
+
 ```bash
 export VDETER_B210_HARDWARE_TEST=1
 export VDETER_B210_USB_DISCONNECT_TEST=1
@@ -102,5 +108,7 @@ python3 tools/run_stage3_b210_hardware_tests.py \
 ```
 
 controlled disconnect 안내 시 control B210의 USB만 분리한다. TX 중 RF cable이나 attenuator를
-분리하지 않는다. TC-RADIO-012/013과 최종 audit가 모두 PASS하기 전에는 Stage 3를
+분리하지 않는다. 결과 evidence에는 서로 다른 `parent_pid`·`gr_uhd_child_pid`,
+`parent_survived_native_disconnect=true`, typed terminal과 `cleanup=PASS`가 있어야 한다.
+TC-RADIO-012/013과 최종 audit가 모두 PASS하기 전에는 Stage 3를
 `VERIFIED/FROZEN`으로 변경하지 않는다.

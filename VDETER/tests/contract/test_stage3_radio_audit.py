@@ -49,7 +49,7 @@ class Stage3RadioAuditTest(unittest.TestCase):
         payload = json.loads(evidence.read_text(encoding="utf-8"))
 
         self.assertEqual("VDETER-STAGE3-RADIO-BL-001", payload["baseline_id"])
-        self.assertEqual("0.2.3", payload["baseline_version"])
+        self.assertEqual("0.2.4", payload["baseline_version"])
         self.assertEqual("stage3-radio", payload["stage"])
         self.assertEqual("PASS", payload["overall_outcome"])
         cases_list = payload["test_cases"]

@@ -50,7 +50,11 @@ from ...common.identifiers import IdSource, PhysicalChannel, Uuid4IdSource
 from ...common.results import Ok, internal_error
 from ...common.time import ClockDomain, ClockMapping, SystemTimeSource, TimePoint, TimeSource
 from ..models import RadioAdapterKind
-from .backend import GrUhdFlowgraphBackend
+from .isolated_backend import (
+    B210BackendTimeout,
+    B210BackendUnavailable,
+    ProcessIsolatedGrUhdBackend,
+)
 
 ADAPTER_KIND = RadioAdapterKind.B210.value
 REQUIRED_MODULES = ("gnuradio", "gnuradio.uhd")
@@ -178,7 +182,7 @@ class B210RadioAdapter:
                         "승인된 GNU Radio gr-uhd dependency가 없습니다",
                         details=Details.of(missing_modules=missing),
                     )
-                factory = GrUhdFlowgraphBackend
+                factory = ProcessIsolatedGrUhdBackend
             else:
                 factory = self._backend_factory
             configuration = request.configuration
@@ -503,6 +507,15 @@ class B210RadioAdapter:
             try:
                 self._backend.submit_tx(request.samples.data, hardware_start, setting.center_frequency_hz, retune_time)
             except Exception as error:
+                if _is_isolated_backend_loss(error):
+                    self._handle_device_disconnect_locked(type(error).__name__)
+                    return self._error(
+                        ErrorCode.RADIO_DEVICE_DISCONNECTED,
+                        ErrorCategory.DEVICE,
+                        "isolated gr-uhd backend was lost while submitting TX",
+                        correlation,
+                        Details.of(reason=type(error).__name__),
+                    )
                 return self._error(ErrorCode.RADIO_STREAM_FAILED, ErrorCategory.DEVICE, "gr-uhd TX 제출이 실패했습니다", correlation, Details.of(reason=type(error).__name__))
             self._tx_ledger.append(_TxLedgerEntry(key, request, hardware_start, hardware_end))
             self._last_tx_channel = request.channel.name
@@ -547,6 +560,14 @@ class B210RadioAdapter:
             try:
                 self._backend.submit_rx(hardware_start, expected, setting.center_frequency_hz)
             except Exception as error:
+                if _is_isolated_backend_loss(error):
+                    self._handle_device_disconnect_locked(type(error).__name__)
+                    return self._error(
+                        ErrorCode.RADIO_DEVICE_DISCONNECTED,
+                        ErrorCategory.DEVICE,
+                        "isolated gr-uhd backend was lost while submitting RX",
+                        details=Details.of(reason=type(error).__name__),
+                    )
                 return self._error(ErrorCode.RADIO_STREAM_FAILED, ErrorCategory.DEVICE, "gr-uhd finite RX command 제출이 실패했습니다", details=Details.of(reason=type(error).__name__))
             self._rx_ledger.append(_RxLedgerEntry(key, request, expected, hardware_start, hardware_end, self._timing_status.mapping))
             self._rx_ledger.sort(key=lambda entry: entry.hardware_start_ns)
@@ -626,6 +647,15 @@ class B210RadioAdapter:
         try:
             remaining = converted.value.total_nanoseconds() - int(self._backend.hardware_time_ns())
         except Exception as error:
+            if _is_isolated_backend_loss(error):
+                self._handle_device_disconnect_locked(type(error).__name__)
+                return self._error(
+                    ErrorCode.RADIO_DEVICE_DISCONNECTED,
+                    ErrorCategory.DEVICE,
+                    "isolated gr-uhd backend was lost while reading hardware time",
+                    correlation,
+                    Details.of(reason=type(error).__name__),
+                )
             return self._error(ErrorCode.RADIO_STREAM_FAILED, ErrorCategory.DEVICE, "B210 hardware time read가 실패했습니다", correlation, Details.of(reason=type(error).__name__))
         if remaining < lead_ns:
             return self._error(
@@ -696,6 +726,9 @@ class B210RadioAdapter:
         try:
             async_events = tuple(self._backend.poll_async())
         except Exception as error:
+            if _is_isolated_backend_loss(error):
+                self._handle_device_disconnect_locked(type(error).__name__)
+                return
             self._fail_monitor_locked(
                 "B210 async event monitoring failed", type(error).__name__
             )
@@ -791,6 +824,9 @@ class B210RadioAdapter:
             try:
                 result = self._read_rx(entry, allow_partial=False)
             except Exception as error:
+                if _is_isolated_backend_loss(error):
+                    self._handle_device_disconnect_locked(type(error).__name__)
+                    return
                 self._fail_monitor_locked(
                     "B210 RX collector failed", type(error).__name__
                 )
@@ -804,6 +840,9 @@ class B210RadioAdapter:
                 try:
                     result = self._read_rx(entry, allow_partial=True)
                 except Exception as error:
+                    if _is_isolated_backend_loss(error):
+                        self._handle_device_disconnect_locked(type(error).__name__)
+                        return
                     self._fail_monitor_locked(
                         "B210 RX collector failed while reading its partial window",
                         type(error).__name__,
@@ -1347,6 +1386,10 @@ class B210RadioAdapter:
             correlation=correlation,
             details=self._common_details_locked(details),
         )
+
+
+def _is_isolated_backend_loss(error):
+    return isinstance(error, (B210BackendUnavailable, B210BackendTimeout))
 
 
 def _applied_channel(setting, binding, readback):

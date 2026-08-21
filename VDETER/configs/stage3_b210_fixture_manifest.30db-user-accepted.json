@@ -54,7 +54,7 @@
     }
   ],
   "created_at_utc": "2026-08-21T00:00:00Z",
-  "preflight_version": "0.2.3",
+  "preflight_version": "0.2.4",
   "outcome": "PASS",
   "validation_profile": "USER_ACCEPTED_NOMINAL_30DB_CONDUCTED_V1",
   "risk_acceptance_id": "VDETER-STAGE3-USER-ACCEPTED-NOMINAL-30DB-CONDUCTED-001"

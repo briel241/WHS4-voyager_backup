@@ -434,7 +434,7 @@ def run(run_id, exclude_controlled_usb_disconnect=False):
         "schema_version": 1,
         "run_id": run_id,
         "baseline_id": "VDETER-STAGE3-RADIO-BL-001",
-        "baseline_version": "0.2.3",
+        "baseline_version": "0.2.4",
         "stage": "stage3-radio-hardware",
         "overall_outcome": (
             "PASS" if successful

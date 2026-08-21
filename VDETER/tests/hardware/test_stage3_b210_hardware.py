@@ -595,6 +595,8 @@ class B210HardwareTest(unittest.TestCase):
         adapter, events, _configured = self._adapter(
             self.control_configuration, 12_200
         )
+        child_pid = adapter._backend._process.pid
+        self.assertNotEqual(os.getpid(), child_pid)
         delay = int(os.environ.get("VDETER_B210_USB_DISCONNECT_DELAY_SECONDS", "10"))
         print(
             f"Disconnect USB for B210 {self.control_serial} within {delay} seconds.",
@@ -620,6 +622,10 @@ class B210HardwareTest(unittest.TestCase):
             "mode": "controlled_usb_disconnect",
             "device_id": self.control_serial,
             "terminal_code": ErrorCode.RADIO_DEVICE_DISCONNECTED,
+            "parent_pid": os.getpid(),
+            "gr_uhd_child_pid": child_pid,
+            "parent_survived_native_disconnect": True,
+            "backend_boundary": "SPAWNED_SUBPROCESS",
             "cleanup": "PASS",
         })
 

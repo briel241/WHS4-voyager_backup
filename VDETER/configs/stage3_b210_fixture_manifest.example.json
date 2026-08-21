@@ -54,7 +54,7 @@
     }
   ],
   "created_at_utc": "REPLACE_WITH_UTC_TIMESTAMP",
-  "preflight_version": "0.2.3",
+  "preflight_version": "0.2.4",
   "outcome": "FAIL",
   "validation_profile": "CALIBRATED_PROTECTION",
   "risk_acceptance_id": null
