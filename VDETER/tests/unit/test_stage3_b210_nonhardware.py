@@ -1315,6 +1315,39 @@ class B210NonHardwareTest(unittest.TestCase):
         finally:
             adapter.stop(RadioStopRequest("test cleanup"))
 
+    def test_TC_RADIO_010_ack_uses_submission_order_when_native_time_is_not_tx_time(self):
+        clock = ControlledTimeSource(
+            1_000_000_000, 0, utc_clock_id="radio-test-utc",
+            monotonic_clock_id="radio-test-monotonic",
+        )
+        events = RecordingInternalEventSink()
+        adapter = B210RadioAdapter(clock, event_sink=events, backend_factory=_Backend)
+        self.assertTrue(adapter.configure(RadioConfigureRequest(b210_configuration())).is_ok)
+        self.assertTrue(adapter.start(RadioStartRequest()).is_ok)
+        try:
+            for value, nanoseconds in ((311, 1_300_000_000), (312, 1_500_000_000)):
+                at = utc(nanoseconds)
+                self.assertTrue(adapter.schedule_tx(RadioTxRequest(
+                    burst_id(value), UPPER, at, cf32_block(at),
+                )).is_ok)
+            backend = _Backend.instances[-1]
+            backend.async_events.extend((
+                {"outcome": "BURST_ACK", "hardware_time_ns": 9_000_000_000},
+                {"outcome": "BURST_ACK", "hardware_time_ns": 9_000_000_000},
+            ))
+            self._wait_until(lambda: len(events.events_of(
+                InternalEventType.BURST_COMPLETED
+            )) == 2)
+            completed = events.events_of(InternalEventType.BURST_COMPLETED)
+            self.assertEqual(
+                [burst_id(311), burst_id(312)],
+                [event.payload.burst_id for event in completed],
+            )
+            self.assertEqual(0, adapter._duplicate_ack_count)
+            self.assertEqual("RUNNING", adapter._state.value)
+        finally:
+            adapter.stop(RadioStopRequest("test cleanup"))
+
     def test_TC_RADIO_007_ack_terminal_arrives_without_status_polling(self):
         clock = ControlledTimeSource(
             1_000_000_000, 0, utc_clock_id="radio-test-utc",
@@ -1626,7 +1659,14 @@ class B210NonHardwareTest(unittest.TestCase):
                 self.wait_called = True
 
         backend = object.__new__(GrUhdFlowgraphBackend)
-        backend._top = _Top()
+        top = _Top()
+        backend._top = top
+        backend._source = object()
+        backend._sink = object()
+        backend._tx_source = object()
+        backend._rx_collector = object()
+        backend._async_collector = object()
+        backend._connected = True
         backend._closed = False
         backend._started = True
         backend._cleanup_event = threading.Event()
@@ -1636,11 +1676,14 @@ class B210NonHardwareTest(unittest.TestCase):
         started = time.monotonic()
         self.assertFalse(backend.stop(20_000_000))
         self.assertLess(time.monotonic() - started, 0.5)
-        self.assertTrue(backend._top.stop_entered.is_set())
-        self.assertFalse(backend._top.wait_called)
-        backend._top.release.set()
+        self.assertTrue(top.stop_entered.is_set())
+        self.assertFalse(top.wait_called)
+        top.release.set()
         self.assertTrue(backend.stop(1_000_000_000))
-        self.assertTrue(backend._top.wait_called)
+        self.assertTrue(top.wait_called)
+        self.assertIsNone(backend._top)
+        self.assertIsNone(backend._source)
+        self.assertIsNone(backend._sink)
 
     def test_TC_RADIO_005_concurrent_stop_shares_one_cleanup(self):
         adapter = B210RadioAdapter(backend_factory=_Backend)

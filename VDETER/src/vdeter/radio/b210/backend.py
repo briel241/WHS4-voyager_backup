@@ -8,6 +8,7 @@ or direct UHD streamer.
 from __future__ import annotations
 
 import importlib
+import gc
 import subprocess
 import time
 from collections import deque
@@ -546,15 +547,30 @@ class GrUhdFlowgraphBackend:
                 self._cleanup_failure.clear()
 
                 def cleanup_graph():
+                    top = self._top
                     try:
                         # Both calls belong to the same bounded cleanup attempt.
                         # In particular, a blocking top_block.stop() must not hold
                         # the adapter caller beyond stop_timeout_ns.
-                        self._top.stop()
-                        self._top.wait()
+                        top.stop()
+                        top.wait()
                     except Exception as error:  # surfaced as a structured adapter error
                         self._cleanup_failure.append(error)
                     finally:
+                        # GNU Radio blocks own the native UHD handles.  Keeping the
+                        # stopped graph reachable prevents an immediate configure
+                        # cycle from reopening the same B210 on some gr-uhd builds.
+                        # Release every graph edge/object inside this same bounded
+                        # cleanup worker, then force collection of native cycles.
+                        self._connected = False
+                        self._top = None
+                        self._source = None
+                        self._sink = None
+                        self._tx_source = None
+                        self._rx_collector = None
+                        self._async_collector = None
+                        del top
+                        gc.collect()
                         self._cleanup_event.set()
 
                 self._cleanup_thread = Thread(

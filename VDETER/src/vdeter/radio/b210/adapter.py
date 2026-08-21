@@ -425,6 +425,7 @@ class B210RadioAdapter:
             self._stopping = False
             if cleanup_ok:
                 self._backend_started = False
+                self._backend = None
                 self._monitor_thread = None
             if not cleanup_ok:
                 self._state = RadioDeviceState.FAILED
@@ -704,14 +705,6 @@ class B210RadioAdapter:
                     "STREAM_ERROR",
                 )
                 return
-            if (
-                outcome == "BURST_ACK"
-                and event_time is not None
-                and any(start <= event_time <= end for start, end in self._recent_ack_intervals)
-            ):
-                self._duplicate_ack_count += 1
-                self._emit_status_changed_locked()
-                continue
             if not self._tx_ledger:
                 if outcome == "BURST_ACK":
                     self._duplicate_ack_count += 1
@@ -722,14 +715,32 @@ class B210RadioAdapter:
                     )
                     return
                 continue
-            if outcome == "BURST_ACK" or event_time is None:
+            if outcome == "BURST_ACK":
                 entry = self._tx_ledger[0]
-                matches = (
-                    event_time is None
-                    or entry.hardware_start_ns
-                    <= event_time
-                    <= entry.hardware_end_ns
+                identifies_completed_burst = (
+                    event_time is not None
+                    and any(
+                        start <= event_time <= end
+                        for start, end in self._recent_ack_intervals
+                    )
+                    and not (
+                        entry.hardware_start_ns
+                        <= event_time
+                        <= entry.hardware_end_ns
+                    )
                 )
+                if identifies_completed_burst:
+                    self._duplicate_ack_count += 1
+                    self._emit_status_changed_locked()
+                    continue
+                # Native TX async metadata has no VDE-TER burst id.  DR-020
+                # therefore correlates BURST_ACK by the ordered submission
+                # ledger.  The optional UHD timestamp is evidence, not a
+                # prerequisite for correlation.
+                matches = True
+            elif event_time is None:
+                entry = self._tx_ledger[0]
+                matches = True
             else:
                 candidates = tuple(
                     value for value in self._tx_ledger
