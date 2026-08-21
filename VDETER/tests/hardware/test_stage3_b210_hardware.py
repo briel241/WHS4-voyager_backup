@@ -43,6 +43,7 @@ from vdeter.radio.b210 import (
     APPROVED_GNURADIO_VERSION,
     APPROVED_UHD_VERSION,
     B210RadioAdapter,
+    GrUhdFlowgraphBackend,
     approved_host_environment_issues,
     host_environment_snapshot,
     load_fixture_manifest,
@@ -261,15 +262,35 @@ class B210HardwareTest(unittest.TestCase):
             "received_sample_count": payload.received_sample_count,
         }
 
-    def _wait_backend_outcome(self, adapter, expected, message):
+    def _wait_backend_outcome(self, backend, expected, message):
         deadline = time.monotonic() + WAIT_SECONDS
         observed = []
         while time.monotonic() < deadline:
-            observed.extend(adapter._backend.poll_async())
+            observed.extend(backend.poll_async())
             if any(value["outcome"] == expected for value in observed):
                 return observed
             time.sleep(0.01)
         self.fail(f"{message}: {expected} not observed; got {observed}")
+
+    @staticmethod
+    def _native_backend(configuration):
+        """Start the production backend with one native async consumer.
+
+        These probes inspect raw UHD error classes.  Starting a full adapter
+        here would create its required monitoring worker, which would race the
+        preflight itself for the same native async queue.
+        """
+
+        stream = configuration.b210_stream
+        backend = GrUhdFlowgraphBackend(
+            configuration.device_selector,
+            stream.cpu_format,
+            stream.otw_format,
+        )
+        readback = backend.configure(configuration)
+        backend.connect()
+        backend.start()
+        return backend, readback
 
     def _run_direction(self, source_configuration, receiver_configuration, channel, seed):
         clock = SystemTimeSource()
@@ -672,42 +693,39 @@ class B210HardwareTest(unittest.TestCase):
     def test_TC_RADIO_012_actual_async_time_error_and_underflow_are_distinct(self):
         observations = {}
 
-        late_adapter, _late_events, late_configured = self._adapter(
-            self.ship_configuration, 12_400
-        )
+        late_backend, late_readback = self._native_backend(self.ship_configuration)
         try:
-            backend = late_adapter._backend
-            backend.submit_tx(
+            hardware_now = late_backend.hardware_time_ns()
+            late_backend.submit_tx(
                 bytes(8 * 64),
-                backend.hardware_time_ns() - 50_000_000,
+                max(0, hardware_now - 50_000_000),
                 161_837_500,
                 None,
             )
             late_native = self._wait_backend_outcome(
-                late_adapter, "TIME_ERROR", "actual past-time TX probe"
+                late_backend, "TIME_ERROR", "actual past-time TX probe"
             )
             observations["time_error"] = late_native
         finally:
-            self._stop(late_adapter)
+            self.assertTrue(late_backend.stop(5_000_000_000))
 
-        underflow_adapter, _underflow_events, underflow_configured = self._adapter(
-            self.ship_configuration, 12_401
+        underflow_backend, underflow_readback = self._native_backend(
+            self.ship_configuration
         )
         try:
-            backend = underflow_adapter._backend
-            backend.arm_async_underflow_preflight(8_192, 0.5)
-            backend.submit_tx(
+            underflow_backend.arm_async_underflow_preflight(8_192, 0.5)
+            underflow_backend.submit_tx(
                 bytes(76_800 * 2 * 8),
-                backend.hardware_time_ns() + 100_000_000,
+                underflow_backend.hardware_time_ns() + 100_000_000,
                 161_837_500,
                 None,
             )
             underflow_native = self._wait_backend_outcome(
-                underflow_adapter, "UNDERFLOW", "actual source-starvation probe"
+                underflow_backend, "UNDERFLOW", "actual source-starvation probe"
             )
             observations["underflow"] = underflow_native
         finally:
-            self._stop(underflow_adapter)
+            self.assertTrue(underflow_backend.stop(5_000_000_000))
 
         self.assertTrue(any(
             value["outcome"] == "TIME_ERROR"
@@ -720,8 +738,8 @@ class B210HardwareTest(unittest.TestCase):
         self.evidence_records.append({
             "test_case": "TC-RADIO-012",
             "mode": "async_error_distinction",
-            "time_error_device_id": late_configured.applied_settings.device_id,
-            "underflow_device_id": underflow_configured.applied_settings.device_id,
+            "time_error_device_id": late_readback["serial"],
+            "underflow_device_id": underflow_readback["serial"],
             "time_error_native_events": observations["time_error"],
             "underflow_native_events": observations["underflow"],
             "time_error_distinct": True,
