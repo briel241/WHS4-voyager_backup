@@ -69,6 +69,25 @@ margin까지 주장하려면 `CALIBRATED_PROTECTION` profile과 교정 artifact�
 
 ## 5. 실물 시험
 
+controlled USB disconnect를 의도적으로 제외하는 중간 evidence run은 disconnect flag를
+설정하지 않고 다음처럼 실행한다. 이 결과는 `PARTIAL_PASS`이며 TC-RADIO-012 또는 전체
+hardware gate를 PASS로 만들지 않는다.
+
+```bash
+export VDETER_B210_HARDWARE_TEST=1
+unset VDETER_B210_USB_DISCONNECT_TEST
+export VDETER_B210_SHIP_SERIAL=34D03DD
+export VDETER_B210_CONTROL_SERIAL=34D6357
+export VDETER_B210_FIXTURE_MANIFEST="$PWD/configs/stage3_b210_fixture_manifest.30db-user-accepted.json"
+export VDETER_B210_PACKAGE_MANIFEST=<absolute_apt_manifest_path>
+
+python3 tools/run_stage3_b210_hardware_tests.py \
+  --run-id stage3-radio-b210-pi5-30db-no-disconnect-<YYYYMMDD> \
+  --exclude-controlled-usb-disconnect
+```
+
+전체 gate는 별도 승인 아래 controlled disconnect까지 포함해 실행한다.
+
 ```bash
 export VDETER_B210_HARDWARE_TEST=1
 export VDETER_B210_USB_DISCONNECT_TEST=1

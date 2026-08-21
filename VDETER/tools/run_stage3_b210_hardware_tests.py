@@ -41,7 +41,6 @@ MODULE_NAME = "tests.hardware.test_stage3_b210_hardware"
 CASE_PATTERN = re.compile(r"TC_RADIO_(012|013)")
 REQUIRED_ENVIRONMENT = (
     "VDETER_B210_HARDWARE_TEST",
-    "VDETER_B210_USB_DISCONNECT_TEST",
     "VDETER_B210_SHIP_SERIAL",
     "VDETER_B210_CONTROL_SERIAL",
     "VDETER_B210_FIXTURE_MANIFEST",
@@ -63,6 +62,10 @@ EXPECTED_MODES = {
         "timed_retune_upper_rx": 1,
     },
 }
+CONTROLLED_USB_TEST_ID = (
+    "tests.hardware.test_stage3_b210_hardware.B210HardwareTest."
+    "test_Z_TC_RADIO_012_controlled_usb_disconnect_is_typed_and_cleanup_succeeds"
+)
 
 
 class RecordingResult(unittest.TextTestResult):
@@ -103,12 +106,17 @@ class RecordingResult(unittest.TextTestResult):
         self._append(test, "SKIP", reason)
 
 
-def _refusal_reason():
+def _refusal_reason(exclude_controlled_usb_disconnect=False):
     missing = [name for name in REQUIRED_ENVIRONMENT if not os.environ.get(name)]
-    invalid_flags = [
-        name for name in REQUIRED_ENVIRONMENT[:2]
-        if os.environ.get(name) not in (None, "1")
-    ]
+    invalid_flags = []
+    if os.environ.get("VDETER_B210_HARDWARE_TEST") != "1":
+        invalid_flags.append("VDETER_B210_HARDWARE_TEST")
+    disconnect_flag = os.environ.get("VDETER_B210_USB_DISCONNECT_TEST")
+    if exclude_controlled_usb_disconnect:
+        if disconnect_flag not in (None, "", "0"):
+            invalid_flags.append("VDETER_B210_USB_DISCONNECT_TEST")
+    elif disconnect_flag != "1":
+        missing.append("VDETER_B210_USB_DISCONNECT_TEST")
     manifest = os.environ.get("VDETER_B210_FIXTURE_MANIFEST")
     if manifest and not os.path.isfile(manifest):
         missing.append("VDETER_B210_FIXTURE_MANIFEST(existing file)")
@@ -184,7 +192,7 @@ def _probe_devices():
     return probes, None
 
 
-def _case(case_id, records, evidence):
+def _case(case_id, records, evidence, excluded_modes=()):
     tests = [record for record in records if record["test_case"] == case_id]
     failures = [record for record in tests if record["outcome"] != "PASS"]
     observed_modes = {}
@@ -193,20 +201,42 @@ def _case(case_id, records, evidence):
             mode = record.get("mode")
             observed_modes[mode] = observed_modes.get(mode, 0) + 1
     expected_modes = EXPECTED_MODES[case_id]
+    requested_modes = {
+        mode: count for mode, count in expected_modes.items()
+        if mode not in excluded_modes
+    }
+    requested_scope_complete = observed_modes == requested_modes
     evidence_complete = observed_modes == expected_modes
+    if tests and not failures and requested_scope_complete:
+        outcome = "PASS" if evidence_complete else "PARTIAL_PASS"
+    else:
+        outcome = "FAIL"
     return {
         "test_case": case_id,
-        "outcome": "PASS" if tests and not failures and evidence_complete else "FAIL",
+        "outcome": outcome,
         "tests": [record["test_id"] for record in tests],
         "failures": failures,
         "expected_evidence_modes": expected_modes,
+        "requested_evidence_modes": requested_modes,
         "observed_evidence_modes": observed_modes,
+        "excluded_evidence_modes": list(excluded_modes),
+        "requested_scope_complete": requested_scope_complete,
         "evidence_complete": evidence_complete,
     }
 
 
-def run(run_id):
-    refusal = _refusal_reason()
+def _tests_without(suite, excluded_test_ids):
+    selected = unittest.TestSuite()
+    for value in suite:
+        if isinstance(value, unittest.TestSuite):
+            selected.addTests(_tests_without(value, excluded_test_ids))
+        elif value.id() not in excluded_test_ids:
+            selected.addTest(value)
+    return selected
+
+
+def run(run_id, exclude_controlled_usb_disconnect=False):
+    refusal = _refusal_reason(exclude_controlled_usb_disconnect)
     if refusal is not None:
         print(json.dumps({
             "overall_outcome": "BLOCKED",
@@ -310,16 +340,31 @@ def run(run_id):
         }, ensure_ascii=False))
         return 2
     suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+    if exclude_controlled_usb_disconnect:
+        suite = _tests_without(suite, {CONTROLLED_USB_TEST_ID})
     stream = io.StringIO()
     result = unittest.TextTestRunner(
         stream=stream, verbosity=2, resultclass=RecordingResult
     ).run(suite)
     finished_ns = time.time_ns()
     evidence = list(module.B210HardwareTest.evidence_records)
-    cases = [_case(case_id, result.records, evidence) for case_id in (
-        "TC-RADIO-012", "TC-RADIO-013"
-    )]
-    successful = result.wasSuccessful() and not result.skipped and all(
+    cases = [
+        _case(
+            case_id,
+            result.records,
+            evidence,
+            ("controlled_usb_disconnect",)
+            if exclude_controlled_usb_disconnect and case_id == "TC-RADIO-012"
+            else (),
+        )
+        for case_id in ("TC-RADIO-012", "TC-RADIO-013")
+    ]
+    requested_scope_successful = (
+        result.wasSuccessful()
+        and not result.skipped
+        and all(case["outcome"] in ("PASS", "PARTIAL_PASS") for case in cases)
+    )
+    successful = requested_scope_successful and all(
         case["outcome"] == "PASS" for case in cases
     )
 
@@ -391,7 +436,11 @@ def run(run_id):
         "baseline_id": "VDETER-STAGE3-RADIO-BL-001",
         "baseline_version": "0.2.3",
         "stage": "stage3-radio-hardware",
-        "overall_outcome": "PASS" if successful else "FAIL",
+        "overall_outcome": (
+            "PASS" if successful
+            else "PARTIAL_PASS" if requested_scope_successful
+            else "FAIL"
+        ),
         "started_at": datetime.fromtimestamp(
             started_ns / 1_000_000_000, timezone.utc
         ).isoformat(),
@@ -410,7 +459,9 @@ def run(run_id):
             "apt_held_packages": apt_holds,
             "ship_serial": os.environ["VDETER_B210_SHIP_SERIAL"],
             "control_serial": os.environ["VDETER_B210_CONTROL_SERIAL"],
-            "actual_b210_count_verified": 2 if successful else 0,
+            "actual_b210_count_verified": (
+                2 if requested_scope_successful else 0
+            ),
             "fixture_manifest_path": manifest_path,
             "fixture_manifest_sha256": manifest_sha256,
             "package_manifest_path": package_manifest_path,
@@ -452,7 +503,13 @@ def run(run_id):
         "hardware_gate": {
             "tc_radio_012_pass": cases[0]["outcome"] == "PASS",
             "tc_radio_013_pass": cases[1]["outcome"] == "PASS",
-            "actual_b210_count_verified": 2 if successful else 0,
+            "actual_b210_count_verified": (
+                2 if requested_scope_successful else 0
+            ),
+            "controlled_usb_disconnect_excluded": (
+                exclude_controlled_usb_disconnect
+            ),
+            "full_gate_pass": successful,
         },
         "artifacts": {
             "hardware_evidence": {
@@ -502,13 +559,27 @@ def run(run_id):
         "tests_run": result.testsRun,
         "evidence_records": len(evidence),
     }, ensure_ascii=False))
-    return 0 if successful else 1
+    return 0 if requested_scope_successful else 1
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
-    return run(parser.parse_args().run_id)
+    parser.add_argument(
+        "--exclude-controlled-usb-disconnect",
+        action="store_true",
+        help=(
+            "run and preserve every other physical test as PARTIAL_PASS; "
+            "never marks TC-RADIO-012 or the full hardware gate PASS"
+        ),
+    )
+    arguments = parser.parse_args()
+    return run(
+        arguments.run_id,
+        exclude_controlled_usb_disconnect=(
+            arguments.exclude_controlled_usb_disconnect
+        ),
+    )
 
 
 if __name__ == "__main__":
