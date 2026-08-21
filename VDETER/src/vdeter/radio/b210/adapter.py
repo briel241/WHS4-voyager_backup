@@ -55,6 +55,11 @@ from .backend import GrUhdFlowgraphBackend
 ADAPTER_KIND = RadioAdapterKind.B210.value
 REQUIRED_MODULES = ("gnuradio", "gnuradio.uhd")
 _LEAD_NS = 100_000_000
+# A finite UHD RX command stops at ``hardware_end_ns``, but gr-uhd may deliver
+# its final native buffer to the Python block after that hardware deadline.
+# This bounded drain interval does not extend the RF capture window; it only
+# prevents an eager partial read from discarding an in-flight final buffer.
+_RX_NATIVE_DRAIN_GRACE_NS = 250_000_000
 _UTC_JUMP_NS = 10_000_000
 _UTC_FLAGS = (
     RadioUtcFlag.HOST_ESTIMATE,
@@ -790,7 +795,11 @@ class B210RadioAdapter:
                     "B210 RX collector failed", type(error).__name__
                 )
                 return
-            deadline_reached = hardware_now is not None and hardware_now >= entry.hardware_end_ns
+            deadline_reached = (
+                hardware_now is not None
+                and hardware_now
+                >= entry.hardware_end_ns + _RX_NATIVE_DRAIN_GRACE_NS
+            )
             if result is None and deadline_reached:
                 try:
                     result = self._read_rx(entry, allow_partial=True)

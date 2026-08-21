@@ -46,6 +46,7 @@ from vdeter.radio.b210 import (
     missing_dependencies,
 )
 from vdeter.radio.b210.backend import _RxWindowAssembler
+from vdeter.radio.b210.adapter import _RX_NATIVE_DRAIN_GRACE_NS
 from vdeter.common.exceptions import InvalidValueError
 from vdeter.common.results import Ok
 
@@ -1002,9 +1003,19 @@ class B210NonHardwareTest(unittest.TestCase):
                 UPPER, start, 1_000_000, 76_800,
             )).is_ok)
             backend = _Backend.instances[-1]
-            backend.hardware_ns = 101_000_000
+            entry = adapter._rx_ledger[0]
+            backend.hardware_ns = entry.hardware_end_ns
             if result is not None:
                 backend.read_results.append(result)
+            if result is None:
+                time.sleep(0.02)
+                self.assertEqual(1, len(adapter._rx_ledger))
+                self.assertFalse(any(
+                    event.error is not None
+                    and event.error.code == ErrorCode.RADIO_RX_TIMEOUT
+                    for event in events.events_of(InternalEventType.LAYER_ERROR)
+                ))
+                backend.hardware_ns += _RX_NATIVE_DRAIN_GRACE_NS
             self._wait_until(lambda: any(
                 event.error is not None and event.error.code == expected_code
                 for event in events.events_of(InternalEventType.LAYER_ERROR)
