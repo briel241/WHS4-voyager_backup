@@ -1043,6 +1043,12 @@ class B210RadioAdapter:
         return actual, missing_timestamp, overflow_samples
 
     def _handle_device_disconnect_locked(self, reason):
+        containment = getattr(self._backend, "contain_failure", None)
+        if containment is not None:
+            try:
+                containment()
+            except Exception as error:
+                reason = f"{reason};containment={type(error).__name__}"
         for affected in tuple(self._tx_ledger):
             self._terminal_error_locked(
                 affected.key, ErrorCode.RADIO_TX_OUTCOME_UNKNOWN,

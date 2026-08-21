@@ -189,6 +189,23 @@ class ProcessIsolatedGrUhdBackend:
     def close(self, timeout_ns: int) -> bool:
         return self.stop(timeout_ns)
 
+    def contain_failure(self) -> None:
+        """Terminate a child whose native runtime is no longer trustworthy.
+
+        UHD may leave the Python worker process alive after terminating one of
+        its native task-loop threads.  Once the adapter has classified a lost
+        hardware-time source as a device disconnect, asking that damaged graph
+        to stop normally can consume the entire cleanup deadline.  Process
+        isolation makes immediate terminate/reap the deterministic cleanup.
+        """
+
+        if self._closed:
+            return
+        with self._rpc_lock:
+            self._terminate_and_reap()
+            self._closed = True
+            self._close_connection()
+
     def hardware_time_ns(self) -> int:
         return int(self._rpc("hardware_time_ns"))
 

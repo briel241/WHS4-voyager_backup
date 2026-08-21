@@ -260,6 +260,27 @@ class _IsolatedPendingAbortFactory(ProcessIsolatedGrUhdBackend):
         )
 
 
+class _NativeTaskFailureAfterStartBackend(_Backend):
+    def hardware_time_ns(self):
+        if self.started:
+            raise RuntimeError("native UHD task loop terminated")
+        return super().hardware_time_ns()
+
+
+class _IsolatedNativeTaskFailureFactory(ProcessIsolatedGrUhdBackend):
+    @staticmethod
+    def discover(selector):
+        return (selector.split("=", 1)[1],)
+
+    def __init__(self, selector, cpu_format, otw_format):
+        super().__init__(
+            selector,
+            cpu_format,
+            otw_format,
+            _backend_type=_NativeTaskFailureAfterStartBackend,
+        )
+
+
 class B210NonHardwareTest(unittest.TestCase):
     def test_TC_RADIO_012_ubuntu_host_profile_is_exact_and_portable(self):
         approved = {
@@ -1594,6 +1615,37 @@ class B210NonHardwareTest(unittest.TestCase):
         self.assertTrue(
             adapter.stop(RadioStopRequest("pending native abort cleanup")).is_ok
         )
+
+    def test_TC_RADIO_010_native_task_failure_contains_live_child_before_stop(self):
+        clock = ControlledTimeSource(
+            1_000_000_000,
+            0,
+            utc_clock_id="radio-test-utc",
+            monotonic_clock_id="radio-test-monotonic",
+        )
+        events = RecordingInternalEventSink()
+        adapter = B210RadioAdapter(
+            clock,
+            DeterministicIdSource(10_075),
+            events,
+            backend_factory=_IsolatedNativeTaskFailureFactory,
+        )
+        self.assertTrue(adapter.configure(
+            RadioConfigureRequest(b210_configuration())
+        ).is_ok)
+        self.assertTrue(adapter.start(RadioStartRequest()).is_ok)
+
+        self._wait_until(lambda: adapter._state is RadioDeviceState.FAILED)
+        backend = adapter._backend
+        self.assertFalse(backend._process.is_alive())
+        self.assertTrue(backend._closed)
+        errors = events.events_of(InternalEventType.LAYER_ERROR)
+        self.assertTrue(any(
+            event.error.code == ErrorCode.RADIO_DEVICE_DISCONNECTED
+            for event in errors
+        ))
+        stopped = adapter.stop(RadioStopRequest("contained child cleanup"))
+        self.assertTrue(stopped.is_ok, stopped)
 
     def test_TC_RADIO_010_delivery_failure_marks_submitted_tx_unknown_and_rx_incomplete(self):
         clock = ControlledTimeSource(1_000_000_000, 0, utc_clock_id="radio-test-utc",

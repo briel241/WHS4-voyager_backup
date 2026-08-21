@@ -135,6 +135,7 @@ REQUIRED_COVERAGE = {
         "native_abort_is_contained_as_backend_unavailable",
         "native_process_abort_is_typed_without_status_polling",
         "native_abort_terminalizes_pending_tx_and_rx",
+        "native_task_failure_contains_live_child_before_stop",
         "delivery_failure_marks_submitted_tx_unknown_and_rx_incomplete",
         "sample_delivery_failure_preserves_actual_rx_count",
         "timestamped_async_error_matches_its_actual_burst",

@@ -616,7 +616,8 @@ class B210HardwareTest(unittest.TestCase):
             event.error.code == ErrorCode.RADIO_DEVICE_DISCONNECTED
             for event in errors
         ))
-        self.assertTrue(adapter.stop(RadioStopRequest("disconnect cleanup")).is_ok)
+        stopped = adapter.stop(RadioStopRequest("disconnect cleanup"))
+        self.assertTrue(stopped.is_ok, stopped)
         self.evidence_records.append({
             "test_case": "TC-RADIO-012",
             "mode": "controlled_usb_disconnect",
