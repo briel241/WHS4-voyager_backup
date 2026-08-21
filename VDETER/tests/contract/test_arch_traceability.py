@@ -174,9 +174,14 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     self.assertEqual(
                         record["baseline_version"], evidence["baseline_version"]
                     )
-                    self.assertTrue(totals["unittest_success"])
-                    self.assertEqual(0, totals["unittest_failures"])
-                    self.assertEqual(0, totals["unittest_errors"])
+                    if "unittest_success" in totals:
+                        self.assertTrue(totals["unittest_success"])
+                        self.assertEqual(0, totals["unittest_failures"])
+                        self.assertEqual(0, totals["unittest_errors"])
+                    else:
+                        self.assertEqual("PASS", evidence.get("overall_outcome"))
+                        self.assertEqual(totals["test_cases"], totals["passed"])
+                        self.assertEqual(0, totals["errors"])
                     self.assertEqual(0, totals["failed"])
                     self.assertEqual(0, totals["skipped"])
                     self.assertEqual(baseline_test_cases, set(outcomes))
@@ -184,12 +189,29 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     for test_case in record["test_cases"]:
                         self.assertEqual("PASS", outcomes.get(test_case), test_case)
 
-                    run_directory = os.path.dirname(result_path)
-                    for artifact in (
-                        "logs.jsonl",
-                        os.path.join("artifacts", "unittest_output.txt"),
-                    ):
-                        artifact_path = os.path.join(run_directory, artifact)
+                    if "unittest_success" in totals:
+                        run_directory = os.path.dirname(result_path)
+                        artifact_paths = (
+                            os.path.join(run_directory, "logs.jsonl"),
+                            os.path.join(
+                                run_directory, "artifacts", "unittest_output.txt"
+                            ),
+                        )
+                    else:
+                        # Stage 3 final evidence aggregates separate software and
+                        # hardware runs.  Its authoritative artifact paths are
+                        # relative to the VDETER repository, not the aggregate
+                        # run directory used by the earlier stage runners.
+                        aggregate_artifacts = evidence.get("artifacts", {})
+                        artifact_paths = tuple(
+                            os.path.join(VDETER_ROOT, aggregate_artifacts[name]["path"])
+                            for name in (
+                                "software_result",
+                                "hardware_result",
+                                "final_audit",
+                            )
+                        )
+                    for artifact_path in artifact_paths:
                         self.assertTrue(os.path.isfile(artifact_path), artifact_path)
                         self.assertGreater(os.path.getsize(artifact_path), 0, artifact_path)
 
@@ -303,10 +325,10 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     all(cases[test_case]["module"] for test_case in requirement["test_cases"])
                 )
 
-    def test_TC_RADIO_015_stage3_scope_is_approved_and_implemented_not_verified(self):
+    def test_TC_RADIO_015_stage3_scope_is_verified_and_frozen(self):
         stage3 = self.baselines[STAGE3_RADIO_BASELINE_ID]
         self.assertEqual("0.2.4", stage3["version"])
-        self.assertEqual("APPROVED", stage3["status"])
+        self.assertEqual("VERIFIED/FROZEN", stage3["status"])
         requirements = [
             record
             for record in self.data["requirements"]
@@ -316,7 +338,7 @@ class TraceabilitySchemaTest(unittest.TestCase):
         cases = {record["id"]: record for record in self.data["test_cases"]}
         for requirement in requirements:
             with self.subTest(requirement=requirement["id"]):
-                self.assertEqual("IMPLEMENTED", requirement["status"])
+                self.assertEqual("VERIFIED", requirement["status"])
                 self.assertTrue(requirement["normative_refs"])
                 self.assertTrue(requirement["decision_records"])
                 self.assertTrue(requirement["implementation"])
