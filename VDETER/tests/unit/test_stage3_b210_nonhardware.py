@@ -9,6 +9,7 @@ import struct
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 from dataclasses import replace
@@ -358,6 +359,70 @@ class B210NonHardwareTest(unittest.TestCase):
         _Backend.instances.clear()
         _Backend.discovery = None
         _Backend.mutate_readback = None
+
+    def test_b210_discovery_uses_uhd_host_for_broken_gr_uhd_wrapper(self):
+        selector = "serial=34D03DD"
+        gr_uhd = types.SimpleNamespace(
+            find_devices=mock.Mock(
+                side_effect=AttributeError(
+                    "module 'gnuradio.uhd.uhd_python' has no attribute "
+                    "'find_devices_raw'"
+                )
+            )
+        )
+        completed = __import__("subprocess").CompletedProcess(
+            (),
+            0,
+            "Device Address:\n    serial: 34D03DD\n    type: b200\n",
+            "",
+        )
+
+        with (
+            mock.patch(
+                "vdeter.radio.b210.backend.subprocess.run",
+                return_value=completed,
+            ) as run,
+            mock.patch(
+                "vdeter.radio.b210.backend.importlib.import_module",
+                return_value=gr_uhd,
+            ),
+        ):
+            found = GrUhdFlowgraphBackend.discover(selector)
+
+        self.assertEqual(("34D03DD",), found)
+        run.assert_called_once_with(
+            ["uhd_find_devices", "--args=serial=34D03DD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+    def test_b210_discovery_does_not_mask_unrelated_attribute_error(self):
+        gr_uhd = types.SimpleNamespace(
+            find_devices=mock.Mock(side_effect=AttributeError("other failure"))
+        )
+        with mock.patch(
+            "vdeter.radio.b210.backend.importlib.import_module",
+            return_value=gr_uhd,
+        ):
+            with self.assertRaisesRegex(AttributeError, "other failure"):
+                GrUhdFlowgraphBackend.discover("serial=34D03DD")
+
+    def test_b210_discovery_error_records_exception_message(self):
+        class _DiscoveryFailureBackend(_Backend):
+            @staticmethod
+            def discover(selector):
+                raise AttributeError("specific discovery failure")
+
+        adapter = B210RadioAdapter(backend_factory=_DiscoveryFailureBackend)
+        failed = adapter.configure(RadioConfigureRequest(b210_configuration()))
+
+        self.assertEqual(ErrorCode.RADIO_CONFIGURATION_FAILED, failed.error.code)
+        self.assertEqual(
+            "specific discovery failure",
+            dict(failed.error.details.entries)["exception_message"],
+        )
 
     @staticmethod
     def _wait_until(predicate, timeout=0.75):

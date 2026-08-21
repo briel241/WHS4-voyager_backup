@@ -181,7 +181,15 @@ class B210RadioAdapter:
             try:
                 found = tuple(factory.discover(configuration.device_selector))
             except Exception as error:
-                return self._error(ErrorCode.RADIO_CONFIGURATION_FAILED, ErrorCategory.DEVICE, "B210 discovery가 실패했습니다", details=Details.of(reason=type(error).__name__))
+                return self._error(
+                    ErrorCode.RADIO_CONFIGURATION_FAILED,
+                    ErrorCategory.DEVICE,
+                    "B210 discovery가 실패했습니다",
+                    details=Details.of(
+                        reason=type(error).__name__,
+                        exception_message=str(error),
+                    ),
+                )
             if found != (expected_serial,):
                 code = ErrorCode.RADIO_DEVICE_NOT_FOUND if not found else ErrorCode.RADIO_CONFIGURATION_FAILED
                 return self._error(code, ErrorCategory.DEVICE, "selector와 정확히 일치하는 B210 한 대가 필요합니다", details=Details.of(match_count=len(found)))

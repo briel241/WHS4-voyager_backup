@@ -8,6 +8,7 @@ or direct UHD streamer.
 from __future__ import annotations
 
 import importlib
+import subprocess
 import time
 from collections import deque
 from threading import Event, Lock, Thread
@@ -363,9 +364,39 @@ class GrUhdFlowgraphBackend:
     @staticmethod
     def discover(device_selector: str) -> tuple[str, ...]:
         uhd = importlib.import_module("gnuradio.uhd")
-        found = uhd.find_devices(device_selector)
+        try:
+            found = uhd.find_devices(device_selector)
+        except AttributeError as error:
+            # GNU Radio 3.10's Debian/Ubuntu wrapper still calls the removed
+            # ``uhd_python.find_devices_raw`` symbol.  Use the approved
+            # uhd-host discovery utility for this exact packaging defect.  The
+            # fallback is discovery-only; the production streaming backend
+            # continues to use the programmatic gr-uhd source and sink above.
+            if "find_devices_raw" not in str(error):
+                raise
+            completed = subprocess.run(
+                ["uhd_find_devices", f"--args={device_selector}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "uhd_find_devices failed with exit code "
+                    f"{completed.returncode}"
+                ) from error
+            serials = []
+            for line in (completed.stdout + "\n" + completed.stderr).splitlines():
+                field = line.strip()
+                if field.startswith("serial:"):
+                    serials.append(field.split(":", 1)[1].strip())
+            return tuple(serials)
         serials = []
         for entry in found:
+            if isinstance(entry, dict) and entry.get("serial"):
+                serials.append(str(entry["serial"]))
+                continue
             value = entry.to_string() if hasattr(entry, "to_string") else str(entry)
             for field in value.split(","):
                 if field.strip().startswith("serial="):
