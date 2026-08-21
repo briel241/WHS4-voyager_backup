@@ -343,11 +343,12 @@ class GrUhdFlowgraphBackend:
                 super().__init__(name="vdeter-b210-async", in_sig=None, out_sig=None)
                 port = pmt.intern("in")
                 collector_self.message_port_register_in(port)
-                def receive(message):
-                    with messages_lock:
-                        messages.append(message)
-                    activity_event.set()
-                collector_self.set_msg_handler(port, receive)
+                collector_self.set_msg_handler(port, collector_self.receive)
+
+            def receive(collector_self, message):
+                with messages_lock:
+                    messages.append(message)
+                activity_event.set()
 
         self._async_collector = _AsyncCollector()
         self._control_lock = Lock()
@@ -381,13 +382,16 @@ class GrUhdFlowgraphBackend:
                 check=False,
                 timeout=60,
             )
+            output = completed.stdout + "\n" + completed.stderr
             if completed.returncode != 0:
+                if "No UHD Devices Found" in output:
+                    return ()
                 raise RuntimeError(
                     "uhd_find_devices failed with exit code "
                     f"{completed.returncode}"
                 ) from error
             serials = []
-            for line in (completed.stdout + "\n" + completed.stderr).splitlines():
+            for line in output.splitlines():
                 field = line.strip()
                 if field.startswith("serial:"):
                     serials.append(field.split(":", 1)[1].strip())
@@ -615,7 +619,16 @@ class GrUhdFlowgraphBackend:
                 finally:
                     self._source.clear_command_time(0)
             self._rx_center_frequency_hz = center_frequency_hz
-        command = self._uhd.stream_cmd(self._uhd.stream_cmd.STREAM_MODE_NUM_SAMPS_AND_DONE)
+        stream_mode = getattr(
+            self._uhd.stream_cmd,
+            "STREAM_MODE_NUM_SAMPS_AND_DONE",
+            None,
+        )
+        if stream_mode is None:
+            stream_mode = (
+                self._uhd.stream_mode_t.STREAM_MODE_NUM_SAMPS_AND_DONE
+            )
+        command = self._uhd.stream_cmd(stream_mode)
         command.num_samps = sample_count
         command.stream_now = False
         command.time_spec = self._time_spec(hardware_time_ns)

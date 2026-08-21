@@ -197,8 +197,8 @@ class B210HardwareTest(unittest.TestCase):
         result = adapter.status(RadioStatusRequest())
         self.assertTrue(result.is_ok, result)
         status = result.value
-        self.assertEqual(0, status.tx_underflow_count)
-        self.assertEqual(0, status.rx_overflow_count)
+        self.assertEqual(0, status.underflow_count)
+        self.assertEqual(0, status.overflow_count)
         self.assertEqual(0, status.late_command_count)
         self.assertFalse(status.event_delivery_status.failed)
         outcome_unknown_count = sum(
@@ -218,8 +218,8 @@ class B210HardwareTest(unittest.TestCase):
         ))
         return {
             "device_state": status.device_state.value,
-            "tx_underflow_count": status.tx_underflow_count,
-            "rx_overflow_count": status.rx_overflow_count,
+            "tx_underflow_count": status.underflow_count,
+            "rx_overflow_count": status.overflow_count,
             "late_command_count": status.late_command_count,
             "event_delivery_failed": status.event_delivery_status.failed,
             "undelivered_terminal_count": (
@@ -447,8 +447,8 @@ class B210HardwareTest(unittest.TestCase):
                     "utc_flags": [
                         value.value for value in status.value.timing_status.utc_flags
                     ],
-                    "tx_underflow_count": status.value.tx_underflow_count,
-                    "rx_overflow_count": status.value.rx_overflow_count,
+                    "tx_underflow_count": status.value.underflow_count,
+                    "rx_overflow_count": status.value.overflow_count,
                     "late_command_count": status.value.late_command_count,
                     "applied_channels": [
                         {

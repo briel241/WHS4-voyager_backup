@@ -411,6 +411,29 @@ class B210NonHardwareTest(unittest.TestCase):
             with self.assertRaisesRegex(AttributeError, "other failure"):
                 GrUhdFlowgraphBackend.discover("serial=34D03DD")
 
+    def test_b210_discovery_maps_uhd_host_no_devices_to_empty_result(self):
+        gr_uhd = types.SimpleNamespace(
+            find_devices=mock.Mock(
+                side_effect=AttributeError("no attribute 'find_devices_raw'")
+            )
+        )
+        completed = __import__("subprocess").CompletedProcess(
+            (), 1, "No UHD Devices Found\n", ""
+        )
+        with (
+            mock.patch(
+                "vdeter.radio.b210.backend.subprocess.run",
+                return_value=completed,
+            ),
+            mock.patch(
+                "vdeter.radio.b210.backend.importlib.import_module",
+                return_value=gr_uhd,
+            ),
+        ):
+            self.assertEqual(
+                (), GrUhdFlowgraphBackend.discover("serial=VDETER-NOT-PRESENT")
+            )
+
     def test_b210_discovery_error_records_exception_message(self):
         class _DiscoveryFailureBackend(_Backend):
             @staticmethod
@@ -505,6 +528,8 @@ class B210NonHardwareTest(unittest.TestCase):
         self.assertIn("uhd.usrp_sink", source)
         self.assertIn("issue_stream_cmd", source)
         self.assertIn("STREAM_MODE_NUM_SAMPS_AND_DONE", source)
+        self.assertIn("stream_mode_t.STREAM_MODE_NUM_SAMPS_AND_DONE", source)
+        self.assertIn("collector_self.receive", source)
         self.assertIn("set_command_time", source)
         self.assertIn("clear_command_time", source)
         self.assertIn("set_clock_rate", source)
