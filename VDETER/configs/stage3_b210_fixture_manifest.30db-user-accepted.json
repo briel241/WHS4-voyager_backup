@@ -1,7 +1,7 @@
 {
   "fixture_id": "stage3-b210-30db-34D03DD-to-34D6357",
-  "source_radio_fingerprint": "sha256:1eea19d5a3b802c8244cbf5b2373d1dc285765f573a0acaa99fe245908f6f421",
-  "receiver_radio_fingerprint": "sha256:e8def2fc3e1a054190918f761e9ec6bd1d777a3178a4bb313b814b8da31ae0a3",
+  "source_radio_fingerprint": "sha256:3779e934e86c4fb17bfa65a4542022cc5a6c91ac72b6271cc9c097d09a0a695a",
+  "receiver_radio_fingerprint": "sha256:dd8d5169741700eeb684d6f188ea0904c68c2d33b1521b8092f0dd62eef9d4f9",
   "center_frequencies_hz": [157237500, 161837500],
   "directions": [
     {

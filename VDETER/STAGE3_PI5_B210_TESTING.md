@@ -52,7 +52,9 @@ python3 tools/run_stage3_b210_no_tx_preflight.py \
 - ship B210은 serial `34D03DD`, control B210은 serial `34D6357`로 고정한다.
 - 두 방향 모두 `TX/RX -> 명목 30 dB 감쇠기 하나 -> RX2`로 연결한다.
 - 감쇠기 A와 B를 서로 구별해 각각 한 방향에만 고정하고, 안테나는 연결하지 않는다.
-- TX gain은 양쪽 모두 `0 dB`, 중심주파수는 `157237500 Hz`와 `161837500 Hz`만 허용한다.
+- TX gain은 양쪽 모두 `0 dB`로 유지한다. 실제 수신 방향인 ship upper RX와 control lower
+  RX gain은 Pi/B210 bring-up에서 known-vector 복원이 확인된 `50 dB`로 고정한다.
+  중심주파수는 `157237500 Hz`와 `161837500 Hz`만 허용한다.
 - fixture manifest는
   `configs/stage3_b210_fixture_manifest.30db-user-accepted.json`을 사용한다.
 
