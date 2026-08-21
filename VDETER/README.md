@@ -1,5 +1,8 @@
 # VDETER
 
+Raspberry Pi 5에서 Stage 3 B210 실물시험을 수행하려면
+[`STAGE3_PI5_B210_TESTING.md`](STAGE3_PI5_B210_TESTING.md)를 따른다.
+
 VDE-TER 프로토콜의 단계 0~2 통합 구현이다.
 
 현재 포함 범위는 다음과 같다.

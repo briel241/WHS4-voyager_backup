@@ -43,7 +43,12 @@ def _payload_tag_table() -> dict:
     from .contracts.message import DecodedMessages
     from .contracts.phy import BasebandBurst, PhyTxCompleted, RecoveredPacketSet
     from .contracts.presentation import ApplicationData, PresentationData
-    from .contracts.radio import RadioSamplesReceived, RadioStatusSnapshot, RadioTxCompleted
+    from .contracts.radio import (
+        RadioRxWindowCompleted,
+        RadioSamplesReceived,
+        RadioStatusSnapshot,
+        RadioTxCompleted,
+    )
 
     return {
         "PRESENTATION_DATA": PresentationData,
@@ -55,6 +60,7 @@ def _payload_tag_table() -> dict:
         "RADIO_TX_COMPLETED": RadioTxCompleted,
         "RADIO_SAMPLES_RECEIVED": RadioSamplesReceived,
         "RADIO_STATUS_SNAPSHOT": RadioStatusSnapshot,
+        "RADIO_RX_WINDOW_COMPLETED": RadioRxWindowCompleted,
         "RECOVERED_PACKET_SET": RecoveredPacketSet,
         "PACKET_DECODE_ACTION": PacketDecodeAction,
         "DECODED_MESSAGES": DecodedMessages,

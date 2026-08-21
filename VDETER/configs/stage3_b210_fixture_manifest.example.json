@@ -1,0 +1,59 @@
+{
+  "fixture_id": "REPLACE_WITH_FIXTURE_ID",
+  "source_radio_fingerprint": "REPLACE_WITH_SOURCE_RADIO_SHA256",
+  "receiver_radio_fingerprint": "REPLACE_WITH_RECEIVER_RADIO_SHA256",
+  "center_frequencies_hz": [157237500, 161837500],
+  "directions": [
+    {
+      "tx_serial": "REPLACE_WITH_B210_A_SERIAL",
+      "tx_connector": "TX/RX",
+      "rx_serial": "REPLACE_WITH_B210_B_SERIAL",
+      "rx_connector": "RX2",
+      "p_tx_bound_millidbm": 20000,
+      "approved_tx_gain_db": 0,
+      "tx_power_evidence": "MANUFACTURER_MAXIMUM",
+      "tx_power_calibration_path": null,
+      "tx_power_calibration_sha256": null,
+      "components": [
+        {
+          "component_id": "REPLACE_WITH_DIRECTION_1_ATTENUATOR_ID",
+          "kind": "ATTENUATOR_AND_VERIFIED_CABLE_PATH",
+          "nominal_loss_millidb": 40000,
+          "tolerance_millidb": 0,
+          "guaranteed_min_loss_millidb": 40000,
+          "loss_evidence": "MANUFACTURER_GUARANTEE",
+          "minimum_frequency_hz": 100000000,
+          "maximum_frequency_hz": 200000000,
+          "maximum_input_millidbm": 30000
+        }
+      ]
+    },
+    {
+      "tx_serial": "REPLACE_WITH_B210_B_SERIAL",
+      "tx_connector": "TX/RX",
+      "rx_serial": "REPLACE_WITH_B210_A_SERIAL",
+      "rx_connector": "RX2",
+      "p_tx_bound_millidbm": 20000,
+      "approved_tx_gain_db": 0,
+      "tx_power_evidence": "MANUFACTURER_MAXIMUM",
+      "tx_power_calibration_path": null,
+      "tx_power_calibration_sha256": null,
+      "components": [
+        {
+          "component_id": "REPLACE_WITH_DIRECTION_2_ATTENUATOR_ID",
+          "kind": "ATTENUATOR_AND_VERIFIED_CABLE_PATH",
+          "nominal_loss_millidb": 40000,
+          "tolerance_millidb": 0,
+          "guaranteed_min_loss_millidb": 40000,
+          "loss_evidence": "MANUFACTURER_GUARANTEE",
+          "minimum_frequency_hz": 100000000,
+          "maximum_frequency_hz": 200000000,
+          "maximum_input_millidbm": 30000
+        }
+      ]
+    }
+  ],
+  "created_at_utc": "REPLACE_WITH_UTC_TIMESTAMP",
+  "preflight_version": "0.2.2",
+  "outcome": "FAIL"
+}

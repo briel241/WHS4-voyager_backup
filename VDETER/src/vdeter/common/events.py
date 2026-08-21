@@ -17,6 +17,7 @@ from .contracts.message import DecodedMessages
 from .contracts.phy import BasebandBurst, PhyTxCompleted, RecoveredPacketSet
 from .contracts.presentation import ApplicationData, PresentationData
 from .contracts.radio import (
+    RadioRxWindowCompleted,
     RadioSamplesReceived,
     RadioStatusSnapshot,
     RadioTxCompleted,
@@ -65,6 +66,7 @@ class InternalEventType(str, Enum):
     MAC_ACTIONS_READY = "MAC_ACTIONS_READY"
     APPLICATION_DATA_READY = "APPLICATION_DATA_READY"
     RADIO_STATUS_CHANGED = "RADIO_STATUS_CHANGED"
+    RADIO_RX_WINDOW_COMPLETED = "RADIO_RX_WINDOW_COMPLETED"
     LAYER_ERROR = "LAYER_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -91,6 +93,7 @@ INTERNAL_EVENT_PAYLOAD_TYPES = (
     RadioTxCompleted,
     RadioSamplesReceived,
     RadioStatusSnapshot,
+    RadioRxWindowCompleted,
     RecoveredPacketSet,
     PacketDecodeAction,
     DecodedMessages,

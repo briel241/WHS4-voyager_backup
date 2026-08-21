@@ -329,6 +329,22 @@ class TestTimeSource:
         self._utc_ns += nanoseconds
         self._monotonic_ns += nanoseconds
 
+    def advance_utc(self, nanoseconds: int) -> None:
+        """UTC만 진행해 clock-jump/mapping invalidation을 결정적으로 시험한다."""
+
+        if isinstance(nanoseconds, bool) or not isinstance(nanoseconds, int):
+            raise InvalidValueError("TestTimeSource.advance_utc: 정수여야 합니다")
+        if self._utc_ns + nanoseconds < 0:
+            raise InvalidValueError("TestTimeSource.advance_utc: 결과 시각은 0 이상이어야 합니다")
+        self._utc_ns += nanoseconds
+
+    def advance_monotonic(self, nanoseconds: int) -> None:
+        """MONOTONIC만 진행해 timeout/expiry 경계를 시험한다."""
+
+        if isinstance(nanoseconds, bool) or not isinstance(nanoseconds, int) or nanoseconds < 0:
+            raise InvalidValueError("TestTimeSource.advance_monotonic: 0 이상의 정수여야 합니다")
+        self._monotonic_ns += nanoseconds
+
     def set_sync_status(self, status: SyncStatus) -> None:
         if not isinstance(status, SyncStatus):
             raise InvalidValueError("TestTimeSource.set_sync_status: SyncStatus가 아닙니다")

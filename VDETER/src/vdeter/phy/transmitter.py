@@ -13,6 +13,7 @@ from ..common.contracts.phy import (
     RecoveredPacketSet,
 )
 from ..common.contracts.radio import (
+    SAMPLE_FORMAT_CF32LE,
     SAMPLE_FORMAT_TEST_IQ_INT16_LE,
     SampleBlock,
     SampleContinuity,
@@ -24,7 +25,7 @@ from ..common.time import ClockDomain, TimeSource
 from ..profiles.models import RegistryScope
 from .burst.framing import TxStages, build
 from .burst.link_id import LinkIdDetectionError
-from .burst.rrc import from_test_iq_int16_le, to_test_iq_int16_le
+from .burst.rrc import from_cf32le, from_test_iq_int16_le, to_cf32le, to_test_iq_int16_le
 from .receiver import (
     FecDecodeFailed,
     LinkIdNotAllowed,
@@ -50,14 +51,25 @@ class Phy11Transmitter:
 class Link11Phy:
     """Stage 2 concrete implementation of the frozen ``PhyPort`` contract."""
 
-    __slots__ = ("_profiles", "_time_source", "_id_source", "_transmitter", "_receiver")
+    __slots__ = (
+        "_profiles", "_time_source", "_id_source", "_transmitter", "_receiver", "_sample_format"
+    )
 
-    def __init__(self, profiles, time_source: TimeSource, id_source: IdSource) -> None:
+    def __init__(
+        self,
+        profiles,
+        time_source: TimeSource,
+        id_source: IdSource,
+        sample_format: str = SAMPLE_FORMAT_TEST_IQ_INT16_LE,
+    ) -> None:
+        if sample_format not in (SAMPLE_FORMAT_TEST_IQ_INT16_LE, SAMPLE_FORMAT_CF32LE):
+            raise ValueError("Link11Phy sample_format must be test-iq-int16-le or cf32le")
         self._profiles = profiles
         self._time_source = time_source
         self._id_source = id_source
         self._transmitter = Phy11Transmitter()
         self._receiver = Phy11Receiver()
+        self._sample_format = sample_format
 
     def _ready_registry(self):
         registry = self._profiles
@@ -134,9 +146,12 @@ class Link11Phy:
             stages = self._transmitter.encode(request.packet)
             if len(stages.samples) != SLOT_SAMPLES:
                 raise AssertionError("slot sample count")
-            sample_data = to_test_iq_int16_le(stages.samples)
+            if self._sample_format == SAMPLE_FORMAT_CF32LE:
+                sample_data = to_cf32le(stages.samples)
+            else:
+                sample_data = to_test_iq_int16_le(stages.samples)
             samples = SampleBlock(
-                sample_format=SAMPLE_FORMAT_TEST_IQ_INT16_LE,
+                sample_format=self._sample_format,
                 sample_rate_hz=SAMPLE_RATE_HZ,
                 sample_count=SLOT_SAMPLES,
                 data=sample_data,
@@ -192,7 +207,18 @@ class Link11Phy:
             )
         allowed = frozenset(link_id.value for link_id in request.allowed_link_ids)
         try:
-            complex_samples = from_test_iq_int16_le(samples.data)
+            if samples.sample_format == SAMPLE_FORMAT_CF32LE:
+                complex_samples = from_cf32le(samples.data)
+            elif samples.sample_format == SAMPLE_FORMAT_TEST_IQ_INT16_LE:
+                complex_samples = from_test_iq_int16_le(samples.data)
+            else:
+                return internal_error(
+                    Layer.PHY,
+                    ErrorCode.RADIO_UNSUPPORTED_SETTING,
+                    ErrorCategory.VALIDATION,
+                    "Link ID 11 PHY가 지원하지 않는 sample format입니다",
+                    details=Details.of(sample_format=samples.sample_format),
+                )
             result = self._receiver.decode(complex_samples, allowed)
         except NoBurstDetected:
             return Ok(

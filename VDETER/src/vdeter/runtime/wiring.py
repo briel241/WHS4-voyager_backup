@@ -156,9 +156,16 @@ def build_radio_adapter(configuration: LoadedConfiguration, time_source, id_sour
     if kind is RadioAdapterKind.FAKE:
         return Ok(FakeRadioAdapter(time_source, id_source, event_sink))
     if kind is RadioAdapterKind.SOFTWARE:
-        return Ok(SoftwareRadioAdapter())
+        return Ok(
+            SoftwareRadioAdapter(
+                time_source,
+                id_source,
+                event_sink,
+                endpoint_id=configuration.endpoint.endpoint_id,
+            )
+        )
     if kind is RadioAdapterKind.B210:
-        return Ok(B210RadioAdapter())
+        return Ok(B210RadioAdapter(time_source, id_source, event_sink))
     return internal_error(
         Layer.RUNTIME,
         ErrorCode.UNSUPPORTED_REQUEST,
