@@ -6,14 +6,15 @@ build/
 dist/
 *.egg-info/
 
-# Local specifications, verification assets, and historical experiments are
-# intentionally kept outside the runtime-only Git branch.
+# Local specifications, generated evidence, and historical experiments remain
+# outside Git. Verification source and immutable test vectors are tracked.
 docs/
 legacy/
-tests/
-tools/
 results/
 grc/
 src/vdeter/cli/
 apps/README.md
 configs/README.md
+
+# Machine-local Stage 3 evidence. Commit only the placeholder/example manifest.
+configs/stage3_b210_ubuntu_apt_manifest.json

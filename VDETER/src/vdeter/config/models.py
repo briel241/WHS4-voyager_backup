@@ -26,7 +26,9 @@ from ..common.identifiers import LinkId, PhysicalChannel, StationId
 from ..common.serialization import to_reference_json
 from ..profiles.models import RegistryScope
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 1  # legacy compatibility alias for frozen Stage 0 fixtures
+CONFIG_SCHEMA_CURRENT_VERSION = 2
+CONFIG_SCHEMA_SUPPORTED_VERSIONS = (1, 2)
 
 
 class TimeSourceKind(str, Enum):
@@ -188,9 +190,9 @@ class EndpointConfig:
     test: TestScopeConfig
 
     def __post_init__(self) -> None:
-        if self.schema_version != CONFIG_SCHEMA_VERSION:
+        if self.schema_version not in CONFIG_SCHEMA_SUPPORTED_VERSIONS:
             raise InvalidValueError(
-                f"EndpointConfig.schema_version: {CONFIG_SCHEMA_VERSION}이어야 합니다"
+                "EndpointConfig.schema_version: 지원 version 1 또는 2여야 합니다"
             )
         if not isinstance(self.endpoint_id, str) or not self.endpoint_id:
             raise InvalidValueError("EndpointConfig.endpoint_id가 비어 있습니다")
@@ -229,4 +231,61 @@ def fingerprint_of(instance) -> str:
     """frozen 설정 snapshot의 결정적 지문."""
 
     canonical = json.dumps(to_reference_json(instance), ensure_ascii=False, sort_keys=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _V1RadioChannelProjection:
+    channel: PhysicalChannel
+    center_frequency_hz: int
+    sample_rate_hz: int
+    tx_gain_db: int
+    rx_gain_db: int
+
+
+@dataclass(frozen=True, slots=True)
+class _V1RadioProjection:
+    adapter_kind: str
+    device_selector: str
+    clock_reference: object
+    channels: tuple[_V1RadioChannelProjection, ...]
+    sample_format: str
+
+
+def radio_fingerprint_of(configuration: RadioConfiguration, schema_version: int) -> str:
+    """Stage 3가 고정한 version별 Radio fingerprint projection."""
+
+    if schema_version == 1:
+        projection = _V1RadioProjection(
+            adapter_kind=configuration.adapter_kind,
+            device_selector=configuration.device_selector,
+            clock_reference=configuration.clock_reference,
+            channels=tuple(
+                _V1RadioChannelProjection(
+                    channel=value.channel,
+                    center_frequency_hz=value.center_frequency_hz,
+                    sample_rate_hz=value.sample_rate_hz,
+                    tx_gain_db=value.tx_gain_db,
+                    rx_gain_db=value.rx_gain_db,
+                )
+                for value in configuration.channels
+            ),
+            sample_format=configuration.sample_format,
+        )
+        canonical = json.dumps(
+            to_reference_json(projection), ensure_ascii=False, sort_keys=True
+        )
+    elif schema_version == 2:
+        envelope = {
+            "schema_version": 2,
+            "radio": to_reference_json(configuration),
+        }
+        canonical = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    else:
+        raise InvalidValueError("radio fingerprint schema version은 1 또는 2여야 합니다")
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

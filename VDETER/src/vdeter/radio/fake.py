@@ -51,6 +51,7 @@ class FakeRadioAdapter:
         "_scheduled",
         "_rx_windows",
         "_completed",
+        "_last_stopped",
     )
 
     def __init__(self, time_source: TimeSource, id_source: IdSource, event_sink) -> None:
@@ -62,6 +63,7 @@ class FakeRadioAdapter:
         self._scheduled = []
         self._rx_windows = []
         self._completed = []
+        self._last_stopped = None
 
     # --- lifecycle ---
 
@@ -72,6 +74,13 @@ class FakeRadioAdapter:
                 ErrorCode.INVALID_REQUEST,
                 ErrorCategory.VALIDATION,
                 "RadioConfigureRequest가 필요합니다",
+            )
+        if self._device_state not in (RadioDeviceState.DISCONNECTED, RadioDeviceState.STOPPED):
+            return internal_error(
+                Layer.RADIO,
+                ErrorCode.RADIO_CONFIGURATION_FAILED,
+                ErrorCategory.DEVICE,
+                "configure는 DISCONNECTED 또는 STOPPED state에서만 허용됩니다",
             )
         configuration = request.configuration
         if configuration.adapter_kind != ADAPTER_KIND:
@@ -96,6 +105,7 @@ class FakeRadioAdapter:
         self._scheduled.clear()
         self._rx_windows.clear()
         self._completed.clear()
+        self._last_stopped = None
         return Ok(
             RadioConfigurationApplied(
                 adapter_kind=ADAPTER_KIND,
@@ -120,12 +130,12 @@ class FakeRadioAdapter:
                 ErrorCategory.VALIDATION,
                 "configure 전에는 시작할 수 없습니다",
             )
-        if self._device_state is RadioDeviceState.RUNNING:
+        if self._device_state is not RadioDeviceState.CONFIGURED:
             return internal_error(
                 Layer.RADIO,
                 ErrorCode.RADIO_ALREADY_STARTED,
                 ErrorCategory.VALIDATION,
-                "이미 시작된 Radio입니다",
+                "start는 CONFIGURED state에서만 허용됩니다",
             )
         self._device_state = RadioDeviceState.RUNNING
         return Ok(
@@ -144,24 +154,25 @@ class FakeRadioAdapter:
                 ErrorCategory.VALIDATION,
                 "RadioStopRequest가 필요합니다",
             )
-        if self._device_state is not RadioDeviceState.RUNNING:
+        if self._device_state is RadioDeviceState.STOPPED and self._last_stopped is not None:
+            return Ok(self._last_stopped)
+        if self._device_state is RadioDeviceState.DISCONNECTED:
             return internal_error(
                 Layer.RADIO,
                 ErrorCode.RADIO_NOT_STARTED,
                 ErrorCategory.VALIDATION,
-                "시작되지 않은 Radio는 정지할 수 없습니다",
+                "configure 전에는 정지할 수 없습니다",
             )
         self._device_state = RadioDeviceState.STOPPED
         self._scheduled.clear()
         self._rx_windows.clear()
         self._completed.clear()
-        return Ok(
-            RadioStopped(
+        self._last_stopped = RadioStopped(
                 adapter_kind=ADAPTER_KIND,
                 device_state=self._device_state,
                 stopped_at=self._time_source.now_utc(),
             )
-        )
+        return Ok(self._last_stopped)
 
     # --- 송수신 ---
 
@@ -303,10 +314,18 @@ class FakeRadioAdapter:
         channel_check = self._require_channel(channel)
         if channel_check is not None:
             return channel_check
+        normalized_samples = SampleBlock(
+            sample_format=samples.sample_format,
+            sample_rate_hz=samples.sample_rate_hz,
+            sample_count=samples.sample_count,
+            data=samples.data,
+            first_sample_at=samples.first_sample_at,
+            continuity=continuity,
+        )
         received = RadioSamplesReceived(
             channel=channel,
-            samples=samples,
-            hardware_received_at=samples.first_sample_at,
+            samples=normalized_samples,
+            hardware_received_at=normalized_samples.first_sample_at,
             continuity=continuity,
         )
         published = self._publish(
