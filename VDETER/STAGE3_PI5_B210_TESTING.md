@@ -1,5 +1,11 @@
 # Stage 3 Raspberry Pi 5 B210 시험
 
+이 문서는 코드 저장소와 함께 배포하는 실제 장비 운용 절차다. 규범적인 합격 조건과 현재
+동결 상태의 판정 원본은
+[`stage3_radio_baseline.md`](../../docs/core/stage3_radio_baseline.md) v0.2.4다. 승인된 장비시험과
+`TC-RADIO-012/013/015`, 최종 evidence audit는 2026-08-22 PASS했다. 아래 절차는 그 결과를
+재현하거나 새 장비 run을 만들 때 사용하며, 새 결과는 기존 동결 evidence와 구분한다.
+
 대상은 native Ubuntu 24.04 LTS `aarch64/arm64`, Raspberry Pi 5, Python 3.12,
 GNU Radio/gr-uhd 3.10.9.2, UHD 4.6.0.0+ds1-5.1ubuntu0.24.04.1이다. WSL과 다른 VM은
 실물 PASS 환경으로 인정하지 않는다.
@@ -110,5 +116,6 @@ python3 tools/run_stage3_b210_hardware_tests.py \
 controlled disconnect 안내 시 control B210의 USB만 분리한다. TX 중 RF cable이나 attenuator를
 분리하지 않는다. 결과 evidence에는 서로 다른 `parent_pid`·`gr_uhd_child_pid`,
 `parent_survived_native_disconnect=true`, typed terminal과 `cleanup=PASS`가 있어야 한다.
-TC-RADIO-012/013과 최종 audit가 모두 PASS하기 전에는 Stage 3를
-`VERIFIED/FROZEN`으로 변경하지 않는다.
+새 기준선 revision이나 장비 profile을 검증할 때에는 `TC-RADIO-012/013`과 최종 audit가 모두
+PASS하기 전까지 그 새 revision의 상태를 `VERIFIED/FROZEN`으로 변경하지 않는다. 기존 v0.2.4
+동결 상태와 새 run의 상태는 별도로 관리한다.
