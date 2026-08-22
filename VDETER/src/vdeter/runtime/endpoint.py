@@ -22,9 +22,54 @@ from __future__ import annotations
 
 from functools import wraps
 
-from ..common.addressing import OriginalDestination, OriginalSource, RouteAddresses
-from ..common.contracts.link import LinkAnalyzeRequest, LinkBuildRequest, LinkDecodeRequest
+from ..common.addressing import (
+    AddressKind,
+    Addressed,
+    NodeDestination,
+    NodeSource,
+    OriginalDestination,
+    OriginalSource,
+    RouteAddresses,
+)
+from ..common.contracts.link import (
+    LinkAnalyzeRequest,
+    LinkBuildRequest,
+    LinkDecodeRequest,
+    LinkFragmentProcessRequest,
+    LinkPacketEncodeRequest,
+    LinkReassemblyControlRequest,
+    LinkTransferControlRequest,
+    TransferControlKind,
+    TransferRequirement,
+    TbbAssemblyControlRequest,
+    TbbEncodeRequest,
+)
 from ..common.contracts.mac import MacActionKind, MacMessageInput
+from ..common.contracts.mac_execution import (
+    CancelWakeupCommand,
+    ClockAdvancedEvent,
+    CommandCompletedEvent,
+    DeliverPresentationDataCommand,
+    DependencyFailedEvent,
+    EndpointStoppingEvent,
+    InvokeLinkCommand,
+    InvokePhyCommand,
+    LinkResultEvent,
+    MacCommandBatch,
+    MacFailureReason,
+    MacReasonCode,
+    PhyReceiveWindowPlan,
+    PhyRxWindowAcceptedEvent,
+    PhyRxWindowClosedEvent,
+    PhyTxAcceptedEvent,
+    PhyTxCompletedEvent,
+    PresentationDeliveryResultEvent,
+    PublishTransferStateCommand,
+    PublishTransmissionPlanCommand,
+    ScheduleWakeupCommand,
+    TimerPurpose,
+    WakeupFiredEvent,
+)
 from ..common.contracts.phy import PhyDecodeRequest, PhyEncodeRequest
 from ..common.contracts.presentation import PresentationDecodeRequest, PresentationEncodeRequest
 from ..common.contracts.radio import (
@@ -67,7 +112,9 @@ from ..common.events import (
     ServiceEventType,
 )
 from ..common.results import Err, Ok, internal_error
+from ..common.time import ClockDomain, TimePoint
 from ..service.models import TransferRecord
+from .mac_commands import MAX_CONSUMER_ATTEMPTS
 from .projection import PublicErrorCode, to_service_error
 from .wiring import EndpointDependencies, build_stage0_layers
 
@@ -77,6 +124,7 @@ ROUTED_EVENT_TYPES = frozenset(
         InternalEventType.TRANSMISSION_PLANNED,
         InternalEventType.BURST_COMPLETED,
         InternalEventType.SAMPLES_RECEIVED,
+        InternalEventType.RADIO_RX_WINDOW_COMPLETED,
     }
 )
 
@@ -113,6 +161,7 @@ class VdeTerEndpoint:
         "_pending_presentation",
         "_burst_transfers",
         "_started",
+        "_stage4",
     )
 
     def __init__(self, dependencies: EndpointDependencies) -> None:
@@ -129,6 +178,8 @@ class VdeTerEndpoint:
         self._pending_presentation = {}
         self._burst_transfers = {}
         self._started = False
+        # Stage 4 실행 지원은 wiring이 주입한다. None이면 Stage 0 legacy route만 사용한다.
+        self._stage4 = None
 
     # --- 관찰 ---
 
@@ -247,10 +298,14 @@ class VdeTerEndpoint:
                     )
                 )
             )
+        if self._stage4 is not None:
+            self._stage4.begin_stop(request.reason or "service_stop")
         stopped = self._radio.stop(RadioStopRequest(reason=request.reason))
         if stopped.is_err:
             self._health = EndpointHealth.DEGRADED
             return Err(to_service_error(stopped.error))
+        if self._stage4 is not None:
+            self._stage4.finish_stop()
         self._started = False
         self._health = EndpointHealth.STOPPED
         self._reset_runtime_state()
@@ -342,10 +397,33 @@ class VdeTerEndpoint:
             self._abort_transfer_after_event_failure(transfer_id, queued_event.error)
             return Err(to_service_error(queued_event.error))
 
+        analysis_route = route
+        if self._stage4 is not None:
+            deployment = self._stage4.mac.coordinator.deployment
+            message_type = 92 if request.ack_required else 93
+            segment_size = 4 + len(encoded.value.data)
+            short_eligible = any(
+                dict(profile.message_payload_capacities).get(message_type, 0)
+                >= segment_size
+                for profile in self._dependencies.registries.link_profile.entries()
+            )
+            if (
+                not short_eligible
+                and endpoint_config.station_id.value != deployment.roc_station_id.value
+                and request.destination.kind is AddressKind.ADDRESSED
+                and request.destination.station_id.value != deployment.roc_station_id.value
+                and deployment.is_member(request.destination.station_id)
+            ):
+                analysis_route = RouteAddresses(
+                    original_source=route.original_source,
+                    original_destination=route.original_destination,
+                    node_source=NodeSource(endpoint_config.station_id),
+                    node_destination=NodeDestination(Addressed(deployment.roc_station_id)),
+                )
         analyzed = self._link.analyze_transfer(
             LinkAnalyzeRequest(
                 transfer_id=transfer_id,
-                route=route,
+                route=analysis_route,
                 ack_required=request.ack_required,
                 presentation_data=encoded.value.data,
             )
@@ -451,11 +529,25 @@ class VdeTerEndpoint:
 
     def _route(self, event: InternalEvent) -> None:
         if event.event_type is InternalEventType.TRANSMISSION_PLANNED:
+            # Stage 4 build-only branch와 Stage 0 legacy branch를 동시에 실행하지 않는다.
+            if self._stage4 is not None and self._stage4.owns_transmission_event(
+                event.event_id
+            ):
+                self._stage4.route_stage4_transmission(event)
+                return
             self._route_transmission_plan(event)
         elif event.event_type is InternalEventType.BURST_COMPLETED:
+            if self._stage4 is not None and self._stage4.on_burst_completed(event):
+                return
             self._route_burst_completed(event)
         elif event.event_type is InternalEventType.SAMPLES_RECEIVED:
+            if self._stage4 is not None:
+                self._stage4.on_samples_received(event)
+                return
             self._route_samples_received(event)
+        elif event.event_type is InternalEventType.RADIO_RX_WINDOW_COMPLETED:
+            if self._stage4 is not None:
+                self._stage4.on_rx_window_completed(event)
 
     def _route_transmission_plan(self, event: InternalEvent) -> None:
         plan = event.payload
@@ -559,7 +651,12 @@ class VdeTerEndpoint:
             InternalEventType.PACKETS_RECOVERED, Layer.PHY, payload=recovered.value
         )
 
-        decode_action = self._mac.handle_recovered_packet(recovered.value)
+        self._deliver_recovered(recovered.value, stage4=None)
+
+    def _deliver_recovered(self, recovered_set, *, stage4=None) -> None:
+        """동결 `MacPort` 수신 경로. Stage 4도 같은 Port를 통해 재진입한다."""
+
+        decode_action = self._mac.handle_recovered_packet(recovered_set)
         if decode_action.is_err:
             self._report_internal_error(decode_action.error)
             return
@@ -595,28 +692,50 @@ class VdeTerEndpoint:
             MacMessageInput(decoded=decoded.value, channel=action.packet.channel)
         )
         if handled.is_err:
-            self._report_internal_error(handled.error)
+            if stage4 is not None:
+                stage4.report_error(handled.error)
+            else:
+                self._report_internal_error(handled.error)
             return
         self._record(
             InternalEventType.MAC_ACTIONS_READY, Layer.MAC, payload=handled.value
         )
 
-        for mac_action in handled.value.actions:
+        for delivery_index, mac_action in enumerate(handled.value.actions):
             if mac_action.kind is not MacActionKind.DELIVER_PRESENTATION_DATA:
                 continue
-            self._deliver_presentation_data(mac_action, action.packet.received_at)
+            # Runtime은 같은 `MacMessageInput.decoded.received_at`을 Presentation/Service
+            # 수신시각으로 함께 사용한다.
+            delivered = self._deliver_presentation_bytes(
+                mac_action.route, mac_action.presentation_data, decoded.value.received_at
+            )
+            if stage4 is None:
+                if delivered.is_err:
+                    self._report_internal_error(delivered.error)
+                continue
+            # ACK-required Type 92의 peer ACK는 Service sink 수락 확인 뒤에만 계획한다.
+            stage4.enqueue(
+                PresentationDeliveryResultEvent(
+                    packet_id=decoded.value.packet_id,
+                    delivery_index=delivery_index,
+                    delivered_at_monotonic=self._time().now_monotonic(),
+                    error=None if delivered.is_ok else delivered.error,
+                ),
+                priority=True,
+            )
 
-    def _deliver_presentation_data(self, mac_action, received_at) -> None:
+    def _deliver_presentation_bytes(self, route, presentation_data, received_at):
+        """Presentation decode와 Service `DATA_RECEIVED` sink 수락까지 확인한다."""
+
         application = self._presentation.decode_payload(
             PresentationDecodeRequest(
-                route=mac_action.route,
-                data=mac_action.presentation_data,
+                route=route,
+                data=presentation_data,
                 received_at=received_at,
             )
         )
         if application.is_err:
-            self._report_internal_error(application.error)
-            return
+            return application
         data = application.value
         self._record(
             InternalEventType.APPLICATION_DATA_READY, Layer.PRESENTATION, payload=data
@@ -629,11 +748,25 @@ class VdeTerEndpoint:
             payload=data.application_payload,
             received_at=data.received_at,
         )
-        self._emit_service_event(
+        published = self._emit_service_event(
             ServiceEventType.DATA_RECEIVED,
             severity=EventSeverity.INFO,
             received_data=received,
         )
+        if published.is_err:
+            return published
+        return Ok(received)
+
+    # --- Stage 4 실행 지원 주입 ---
+
+    def attach_stage4(self, support) -> None:
+        """Stage 4 dispatcher를 한 번 연결한다. Stage 0 legacy route는 그대로 유지한다."""
+
+        self._stage4 = support
+
+    @property
+    def stage4(self):
+        return self._stage4
 
     # --- 상태와 event helper ---
 
@@ -862,9 +995,15 @@ class VdeTerEndpoint:
         self._transfers.clear()
         self._pending_presentation.clear()
         self._burst_transfers.clear()
-        self._presentation, self._link, self._mac, self._phy = build_stage0_layers(
+        presentation, link, legacy_mac, phy = build_stage0_layers(
             self._dependencies, self._dependencies.internal_event_sink
         )
+        self._presentation, self._link, self._phy = presentation, link, phy
+        if self._stage4 is None:
+            self._mac = legacy_mac
+            return
+        self._stage4.reset_for_restart()
+        self._mac = self._stage4.mac
 
     def _emit_service_event(
         self,
@@ -895,8 +1034,14 @@ class VdeTerEndpoint:
         return published
 
     def _request_rx_window(self):
-        """시작 시 설정된 RX channel의 수신 구간을 요청한다."""
+        """시작 시 설정된 RX channel의 수신 구간을 요청한다.
 
+        Stage 4에서는 MAC이 TBB slot map에 따라 RX window를 소유하므로 Stage 0 startup
+        window를 만들지 않는다.
+        """
+
+        if self._stage4 is not None:
+            return None
         endpoint_config = self._dependencies.configuration.endpoint
         now = self._time().now_utc()
         return self._radio.request_rx(
@@ -907,6 +1052,701 @@ class VdeTerEndpoint:
                 sample_rate_hz=endpoint_config.phy.sample_rate_hz,
             )
         )
+
+
+# --- Stage 4 실행 지원 (`DR-STAGE4-MAC-001`, `012`) ---
+
+
+class Stage4Support:
+    """Stage 4 command dispatcher, ingress 재진입과 build-only route 상태.
+
+    Stage 0 legacy route를 대체하지 않는다. `TRANSMISSION_PLANNED` event ID가 아래의
+    pending map/active set에 있을 때만 Stage 4 build-only branch를 선택한다.
+    """
+
+    __slots__ = (
+        "_endpoint",
+        "mac",
+        "outbox",
+        "ingress",
+        "health",
+        "lock",
+        "pending_transmission_plans",
+        "stage4_transmission_event_ids",
+        "recent_transmission_event_ids",
+        "_burst_commands",
+        "_rx_commands",
+        "_timers",
+        "_consumer_attempts",
+        "_pumping",
+        "_build_results",
+        "_relay_analysis_cleanup",
+    )
+
+    def __init__(self, endpoint, mac, outbox, ingress, health, lock) -> None:
+        self._endpoint = endpoint
+        self.mac = mac
+        self.outbox = outbox
+        self.ingress = ingress
+        self.health = health
+        self.lock = lock
+        # bounded private map. 공개 DTO를 바꾸지 않으며 64-command outbox 상한 안에 포함된다.
+        self.pending_transmission_plans = {}
+        self.stage4_transmission_event_ids = set()
+        self.recent_transmission_event_ids = []
+        self._burst_commands = {}
+        self._rx_commands = {}
+        self._timers = {}
+        self._consumer_attempts = {}
+        self._pumping = False
+        self._build_results = {}
+        self._relay_analysis_cleanup = {}
+
+    # --- Stage 4 route 판정 ---
+
+    def owns_transmission_event(self, event_id: str) -> bool:
+        return (
+            event_id in self.pending_transmission_plans
+            or event_id in self.stage4_transmission_event_ids
+        )
+
+    def _retire_transmission_event(self, event_id: str) -> None:
+        self.stage4_transmission_event_ids.discard(event_id)
+        self.recent_transmission_event_ids.append(event_id)
+        if len(self.recent_transmission_event_ids) > 256:
+            del self.recent_transmission_event_ids[
+                0 : len(self.recent_transmission_event_ids) - 256
+            ]
+
+    # --- ingress 재진입 ---
+
+    def enqueue(self, payload, *, correlation=Correlation(), causation_command_id=None, priority=False):
+        result = self.ingress.enqueue(
+            payload,
+            correlation=correlation,
+            causation_command_id=causation_command_id,
+            priority=priority,
+        )
+        return result
+
+    def report_error(self, error: InternalProtocolError) -> None:
+        """Stage 4 오류를 bounded health log와 기존 Runtime error 경로에 함께 남긴다."""
+
+        reason_code = error.details.get("reason_code", "")
+        self.health.record(error.code, reason_code, error.details)
+        self._endpoint._report_internal_error(error)
+
+    def _record_endpoint_error(self, error: InternalProtocolError) -> None:
+        """Record endpoint-only MAC evidence without a public Service error."""
+
+        reason_code = error.details.get("reason_code", "")
+        self.health.record(error.code, reason_code, error.details)
+        self._endpoint._record_internal_error(error)
+
+    def _cleanup_relay_analysis(self, command_id: str) -> bool:
+        request = self._relay_analysis_cleanup.get(command_id)
+        if request is None:
+            return True
+        cleaned = self._endpoint._link.control_transfer(request)
+        if cleaned.is_err:
+            self.health.record(
+                cleaned.error.code,
+                MacFailureReason.DEPENDENCY_FAILED.value,
+                Details.of(
+                    cleanup="relay_analysis",
+                    transfer_id_value=request.transfer_id.value,
+                ),
+            )
+            self._endpoint._report_internal_error(cleaned.error)
+            return False
+        self._relay_analysis_cleanup.pop(command_id, None)
+        return True
+
+    def _cleanup_all_relay_analyses(self) -> None:
+        for command_id in tuple(self._relay_analysis_cleanup):
+            self._cleanup_relay_analysis(command_id)
+
+    def begin_stop(self, reason_code: str) -> None:
+        """새 work를 닫기 전에 accepted dependency가 DRAINING으로 수렴하게 한다."""
+
+        self.enqueue(
+            EndpointStoppingEvent(reason_code=reason_code or "service_stop"),
+            priority=True,
+        )
+        self.pump()
+        self.outbox.set_draining(True)
+
+    def finish_stop(self) -> None:
+        """Radio 정지 뒤 stop-drain의 cleanup allowlist를 즉시 끝낸다."""
+
+        timer = next(
+            (
+                (timer_id, deadline)
+                for timer_id, (deadline, purpose) in self._timers.items()
+                if purpose is TimerPurpose.STOP_DRAIN
+            ),
+            None,
+        )
+        if timer is None:
+            self._rx_commands.clear()
+            self._burst_commands.clear()
+            self._cleanup_all_relay_analyses()
+            return
+        timer_id, deadline = timer
+        self.enqueue(
+            WakeupFiredEvent(
+                timer_id=timer_id,
+                purpose=TimerPurpose.STOP_DRAIN,
+                scheduled_for_monotonic=TimePoint.from_nanoseconds(
+                    deadline,
+                    ClockDomain.MONOTONIC,
+                    self._endpoint._time().now_monotonic().clock_id,
+                ),
+            ),
+            priority=True,
+        )
+        del self._timers[timer_id]
+        self.pump()
+        # Radio는 이 호출 전에 이미 정지했다. close/completion callback이 누락된
+        # window/burst correlation은 더 이상 terminal event를 만들 수 없으므로
+        # STOP_DRAIN commit 뒤 Runtime side ownership도 함께 해제한다.
+        self._rx_commands.clear()
+        self._burst_commands.clear()
+        self._cleanup_all_relay_analyses()
+
+    def reset_for_restart(self) -> None:
+        """stop이 끝난 Stage 4 private state를 새 실행의 INITIAL snapshot으로 바꾼다."""
+
+        self._cleanup_all_relay_analyses()
+        self.mac.repository.replace_for_restart(type(self.mac.state)())
+        self.outbox.clear()
+        self.ingress.clear()
+        self.health.clear()
+        self.pending_transmission_plans.clear()
+        self.stage4_transmission_event_ids.clear()
+        self.recent_transmission_event_ids.clear()
+        self._burst_commands.clear()
+        self._rx_commands.clear()
+        self._timers.clear()
+        self._consumer_attempts.clear()
+        self._build_results.clear()
+        # Failed Link cleanup still owns live Stage 1 analysis state.  Keep the
+        # record across restart so a later stop/retry can release it; clearing the
+        # bookkeeping here would falsely report that ownership as discharged.
+        self._pumping = False
+
+    def pump(self) -> None:
+        """READY batch 실행과 ingress event 처리를 번갈아 진행한다.
+
+        dispatcher도 같은 endpoint lock을 획득해야 dequeue하므로 state commit과 lock 해제
+        전에 batch를 관측·실행할 수 없다.
+        """
+
+        if self._pumping:
+            return
+        self._pumping = True
+        try:
+            for _ in range(4096):
+                ready = self.outbox.take_ready()
+                if ready:
+                    for command in ready:
+                        self._execute(command)
+                    continue
+                self.ingress.release_held()
+                event = self.ingress.pop_next()
+                if event is None:
+                    return
+                handled = self.mac.handle_event(event)
+                relay_command_id = None
+                if (
+                    isinstance(event.payload, LinkResultEvent)
+                    and isinstance(event.payload.result, TransferRequirement)
+                    and event.payload.command_id in self._relay_analysis_cleanup
+                ):
+                    relay_command_id = event.payload.command_id
+                if handled.is_err:
+                    self._record_endpoint_error(handled.error)
+                    if (
+                        relay_command_id is not None
+                        and handled.error.details.get("mac_reason")
+                        != MacFailureReason.COMMAND_RESULT_UNMATCHED.value
+                    ):
+                        self._cleanup_relay_analysis(relay_command_id)
+                elif relay_command_id is not None:
+                    relay = self.mac.state.relay_record(
+                        event.payload.result.transfer_id.value
+                    )
+                    if relay is not None and relay.admitted:
+                        # matching result commit이 끝난 순간부터 cleanup은 relay MAC 소유다.
+                        self._relay_analysis_cleanup.pop(relay_command_id, None)
+        finally:
+            self._pumping = False
+
+    def advance_clock(self) -> None:
+        """`ClockAdvancedEvent`를 넣고 결과를 소진한다."""
+
+        self.enqueue(ClockAdvancedEvent(sync_status=self._endpoint._time().sync_status()))
+        self.pump()
+
+    def fire_due_timers(self) -> None:
+        """deadline에 도달한 timer의 `WakeupFiredEvent`를 넣는다."""
+
+        now = self._endpoint._time().now_monotonic().total_nanoseconds()
+        for timer_id, record in sorted(self._timers.items()):
+            deadline, purpose = record
+            if deadline > now:
+                continue
+            self.enqueue(
+                WakeupFiredEvent(
+                    timer_id=timer_id,
+                    purpose=purpose,
+                    scheduled_for_monotonic=TimePoint.from_nanoseconds(
+                        deadline,
+                        ClockDomain.MONOTONIC,
+                        self._endpoint._time().now_monotonic().clock_id,
+                    ),
+                ),
+                priority=True,
+            )
+            del self._timers[timer_id]
+            break
+        self.pump()
+
+    def has_due_timer(self) -> bool:
+        now = self._endpoint._time().now_monotonic().total_nanoseconds()
+        return any(deadline <= now for deadline, _ in self._timers.values())
+
+    # --- command 실행 ---
+
+    def _fail(self, command, error) -> None:
+        self.enqueue(
+            DependencyFailedEvent(command_id=command.command_id, error=error),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+
+    def _complete(self, command) -> None:
+        self.enqueue(
+            CommandCompletedEvent(command_id=command.command_id),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+
+    def _execute(self, command) -> None:
+        payload = command.payload
+        try:
+            if isinstance(payload, PublishTransmissionPlanCommand):
+                self._execute_build(command, payload)
+            elif isinstance(payload, InvokeLinkCommand):
+                self._execute_link(command, payload)
+            elif isinstance(payload, InvokePhyCommand):
+                self._execute_phy(command, payload)
+            elif isinstance(payload, ScheduleWakeupCommand):
+                requested = (
+                    payload.deadline_monotonic.total_nanoseconds(),
+                    payload.purpose,
+                )
+                if payload.replaces_timer_id is not None:
+                    # Coordinator state와 같은 원자 경계로 기존 active timer를
+                    # 교체한다. 별도 Cancel command를 만들지 않아 포화 상태에서도
+                    # active timer 수와 pending cleanup quota를 늘리지 않는다.
+                    self._timers.pop(payload.replaces_timer_id, None)
+                existing = self._timers.get(payload.timer_id)
+                if existing is not None and existing != requested:
+                    self._fail(
+                        command,
+                        self._endpoint._error(
+                            Layer.RUNTIME,
+                            ErrorCode.INVALID_REQUEST,
+                            "active timer ID was reused with a different deadline or purpose",
+                            category=ErrorCategory.VALIDATION,
+                            details=Details.of(
+                                mac_reason=MacFailureReason.EVENT_INVALID.value,
+                                timer_id=payload.timer_id,
+                            ),
+                        ),
+                    )
+                    return
+                self._timers[payload.timer_id] = requested
+                self._complete(command)
+            elif isinstance(payload, CancelWakeupCommand):
+                self._timers.pop(payload.timer_id, None)
+                self._complete(command)
+            elif isinstance(payload, PublishTransferStateCommand):
+                self._execute_transfer_state(command, payload)
+            elif isinstance(payload, DeliverPresentationDataCommand):
+                self._execute_delivery(command, payload)
+            else:
+                self._fail(command, self._endpoint._error(
+                    Layer.RUNTIME, ErrorCode.UNSUPPORTED_REQUEST, "알 수 없는 MAC command입니다"
+                ))
+        except Exception as error:  # noqa: BLE001 - dispatcher 경계에서 구조화한다.
+            self._fail(command, self._endpoint._error(
+                Layer.RUNTIME,
+                ErrorCode.INTERNAL_ERROR,
+                "MAC command 실행 중 오류가 발생했습니다",
+                category=ErrorCategory.INTERNAL,
+                details=Details.of(exception_type=type(error).__name__),
+            ))
+
+    def _execute_build(self, command, payload) -> None:
+        """Stage 4 build-only route를 정확히 한 번 실행한다."""
+
+        request = payload.request
+        event_id = self._endpoint._dependencies.id_source.new_event_id()
+        self.pending_transmission_plans[event_id] = (command.command_id, request)
+        self.stage4_transmission_event_ids.add(event_id)
+        published = self._endpoint._dependencies.internal_event_sink.publish(
+            InternalEvent(
+                event_id=event_id,
+                event_type=InternalEventType.TRANSMISSION_PLANNED,
+                occurred_at=self._endpoint._time().now_utc(),
+                severity=EventSeverity.INFO,
+                layer=Layer.MAC,
+                correlation=command.correlation,
+                payload=request.plan,
+                details=Details.of(
+                    link_id=request.plan.link_id.value, channel=request.plan.channel.name
+                ),
+            )
+        )
+        if published.is_err:
+            # event publish 실패면 map entry를 제거하고 Link를 호출하지 않는다.
+            self.pending_transmission_plans.pop(event_id, None)
+            self._retire_transmission_event(event_id)
+            self._fail(command, published.error)
+            return
+        outcome = self._build_results.pop(command.command_id, None)
+        self._retire_transmission_event(event_id)
+        if outcome is None:
+            self._fail(command, self._endpoint._error(
+                Layer.RUNTIME,
+                ErrorCode.INTERNAL_ERROR,
+                "Stage 4 build-only branch가 결과를 만들지 못했습니다",
+                category=ErrorCategory.INTERNAL,
+            ))
+            return
+        ok, value = outcome
+        if not ok:
+            self._fail(command, value)
+            return
+        self.enqueue(
+            LinkResultEvent(command_id=command.command_id, result=value),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+
+    def route_stage4_transmission(self, event) -> None:
+        """Stage 4 build-only branch. `PhyPort`/`RadioAdapter`를 호출하지 않는다."""
+
+        entry = self.pending_transmission_plans.pop(event.event_id, None)
+        if entry is None:
+            # 이미 소비된 Stage 4 중복이므로 어떤 branch도 실행하지 않는다.
+            self.health.record(
+                ErrorCode.INVALID_REQUEST,
+                MacReasonCode.OUTBOX_RESERVATION_INVALID,
+                Details.of(reason="duplicate_stage4_transmission_event"),
+            )
+            return
+        command_id, request = entry
+        presentation = self._endpoint._pending_presentation.get(request.transfer_id.value)
+        relay = self.mac.state.relay_record(request.transfer_id.value)
+        presentation_data = (
+            presentation.data
+            if presentation is not None
+            else relay.presentation_data
+            if relay is not None
+            else None
+        )
+        if presentation_data is None:
+            self._build_results[command_id] = (
+                False,
+                self._endpoint._error(
+                    Layer.RUNTIME,
+                    ErrorCode.UNKNOWN_TRANSFER,
+                    "전송 계획에 대응하는 Presentation data가 없습니다",
+                    correlation=Correlation(transfer_id=request.transfer_id),
+                ),
+            )
+            return
+        built = self._endpoint._link.build_packet(
+            LinkBuildRequest(
+                plan=request.plan,
+                presentation_data=presentation_data,
+                sequential_id=None,
+                retransmission_number=request.retransmission_number,
+                session_frame_index=request.session_frame_index,
+                frame_fragment_count=request.frame_fragment_count,
+                fragment_position_in_frame=request.fragment_position_in_frame,
+            )
+        )
+        if built.is_err:
+            self._build_results[command_id] = (False, built.error)
+            return
+        packet = built.value
+        self._endpoint._record(
+            InternalEventType.PACKET_BUILT,
+            Layer.LINK,
+            payload=packet,
+            correlation=Correlation(
+                transfer_id=request.transfer_id, packet_id=packet.packet_id
+            ),
+        )
+        self._build_results[command_id] = (True, packet)
+
+    def _execute_link(self, command, payload) -> None:
+        request = payload.request
+        link = self._endpoint._link
+        method = {
+            LinkAnalyzeRequest: link.analyze_transfer,
+            LinkPacketEncodeRequest: link.encode_packet,
+            TbbEncodeRequest: link.encode_tbb,
+            LinkFragmentProcessRequest: link.process_fragment,
+            LinkReassemblyControlRequest: link.control_reassembly,
+            LinkTransferControlRequest: link.control_transfer,
+            TbbAssemblyControlRequest: link.control_tbb_assembly,
+        }.get(type(request))
+        if method is None:
+            self._fail(command, self._endpoint._error(
+                Layer.RUNTIME, ErrorCode.UNSUPPORTED_REQUEST, "알 수 없는 Link request입니다"
+            ))
+            return
+        result = method(request)
+        if result.is_err:
+            # 성공 variant를 합성하지 않고 원 오류를 보존한다.
+            self._fail(command, result.error)
+            return
+        relay = (
+            self.mac.state.relay_record(request.transfer_id.value)
+            if isinstance(request, LinkAnalyzeRequest)
+            else None
+        )
+        if relay is not None and relay.analyze_command_id == command.command_id:
+            self._relay_analysis_cleanup[command.command_id] = (
+                LinkTransferControlRequest(
+                    kind=TransferControlKind.FAIL,
+                    transfer_id=request.transfer_id,
+                    session_handle=None,
+                    packet_progress=(),
+                    correlation=Correlation(transfer_id=request.transfer_id),
+                )
+            )
+        enqueued = self.enqueue(
+            LinkResultEvent(command_id=command.command_id, result=result.value),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+        if enqueued.is_err:
+            self.report_error(enqueued.error)
+            if (
+                command.command_id in self._relay_analysis_cleanup
+                and not self.ingress.has_held_causation(command.command_id)
+            ):
+                self._cleanup_relay_analysis(command.command_id)
+
+    def _execute_phy(self, command, payload) -> None:
+        request = payload.request
+        if isinstance(request, PhyReceiveWindowPlan):
+            self._execute_rx(command, request)
+            return
+        self._execute_tx(command, request)
+
+    def _execute_tx(self, command, request) -> None:
+        """TX dispatcher: 기존 PHY encode 뒤 기존 Radio TX까지 실행한다."""
+
+        encoded = self._endpoint._phy.encode_packet(
+            PhyEncodeRequest(
+                packet_id=request.packet_id,
+                link_id=request.link_id,
+                channel=request.channel,
+                transmit_at=request.transmit_at,
+                packet=request.packet,
+            )
+        )
+        if encoded.is_err:
+            self._fail(command, encoded.error)
+            return
+        burst = encoded.value
+        self._endpoint._record(
+            InternalEventType.BURST_ENCODED,
+            Layer.PHY,
+            payload=burst,
+            correlation=Correlation(packet_id=request.packet_id, burst_id=burst.burst_id),
+        )
+        scheduled = self._endpoint._radio.schedule_tx(
+            RadioTxRequest(
+                burst_id=burst.burst_id,
+                channel=burst.channel,
+                transmit_at=burst.transmit_at,
+                samples=burst.samples,
+            )
+        )
+        if scheduled.is_err:
+            self._fail(command, scheduled.error)
+            return
+        self._burst_commands[burst.burst_id.value] = (command, request.packet_id)
+        self._endpoint._record(
+            InternalEventType.BURST_SCHEDULED,
+            Layer.RADIO,
+            correlation=Correlation(packet_id=request.packet_id, burst_id=burst.burst_id),
+        )
+        # `PhyTxAcceptedEvent`는 Radio가 송신을 접수한 뒤에만 만든다.
+        self.enqueue(
+            PhyTxAcceptedEvent(
+                command_id=command.command_id,
+                packet_id=request.packet_id,
+                accepted_at=self._endpoint._time().now_monotonic(),
+            ),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+
+    def _execute_rx(self, command, request) -> None:
+        """RX dispatcher: 기존 `RadioAdapter.request_rx()`로 변환한다."""
+
+        sample_rate = self._endpoint._dependencies.configuration.endpoint.phy.sample_rate_hz
+        accepted = self._endpoint._radio.request_rx(
+            RadioRxRequest(
+                channel=request.channel,
+                start_at=request.start_at,
+                duration_nanoseconds=request.duration_nanoseconds,
+                sample_rate_hz=sample_rate,
+            )
+        )
+        if accepted.is_err:
+            self._fail(command, accepted.error)
+            return
+        key = (request.channel.name, request.start_at.total_nanoseconds())
+        self._rx_commands[key] = command
+        self.enqueue(
+            PhyRxWindowAcceptedEvent(
+                command_id=command.command_id,
+                channel=request.channel,
+                accepted_at=self._endpoint._time().now_monotonic(),
+            ),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+
+    def _execute_transfer_state(self, command, payload) -> None:
+        """Runtime 소비자가 수락할 때까지 같은 command ID로 최대 3회 실행한다."""
+
+        attempts = self._consumer_attempts.get(command.command_id, 0) + 1
+        self._consumer_attempts[command.command_id] = attempts
+        error = None if payload.error is None else to_service_error(payload.error)
+        published = self._endpoint._set_transfer_state(
+            payload.transfer_id, payload.state, error
+        )
+        if published.is_err:
+            if attempts >= MAX_CONSUMER_ATTEMPTS:
+                self._consumer_attempts.pop(command.command_id, None)
+                self._fail(command, published.error)
+                return
+            self._retry_consumer_command(command)
+            return
+        self._consumer_attempts.pop(command.command_id, None)
+        self._complete(command)
+
+    def _execute_delivery(self, command, payload) -> None:
+        attempts = self._consumer_attempts.get(command.command_id, 0) + 1
+        self._consumer_attempts[command.command_id] = attempts
+        delivered = self._endpoint._deliver_presentation_bytes(
+            payload.route, payload.presentation_data, payload.received_at
+        )
+        if delivered.is_err:
+            if attempts >= MAX_CONSUMER_ATTEMPTS:
+                self._consumer_attempts.pop(command.command_id, None)
+                self._fail(command, delivered.error)
+                return
+            self._retry_consumer_command(command)
+            return
+        self._consumer_attempts.pop(command.command_id, None)
+        self._complete(command)
+
+    def _retry_consumer_command(self, command) -> None:
+        """같은 command ID를 새 batch로 예약·공개해 bounded consumer retry를 실행한다."""
+
+        batch = MacCommandBatch(
+            batch_id=self._endpoint._dependencies.id_source.new_event_id(),
+            causation_event_id=command.causation_event_id,
+            commands=(command,),
+        )
+        reservation = self.outbox.submit(batch)
+        if reservation.is_err:
+            self._consumer_attempts.pop(command.command_id, None)
+            self._fail(command, reservation.error)
+            return
+        self.outbox.publish(reservation.value)
+
+    # --- Radio 결과 결속 ---
+
+    def on_burst_completed(self, event) -> bool:
+        burst_id = event.correlation.burst_id
+        if burst_id is None:
+            return False
+        entry = self._burst_commands.pop(burst_id.value, None)
+        if entry is None:
+            return False
+        command, packet_id = entry
+        self.enqueue(
+            PhyTxCompletedEvent(
+                command_id=command.command_id,
+                packet_id=packet_id,
+                completed_at=self._endpoint._time().now_monotonic(),
+            ),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+        self.pump()
+        return True
+
+    def on_rx_window_completed(self, event) -> bool:
+        payload = event.payload
+        key = (payload.channel.name, payload.requested_start_at.total_nanoseconds())
+        command = self._rx_commands.pop(key, None)
+        if command is None:
+            return False
+        self.enqueue(
+            PhyRxWindowClosedEvent(
+                command_id=command.command_id,
+                channel=payload.channel,
+                closed_at=self._endpoint._time().now_monotonic(),
+            ),
+            correlation=command.correlation,
+            causation_command_id=command.command_id,
+            priority=True,
+        )
+        self.pump()
+        return True
+
+    def on_samples_received(self, event) -> bool:
+        """window의 sample을 기존 PHY decode와 동결 `MacPort` 경로로 보낸다."""
+
+        received = event.payload
+        endpoint_config = self._endpoint._dependencies.configuration.endpoint
+        recovered = self._endpoint._phy.decode_samples(
+            PhyDecodeRequest(
+                channel=received.channel,
+                samples=received.samples,
+                allowed_link_ids=endpoint_config.link.supported_link_ids,
+            )
+        )
+        if recovered.is_err:
+            self.report_error(recovered.error)
+            return True
+        self._endpoint._record(
+            InternalEventType.PACKETS_RECOVERED, Layer.PHY, payload=recovered.value
+        )
+        self._endpoint._deliver_recovered(recovered.value, stage4=self)
+        self.pump()
+        return True
 
 
 def build_endpoint(dependencies: EndpointDependencies):
@@ -922,4 +1762,10 @@ def build_endpoint(dependencies: EndpointDependencies):
     return Ok(VdeTerEndpoint(dependencies))
 
 
-__all__ = ["VdeTerEndpoint", "build_endpoint", "PublicErrorCode", "ROUTED_EVENT_TYPES"]
+__all__ = [
+    "PublicErrorCode",
+    "ROUTED_EVENT_TYPES",
+    "Stage4Support",
+    "VdeTerEndpoint",
+    "build_endpoint",
+]

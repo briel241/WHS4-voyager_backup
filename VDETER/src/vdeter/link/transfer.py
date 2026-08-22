@@ -612,25 +612,49 @@ class LinkTransferManager:
         context = self._active.get(transfer_id)
         if context is None:
             tombstone = self._tombstones.get(transfer_id)
-            if tombstone is None:
-                return _error(
-                    ErrorCode.LINK_UNKNOWN_TRANSFER,
-                    ErrorCategory.PROTOCOL,
-                    "terminal control references an unknown transfer",
-                    transfer_id=transfer_id,
-                    session_handle=request.session_handle,
-                )
-            if tombstone.kind is not request.kind or not self._session_compatible(
-                tombstone.session_handle, request.session_handle
+            if tombstone is not None:
+                if tombstone.kind is not request.kind or not self._session_compatible(
+                    tombstone.session_handle, request.session_handle
+                ):
+                    return _error(
+                        ErrorCode.LINK_TRANSFER_TERMINAL_CONFLICT,
+                        ErrorCategory.PROTOCOL,
+                        "terminal control conflicts with the stored tombstone",
+                        transfer_id=transfer_id,
+                        session_handle=request.session_handle,
+                    )
+                return Ok(self._empty_control_result(request.kind))
+
+            # DR-STAGE1-038: a transfer that was analyzed but never built has no
+            # active context or Sequential ID.  Stage 4 may still need to close
+            # it after admission rejection, timeout, cancellation, or draining.
+            # Keep this extension deliberately narrow so all v0.5.3 terminal
+            # meanings and validation outcomes remain unchanged.
+            if (
+                transfer_id in self._analyses
+                and request.kind in (TransferControlKind.FAIL, TransferControlKind.CANCEL)
+                and request.session_handle is None
             ):
-                return _error(
-                    ErrorCode.LINK_TRANSFER_TERMINAL_CONFLICT,
-                    ErrorCategory.PROTOCOL,
-                    "terminal control conflicts with the stored tombstone",
-                    transfer_id=transfer_id,
-                    session_handle=request.session_handle,
+                del self._analyses[transfer_id]
+                self._remember_tombstone(
+                    transfer_id, _TerminalTombstone(request.kind, None)
                 )
-            return Ok(self._empty_control_result(request.kind))
+                return Ok(
+                    LinkTransferControlResult(
+                        kind=request.kind,
+                        progress=(),
+                        released_transfer_ids=(transfer_id,),
+                        released_sequential_ids=(),
+                    )
+                )
+
+            return _error(
+                ErrorCode.LINK_UNKNOWN_TRANSFER,
+                ErrorCategory.PROTOCOL,
+                "terminal control references an unknown transfer",
+                transfer_id=transfer_id,
+                session_handle=request.session_handle,
+            )
 
         if request.session_handle is not None and request.session_handle != context.session_handle:
             return _error(

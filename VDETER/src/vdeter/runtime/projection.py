@@ -65,6 +65,19 @@ _CODE_MAP = {
         PublicErrorCode.UNKNOWN_TRANSFER,
         ServiceErrorCategory.VALIDATION,
     ),
+    # Stage 4 MAC 가산 migration (DR-STAGE4-MAC-015). 기존 공개 code 문자열은 바꾸지 않는다.
+    ErrorCode.MAC_TRANSFER_FAILED: (
+        PublicErrorCode.TRANSFER_FAILED,
+        ServiceErrorCategory.PROTOCOL,
+    ),
+    ErrorCode.MAC_RESOURCE_UNAVAILABLE: (
+        PublicErrorCode.TRANSFER_FAILED,
+        ServiceErrorCategory.RESOURCE,
+    ),
+    ErrorCode.MAC_TRANSFER_TIMEOUT: (
+        PublicErrorCode.TRANSFER_TIMEOUT,
+        ServiceErrorCategory.TIMEOUT,
+    ),
     ErrorCode.RADIO_NOT_CONFIGURED: (PublicErrorCode.DEVICE_ERROR, ServiceErrorCategory.DEVICE),
     ErrorCode.RADIO_NOT_STARTED: (PublicErrorCode.DEVICE_ERROR, ServiceErrorCategory.DEVICE),
     ErrorCode.RADIO_ALREADY_STARTED: (PublicErrorCode.DEVICE_ERROR, ServiceErrorCategory.DEVICE),

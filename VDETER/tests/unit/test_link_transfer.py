@@ -242,6 +242,109 @@ class LinkTransferManagerTest(unittest.TestCase):
         )
         self.assertEqual(1, self.manager.active_sequential_id_count)
 
+    def test_TC_LINK_019_analysis_only_fail_and_cancel_cleanup(self):
+        for terminal in (TransferControlKind.FAIL, TransferControlKind.CANCEL):
+            with self.subTest(terminal=terminal):
+                transfer_id, _ = self._analyze(
+                    b"analysis-only-" + terminal.value.encode()
+                )
+                self.assertEqual(0, self.manager.active_transfer_count)
+                self.assertEqual(0, self.manager.active_sequential_id_count)
+
+                released = self._control(terminal, transfer_id=transfer_id)
+                self.assertTrue(released.is_ok, getattr(released, "error", None))
+                self.assertEqual((), released.value.progress)
+                self.assertEqual(
+                    (transfer_id,), released.value.released_transfer_ids
+                )
+                self.assertEqual((), released.value.released_sequential_ids)
+
+                repeated = self._control(terminal, transfer_id=transfer_id)
+                self.assertTrue(repeated.is_ok, getattr(repeated, "error", None))
+                self.assertEqual((), repeated.value.released_transfer_ids)
+                self.assertEqual((), repeated.value.released_sequential_ids)
+
+                other = (
+                    TransferControlKind.CANCEL
+                    if terminal is TransferControlKind.FAIL
+                    else TransferControlKind.FAIL
+                )
+                conflict = self._control(other, transfer_id=transfer_id)
+                self.assertEqual(
+                    ErrorCode.LINK_TRANSFER_TERMINAL_CONFLICT,
+                    conflict.error.code,
+                )
+                rebuilt = self._build_short(
+                    transfer_id, b"analysis-only-" + terminal.value.encode()
+                )
+                self.assertEqual(
+                    ErrorCode.LINK_TRANSFER_TERMINAL_CONFLICT,
+                    rebuilt.error.code,
+                )
+
+    def test_TC_LINK_019_analysis_only_extension_rejects_other_shapes_without_cleanup(self):
+        transfer_id, _ = self._analyze(b"complete-stays-analyzed")
+        complete = self._control(
+            TransferControlKind.COMPLETE, transfer_id=transfer_id
+        )
+        self.assertEqual(ErrorCode.LINK_UNKNOWN_TRANSFER, complete.error.code)
+        cleanup = self._control(TransferControlKind.FAIL, transfer_id=transfer_id)
+        self.assertTrue(cleanup.is_ok, getattr(cleanup, "error", None))
+
+        transfer_id, _ = self._analyze(b"session-stays-analyzed")
+        session_terminal = self._control(
+            TransferControlKind.FAIL,
+            transfer_id=transfer_id,
+            session_handle=self.ids.new_session_handle(),
+        )
+        self.assertEqual(
+            ErrorCode.LINK_UNKNOWN_TRANSFER, session_terminal.error.code
+        )
+        cleanup = self._control(
+            TransferControlKind.CANCEL, transfer_id=transfer_id
+        )
+        self.assertTrue(cleanup.is_ok, getattr(cleanup, "error", None))
+
+        transfer_id, _ = self._analyze(b"abort-does-not-clean-analysis")
+        abort = self._control(
+            TransferControlKind.ABORT_SESSION,
+            session_handle=self.ids.new_session_handle(),
+        )
+        self.assertTrue(abort.is_ok, getattr(abort, "error", None))
+        self.assertEqual((), abort.value.released_transfer_ids)
+        cleanup = self._control(
+            TransferControlKind.FAIL, transfer_id=transfer_id
+        )
+        self.assertTrue(cleanup.is_ok, getattr(cleanup, "error", None))
+
+        transfer_id, _ = self._analyze(b"progress-does-not-clean-analysis")
+        progress = self._control(
+            TransferControlKind.PROGRESS,
+            transfer_id=transfer_id,
+            packet_progress=(
+                TransferPacketProgress(
+                    self.ids.new_packet_id(), TransferPacketOutcome.DISCARDED
+                ),
+            ),
+        )
+        self.assertEqual(ErrorCode.LINK_UNKNOWN_TRANSFER, progress.error.code)
+        cleanup = self._control(
+            TransferControlKind.FAIL, transfer_id=transfer_id
+        )
+        self.assertTrue(cleanup.is_ok, getattr(cleanup, "error", None))
+
+    def test_TC_LINK_019_active_context_precedes_analysis_only_cleanup(self):
+        payload = b"active-precedence"
+        transfer_id, _ = self._analyze(payload)
+        built = self._build_short(transfer_id, payload).value
+        released = self._control(
+            TransferControlKind.FAIL, transfer_id=transfer_id
+        )
+        self.assertEqual((transfer_id,), released.value.released_transfer_ids)
+        self.assertEqual(
+            (built.sequential_id,), released.value.released_sequential_ids
+        )
+
     def test_TC_LINK_023_progress_and_safe_profile_repartition(self):
         payload = bytes(range(100))  # Segment is 104 bytes: 35, 35, 34 on Link ID 11.
         transfer_id, requirement = self._analyze(payload)
@@ -434,6 +537,59 @@ class LinkTransferManagerTest(unittest.TestCase):
             self.assertTrue(released.is_ok, getattr(released, "error", None))
             oldest = transfer_id if oldest is None else oldest
             newest = transfer_id
+        self.assertEqual(
+            MAX_TERMINAL_TOMBSTONES, self.manager.terminal_tombstone_count
+        )
+        evicted = self._control(
+            TransferControlKind.FAIL, transfer_id=oldest
+        )
+        self.assertEqual(ErrorCode.LINK_UNKNOWN_TRANSFER, evicted.error.code)
+        retained = self._control(
+            TransferControlKind.FAIL, transfer_id=newest
+        )
+        self.assertTrue(retained.is_ok, getattr(retained, "error", None))
+
+    def test_TC_LINK_034_analysis_only_tombstone_late_progress_restart_and_limit(self):
+        transfer_id, _ = self._analyze(b"analysis-tombstone")
+        released = self._control(
+            TransferControlKind.CANCEL, transfer_id=transfer_id
+        )
+        self.assertTrue(released.is_ok, getattr(released, "error", None))
+
+        late = self._control(
+            TransferControlKind.PROGRESS,
+            transfer_id=transfer_id,
+            packet_progress=(
+                TransferPacketProgress(
+                    self.ids.new_packet_id(), TransferPacketOutcome.SUCCESS
+                ),
+            ),
+        )
+        self.assertEqual(
+            ErrorCode.LINK_TRANSFER_TERMINAL_CONFLICT, late.error.code
+        )
+
+        self.manager.restart()
+        after_restart = self._control(
+            TransferControlKind.CANCEL, transfer_id=transfer_id
+        )
+        self.assertEqual(ErrorCode.LINK_UNKNOWN_TRANSFER, after_restart.error.code)
+        analyzed_again = self._analyze(
+            b"analysis-tombstone", transfer_id=transfer_id
+        )[1]
+        self.assertEqual(transfer_id, analyzed_again.transfer_id)
+
+        self.manager.restart()
+        oldest = None
+        newest = None
+        for index in range(MAX_TERMINAL_TOMBSTONES + 1):
+            candidate, _ = self._analyze(index.to_bytes(2, "big"))
+            cleanup = self._control(
+                TransferControlKind.FAIL, transfer_id=candidate
+            )
+            self.assertTrue(cleanup.is_ok, getattr(cleanup, "error", None))
+            oldest = candidate if oldest is None else oldest
+            newest = candidate
         self.assertEqual(
             MAX_TERMINAL_TOMBSTONES, self.manager.terminal_tombstone_count
         )
