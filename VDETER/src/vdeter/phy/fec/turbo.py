@@ -213,6 +213,186 @@ def _siso(
     return tuple(posterior), tuple(extrinsic)
 
 
+def encode_with_permutation(information_bits, permutation_zero_based) -> TurboEncoded:
+    """공통 §3~4 general 부호기: 임의 K와 명시적 interleaver 순열을 사용한다."""
+
+    bits = tuple(information_bits)
+    permutation = tuple(permutation_zero_based)
+    if len(bits) != len(permutation) or any(bit not in (0, 1) for bit in bits):
+        raise ValueError("general Turbo encoder requires K bits and a K permutation")
+    permuted = tuple(bits[index] for index in permutation)
+    first_state = 0
+    second_state = 0
+    rows = []
+    for original, interleaved_bit in zip(bits, permuted):
+        first_state, first_output = rsc_step(first_state, original)
+        second_state, second_output = rsc_step(second_state, interleaved_bit)
+        rows.append(first_output + second_output)
+    first_final = first_state
+    second_final = second_state
+    tails = []
+    for _ in range(3):
+        first_state, output = rsc_tail(first_state)
+        tails.append(output + (0, 0, 0))
+    for _ in range(3):
+        second_state, output = rsc_tail(second_state)
+        tails.append((0, 0, 0) + output)
+    if first_state != 0 or second_state != 0:
+        raise AssertionError("Turbo RSC termination invariant failed")
+    return TurboEncoded(
+        data_rows=tuple(rows),
+        tail_rows=tuple(tails),
+        channel_bits=(),
+        first_final_state=first_final,
+        second_final_state=second_final,
+    )
+
+
+def _siso_general(systematic, parity0, parity1, apriori_data):
+    """길이 주도 Log-MAP SISO. 수치 규칙은 동결 `_siso`와 동일하다."""
+
+    k = len(apriori_data)
+    steps = k + 3
+    if not (len(systematic) == len(parity0) == len(parity1) == steps):
+        raise ValueError("Log-MAP SISO length invariant failed")
+    if any(
+        not math.isfinite(value)
+        for values in (systematic, parity0, parity1, apriori_data)
+        for value in values
+    ):
+        raise ArithmeticError("Turbo decoder received a non-finite LLR")
+
+    transitions = RSC_TRANSITIONS
+    inf = math.inf
+    log1p = math.log1p
+    exp = math.exp
+
+    gamma = []
+    for index in range(steps):
+        la = apriori_data[index] if index < k else 0.0
+        t0 = systematic[index] + la
+        p0_value = parity0[index]
+        p1_value = parity1[index]
+        step = []
+        for state in range(8):
+            row = []
+            for bit in (0, 1):
+                next_state, (_, p0, p1) = transitions[state][bit]
+                t1 = t0 if bit == 0 else -t0
+                t2 = p0_value if p0 == 0 else -p0_value
+                t3 = p1_value if p1 == 0 else -p1_value
+                row.append((next_state, 0.5 * ((t1 + t2) + t3)))
+            step.append(tuple(row))
+        gamma.append(tuple(step))
+
+    alpha = [[-inf] * 8 for _ in range(steps + 1)]
+    alpha[0][0] = 0.0
+    for index in range(steps):
+        following = [-inf] * 8
+        current = alpha[index]
+        step = gamma[index]
+        for state in range(8):
+            base = current[state]
+            if base == -inf:
+                continue
+            for target, branch in step[state]:
+                candidate = base + branch
+                existing = following[target]
+                if existing == -inf:
+                    following[target] = candidate
+                else:
+                    maximum = existing if existing >= candidate else candidate
+                    following[target] = maximum + log1p(exp(-abs(existing - candidate)))
+        alpha[index + 1] = _normalize(following)
+
+    beta = [[-inf] * 8 for _ in range(steps + 1)]
+    beta[steps][0] = 0.0
+    for index in range(steps - 1, -1, -1):
+        preceding = [-inf] * 8
+        step = gamma[index]
+        upcoming = beta[index + 1]
+        for state in range(8):
+            best = -inf
+            for target, branch in step[state]:
+                candidate = branch + upcoming[target]
+                if best == -inf:
+                    best = candidate
+                elif candidate != -inf:
+                    maximum = best if best >= candidate else candidate
+                    best = maximum + log1p(exp(-abs(best - candidate)))
+            preceding[state] = best
+        beta[index] = _normalize(preceding)
+
+    posterior = []
+    extrinsic = []
+    for index in range(k):
+        maxima = [-inf, -inf]
+        current = alpha[index]
+        upcoming = beta[index + 1]
+        step = gamma[index]
+        for state in range(8):
+            base = current[state]
+            if base == -inf:
+                continue
+            for bit in (0, 1):
+                target, branch = step[state][bit]
+                candidate = base + branch + upcoming[target]
+                existing = maxima[bit]
+                if existing == -inf:
+                    maxima[bit] = candidate
+                elif candidate != -inf:
+                    maximum = existing if existing >= candidate else candidate
+                    maxima[bit] = maximum + log1p(exp(-abs(existing - candidate)))
+        if not all(math.isfinite(value) for value in maxima):
+            raise ArithmeticError("Turbo posterior has no finite bit metric")
+        post = maxima[0] - maxima[1]
+        posterior.append(post)
+        extrinsic.append((post - systematic[index]) - apriori_data[index])
+    return tuple(posterior), tuple(extrinsic)
+
+
+def decode_rows(data_rows, tail_rows, permutation_zero_based, iterations: int = 8) -> tuple[int, ...]:
+    """공통 §6 general 복호기: rate-recover된 6-column rows에서 K bits를 복원한다."""
+
+    if iterations != 8:
+        raise ValueError("The approved decoder profile uses exactly 8 iterations")
+    permutation = tuple(permutation_zero_based)
+    k = len(permutation)
+    data = tuple(tuple(float(value) for value in row) for row in data_rows)
+    tails = tuple(tuple(float(value) for value in row) for row in tail_rows)
+    if len(data) != k or len(tails) != 6 or any(len(row) != 6 for row in data + tails):
+        raise ValueError("general Turbo decoder row invariant failed")
+
+    def permute(values):
+        return tuple(values[index] for index in permutation)
+
+    def unpermute(values):
+        restored = [0.0] * k
+        for output_index, input_index in enumerate(permutation):
+            restored[input_index] = values[output_index]
+        return tuple(restored)
+
+    lx = tuple(row[0] for row in data)
+    sys1 = lx + tuple(row[0] for row in tails[:3])
+    p01 = tuple(row[1] for row in data) + tuple(row[1] for row in tails[:3])
+    p11 = tuple(row[2] for row in data) + tuple(row[2] for row in tails[:3])
+    sys2 = permute(lx) + tuple(row[3] for row in tails[3:])
+    p02 = tuple(row[4] for row in data) + tuple(row[4] for row in tails[3:])
+    p12 = tuple(row[5] for row in data) + tuple(row[5] for row in tails[3:])
+
+    la1 = (0.0,) * k
+    post2 = (0.0,) * k
+    for _ in range(iterations):
+        _, ext1 = _siso_general(sys1, p01, p11, la1)
+        la2 = permute(ext1)
+        post2, ext2 = _siso_general(sys2, p02, p12, la2)
+        la1 = unpermute(ext2)
+    final = unpermute(post2)
+    if any(not math.isfinite(value) for value in final):
+        raise ArithmeticError("Turbo decoder produced non-finite final LLRs")
+    return tuple(0 if value >= 0.0 else 1 for value in final)
+
+
 def decode(channel_llrs, iterations: int = 8) -> tuple[int, ...]:
     if iterations != 8:
         raise ValueError("The approved Link ID 11 decoder uses exactly 8 iterations")

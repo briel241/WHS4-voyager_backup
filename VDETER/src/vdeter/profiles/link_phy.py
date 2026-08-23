@@ -31,6 +31,8 @@ PLANNED_LINK_IDS = (11, 17, 19)
 TEST_LINK_ID = 63
 
 PHY11_PROFILE_SCHEMA_ID = "phy11-profile-v2"
+STAGE6_PROFILE_SCHEMA_ID = "stage6-phy-profile-v4"
+STAGE6_REGISTRY_CONTENT_VERSION = "stage6-phy11-17-19-v5"
 PHY11_REGISTRY_CONTENT_VERSION = "stage2-phy11-v2"
 PHY11_REGISTRY_FINGERPRINT = (
     "ce8760138f3a7640705b71af4500520afabf26e9fb5300db524f61a5b0114898"
@@ -76,7 +78,7 @@ def _freeze_mapping(mapping: dict) -> tuple:
             )
         if isinstance(value, (tuple, list)):
             return tuple(freeze(item) for item in value)
-        if isinstance(value, (str, int, bool)) or value is None:
+        if isinstance(value, (str, int, bool, float)) or value is None:
             return value
         raise InvalidValueError(
             f"PhyProfileParameters에는 canonical scalar/tuple만 허용합니다 ({type(value).__name__})"
@@ -113,9 +115,20 @@ class PhyProfileParameters:
     receiver: tuple
     timestamp: tuple
     vectors: tuple
+    normative_source: tuple | None = None
 
     def __post_init__(self) -> None:
-        if self.profile_schema_id != PHY11_PROFILE_SCHEMA_ID:
+        if self.profile_schema_id == PHY11_PROFILE_SCHEMA_ID:
+            if self.normative_source is not None:
+                raise InvalidValueError(
+                    "Link 11 schema는 normative_source key를 갖지 않습니다"
+                )
+        elif self.profile_schema_id == STAGE6_PROFILE_SCHEMA_ID:
+            if not isinstance(self.normative_source, tuple):
+                raise InvalidValueError(
+                    "stage6 schema에는 normative_source가 필요합니다"
+                )
+        else:
             raise InvalidValueError("PhyProfileParameters.profile_schema_id가 승인값과 다릅니다")
         for name in (
             "identity", "counts", "rates", "fec", "scrambler", "training",
@@ -140,7 +153,11 @@ class PhyProfileParameters:
             "receiver": _thaw_mapping(self.receiver),
             "timestamp": _thaw_mapping(self.timestamp),
             "vectors": _thaw_mapping(self.vectors),
-        }
+        } | (
+            {"normative_source": _thaw_mapping(self.normative_source)}
+            if self.normative_source is not None
+            else {}
+        )
 
     def section(self, name: str) -> dict:
         if name not in {
@@ -493,10 +510,17 @@ class PhyProfileEntry:
                 identity["link_id"] != self.link_id.value
                 or rates["symbol_rate_hz"] != self.symbol_rate_hz
                 or rates["sample_rate_hz"] != self.sample_rate_hz
-                or counts["packet_bytes"] != 54
-                or counts["information_bits"] != 432
-                or counts["channel_bits"] != 874
-                or counts["slot_samples"] != 2048
+                or counts["information_bits"] != counts["packet_bytes"] * 8
+                or counts["channel_bits"]
+                != counts["data_symbols"] * rates["bits_per_data_symbol"]
+                or counts["body_symbols"]
+                != counts["training_symbols"]
+                + counts["link_id_symbols"]
+                + counts["data_symbols"]
+                or counts["slot_samples"]
+                != counts["slot_symbols"] * rates["samples_per_symbol"]
+                or counts["slot_samples"]
+                != counts["active_samples"] + counts["guard_samples"]
             ):
                 raise InvalidValueError("PhyProfileEntry와 완결 parameters가 일치하지 않습니다")
 
@@ -665,6 +689,628 @@ def build_message_profile_registry(
 
     registry = ExplicitRegistry("message_profile", scope, content_version, MessageProfileEntry)
     registered = registry.register_all(entries_for(scope))
+    if registered.is_err:
+        return registered
+    return Ok(registry)
+
+
+# --- Stage 6 Link 17·19 combined registry ---------------------------------
+# 아래 두 content는 각 Link 기준선 §10의 `fingerprint_content()` 반환 표현이며
+# 실행 경로 값은 factory의 교차 검증으로 frozen runtime 모듈과 결속한다.
+
+
+def _phy17_content() -> dict:
+    return {
+        "profile_schema_id": "stage6-phy-profile-v4",
+        "identity": {
+            "baseline_id": "VDETER-STAGE6-PHY17-BL-001",
+            "baseline_version": "0.7.2",
+            "link_id": 17,
+            "pl_format": "TER-MCS-1.100",
+            "profile_id": "phy17-markdown-v4",
+            "scope": "OPERATIONAL",
+            "source_document": "ITU-R M.2092-2",
+            "source_edition": "02/2026",
+            "source_location": "Annex 2 §A2-1.2; Annex 4 §A4-3, §A4-4",
+            "support_status": "SUPPORTED",
+        },
+        "counts": {
+            "active_samples": 7936,
+            "active_symbols": 1984,
+            "body_samples": 7680,
+            "body_symbols": 1920,
+            "channel_bits": 3754,
+            "data_channel_bits": 3744,
+            "data_symbols": 1877,
+            "guard_samples": 256,
+            "guard_symbols": 64,
+            "information_bits": 1872,
+            "link_id_symbols": 16,
+            "packet_bytes": 234,
+            "phy_padding_bits": 0,
+            "ramp_down_samples": 128,
+            "ramp_down_symbols": 32,
+            "ramp_up_samples": 128,
+            "ramp_up_symbols": 32,
+            "slot_samples": 8192,
+            "slot_symbols": 2048,
+            "tail_channel_bits": 10,
+            "training_symbols": 27,
+        },
+        "rates": {
+            "bits_per_data_symbol": 2,
+            "channel_bandwidth_hz": 100000,
+            "sample_rate_hz": 307200,
+            "samples_per_symbol": 4,
+            "signal_bandwidth_hz": 99800,
+            "symbol_rate_hz": 76800,
+        },
+        "fec": {
+            "data_puncture_id": 6,
+            "data_puncture_rows": [[1, 1, 0, 0, 0, 0], [1, 0, 0, 0, 1, 0]],
+            "decoder_id": "log-map-f64-8iter-v1",
+            "decoder_iterations": 8,
+            "hard_tie": "llr-greater-than-or-equal-zero-is-bit-0",
+            "interleaver": {
+                "formula_id": "m2092-general-permutation-v1",
+                "k": 1872,
+                "k1": 6,
+                "k2": 312,
+                "primes": [211, 61, 227, 239, 181, 79, 73, 193],
+            },
+            "rsc_denominator_exponents": [0, 2, 3],
+            "rsc_numerator_0_exponents": [0, 1, 3],
+            "rsc_numerator_1_exponents": [0, 1, 2, 3],
+            "serialization_order": ["X", "Y0", "Y1", "X'", "Y'0", "Y'1"],
+            "siso_steps": 1875,
+            "termination_tail_inputs": ["000", "100", "110", "010", "011", "111", "101", "001"],
+            "tail_puncture_id": "6a",
+            "tail_puncture_rows": [
+                [1, 1, 0, 0, 0, 0],
+                [1, 1, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 0],
+                [0, 0, 0, 1, 1, 0],
+                [0, 0, 0, 1, 0, 0],
+            ],
+        },
+        "scrambler": {
+            "bit_order": "channel-left-first",
+            "initial_state": [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            "packet_reset": True,
+            "polynomial_exponents": [0, 14, 15],
+            "scrambled_bits": 3754,
+            "training_and_link_id_excluded": True,
+        },
+        "training": {
+            "bits": "111111001101010000011001010",
+            "first_phase": "green",
+            "mapping": {
+                "0": "00",
+                "1": "11",
+            },
+            "modulation": "pi/4-QPSK",
+            "symbols": 27,
+        },
+        "link_id_code": {
+            "codeword": "10000111001101110010010011100101",
+            "codeword_bits": 32,
+            "detector_candidate_range": [0, 63],
+            "exact_tie_rejected": True,
+            "hard_distance_max": 7,
+            "information_bits": 6,
+            "scrambling_word": "11000010111000101000111001001111",
+            "value": 17,
+            "value_bits": "010001",
+        },
+        "modulation": {
+            "bits_per_symbol": 2,
+            "data_phase_alternation": True,
+            "identifier": "pi/4-QPSK",
+            "label_order": ["00", "01", "11", "10"],
+            "normalization_binary64_bits": 4604544271217802189,
+        },
+        "waveform": {
+            "guard_samples": 256,
+            "phase_hold": True,
+            "ramp_id": "rrc-continuous-avg-db-linear-v2",
+            "ramp_samples": 128,
+            "reference_power_ratio": [1, 4],
+            "rrc_beta_ratio": [3, 10],
+            "rrc_group_delay_samples": 20,
+            "rrc_span_symbols": 10,
+            "rrc_tap_binary64_bits": [
+                4561528387110721419,
+                13794938650351962643,
+                13796332409199125494,
+                13783121652466558305,
+                4573509893763543727,
+                4574870330844761916,
+                13784846569653267972,
+                13801928541859933995,
+                13803802258031059430,
+                13792764167538667628,
+                4582145384294991963,
+                4585992274673594801,
+                4583814571479215940,
+                13804521522459226049,
+                13813571218424099223,
+                13815059194420588553,
+                13808937871933581956,
+                4592688422846200875,
+                4599214752718274761,
+                4602232803638848879,
+                4603048513493868935,
+                4602232803638848879,
+                4599214752718274761,
+                4592688422846200875,
+                13808937871933581956,
+                13815059194420588553,
+                13813571218424099223,
+                13804521522459226049,
+                4583814571479215940,
+                4585992274673594801,
+                4582145384294991963,
+                13792764167538667628,
+                13803802258031059430,
+                13801928541859933995,
+                13784846569653267972,
+                4574870330844761916,
+                4573509893763543727,
+                13783121652466558305,
+                13796332409199125494,
+                13794938650351962643,
+                4561528387110721419,
+            ],
+            "rrc_tap_binary64_bits_source": "phy11-profile-v2.waveform.rrc_tap_binary64_bits",
+            "rrc_taps_sha256": "1349ba6bac54cdd4a5e8cc3a89c4e22571a74cf20cf2f92dcf6b50b4227f588d",
+            "rrc_taps_unit_energy": True,
+            "sample_format": "cf32le",
+            "slot_samples": 8192,
+            "tx_scale_application": "after-rrc-and-ramp-before-guard-and-cf32le",
+            "tx_scale_binary64_bits": 4607182418800017408,
+            "tx_scale_ratio": [1, 1],
+            "unscaled_peak_bound": 0.8268066598557832,
+            "scaled_peak_bound": 0.8268066598557832,
+        },
+        "receiver": {
+            "arithmetic": "ieee754-binary64-index-order-no-fma-fast-math",
+            "candidate_max": 8,
+            "candidate_suppression_samples": 4,
+            "cfo_acquisition_coarse_hz": [-2200, 2200, 50],
+            "cfo_acquisition_fine_hz": [-50, 50, 5],
+            "cfo_hz_range": [-2000, 2000],
+            "detector_id": "two-stage-normalized-training-correlation-v2",
+            "demapper_id": "max-log-positive-is-bit-0-v1",
+            "error_precedence_id": "stage6-common-7.8-v1",
+            "fec_aided_cfo_coarse_hz": [-400, 400, 25],
+            "fec_aided_cfo_fine_hz": [-25, 25, 1],
+            "fec_aided_reference_symbols": 1920,
+            "fec_aided_sro_ppm": [-10, 10, 1],
+            "final_order": ["Q-desc", "training-C-desc", "epoch-asc"],
+            "gain_range": [0.25, 4.0],
+            "initial_scan_first_sample": 20,
+            "interpolation_id": "lagrange-cubic-four-point-zero-extension-v1",
+            "link_id_hard_distance_max": 7,
+            "matched_filter_extension": "zero",
+            "noise_floor": 1e-12,
+            "prefix_refinement_coarse_hz": [-400, 400, 10],
+            "prefix_refinement_fine_hz": [-10, 10, 1],
+            "refinement_passes": 1,
+            "sro_ppm_range": [-10, 10],
+            "stream_buffer_samples": 8232,
+            "thresholds": [0.3, 0.525, 1.05],
+            "tracking_data_alpha_beta": [[2, 25], [1, 1000]],
+            "tracking_prefix_alpha_beta": [[1, 10], [3, 2000]],
+            "timing_fraction_denominator": 16,
+            "timing_fraction_steps": [-8, 8],
+        },
+        "timestamp": {
+            "burst_formula_id": "stage6-common-exact-rational-v1",
+            "reference": "first-training-symbol-centre-after-mf-group-delay-removal",
+            "tolerance_ns": 3256,
+        },
+        "vectors": {
+            "awgn_domain": "VDETER-PHY17-AWGN-V1",
+            "awgn_es_tx_ratio": [1, 1],
+            "awgn_packet_sequence": "REPEAT-CANONICAL-PACKET-1000",
+            "awgn_scale_id": "mpfr256-db-to-binary64-rne-v1",
+            "awgn_sweep_tenths_db": [-10, 50, 1],
+            "bursts_per_point": 1000,
+            "generator_imports_production": False,
+            "impairment_cases": [
+                ["IDEAL", 0, 0, 0, 0, 1],
+                ["TIMING_MAX", "63/16", 0, 0, 0, 1],
+                ["CFO_MIN", 0, 0, -2000, 0, 1],
+                ["CFO_MAX", 0, 0, 2000, 0, 1],
+                ["SRO_MIN", 0, 0, 0, -10, 1],
+                ["SRO_MAX", 0, 0, 0, 10, 1],
+                ["GAIN_MIN", 0, 0, 0, 0, "1/4"],
+                ["GAIN_MAX", 0, 0, 0, 0, 4],
+                ["PHASE_WRAP", 0, "-pi", 0, 0, 1],
+                ["MIXED", "23/16", "3*pi/7", 1375, 6, "5/4"],
+            ],
+            "impairment_order": ["timing-sro", "gain-phase-cfo", "awgn"],
+            "impairment_trig_id": "mpfr256-direct-angle-binary64-rne-v1",
+            "noise_only_domain": "VDETER-PHY17-NOISE-V1",
+            "noise_only_points_tenths_db": [-10, 10, 50],
+            "official_es_n0_db": 1.0,
+            "packet_rng_id": "sha256-counter-bytes-v2",
+            "loopback_fixed_packets": 5,
+            "loopback_random_domain": "VDETER-PHY17-LOOPBACK-PACKET-V2",
+            "loopback_random_packets": 256,
+            "impairment_random_packets_per_case": 64,
+            "rng_id": "sha256-counter-box-muller-mpfr256-v2",
+            "rng_seed_formula": "0x5644455445520000 + link_id*0x100 + sequence",
+            "sample_format": "cf32le",
+            "sample_rounding": "binary64-add-then-binary32-rne-once",
+        },
+        "normative_source": {
+            "binding_algorithm": "markdown-region-lf-normalized-sha256-v1",
+            "common_baseline_id": "VDETER-STAGE6-PHY-COMMON-BL-001",
+            "common_baseline_version": "0.5.2",
+            "common_normative_sha256": "b6d0e76ba71b040a73f012b3f98b33337a4424f9777f95a497cf40183f6b3927",
+            "link_normative_sha256": "ec61c00822a81606a8d7ed68a2080eedd3f12dd28a3576acf0e47afffed687aa",
+        },
+    }
+
+
+def _phy19_content() -> dict:
+    return {
+        "profile_schema_id": "stage6-phy-profile-v4",
+        "identity": {
+            "baseline_id": "VDETER-STAGE6-PHY19-BL-001",
+            "baseline_version": "0.7.2",
+            "link_id": 19,
+            "pl_format": "TER-MCS-5.100",
+            "profile_id": "phy19-markdown-v4",
+            "scope": "OPERATIONAL",
+            "source_document": "ITU-R M.2092-2",
+            "source_edition": "02/2026",
+            "source_location": "Annex 2 §A2-1.2; Annex 4 §A4-3, §A4-4",
+            "support_status": "SUPPORTED",
+        },
+        "counts": {
+            "active_samples": 7936,
+            "active_symbols": 1984,
+            "body_samples": 7680,
+            "body_symbols": 1920,
+            "channel_bits": 7508,
+            "data_channel_bits": 7488,
+            "data_symbols": 1877,
+            "guard_samples": 256,
+            "guard_symbols": 64,
+            "information_bits": 5616,
+            "link_id_symbols": 16,
+            "packet_bytes": 702,
+            "phy_padding_bits": 8,
+            "ramp_down_samples": 128,
+            "ramp_down_symbols": 32,
+            "ramp_up_samples": 128,
+            "ramp_up_symbols": 32,
+            "slot_samples": 8192,
+            "slot_symbols": 2048,
+            "tail_channel_bits": 12,
+            "training_symbols": 27,
+        },
+        "rates": {
+            "bits_per_data_symbol": 4,
+            "channel_bandwidth_hz": 100000,
+            "sample_rate_hz": 307200,
+            "samples_per_symbol": 4,
+            "signal_bandwidth_hz": 99800,
+            "symbol_rate_hz": 76800,
+        },
+        "fec": {
+            "data_puncture_id": 8,
+            "data_puncture_rows": [
+                [1, 0, 1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 1],
+            ],
+            "decoder_id": "log-map-f64-8iter-v1",
+            "decoder_iterations": 8,
+            "hard_tie": "llr-greater-than-or-equal-zero-is-bit-0",
+            "interleaver": {
+                "formula_id": "m2092-general-permutation-v1",
+                "k": 5616,
+                "k1": 16,
+                "k2": 351,
+                "primes": [137, 101, 223, 41, 67, 131, 61, 47],
+            },
+            "padding_order": "punctured-data-zero-pad-tail",
+            "rsc_denominator_exponents": [0, 2, 3],
+            "rsc_numerator_0_exponents": [0, 1, 3],
+            "rsc_numerator_1_exponents": [0, 1, 2, 3],
+            "serialization_order": ["X", "Y0", "Y1", "X'", "Y'0", "Y'1"],
+            "siso_steps": 5619,
+            "termination_tail_inputs": ["000", "100", "110", "010", "011", "111", "101", "001"],
+            "tail_puncture_id": 8,
+            "tail_puncture_rows": [
+                [1, 0, 1, 0, 0, 0],
+                [1, 0, 1, 0, 0, 0],
+                [1, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 1],
+                [0, 0, 0, 1, 0, 1],
+                [0, 0, 0, 1, 0, 1],
+            ],
+        },
+        "scrambler": {
+            "bit_order": "channel-left-first",
+            "initial_state": [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            "packet_reset": True,
+            "polynomial_exponents": [0, 14, 15],
+            "scrambled_bits": 7508,
+            "training_and_link_id_excluded": True,
+        },
+        "training": {
+            "bits": "111111001101010000011001010",
+            "first_phase": "green",
+            "mapping": {
+                "0": "00",
+                "1": "11",
+            },
+            "modulation": "pi/4-QPSK",
+            "symbols": 27,
+        },
+        "link_id_code": {
+            "codeword": "10001111010010000010010000011010",
+            "codeword_bits": 32,
+            "detector_candidate_range": [0, 63],
+            "exact_tie_rejected": True,
+            "hard_distance_max": 7,
+            "information_bits": 6,
+            "scrambling_word": "11000010111000101000111001001111",
+            "value": 19,
+            "value_bits": "010011",
+        },
+        "modulation": {
+            "bits_per_symbol": 4,
+            "data_phase_alternation": False,
+            "identifier": "16-QAM-Gray",
+            "level_order": [-3, -1, 1, 3],
+            "normalization_binary64_bits": 4599368272914696463,
+            "slicer_tie": "label-ascii-lexicographic",
+        },
+        "waveform": {
+            "guard_samples": 256,
+            "phase_hold": True,
+            "ramp_id": "rrc-continuous-avg-db-linear-v2",
+            "ramp_samples": 128,
+            "reference_power_ratio": [1, 4],
+            "rrc_beta_ratio": [3, 10],
+            "rrc_group_delay_samples": 20,
+            "rrc_span_symbols": 10,
+            "rrc_tap_binary64_bits": [
+                4561528387110721419,
+                13794938650351962643,
+                13796332409199125494,
+                13783121652466558305,
+                4573509893763543727,
+                4574870330844761916,
+                13784846569653267972,
+                13801928541859933995,
+                13803802258031059430,
+                13792764167538667628,
+                4582145384294991963,
+                4585992274673594801,
+                4583814571479215940,
+                13804521522459226049,
+                13813571218424099223,
+                13815059194420588553,
+                13808937871933581956,
+                4592688422846200875,
+                4599214752718274761,
+                4602232803638848879,
+                4603048513493868935,
+                4602232803638848879,
+                4599214752718274761,
+                4592688422846200875,
+                13808937871933581956,
+                13815059194420588553,
+                13813571218424099223,
+                13804521522459226049,
+                4583814571479215940,
+                4585992274673594801,
+                4582145384294991963,
+                13792764167538667628,
+                13803802258031059430,
+                13801928541859933995,
+                13784846569653267972,
+                4574870330844761916,
+                4573509893763543727,
+                13783121652466558305,
+                13796332409199125494,
+                13794938650351962643,
+                4561528387110721419,
+            ],
+            "rrc_tap_binary64_bits_source": "phy11-profile-v2.waveform.rrc_tap_binary64_bits",
+            "rrc_taps_sha256": "1349ba6bac54cdd4a5e8cc3a89c4e22571a74cf20cf2f92dcf6b50b4227f588d",
+            "rrc_taps_unit_energy": True,
+            "sample_format": "cf32le",
+            "slot_samples": 8192,
+            "tx_scale_application": "after-rrc-and-ramp-before-guard-and-cf32le",
+            "tx_scale_binary64_bits": 4606056518893174784,
+            "tx_scale_ratio": [7, 8],
+            "unscaled_peak_bound": 1.1092775374122466,
+            "scaled_peak_bound": 0.9706178452357157,
+            "scaled_power_bound": 0.9420990014900238,
+            "cf32_power_bound_exclusive": 0.9421,
+        },
+        "receiver": {
+            "arithmetic": "ieee754-binary64-index-order-no-fma-fast-math",
+            "candidate_max": 8,
+            "candidate_suppression_samples": 4,
+            "cfo_acquisition_coarse_hz": [-2200, 2200, 50],
+            "cfo_acquisition_fine_hz": [-50, 50, 5],
+            "cfo_hz_range": [-2000, 2000],
+            "data_tracking_id": "normalized-16qam-decision-directed-v1",
+            "detector_id": "two-stage-normalized-training-correlation-v2",
+            "demapper_id": "max-log-positive-is-bit-0-v1",
+            "error_precedence_id": "stage6-common-7.8-v1",
+            "fec_aided_cfo_coarse_hz": [-400, 400, 25],
+            "fec_aided_cfo_fine_hz": [-25, 25, 1],
+            "fec_aided_reference_symbols": 1920,
+            "fec_aided_sro_ppm": [-10, 10, 1],
+            "final_order": ["Q-desc", "training-C-desc", "epoch-asc"],
+            "gain_range": [0.25, 4.0],
+            "initial_scan_first_sample": 20,
+            "interpolation_id": "lagrange-cubic-four-point-zero-extension-v1",
+            "link_id_hard_distance_max": 7,
+            "matched_filter_extension": "zero",
+            "noise_floor": 1e-12,
+            "prefix_refinement_coarse_hz": [-400, 400, 10],
+            "prefix_refinement_fine_hz": [-10, 10, 1],
+            "refinement_passes": 1,
+            "sro_ppm_range": [-10, 10],
+            "stream_buffer_samples": 8232,
+            "thresholds": [0.3, 0.525, 1.05],
+            "tracking_data_alpha_beta": [[2, 25], [1, 1000]],
+            "tracking_prefix_alpha_beta": [[1, 10], [3, 2000]],
+            "timing_fraction_denominator": 16,
+            "timing_fraction_steps": [-8, 8],
+        },
+        "timestamp": {
+            "burst_formula_id": "stage6-common-exact-rational-v1",
+            "reference": "first-training-symbol-centre-after-mf-group-delay-removal",
+            "tolerance_ns": 3256,
+        },
+        "vectors": {
+            "awgn_domain": "VDETER-PHY19-AWGN-V1",
+            "awgn_es_tx_ratio": [49, 64],
+            "awgn_packet_sequence": "REPEAT-CANONICAL-PACKET-1000",
+            "awgn_scale_id": "mpfr256-db-to-binary64-rne-v1",
+            "awgn_sweep_tenths_db": [82, 142, 1],
+            "bursts_per_point": 1000,
+            "generator_imports_production": False,
+            "impairment_cases": [
+                ["IDEAL", 0, 0, 0, 0, 1],
+                ["TIMING_MAX", "63/16", 0, 0, 0, 1],
+                ["CFO_MIN", 0, 0, -2000, 0, 1],
+                ["CFO_MAX", 0, 0, 2000, 0, 1],
+                ["SRO_MIN", 0, 0, 0, -10, 1],
+                ["SRO_MAX", 0, 0, 0, 10, 1],
+                ["GAIN_MIN", 0, 0, 0, 0, "1/4"],
+                ["GAIN_MAX", 0, 0, 0, 0, 4],
+                ["PHASE_WRAP", 0, "-pi", 0, 0, 1],
+                ["MIXED", "23/16", "3*pi/7", 1375, 6, "5/4"],
+            ],
+            "impairment_order": ["timing-sro", "gain-phase-cfo", "awgn"],
+            "impairment_trig_id": "mpfr256-direct-angle-binary64-rne-v1",
+            "noise_only_domain": "VDETER-PHY19-NOISE-V1",
+            "noise_only_points_tenths_db": [82, 102, 142],
+            "official_es_n0_db": 10.2,
+            "packet_rng_id": "sha256-counter-bytes-v2",
+            "loopback_fixed_packets": 5,
+            "loopback_random_domain": "VDETER-PHY19-LOOPBACK-PACKET-V2",
+            "loopback_random_packets": 256,
+            "impairment_random_packets_per_case": 64,
+            "rng_id": "sha256-counter-box-muller-mpfr256-v2",
+            "rng_seed_formula": "0x5644455445520000 + link_id*0x100 + sequence",
+            "sample_format": "cf32le",
+            "sample_rounding": "binary64-add-then-binary32-rne-once",
+        },
+        "normative_source": {
+            "binding_algorithm": "markdown-region-lf-normalized-sha256-v1",
+            "common_baseline_id": "VDETER-STAGE6-PHY-COMMON-BL-001",
+            "common_baseline_version": "0.5.2",
+            "common_normative_sha256": "b6d0e76ba71b040a73f012b3f98b33337a4424f9777f95a497cf40183f6b3927",
+            "link_normative_sha256": "7fc05a010651e07364001634a73e7efa04fe571cb981aeb463c851285f26ea39",
+        },
+    }
+
+
+def _stage6_profile_parameters(content: dict) -> PhyProfileParameters:
+    from ..phy import wideband as _wideband
+    from ..phy.burst.link_id import CODEWORDS as _codewords
+
+    link_id = content["identity"]["link_id"]
+    profile = _wideband.PROFILES[link_id]
+    fec = content["fec"]
+    if (
+        fec["interleaver"]["k"] != profile.information_bits
+        or fec["interleaver"]["k1"] != profile.interleaver_k1
+        or fec["interleaver"]["k2"] != profile.interleaver_k2
+        or tuple(fec["interleaver"]["primes"]) != profile.interleaver_primes
+        or tuple(tuple(row) for row in fec["data_puncture_rows"]) != profile.data_patterns
+        or content["counts"]["packet_bytes"] != profile.packet_bytes
+        or content["counts"]["information_bits"] != profile.information_bits
+        or content["counts"]["channel_bits"] != profile.channel_bits
+        or content["scrambler"]["scrambled_bits"] != profile.channel_bits
+    ):
+        raise InvalidValueError("stage6 profile content가 frozen wideband 모듈과 다릅니다")
+    codeword = "".join(str(bit) for bit in _codewords[link_id])
+    if content["link_id_code"]["codeword"] != codeword:
+        raise InvalidValueError("stage6 Link ID codeword가 frozen 생성기와 다릅니다")
+    if tuple(content["waveform"]["rrc_tap_binary64_bits"]) != PHY11_RRC_TAP_BINARY64_BITS:
+        raise InvalidValueError("stage6 RRC tap literal이 Stage 2 동결값과 다릅니다")
+    if content["waveform"]["rrc_taps_sha256"] != PHY11_RRC_TAPS_SHA256:
+        raise InvalidValueError("stage6 RRC tap SHA-256이 Stage 2 동결값과 다릅니다")
+    return PhyProfileParameters(
+        profile_schema_id=content["profile_schema_id"],
+        **{
+            name: _freeze_mapping(content[name])
+            for name in content
+            if name != "profile_schema_id"
+        },
+    )
+
+
+def phy17_profile_parameters() -> PhyProfileParameters:
+    return _stage6_profile_parameters(_phy17_content())
+
+
+def phy19_profile_parameters() -> PhyProfileParameters:
+    return _stage6_profile_parameters(_phy19_content())
+
+
+def _stage6_phy_entry(parameters: PhyProfileParameters) -> PhyProfileEntry:
+    identity = parameters.section("identity")
+    rates = parameters.section("rates")
+    modulation = parameters.section("modulation")
+    return PhyProfileEntry(
+        link_id=LinkId(identity["link_id"]),
+        scope=RegistryScope.OPERATIONAL,
+        support_status=SupportStatus.SUPPORTED,
+        source=SourceReference(
+            document=identity["source_document"],
+            edition=identity["source_edition"],
+            location=identity["source_location"],
+        ),
+        symbol_rate_hz=rates["symbol_rate_hz"],
+        sample_rate_hz=rates["sample_rate_hz"],
+        modulation=modulation["identifier"],
+        fec="turbo-puncture-{0}-tail-{1}".format(
+            parameters.section("fec")["data_puncture_id"],
+            parameters.section("fec")["tail_puncture_id"],
+        ),
+        profile_version=identity["baseline_version"],
+        parameters=parameters,
+    )
+
+
+def combined_phy_profile_entries() -> tuple:
+    """Stage 6 combined catalogue: frozen Link 11 entry + Link 17·19 entries."""
+
+    return operational_phy_entries() + (
+        _stage6_phy_entry(phy17_profile_parameters()),
+        _stage6_phy_entry(phy19_profile_parameters()),
+    )
+
+
+def build_combined_phy_profile_registry():
+    """세 entry combined `phy_profile` registry. content version은 내부 고정이다."""
+
+    registry = ExplicitRegistry(
+        "phy_profile",
+        RegistryScope.OPERATIONAL,
+        STAGE6_REGISTRY_CONTENT_VERSION,
+        PhyProfileEntry,
+    )
+    registered = registry.register_all(combined_phy_profile_entries())
     if registered.is_err:
         return registered
     return Ok(registry)
