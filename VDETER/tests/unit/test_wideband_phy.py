@@ -10,7 +10,11 @@ import unittest
 
 from tests.support.phy11 import CHANNEL, FIRST_SAMPLE_AT, TIME_SOURCE, canonical_packet
 from vdeter.common.contracts.phy import PhyDecodeRequest, PhyEncodeRequest
-from vdeter.common.contracts.radio import SAMPLE_FORMAT_CF32LE, SampleBlock
+from vdeter.common.contracts.radio import (
+    SAMPLE_FORMAT_CF32LE,
+    SampleBlock,
+    SampleContinuity,
+)
 from vdeter.common.identifiers import DeterministicIdSource, LinkId
 from vdeter.phy import wideband
 from vdeter.phy.burst.link_id import CODEWORDS
@@ -20,6 +24,7 @@ from vdeter.phy.modulation import qam16
 from vdeter.phy.multilink import MultiRatePhy
 from vdeter.phy.receiver import LinkIdNotAllowed, UnsupportedDetectedLinkId
 from vdeter.profiles.link_phy import build_combined_phy_profile_registry
+from vdeter.runtime.phy_bridge import RuntimePhyRadioBridge
 
 
 def _packet_for(link_id: int) -> bytes:
@@ -121,17 +126,23 @@ class WidebandLoopbackTest(unittest.TestCase):
 class MultiRateFacadeTest(unittest.TestCase):
     def test_link11_round_trip_through_device_rate(self):
         phy = _multirate_phy()
+        bridge = RuntimePhyRadioBridge(phy)
         packet = canonical_packet()
         encoded = _encode(phy, 11, packet)
         self.assertTrue(encoded.is_ok, getattr(encoded, "error", None))
-        burst = encoded.value
+        self.assertEqual(76_800, encoded.value.samples.sample_rate_hz)
+        converted = bridge.to_device_burst(encoded.value)
+        self.assertTrue(converted.is_ok, getattr(converted, "error", None))
+        burst = converted.value
         self.assertEqual(307_200, burst.samples.sample_rate_hz)
         self.assertEqual(8_192, burst.samples.sample_count)
-        decoded = phy.decode_samples(
+        prepared = bridge.to_native_decode_request(
             PhyDecodeRequest(
                 channel=CHANNEL, samples=burst.samples, allowed_link_ids=(LinkId(11),)
             )
         )
+        self.assertTrue(prepared.is_ok, getattr(prepared, "error", None))
+        decoded = phy.decode_samples(prepared.value)
         self.assertTrue(decoded.is_ok, getattr(decoded, "error", None))
         recovered = decoded.value.packets[0]
         self.assertEqual(packet, bytes(recovered.packet))
@@ -166,8 +177,9 @@ class MultiRateFacadeTest(unittest.TestCase):
 
     def test_mixed_rate_family_window_is_rejected(self):
         phy = _multirate_phy()
+        bridge = RuntimePhyRadioBridge(phy)
         encoded = _encode(phy, 17, _packet_for(17))
-        rejected = phy.decode_samples(
+        rejected = bridge.to_native_decode_request(
             PhyDecodeRequest(
                 channel=CHANNEL,
                 samples=encoded.value.samples,
@@ -177,7 +189,7 @@ class MultiRateFacadeTest(unittest.TestCase):
         self.assertTrue(rejected.is_err)
         self.assertEqual("CONFIG_SEMANTIC_INVALID", rejected.error.code)
 
-    def test_native_rate_at_the_device_boundary_is_rejected(self):
+    def test_public_phy_accepts_native_link11_rate(self):
         phy = _multirate_phy()
         native = SampleBlock(
             sample_format=SAMPLE_FORMAT_CF32LE,
@@ -186,11 +198,11 @@ class MultiRateFacadeTest(unittest.TestCase):
             data=b"\x00" * (2_048 * 8),
             first_sample_at=FIRST_SAMPLE_AT,
         )
-        rejected = phy.decode_samples(
+        result = phy.decode_samples(
             PhyDecodeRequest(channel=CHANNEL, samples=native, allowed_link_ids=(LinkId(11),))
         )
-        self.assertTrue(rejected.is_err)
-        self.assertEqual("PHY_SAMPLE_RATE_MISMATCH", rejected.error.code)
+        self.assertTrue(result.is_ok)
+        self.assertEqual("NO_BURST_DETECTED", result.value.status.value)
 
     def test_no_cross_link_fallback_between_17_and_19(self):
         phy = _multirate_phy()
@@ -207,31 +219,40 @@ class MultiRateFacadeTest(unittest.TestCase):
 
     def test_link11_burst_is_not_detected_in_a_wideband_window(self):
         phy = _multirate_phy()
+        bridge = RuntimePhyRadioBridge(phy)
         encoded = _encode(phy, 11, canonical_packet())
-        result = phy.decode_samples(
+        converted = bridge.to_device_burst(encoded.value)
+        self.assertTrue(converted.is_ok, getattr(converted, "error", None))
+        prepared = bridge.to_native_decode_request(
             PhyDecodeRequest(
                 channel=CHANNEL,
-                samples=encoded.value.samples,
+                samples=converted.value.samples,
                 allowed_link_ids=(LinkId(17),),
             )
         )
+        self.assertTrue(prepared.is_ok, getattr(prepared, "error", None))
+        result = phy.decode_samples(prepared.value)
         self.assertTrue(result.is_ok, getattr(result, "error", None))
         self.assertEqual("NO_BURST_DETECTED", result.value.status.value)
         self.assertEqual((), result.value.packets)
 
     def test_zero_windows_report_no_burst_on_both_families(self):
         phy = _multirate_phy()
+        bridge = RuntimePhyRadioBridge(phy)
         zero = SampleBlock(
             sample_format=SAMPLE_FORMAT_CF32LE,
             sample_rate_hz=307_200,
             sample_count=8_192,
             data=b"\x00" * (8_192 * 8),
             first_sample_at=FIRST_SAMPLE_AT,
+            continuity=SampleContinuity.CONTIGUOUS,
         )
         for allowed in ((LinkId(11),), (LinkId(17),), (LinkId(19),)):
-            result = phy.decode_samples(
+            prepared = bridge.to_native_decode_request(
                 PhyDecodeRequest(channel=CHANNEL, samples=zero, allowed_link_ids=allowed)
             )
+            self.assertTrue(prepared.is_ok)
+            result = phy.decode_samples(prepared.value)
             self.assertTrue(result.is_ok)
             self.assertEqual("NO_BURST_DETECTED", result.value.status.value)
 

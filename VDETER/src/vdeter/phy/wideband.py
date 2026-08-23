@@ -13,7 +13,13 @@ from dataclasses import dataclass
 
 from .burst.framing import bits_to_bytes, bytes_to_bits
 from .burst.link_id import CODEWORDS, LinkIdDetectionError, detect
-from .burst.rrc import RRC_HALF_SPAN_SAMPLES, RRC_TAPS, SAMPLES_PER_SYMBOL
+from .burst.rrc import (
+    RRC_HALF_SPAN_SAMPLES,
+    RRC_TAPS,
+    SAMPLES_PER_SYMBOL,
+    to_cf32le,
+    validate_cf32le_full_scale,
+)
 from .burst.synchronization import (
     NoBurstDetected,
     SynchronizationFailed,
@@ -215,8 +221,12 @@ def make_slot(body_symbols, tx_scale: float) -> tuple[complex, ...]:
         not math.isfinite(value.real) or not math.isfinite(value.imag) for value in slot
     ):
         raise AssertionError("wideband slot waveform invariant failed")
-    if any(abs(value.real) > 1.0 or abs(value.imag) > 1.0 for value in slot):
-        raise AssertionError("wideband slot exceeds the Radio TX full-scale contract")
+    try:
+        validate_cf32le_full_scale(to_cf32le(slot))
+    except ValueError as error:
+        raise AssertionError(
+            "wideband slot exceeds the Radio TX full-scale contract"
+        ) from error
     return slot
 
 
@@ -290,107 +300,159 @@ def _decode_channel(profile: WidebandLinkProfile, descrambled) -> tuple[int, ...
     return decode_rows(data_rows, tail_rows, _PERMUTATIONS[profile.link_id])
 
 
+def profile_content_mismatch(link_id: int, content: dict) -> str | None:
+    """combined registry entry content와 frozen wideband runtime 값의 불일치 사유.
+
+    일치하면 `None`을 반환한다. `TC-ARCH-002`에 따라 profiles 계층 대신 PHY 계층이
+    이 결속을 소유하고 Runtime composition이 조립 시 호출한다.
+    """
+
+    profile = PROFILES.get(link_id)
+    if profile is None:
+        return "unsupported wideband link id"
+    fec = content["fec"]
+    if (
+        fec["interleaver"]["k"] != profile.information_bits
+        or fec["interleaver"]["k1"] != profile.interleaver_k1
+        or fec["interleaver"]["k2"] != profile.interleaver_k2
+        or tuple(fec["interleaver"]["primes"]) != profile.interleaver_primes
+        or tuple(tuple(row) for row in fec["data_puncture_rows"]) != profile.data_patterns
+        or tuple(tuple(row) for row in fec["tail_puncture_rows"]) != profile.tail_patterns
+    ):
+        return "FEC interleaver/puncture parameters differ from the frozen runtime"
+    counts = content["counts"]
+    if (
+        counts["packet_bytes"] != profile.packet_bytes
+        or counts["information_bits"] != profile.information_bits
+        or counts["channel_bits"] != profile.channel_bits
+        or content["scrambler"]["scrambled_bits"] != profile.channel_bits
+    ):
+        return "packet/channel bit counts differ from the frozen runtime"
+    codeword = "".join(str(bit) for bit in CODEWORDS[link_id])
+    if content["link_id_code"]["codeword"] != codeword:
+        return "Link ID codeword differs from the frozen generator"
+    return None
+
+
 class WidebandReceiver:
     """Link 17·19 공통 수신기. §7의 Stage-2 receiver 공통화를 사용한다."""
 
-    def decode(self, samples, allowed_link_ids: frozenset[int] | None = None) -> ReceiverCoreResult:
+    def _decode_candidate(
+        self,
+        acquisition,
+        allowed_link_ids: frozenset[int] | None,
+    ) -> ReceiverCoreResult:
+        body = equalize_body(
+            acquisition,
+            body_symbols=BODY_SYMBOLS,
+            symbol_rate_hz=SYMBOL_RATE_HZ,
+        )
+        link_llrs = pi4_qpsk.soft_demap(
+            body.symbols[27:DATA_FIRST_BODY_INDEX], 27, body.noise_variance
+        )
+        link_id = detect(link_llrs)
+        if link_id not in PROFILES:
+            raise UnsupportedDetectedLinkId(link_id)
+        if allowed_link_ids and link_id not in allowed_link_ids:
+            raise LinkIdNotAllowed(f"detected Link ID {link_id} is not allowed")
+        profile = PROFILES[link_id]
+        decision = _data_decision(link_id)
+        body = equalize_body(
+            acquisition,
+            _PREFIX_SYMBOLS[link_id],
+            body_symbols=BODY_SYMBOLS,
+            symbol_rate_hz=SYMBOL_RATE_HZ,
+            data_decision=decision,
+        )
+        confirmed = detect(
+            pi4_qpsk.soft_demap(
+                body.symbols[27:DATA_FIRST_BODY_INDEX], 27, body.noise_variance
+            )
+        )
+        if confirmed != link_id:
+            raise UnsupportedDetectedLinkId(confirmed)
+        data_llrs = _descramble_llrs(
+            _demap_data(
+                link_id,
+                body.symbols[DATA_FIRST_BODY_INDEX:BODY_SYMBOLS],
+                body.noise_variance,
+            )
+        )
+        information_bits = _decode_channel(profile, data_llrs)
+        packet = bits_to_bytes(information_bits)
+        if len(packet) != profile.packet_bytes:
+            raise FecDecodeFailed("decoded Packet length invariant failed")
+        encoded = encode_with_permutation(information_bits, _PERMUTATIONS[link_id])
+        serial = _serial_channel_bits(profile, encoded)
+        reference = _PREFIX_SYMBOLS[link_id] + _map_data_symbols(
+            profile, _scramble_bits(serial)
+        )
+        body = equalize_body(
+            acquisition,
+            reference,
+            body_symbols=BODY_SYMBOLS,
+            symbol_rate_hz=SYMBOL_RATE_HZ,
+            data_decision=decision,
+        )
+        data_llrs = _descramble_llrs(
+            _demap_data(
+                link_id,
+                body.symbols[DATA_FIRST_BODY_INDEX:BODY_SYMBOLS],
+                body.noise_variance,
+            )
+        )
+        second_bits = _decode_channel(profile, data_llrs)
+        second_packet = bits_to_bytes(second_bits)
+        if second_packet != packet:
+            raise FecDecodeFailed("refinement pass produced a different Packet")
+        serial = _serial_channel_bits(
+            profile, encode_with_permutation(second_bits, _PERMUTATIONS[link_id])
+        )
+        denominator = sum(abs(value) for value in data_llrs)
+        if not denominator or not math.isfinite(denominator):
+            raise FecDecodeFailed(
+                "FEC confirmation metric has zero or non-finite energy"
+            )
+        score = sum(
+            value if bit == 0 else -value
+            for bit, value in zip(serial, data_llrs)
+        ) / denominator
+        if not math.isfinite(score):
+            raise FecDecodeFailed("FEC confirmation metric is non-finite")
+        return ReceiverCoreResult(
+            packet=packet,
+            link_id=link_id,
+            training_epoch_samples=acquisition.training_epoch_samples,
+            rho_hat=body.rho_hat,
+            correlation=acquisition.correlation,
+            peak_ratio=acquisition.peak_ratio,
+            cfo_hz=acquisition.cfo_hz,
+            gain_magnitude=acquisition.gain_magnitude,
+            noise_variance=body.noise_variance,
+            fec_codeword_score=score,
+        )
+
+    def decode_all(
+        self,
+        samples,
+        allowed_link_ids: frozenset[int] | None = None,
+    ) -> tuple[ReceiverCoreResult, ...]:
+        """Return every successful candidate in timestamp order.
+
+        Candidate-local failures are retained only to select the deterministic
+        error when *no* candidate succeeds.  ``InternalResult`` cannot carry
+        packets and an error together, therefore one or more successful
+        candidates always win over failed candidates in the same input.
+        """
+
         candidates = acquire_candidates(
             samples, body_symbols=BODY_SYMBOLS, symbol_rate_hz=SYMBOL_RATE_HZ
         )
-        decoded = []
+        decoded: list[ReceiverCoreResult] = []
         strongest_error = None
         for acquisition in candidates:
             try:
-                body = equalize_body(
-                    acquisition,
-                    body_symbols=BODY_SYMBOLS,
-                    symbol_rate_hz=SYMBOL_RATE_HZ,
-                )
-                link_llrs = pi4_qpsk.soft_demap(
-                    body.symbols[27:DATA_FIRST_BODY_INDEX], 27, body.noise_variance
-                )
-                link_id = detect(link_llrs)
-                if link_id not in PROFILES:
-                    raise UnsupportedDetectedLinkId(link_id)
-                if allowed_link_ids and link_id not in allowed_link_ids:
-                    raise LinkIdNotAllowed(
-                        f"detected Link ID {link_id} is not allowed"
-                    )
-                profile = PROFILES[link_id]
-                decision = _data_decision(link_id)
-                body = equalize_body(
-                    acquisition,
-                    _PREFIX_SYMBOLS[link_id],
-                    body_symbols=BODY_SYMBOLS,
-                    symbol_rate_hz=SYMBOL_RATE_HZ,
-                    data_decision=decision,
-                )
-                confirmed = detect(
-                    pi4_qpsk.soft_demap(
-                        body.symbols[27:DATA_FIRST_BODY_INDEX], 27, body.noise_variance
-                    )
-                )
-                if confirmed != link_id:
-                    raise UnsupportedDetectedLinkId(confirmed)
-                data_llrs = _descramble_llrs(
-                    _demap_data(
-                        link_id,
-                        body.symbols[DATA_FIRST_BODY_INDEX:BODY_SYMBOLS],
-                        body.noise_variance,
-                    )
-                )
-                information_bits = _decode_channel(profile, data_llrs)
-                packet = bits_to_bytes(information_bits)
-                if len(packet) != profile.packet_bytes:
-                    raise FecDecodeFailed("decoded Packet length invariant failed")
-                # 1회 FEC-aided refinement: 재부호화한 전체 1,920-symbol reference로
-                # CFO/SRO를 다듬고 두 번째 demap/decode 결과와 exact 일치해야 한다.
-                encoded = encode_with_permutation(information_bits, _PERMUTATIONS[link_id])
-                serial = _serial_channel_bits(profile, encoded)
-                reference = _PREFIX_SYMBOLS[link_id] + _map_data_symbols(
-                    profile, _scramble_bits(serial)
-                )
-                body = equalize_body(
-                    acquisition,
-                    reference,
-                    body_symbols=BODY_SYMBOLS,
-                    symbol_rate_hz=SYMBOL_RATE_HZ,
-                    data_decision=decision,
-                )
-                data_llrs = _descramble_llrs(
-                    _demap_data(
-                        link_id,
-                        body.symbols[DATA_FIRST_BODY_INDEX:BODY_SYMBOLS],
-                        body.noise_variance,
-                    )
-                )
-                second_bits = _decode_channel(profile, data_llrs)
-                second_packet = bits_to_bytes(second_bits)
-                if second_packet != packet:
-                    raise FecDecodeFailed("refinement pass produced a different Packet")
-                serial = _serial_channel_bits(
-                    profile, encode_with_permutation(second_bits, _PERMUTATIONS[link_id])
-                )
-                denominator = sum(abs(value) for value in data_llrs)
-                if not denominator or not math.isfinite(denominator):
-                    raise FecDecodeFailed("FEC confirmation metric has zero or non-finite energy")
-                score = sum(
-                    value if bit == 0 else -value
-                    for bit, value in zip(serial, data_llrs)
-                ) / denominator
-                if not math.isfinite(score):
-                    raise FecDecodeFailed("FEC confirmation metric is non-finite")
-                decoded.append(
-                    (
-                        score,
-                        acquisition.correlation,
-                        -acquisition.training_epoch_samples,
-                        packet,
-                        link_id,
-                        acquisition,
-                        body,
-                    )
-                )
+                decoded.append(self._decode_candidate(acquisition, allowed_link_ids))
             except (
                 LinkIdDetectionError,
                 UnsupportedDetectedLinkId,
@@ -406,18 +468,30 @@ class WidebandReceiver:
             if strongest_error is not None:
                 raise strongest_error
             raise NoBurstDetected
-        score, _, _, packet, link_id, acquisition, body = max(
-            decoded, key=lambda item: (item[0], item[1], item[2])
+        return tuple(
+            sorted(
+                decoded,
+                key=lambda item: (
+                    item.training_epoch_samples - RAMP_SAMPLES * item.rho_hat,
+                    item.link_id,
+                    item.packet,
+                ),
+            )
         )
-        return ReceiverCoreResult(
-            packet=packet,
-            link_id=link_id,
-            training_epoch_samples=acquisition.training_epoch_samples,
-            rho_hat=body.rho_hat,
-            correlation=acquisition.correlation,
-            peak_ratio=acquisition.peak_ratio,
-            cfo_hz=acquisition.cfo_hz,
-            gain_magnitude=acquisition.gain_magnitude,
-            noise_variance=body.noise_variance,
-            fec_codeword_score=score,
+
+    def decode(
+        self,
+        samples,
+        allowed_link_ids: frozenset[int] | None = None,
+    ) -> ReceiverCoreResult:
+        """Compatibility helper returning the strongest successful candidate."""
+
+        decoded = self.decode_all(samples, allowed_link_ids)
+        return max(
+            decoded,
+            key=lambda item: (
+                item.fec_codeword_score,
+                item.correlation,
+                -item.training_epoch_samples,
+            ),
         )

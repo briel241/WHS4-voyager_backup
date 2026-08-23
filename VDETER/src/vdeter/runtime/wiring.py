@@ -994,6 +994,23 @@ def build_wideband_profile(dependencies: EndpointDependencies, deployment: MacDe
             return config_error(
                 "combined registry에 필요한 Link profile이 없습니다", link_id=link_id
             )
+    from ..phy.wideband import profile_content_mismatch
+
+    for link_id in (17, 19):
+        entry = dependencies.registries.phy_profile.lookup(link_id)
+        if entry.is_err:
+            return config_error(
+                "combined registry에 wideband Link profile이 없습니다", link_id=link_id
+            )
+        mismatch = profile_content_mismatch(
+            link_id, entry.value.parameters.fingerprint_content()
+        )
+        if mismatch is not None:
+            return config_error(
+                "combined registry content가 frozen wideband runtime과 다릅니다",
+                link_id=link_id,
+                reason=mismatch,
+            )
     base = build_canonical_tbb_profile(deployment)
     wideband_tbb = build_wideband_canonical_tbb_profile(deployment)
     data_link_id = endpoint_config.mac.data_link_id.value
@@ -1095,6 +1112,9 @@ def build_wideband_endpoint(
         dependencies.time_source,
         dependencies.id_source,
     )
+    from .phy_bridge import RuntimePhyRadioBridge
+
+    endpoint._phy_radio_bridge = RuntimePhyRadioBridge(endpoint._phy)
     endpoint._crypto_dependencies = crypto_dependencies
     endpoint._wideband_profile = wideband_profile
 

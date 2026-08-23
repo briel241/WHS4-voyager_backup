@@ -1224,27 +1224,9 @@ def _phy19_content() -> dict:
 
 
 def _stage6_profile_parameters(content: dict) -> PhyProfileParameters:
-    from ..phy import wideband as _wideband
-    from ..phy.burst.link_id import CODEWORDS as _codewords
-
-    link_id = content["identity"]["link_id"]
-    profile = _wideband.PROFILES[link_id]
-    fec = content["fec"]
-    if (
-        fec["interleaver"]["k"] != profile.information_bits
-        or fec["interleaver"]["k1"] != profile.interleaver_k1
-        or fec["interleaver"]["k2"] != profile.interleaver_k2
-        or tuple(fec["interleaver"]["primes"]) != profile.interleaver_primes
-        or tuple(tuple(row) for row in fec["data_puncture_rows"]) != profile.data_patterns
-        or content["counts"]["packet_bytes"] != profile.packet_bytes
-        or content["counts"]["information_bits"] != profile.information_bits
-        or content["counts"]["channel_bits"] != profile.channel_bits
-        or content["scrambler"]["scrambled_bits"] != profile.channel_bits
-    ):
-        raise InvalidValueError("stage6 profile content가 frozen wideband 모듈과 다릅니다")
-    codeword = "".join(str(bit) for bit in _codewords[link_id])
-    if content["link_id_code"]["codeword"] != codeword:
-        raise InvalidValueError("stage6 Link ID codeword가 frozen 생성기와 다릅니다")
+    # TC-ARCH-002: profiles는 layer 모듈을 import하지 않는다. frozen wideband runtime
+    # 모듈과의 교차검증은 `phy.wideband.profile_content_mismatch()`가 소유하고 Runtime
+    # composition(`build_wideband_profile`)이 조립 시 호출한다.
     if tuple(content["waveform"]["rrc_tap_binary64_bits"]) != PHY11_RRC_TAP_BINARY64_BITS:
         raise InvalidValueError("stage6 RRC tap literal이 Stage 2 동결값과 다릅니다")
     if content["waveform"]["rrc_taps_sha256"] != PHY11_RRC_TAPS_SHA256:

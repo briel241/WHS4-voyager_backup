@@ -155,6 +155,7 @@ class VdeTerEndpoint:
         "_link",
         "_mac",
         "_phy",
+        "_phy_radio_bridge",
         "_radio",
         "_health",
         "_transfers",
@@ -170,6 +171,7 @@ class VdeTerEndpoint:
         self._presentation, self._link, self._mac, self._phy = build_stage0_layers(
             dependencies, dependencies.internal_event_sink
         )
+        self._phy_radio_bridge = None
         # 하위 계층은 상위 concrete 구현을 직접 호출하지 않는다. event bus가 내부 event를
         # 기록한 뒤 Runtime router에만 전달한다. binding은 조립 시 한 번만 한다.
         dependencies.internal_event_sink.bind_router(self)
@@ -592,6 +594,12 @@ class VdeTerEndpoint:
             self._fail_transfer(transfer_id, encoded.error)
             return
         burst = encoded.value
+        if self._phy_radio_bridge is not None:
+            converted = self._phy_radio_bridge.to_device_burst(burst)
+            if converted.is_err:
+                self._fail_transfer(transfer_id, converted.error)
+                return
+            burst = converted.value
         self._burst_transfers[burst.burst_id.value] = transfer_id
         self._record(
             InternalEventType.BURST_ENCODED,
@@ -637,13 +645,20 @@ class VdeTerEndpoint:
     def _route_samples_received(self, event: InternalEvent) -> None:
         received = event.payload
         endpoint_config = self._dependencies.configuration.endpoint
-        recovered = self._phy.decode_samples(
-            PhyDecodeRequest(
-                channel=received.channel,
-                samples=received.samples,
-                allowed_link_ids=endpoint_config.link.supported_link_ids,
-            )
+        decode_request = PhyDecodeRequest(
+            channel=received.channel,
+            samples=received.samples,
+            allowed_link_ids=endpoint_config.link.supported_link_ids,
         )
+        if self._phy_radio_bridge is not None:
+            prepared = self._phy_radio_bridge.to_native_decode_request(decode_request)
+            if prepared.is_err:
+                self._report_internal_error(prepared.error)
+                return
+            if prepared.value is None:
+                return
+            decode_request = prepared.value
+        recovered = self._phy.decode_samples(decode_request)
         if recovered.is_err:
             self._report_internal_error(recovered.error)
             return
@@ -995,10 +1010,14 @@ class VdeTerEndpoint:
         self._transfers.clear()
         self._pending_presentation.clear()
         self._burst_transfers.clear()
+        retained_native_phy = self._phy if self._phy_radio_bridge is not None else None
         presentation, link, legacy_mac, phy = build_stage0_layers(
             self._dependencies, self._dependencies.internal_event_sink
         )
         self._presentation, self._link, self._phy = presentation, link, phy
+        if retained_native_phy is not None:
+            self._phy = retained_native_phy
+            self._phy_radio_bridge.reset_stream()
         if self._stage4 is None:
             self._mac = legacy_mac
             return
@@ -1571,6 +1590,12 @@ class Stage4Support:
             self._fail(command, encoded.error)
             return
         burst = encoded.value
+        if self._endpoint._phy_radio_bridge is not None:
+            converted = self._endpoint._phy_radio_bridge.to_device_burst(burst)
+            if converted.is_err:
+                self._fail(command, converted.error)
+                return
+            burst = converted.value
         self._endpoint._record(
             InternalEventType.BURST_ENCODED,
             Layer.PHY,
@@ -1749,13 +1774,24 @@ class Stage4Support:
             )
             if plan_allowed:
                 allowed = plan_allowed
-        recovered = self._endpoint._phy.decode_samples(
-            PhyDecodeRequest(
-                channel=received.channel,
-                samples=received.samples,
-                allowed_link_ids=allowed,
-            )
+        elif self._endpoint._phy_radio_bridge is not None:
+            allowed = ()
+        decode_request = PhyDecodeRequest(
+            channel=received.channel,
+            samples=received.samples,
+            allowed_link_ids=allowed,
         )
+        if self._endpoint._phy_radio_bridge is not None:
+            prepared = self._endpoint._phy_radio_bridge.to_native_decode_request(
+                decode_request
+            )
+            if prepared.is_err:
+                self.report_error(prepared.error)
+                return True
+            if prepared.value is None:
+                return True
+            decode_request = prepared.value
+        recovered = self._endpoint._phy.decode_samples(decode_request)
         if recovered.is_err:
             self.report_error(recovered.error)
             return True
