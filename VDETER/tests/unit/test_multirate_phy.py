@@ -52,18 +52,24 @@ def _block(
     )
 
 
-def _result(epoch: float, packet: bytes = b"ok") -> ReceiverCoreResult:
+def _result(
+    epoch: float,
+    packet: bytes = b"ok",
+    *,
+    score: float = 0.8,
+    correlation: float = 0.9,
+) -> ReceiverCoreResult:
     return ReceiverCoreResult(
         packet=packet,
         link_id=17,
         training_epoch_samples=epoch,
         rho_hat=1.0,
-        correlation=0.9,
+        correlation=correlation,
         peak_ratio=2.0,
         cfo_hz=0.0,
         gain_magnitude=1.0,
         noise_variance=1e-3,
-        fec_codeword_score=0.8,
+        fec_codeword_score=score,
     )
 
 
@@ -104,6 +110,24 @@ class RuntimeBridgeRxTest(unittest.TestCase):
         self.assertEqual(ErrorCode.CONFIG_SEMANTIC_INVALID, empty.error.code)
         self.assertEqual(ErrorCode.CONFIG_SEMANTIC_INVALID, mixed.error.code)
 
+    def test_device_intent_must_be_exactly_one_supported_link(self):
+        # §13.2: device-rate 허용 집합은 정확히 (11,), (17,), (19,) 중 하나다.
+        same_family_pair = self.bridge.to_native_decode_request(
+            self._request(_block(), (LinkId(17), LinkId(19)))
+        )
+        self.assertEqual(
+            ErrorCode.CONFIG_SEMANTIC_INVALID, same_family_pair.error.code
+        )
+        unsupported = self.bridge.to_native_decode_request(
+            self._request(_block(), (LinkId(63),))
+        )
+        self.assertEqual(ErrorCode.CONFIG_SEMANTIC_INVALID, unsupported.error.code)
+        # 순서·중복만 다른 tuple은 같은 canonical (17,)이므로 허용된다.
+        duplicated = self.bridge.to_native_decode_request(
+            self._request(_block(), (LinkId(17), LinkId(17)))
+        )
+        self.assertTrue(duplicated.is_ok)
+
     def test_short_or_gapped_radio_window_is_discarded_and_resets_state(self):
         short = self.bridge.to_native_decode_request(
             self._request(_block(resampling.DEVICE_SLOT_SAMPLES - 1))
@@ -124,7 +148,7 @@ class RuntimeBridgeRxTest(unittest.TestCase):
         self.assertEqual(resampling.NATIVE_SLOT_SAMPLES, prepared.value.samples.sample_count)
 
     def test_wideband_native_rate_is_passed_without_conversion(self):
-        request = self._request(_block(), (LinkId(17), LinkId(19)))
+        request = self._request(_block(), (LinkId(17),))
         prepared = self.bridge.to_native_decode_request(request)
         self.assertTrue(prepared.is_ok)
         self.assertIs(request, prepared.value)
@@ -235,7 +259,8 @@ class CandidateResultPolicyTest(unittest.TestCase):
 
     def test_multiple_successes_are_returned_in_burst_time_order(self):
         receiver = wideband.WidebandReceiver()
-        late = _result(500.0, b"late")
+        # 서로 겹치지 않는 두 burst interval: [0, 8192)와 [8372, 16564).
+        late = _result(8_500.0, b"late")
         early = _result(128.0, b"early")
         with patch.object(
             wideband,
@@ -248,6 +273,42 @@ class CandidateResultPolicyTest(unittest.TestCase):
         ):
             decoded = receiver.decode_all((1 + 0j,) * wideband.SLOT_SAMPLES)
         self.assertEqual((early, late), decoded)
+
+    def test_overlapping_candidates_form_one_cluster_with_one_winner(self):
+        # §7.6: 같은 물리 burst를 가리키는 겹친 성공 후보는 (Q desc, C desc, epoch asc)로
+        # 하나만 선택한다.
+        weak = _result(500.0, b"weak", score=0.5)
+        strong = _result(128.0, b"strong", score=0.9)
+        winners = wideband.select_burst_clusters(
+            [weak, strong], slot_samples=wideband.SLOT_SAMPLES
+        )
+        self.assertEqual((strong,), winners)
+
+    def test_exact_three_way_tie_cluster_is_synchronization_failure(self):
+        receiver = wideband.WidebandReceiver()
+        tied_a = _result(128.0, b"aa")
+        tied_b = _result(128.0, b"bb")
+        with patch.object(
+            wideband,
+            "acquire_candidates",
+            return_value=(object(), object()),
+        ), patch.object(
+            receiver,
+            "_decode_candidate",
+            side_effect=(tied_a, tied_b),
+        ):
+            with self.assertRaises(wideband.SynchronizationFailed):
+                receiver.decode_all((1 + 0j,) * wideband.SLOT_SAMPLES)
+
+    def test_tie_failed_cluster_does_not_block_other_success_cluster(self):
+        # exact tie로 실패한 cluster가 있어도 다른 성공 cluster는 반환된다.
+        tied_a = _result(128.0, b"aa")
+        tied_b = _result(128.0, b"bb")
+        separate = _result(9_000.0, b"separate")
+        winners = wideband.select_burst_clusters(
+            [tied_a, tied_b, separate], slot_samples=wideband.SLOT_SAMPLES
+        )
+        self.assertEqual((separate,), winners)
 
 
 if __name__ == "__main__":

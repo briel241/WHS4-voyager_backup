@@ -334,6 +334,57 @@ def profile_content_mismatch(link_id: int, content: dict) -> str | None:
     return None
 
 
+def select_burst_clusters(decoded, *, slot_samples: int) -> tuple:
+    """§7.6: reconstructed slot interval overlap의 transitive closure로 cluster를 묶는다.
+
+    각 성공 후보의 half-open interval은 `[e-128*rho, e-128*rho+slot*rho)`다. 겹치는
+    cluster 안에서는 `(Q 내림차순, training C 내림차순, epoch 오름차순)`으로 하나를
+    고르고, 세 값이 exact 동률인 cluster는 임의 결정 없이 탈락시킨다(호출자가 성공
+    cluster가 하나도 없을 때 synchronization 실패로 구조화한다). 겹치지 않는 cluster는
+    서로 다른 물리 burst이므로 각자의 승자를 burst-start epoch 오름차순으로 반환한다.
+    """
+
+    if not decoded:
+        return ()
+    items = []
+    for result in decoded:
+        start = result.training_epoch_samples - RAMP_SAMPLES * result.rho_hat
+        end = start + slot_samples * result.rho_hat
+        items.append((start, end, result))
+    items.sort(key=lambda item: item[0])
+    clusters = [[items[0]]]
+    reach = items[0][1]
+    for item in items[1:]:
+        if item[0] < reach:
+            clusters[-1].append(item)
+            reach = max(reach, item[1])
+        else:
+            clusters.append([item])
+            reach = item[1]
+    winners = []
+    for cluster in clusters:
+        ranked = sorted(
+            cluster,
+            key=lambda item: (
+                -item[2].fec_codeword_score,
+                -item[2].correlation,
+                item[2].training_epoch_samples,
+            ),
+        )
+        if len(ranked) > 1:
+            first, second = ranked[0][2], ranked[1][2]
+            if (
+                first.fec_codeword_score == second.fec_codeword_score
+                and first.correlation == second.correlation
+                and first.training_epoch_samples == second.training_epoch_samples
+            ):
+                # exact 동률: Packet bytes나 Link ID로 임의 결정하지 않는다.
+                continue
+        winners.append((ranked[0][0], ranked[0][2]))
+    winners.sort(key=lambda item: item[0])
+    return tuple(item[1] for item in winners)
+
+
 class WidebandReceiver:
     """Link 17·19 공통 수신기. §7의 Stage-2 receiver 공통화를 사용한다."""
 
@@ -464,20 +515,17 @@ class WidebandReceiver:
             except (ArithmeticError, ValueError, AssertionError) as error:
                 if strongest_error is None:
                     strongest_error = FecDecodeFailed(str(error))
-        if not decoded:
+        winners = select_burst_clusters(decoded, slot_samples=SLOT_SAMPLES)
+        if not winners:
             if strongest_error is not None:
                 raise strongest_error
+            if decoded:
+                # 성공 후보가 모두 exact 동률 cluster로 실패했다 (§7.6).
+                raise SynchronizationFailed(
+                    "exact-tie candidate cluster cannot be resolved"
+                )
             raise NoBurstDetected
-        return tuple(
-            sorted(
-                decoded,
-                key=lambda item: (
-                    item.training_epoch_samples - RAMP_SAMPLES * item.rho_hat,
-                    item.link_id,
-                    item.packet,
-                ),
-            )
-        )
+        return winners
 
     def decode(
         self,

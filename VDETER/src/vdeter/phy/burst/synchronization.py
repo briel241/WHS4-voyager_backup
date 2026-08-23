@@ -198,10 +198,11 @@ def acquire_candidates(
             confirmed.append(solved)
     if not confirmed:
         raise NoBurstDetected
+    # §7.6: 확인된 candidate의 처리 순서는 정확히 (training C 내림차순, epoch 오름차순)이다.
     return tuple(
         sorted(
             confirmed,
-            key=lambda item: (-item.correlation, -item.peak_ratio, item.training_epoch_samples),
+            key=lambda item: (-item.correlation, item.training_epoch_samples),
         )
     )
 
