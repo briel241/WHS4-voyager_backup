@@ -1,0 +1,51 @@
+{
+  "manifest_id": "STAGE5-PRES-GOLDEN-VECTORS",
+  "baseline_id": "VDETER-STAGE5-SERVICE-INTEGRATION-BL-001",
+  "baseline_version": "0.1.4",
+  "source": "docs/core/stage5_service_integration_baseline.md §6.6",
+  "note": "expected bytes는 승인 문서의 고정 상수를 복제한 독립 시험 artifact다. production codec으로 생성하지 않았다.",
+  "vectors": {
+    "GV-STAGE5-PRES-OPAQUE-001": {
+      "payload_format": "test.stage0.opaque",
+      "scope": "TEST",
+      "application": {
+        "file": "gv_stage5_pres_opaque_001.application.bin",
+        "bytes": 3,
+        "sha256": "f742b965f156c10374bc23aea96e3a8aff8facd6fc079defeaa30219ad86f211"
+      },
+      "wire": {
+        "file": "gv_stage5_pres_opaque_001.wire.bin",
+        "bytes": 7,
+        "sha256": "890f598700c95a02a21c6dab71240a92682a8cb5abcce45a40852eb28f656248"
+      }
+    },
+    "GV-STAGE5-PRES-X509-001": {
+      "payload_format": "x509.certificate_report",
+      "scope": "OPERATIONAL+TEST",
+      "application": {
+        "file": "gv_stage5_pres_x509_001.application.bin",
+        "bytes": 247,
+        "sha256": "e392989c9545a7e2a906ec3e0bdf0a7301990cb6a43edff6fe1a9f350f8fbf3f"
+      },
+      "wire": {
+        "file": "gv_stage5_pres_x509_001.wire.bin",
+        "bytes": 249,
+        "sha256": "374b10e619ca33c6584c3eaf8510aa7bdcf8b54e54bdea5dae3796b8aaa65501"
+      }
+    },
+    "GV-STAGE5-PRES-AIS1-001": {
+      "payload_format": "ais.authentication_integrity.scheme1",
+      "scope": "OPERATIONAL+TEST",
+      "application": {
+        "file": "gv_stage5_pres_ais1_001.application.bin",
+        "bytes": 82,
+        "sha256": "fbe7fca9aefeec9de1f97e9287fb7af4c1393529c46d3d582e6c4ebbed32f3bf"
+      },
+      "wire": {
+        "file": "gv_stage5_pres_ais1_001.wire.bin",
+        "bytes": 84,
+        "sha256": "095d988bff18222e77415f0cfe516d66025cdca20d296096d67076c031779780"
+      }
+    }
+  }
+}

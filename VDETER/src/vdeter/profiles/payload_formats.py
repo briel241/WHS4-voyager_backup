@@ -1,8 +1,16 @@
-"""Payload Format 표준 catalogue (`stage0_baseline.md` §7.2).
+"""Payload Format 표준 catalogue (`stage5_service_integration_baseline.md` §7).
 
-운영 profile에는 IALA R1027에 할당된 값만 등록한다. 단계 0은 실제 VPFI 할당과 codec을
-확정하지 않으므로 운영 catalogue는 비어 있고, 시험 catalogue만 test scope VPFI를 갖는다.
-지원 Payload Format catalogue와 각 codec은 단계 5 Presentation 기준선이 확정한다.
+운영 registry에는 IALA R1027의 공식 mapping만 등록한다 (`PRES-REQ-01`).
+
+| `payload_format` | VPFI | 형식 식별자 | 운영 | 시험 |
+| --- | ---: | --- | --- | --- |
+| `x509.certificate_report` | 0 | Message format 1 | 지원 | 지원 |
+| `ais.authentication_integrity.scheme1` | 7 | Message format 1, Scheme ID 1 | 지원 | 지원 |
+| `test.stage0.opaque` | 268435455 | 없음 | 미등록 | 지원 |
+| `electronic_chart.data` | 미확정 | 미확정 | 미등록 (`DR-STAGE5-022`) | 미등록 |
+
+전자해도(`electronic_chart.data`)는 canonical key만 예약하고 registry entry와 codec을
+만들지 않는다. submit은 registry lookup 실패로 `UNSUPPORTED_REQUEST`가 된다.
 
 R1027은 `VPFMI`가 아니라 `Message format`이라는 field 명칭을 사용하므로 공통 모델도
 `message_format`을 사용한다.
@@ -16,17 +24,43 @@ from ..common.exceptions import InvalidValueError
 from ..common.identifiers import PayloadFormat, Vpfi
 from .models import RegistryScope, SourceReference, SupportStatus
 
-#: 단계 0 시험 전용 payload format key. 운영 registry에 등록하지 않는다.
+#: 시험 전용 opaque payload format key. 운영 registry에 등록하지 않는다 (`DR-STAGE5-008`).
 TEST_PAYLOAD_FORMAT = "test.stage0.opaque"
 
-#: R1027 Table 3의 시험 전용 범위를 사용하는 단계 0 시험 VPFI.
+#: R1027 Table 3의 시험 전용 범위를 사용하는 opaque 시험 VPFI.
 #: 실제 운영 할당값이 아니며 운영 profile에 등록하지 않는다.
 TEST_VPFI = 268435455
 
-_R1027 = SourceReference(
+#: Stage 5 운영 catalogue의 canonical key (`stage5` §7.1).
+CERTIFICATE_REPORT_PAYLOAD_FORMAT = "x509.certificate_report"
+AIS_SCHEME1_PAYLOAD_FORMAT = "ais.authentication_integrity.scheme1"
+
+#: 향후 호환성을 위해 예약만 하는 key. Stage 5에서는 registry entry가 없다
+#: (`DR-STAGE5-022`). 운영·시험 어느 scope에도 등록해서는 안 된다.
+ELECTRONIC_CHART_RESERVED_KEY = "electronic_chart.data"
+
+#: Stage 5 Payload Format Registry content version (`stage5` §7.1).
+STAGE5_PAYLOAD_CONTENT_VERSION = "stage5-r1027-ed1.1-v1"
+
+#: registry portable codec 참조 (`stage5` §7.1).
+OPAQUE_CODEC_REF = "test.stage0.opaque_passthrough"
+CERTIFICATE_REPORT_CODEC_REF = "r1027.vpfi0.certificate_report.v1"
+AIS_SCHEME1_CODEC_REF = "r1027.vpfi7.authentication_scheme1.v1"
+
+_R1027_TEST = SourceReference(
     document="IALA R1027",
     edition="Ed.1.1",
     location="Annex §2, §3.1, Table 3 (시험 전용 값)",
+)
+_R1027_CERTIFICATE_REPORT = SourceReference(
+    document="IALA R1027",
+    edition="Ed.1.1",
+    location="Tables 4·6 (VPFI 0, Certificate Report Message format 1)",
+)
+_R1027_AIS_SCHEME1 = SourceReference(
+    document="IALA R1027",
+    edition="Ed.1.1",
+    location="Table 21 (VPFI 7, Authentication Scheme 1, 672-bit)",
 )
 
 
@@ -70,28 +104,49 @@ class PayloadFormatEntry:
         return (self.vpfi.value, self.message_format)
 
 
+def _official_entries(scope: RegistryScope) -> tuple:
+    """R1027 공식 mapping 두 entry. 운영·시험 scope에 같은 codec·wire key로 등록한다."""
+
+    return (
+        PayloadFormatEntry(
+            payload_format=PayloadFormat(CERTIFICATE_REPORT_PAYLOAD_FORMAT),
+            vpfi=Vpfi(0),
+            scope=scope,
+            support_status=SupportStatus.SUPPORTED,
+            source=_R1027_CERTIFICATE_REPORT,
+            message_format=1,
+            codec_ref=CERTIFICATE_REPORT_CODEC_REF,
+        ),
+        PayloadFormatEntry(
+            payload_format=PayloadFormat(AIS_SCHEME1_PAYLOAD_FORMAT),
+            vpfi=Vpfi(7),
+            scope=scope,
+            support_status=SupportStatus.SUPPORTED,
+            source=_R1027_AIS_SCHEME1,
+            message_format=1,
+            codec_ref=AIS_SCHEME1_CODEC_REF,
+        ),
+    )
+
+
 def operational_entries() -> tuple:
-    """운영 catalogue.
+    """운영 catalogue. R1027 공식 mapping 두 entry만 등록한다 (`stage5` §7.2)."""
 
-    단계 0에서는 공식 VPFI 할당과 codec을 확정하지 않으므로 비어 있다. 임의 VPFI를
-    운영 profile에 등록하지 않는다 (`PRES-REQ-01`).
-    """
-
-    return ()
+    return _official_entries(RegistryScope.OPERATIONAL)
 
 
 def test_entries() -> tuple:
-    """단계 0 interface 시험 전용 catalogue. 운영에 사용하지 않는다."""
+    """시험 catalogue. 공식 두 entry의 test-scope copy와 opaque test entry."""
 
-    return (
+    return _official_entries(RegistryScope.TEST) + (
         PayloadFormatEntry(
             payload_format=PayloadFormat(TEST_PAYLOAD_FORMAT),
             vpfi=Vpfi(TEST_VPFI),
             scope=RegistryScope.TEST,
-            support_status=SupportStatus.PLANNED,
-            source=_R1027,
+            support_status=SupportStatus.SUPPORTED,
+            source=_R1027_TEST,
             message_format=None,
-            codec_ref="test.stage0.opaque_passthrough",
+            codec_ref=OPAQUE_CODEC_REF,
         ),
     )
 

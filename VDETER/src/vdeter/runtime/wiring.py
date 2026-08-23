@@ -23,7 +23,7 @@ from ..common.events import (
 from ..common.identifiers import DeterministicIdSource, IdSource, Uuid4IdSource
 from ..common.random_source import RandomSource, SeededRandomSource, SystemRandomSource
 from ..common.exceptions import VdeterInternalError
-from ..common.results import Ok, internal_error
+from ..common.results import Err, Ok, internal_error
 from ..common.time import SystemTimeSource, TestTimeSource, TimeSource
 from ..config.models import (
     IdSourceKind,
@@ -204,10 +204,14 @@ def build_radio_adapter(configuration: LoadedConfiguration, time_source, id_sour
 def build_registries(configuration: LoadedConfiguration):
     """모든 registry를 만들고 명시적으로 등록한 뒤 freeze한다."""
 
+    from ..profiles.payload_formats import STAGE5_PAYLOAD_CONTENT_VERSION
+
     scope = configuration.endpoint.scope
     version = configuration.endpoint.code_version
 
-    payload_result = build_payload_format_registry(scope, version)
+    # Payload Format registry의 content version은 catalogue 내용과 함께 §7.1이 고정한
+    # 값을 사용한다. endpoint code_version은 다른 registry들의 조립 판본 표기로만 쓴다.
+    payload_result = build_payload_format_registry(scope, STAGE5_PAYLOAD_CONTENT_VERSION)
     if payload_result.is_err:
         return payload_result
     payload_format = payload_result.value
@@ -589,6 +593,269 @@ def _validate_type4_capacity(link_profile_registry):
             packet_capacity_bytes=packet_capacity,
         )
     return Ok(packet_capacity)
+
+
+# --- Stage 5 조립 (`stage5_service_integration_baseline.md` §4, §8, `DR-STAGE5-018`) ---
+
+#: Stage 5 Software profile의 규범 Service config 값 (`stage5` §10).
+STAGE5_MAX_APPLICATION_BYTES = 65_531
+STAGE5_MAX_CONCURRENT_TRANSFERS = 8
+
+
+def build_stage5_endpoint(
+    dependencies: EndpointDependencies,
+    deployment: MacDeploymentProfile,
+    *,
+    crypto_dependencies=None,
+    readiness_utc=None,
+    policy=None,
+):
+    """Stage 5 endpoint 하나를 조립한다. group 검증은 `build_stage5_group`이 한다."""
+
+    from ..presentation.adapter import build_presentation_adapter
+    from ..service.models import Stage5ServicePolicy
+    from .stage5 import Stage5Endpoint, Stage5Support
+
+    endpoint_config = dependencies.configuration.endpoint
+    if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
+        return config_error(
+            "Stage 5 profile의 max_payload_bytes는 65,531이어야 합니다",
+            configured=endpoint_config.service.max_payload_bytes,
+        )
+    if endpoint_config.service.max_concurrent_transfers != STAGE5_MAX_CONCURRENT_TRANSFERS:
+        return config_error(
+            "Stage 5 profile의 max_concurrent_transfers는 8이어야 합니다",
+            configured=endpoint_config.service.max_concurrent_transfers,
+        )
+
+    is_control = endpoint_config.role is ServiceRole.CONTROL
+    signer = None if crypto_dependencies is None else crypto_dependencies.tbb_signer
+    trust_store = None if crypto_dependencies is None else crypto_dependencies.tbb_trust_store
+    preflight = preflight_tbb_certificate(
+        readiness_utc=readiness_utc or dependencies.time_source.now_utc(),
+        signer=signer,
+        trust_store=trust_store,
+        expected_fingerprint=deployment.expected_tbb_certificate_fingerprint,
+        is_control=is_control,
+    )
+    if preflight.is_err:
+        return preflight
+
+    canonical_tbb = build_canonical_tbb_profile(deployment)
+    capacity = _validate_type4_capacity(dependencies.registries.link_profile)
+    if capacity.is_err:
+        return capacity
+
+    endpoint = Stage5Endpoint(dependencies, policy or Stage5ServicePolicy())
+
+    _stub_presentation, link, phy = build_stage4_layers(dependencies, crypto_dependencies)
+    adapter = build_presentation_adapter(dependencies.registries.payload_format)
+    if adapter.is_err:
+        return adapter
+    endpoint._presentation = adapter.value
+    endpoint._link = link
+    endpoint._phy = phy
+    endpoint._crypto_dependencies = crypto_dependencies
+
+    capabilities = _radio_capabilities(dependencies.radio)
+    horizon = _radio_schedule_horizon(dependencies.configuration)
+    profile = MacRuntimeProfile(
+        canonical_tbb=canonical_tbb,
+        deployment_fingerprint=build_canonical_deployment_profile(
+            deployment, canonical_tbb.canonical_tbb_fingerprint
+        ).deployment_fingerprint,
+        local_station_id=endpoint_config.station_id,
+        is_control=is_control,
+        transmit_lead_nanoseconds=capabilities[0],
+        receive_lead_nanoseconds=capabilities[1],
+        channel_switch_gap_nanoseconds=capabilities[2],
+        sample_rate_hz=endpoint_config.phy.sample_rate_hz,
+        schedule_horizon_nanoseconds=horizon,
+    )
+    repository = MacStateRepository()
+    lock = RLock()
+    health = EndpointHealthLog()
+    outbox = MacCommandOutbox(dependencies.id_source, lock, health)
+    ingress = MacIngressQueue(lock, dependencies.time_source, dependencies.id_source)
+    coordinator = MacCoordinator(
+        profile=profile,
+        deployment=deployment,
+        time_source=dependencies.time_source,
+        random_source=dependencies.random_source,
+        id_source=dependencies.id_source,
+        link_profile_registry=dependencies.registries.link_profile,
+        phy_profile_registry=dependencies.registries.phy_profile,
+        repository=repository,
+    )
+    mac = Stage4Mac(coordinator, repository, outbox, lock, dependencies.id_source)
+    endpoint._mac = mac
+    support = Stage5Support(endpoint, mac, outbox, ingress, health, lock)
+    endpoint.attach_stage4(support)
+    graph = endpoint._validate_effective_graph()
+    if graph is not None:
+        return graph
+    return Ok(endpoint)
+
+
+class Stage5Group:
+    """세 endpoint의 승인된 시작·종료 순서를 소유하는 내부 조립 결과 (`stage5` §4.1).
+
+    공개 Service API가 아니다. 각 endpoint의 기존 `VdeService.start()/stop()`을 승인된
+    순서로 호출하고 실패 시 역순 rollback을 수행한다.
+    """
+
+    __slots__ = ("_endpoints",)
+
+    def __init__(self, endpoints: tuple) -> None:
+        self._endpoints = endpoints
+
+    @property
+    def endpoints(self) -> tuple:
+        return self._endpoints
+
+    def by_station(self) -> dict:
+        return {
+            endpoint.dependencies.configuration.endpoint.station_id.value: endpoint
+            for endpoint in self._endpoints
+        }
+
+    def _ships_ascending(self):
+        ships = [
+            endpoint
+            for endpoint in self._endpoints
+            if endpoint.dependencies.configuration.endpoint.role is ServiceRole.SHIP
+        ]
+        return sorted(
+            ships,
+            key=lambda endpoint: endpoint.dependencies.configuration.endpoint.station_id.value,
+        )
+
+    def _control(self):
+        return next(
+            endpoint
+            for endpoint in self._endpoints
+            if endpoint.dependencies.configuration.endpoint.role is ServiceRole.CONTROL
+        )
+
+    def start(self):
+        """station ID 오름차순의 두 Ship을 RX-ready로 만든 뒤 ROC를 시작한다."""
+
+        from ..common.contracts.service import ServiceStartRequest, ServiceStopRequest
+
+        # RF/protocol 작업 전에 세 endpoint의 최종 유효 graph를 함께 검증한다.
+        for endpoint in self._endpoints:
+            mismatch = endpoint._validate_effective_graph()
+            if mismatch is not None:
+                return mismatch
+        ordered = self._ships_ascending() + [self._control()]
+        started = []
+        for endpoint in ordered:
+            configuration = endpoint.dependencies.configuration.endpoint
+            result = endpoint.start(
+                ServiceStartRequest(
+                    local_station_id=configuration.station_id, role=configuration.role
+                )
+            )
+            if result.is_err:
+                # 이미 시작한 endpoint를 역순으로 stop해 group 전체를 실패 처리한다.
+                for previous in reversed(started):
+                    try:
+                        previous.stop(ServiceStopRequest(reason="stage5 group rollback"))
+                    except Exception:  # noqa: BLE001 - best-effort rollback
+                        pass
+                return Err(result.error)
+            started.append(endpoint)
+        return Ok(tuple(started))
+
+    def stop(self):
+        """신규 admission을 세 endpoint에서 먼저 닫은 뒤 ROC, Ship 내림차순으로 정리한다."""
+
+        from ..common.contracts.service import ServiceStopRequest
+
+        for endpoint in self._endpoints:
+            endpoint._close_admission()
+        ordered = [self._control()] + list(reversed(self._ships_ascending()))
+        failures = []
+        for endpoint in ordered:
+            try:
+                result = endpoint.stop(ServiceStopRequest(reason="stage5 group stop"))
+                if result.is_err:
+                    failures.append(
+                        (
+                            endpoint.dependencies.configuration.endpoint.endpoint_id,
+                            result.error,
+                        )
+                    )
+            except Exception as error:  # noqa: BLE001 - best-effort cleanup 계속
+                failures.append(
+                    (
+                        endpoint.dependencies.configuration.endpoint.endpoint_id,
+                        error,
+                    )
+                )
+        if failures:
+            return Err(tuple(failures))
+        return Ok(True)
+
+
+def build_stage5_group(descriptors, *, crypto_by_station=None, policy=None):
+    """세 endpoint descriptor를 한 번에 검증하고 Stage 5 group을 조립한다.
+
+    `CONTROL 1 + SHIP 2`, 서로 다른 nonzero station ID, 구성된 member 집합, 동일 TBB
+    semantic fingerprint와 동일 deployment fingerprint를 검증한 뒤 endpoint를 만든다.
+    """
+
+    from ..radio.software import SoftwareRadioAdapter
+
+    if not isinstance(descriptors, tuple) or len(descriptors) != 3:
+        return config_error("Stage 5 group은 정확히 세 endpoint여야 합니다")
+    entries = []
+    for dependencies, deployment in descriptors:
+        endpoint_config = dependencies.configuration.endpoint
+        entries.append(
+            EndpointDescriptor(
+                station_id=endpoint_config.station_id,
+                role=endpoint_config.role,
+                profile=deployment,
+            )
+        )
+    fingerprints = tuple(
+        build_canonical_tbb_profile(deployment).canonical_tbb_fingerprint
+        for _dependencies, deployment in descriptors
+    )
+    validated = validate_endpoint_group(tuple(entries), fingerprints)
+    if validated.is_err:
+        return validated
+
+    # Stage 5 정상 profile은 공유 `SoftwareRadioMedium`의 SoftwareRadioAdapter만 허용한다.
+    media = set()
+    for dependencies, _deployment in descriptors:
+        radio = dependencies.radio
+        if not isinstance(radio, SoftwareRadioAdapter):
+            return config_error(
+                "Stage 5 정상 profile은 SoftwareRadioAdapter만 사용할 수 있습니다",
+                adapter=type(radio).__name__,
+            )
+        media.add(id(radio._medium))
+    if len(media) != 1:
+        return config_error("세 endpoint는 같은 SoftwareRadioMedium을 공유해야 합니다")
+
+    readiness_utc = descriptors[0][0].time_source.now_utc()
+    endpoints = []
+    crypto_by_station = crypto_by_station or {}
+    for dependencies, deployment in descriptors:
+        station_id = dependencies.configuration.endpoint.station_id
+        built = build_stage5_endpoint(
+            dependencies,
+            deployment,
+            crypto_dependencies=crypto_by_station.get(station_id.value),
+            readiness_utc=readiness_utc,
+            policy=policy,
+        )
+        if built.is_err:
+            return built
+        endpoints.append(built.value)
+    return Ok(Stage5Group(tuple(endpoints)))
 
 
 def build_stage4_group(descriptors, *, crypto_by_station=None):

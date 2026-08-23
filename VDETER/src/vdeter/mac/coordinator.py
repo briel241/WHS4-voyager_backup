@@ -2969,6 +2969,13 @@ class MacCoordinator:
                 ),
             )
             commands.append(command)
+            # `DR-STAGE5-029`: request chain은 data 관측 뒤 중복 Type 90을 stale
+            # evidence로만 기록하도록 설계됐지만 `data_observed`가 세워지지 않아 후속
+            # inbound session이 영구히 거부됐다. 첫 Data start fragment 관측 시점에
+            # 설계된 flag를 세운다.
+            chain = state.request_chain(peer.value)
+            if chain is not None and not chain.data_observed:
+                state = state.with_request_chain(replace(chain, data_observed=True))
             return state.with_rx_session(
                 RxSessionContext(
                     session_handle=handle,
@@ -4080,7 +4087,14 @@ class MacCoordinator:
                         frame_receptions=session.frame_receptions,
                     )
                 )
+            closing_session = state.rx_session(result.session_handle.value)
             next_state = state.without_rx_session(result.session_handle.value)
+            if closing_session is not None:
+                # `DR-STAGE5-029`: session 종료와 함께 그 peer의 request chain을 닫아
+                # 단일 active Data Session slot을 다음 inbound 요청에 되돌린다.
+                next_state = next_state.without_request_chain(
+                    closing_session.peer_station_id_value
+                )
             for relay in next_state.relay_records:
                 next_state = self._maybe_start_relay_second_hop(
                     next_state,
