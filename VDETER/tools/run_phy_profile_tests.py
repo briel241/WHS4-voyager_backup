@@ -715,8 +715,10 @@ def main(argv=None) -> int:
     results["profile_hashes_artifact"] = _artifact(profile_path)
     print(f"[identity] {'PASS' if profile_payload['pass'] else 'FAIL'}", flush=True)
 
-    reg_payload, reg_path = stage04_manifest_record(
-        evidence_dir, Path(arguments.stage04_run) if arguments.stage04_run else None)
+    stage04_path = (
+        (VDETER_ROOT / arguments.stage04_run) if arguments.stage04_run else None
+    )
+    reg_payload, reg_path = stage04_manifest_record(evidence_dir, stage04_path)
     results["regression_manifest"] = reg_payload
     results["regression_artifact"] = _artifact(reg_path)
 
