@@ -78,12 +78,19 @@ def _artifact(path: Path) -> dict:
             "sha256": sha256_of(path)}
 
 
-def run_pytest(nodes: list[str], timeout: int = 7200) -> dict:
+def run_pytest(nodes: list[str], timeout: int = 7200,
+               extra_env: dict | None = None) -> dict:
     """pytest를 실행하고 pass/fail/subtest count를 관찰값으로 돌려준다."""
 
+    import os
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     completed = subprocess.run(
         [str(PYTHON), "-m", "pytest", *nodes, "-q", "-p", "no:cacheprovider"],
         cwd=str(VDETER_ROOT), capture_output=True, text=True, timeout=timeout,
+        env=env,
     )
     tail = "\n".join(completed.stdout.splitlines()[-5:])
     counts = {"passed": 0, "failed": 0, "skipped": 0, "subtests": 0}
@@ -237,6 +244,20 @@ def stage04_manifest_record(evidence_dir: Path, stage04_run: Path | None) -> tup
             _artifact(stage04_run) if stage04_run and stage04_run.exists() else None
         ),
     }
+    if stage04_run and stage04_run.exists():
+        try:
+            execution = json.loads(stage04_run.read_text(encoding="utf-8"))
+            payload["stage04_execution"] = {
+                "total_nodes": execution.get("total_nodes"),
+                "failures": execution.get("failures"),
+                "skips": execution.get("skips"),
+                "pass": execution.get("pass", False),
+                "split_reason": execution.get("split_reason"),
+            }
+        except (OSError, json.JSONDecodeError):
+            payload["stage04_execution"] = None
+    else:
+        payload["stage04_execution"] = None
     payload["stage5"]["runner_pass"] = (
         payload["stage5"]["runner_lf_blob_sha256_observed"] == STAGE5_RUNNER_BLOB_SHA
     )
@@ -279,20 +300,20 @@ def link_records(link_id: int, evidence_dir: Path, results: dict,
     fec = run_pytest([
         "tests/unit/test_wideband_phy.py::WidebandConstantsTest",
         "tests/unit/test_wideband_phy.py::WidebandLoopbackTest",
+        f"tests/integration/test_wideband_stage_bits.py::Link{L}StageBitsTest",
     ])
     fec_status = "PASS" if fec["failed"] == 0 and fec["exit_code"] == 0 else "FAIL"
     fec_artifact = _write_json(evidence_dir / f"fec_stages_link{L}.json", fec)
-    for tc, scope in (("002", "interleaver 완전 순열·RSC/termination·decoder 체인"),
-                      ("003", "data/tail puncture count·padding·rate recovery"),
-                      ("004", "scrambler/descrambler 범위와 padding 불변식")):
+    vec_stage_artifact = _artifact(
+        VDETER_ROOT / "tests" / "vectors" / "phy" / f"link{L}" / "tx_stages_v2.md")
+    for tc, scope in (("002", "interleaver 완전 순열·encoder 직렬화가 독립 vector와 "
+                              "bit-exact"),
+                      ("003", "data/tail puncture count·padding 위치·직렬 channel "
+                              "bits가 vector와 exact"),
+                      ("004", "scrambler 범위·왕복과 scrambled bits가 vector와 exact")):
         records.append(record(
             f"TC-PHY{L}-{tc}", ["PHY-REQ-01", "PHY-REQ-03"],
-            scope + " (공유 FEC 체인 suite로 검증; §11.1 개별 vector-level exact "
-            "predicate의 세분 record는 미완)",
-            fec, "PARTIAL" if fec_status == "PASS" else "FAIL",
-            [fec_artifact],
-            note="round-trip suite가 체인 전체를 고정하나 stage별 독립 exact vector "
-                 "record는 후속 audit 항목",
+            scope, fec, fec_status, [fec_artifact, vec_stage_artifact],
         ))
 
     waveform = run_pytest([
@@ -340,14 +361,17 @@ def link_records(link_id: int, evidence_dir: Path, results: dict,
                   "passed": loopback["subtests"], "failed": loopback["failed"]},
     ))
 
-    link_chain = run_pytest(["tests/unit/test_link_packet.py",
-                             "tests/unit/test_link_message_codecs.py"])
+    link_chain = run_pytest([
+        f"tests/integration/test_wideband_link_chain.py::Link{L}ChainTest",
+        "tests/unit/test_link_packet.py",
+    ])
     records.append(record(
         f"TC-PHY{L}-010", ["TEST-REQ-03"],
-        "Stage 1 Link→PHY→Link의 payload·opaque CRC 보존 (Link suite + wideband "
-        "integration이 공동 소유; PHY-경유 직접 체인 record는 후속 audit 항목)",
+        "Stage 1 Link build→PHY loopback→Link parse의 payload·opaque CRC "
+        "zero-residue 보존 exact",
         link_chain,
-        "PARTIAL" if link_chain["failed"] == 0 else "FAIL",
+        "PASS" if link_chain["failed"] == 0 and link_chain["exit_code"] == 0
+        else "FAIL",
         [_write_json(evidence_dir / f"link_chain_link{L}.json", link_chain)],
     ))
 
@@ -368,7 +392,7 @@ def link_records(link_id: int, evidence_dir: Path, results: dict,
     ))
 
     imp = run_pytest([f"tests/integration/test_wideband_impairment.py::Link{L}ImpairmentTest"],
-                     timeout=14_400)
+                     timeout=14_400, extra_env={"VDETER_IMPAIRMENT_FULL": "1"})
     imp_full = imp["subtests"] >= 650
     imp_status = ("PASS" if imp["failed"] == 0 and imp["exit_code"] == 0 and imp_full
                   else ("PARTIAL" if imp["failed"] == 0 and imp["exit_code"] == 0 else "FAIL"))
@@ -421,15 +445,16 @@ def link_records(link_id: int, evidence_dir: Path, results: dict,
     ))
 
     reg = results["regression_manifest"]
-    reg_pass = reg["manifest"]["pass"] and reg["stage5"]["runner_pass"]
-    exec_note = ("직전 실행 425/6/1: 실패 6건은 base 커밋 동일 재현의 B210 "
-                 "process-isolation 전체-스위트 flake(격리·unit-only·runner PASS)")
+    execution = reg.get("stage04_execution")
+    executed = bool(execution and execution.get("pass"))
+    reg_pass = reg["manifest"]["pass"] and reg["stage5"]["runner_pass"] and executed
     records.append(record(
         f"TC-PHY{L}-016", ["PHY-REQ-09", "TEST-REQ-01"],
         "432-node Stage 0~4 manifest identity 일치와 회귀 무실패",
-        reg, "PARTIAL" if reg_pass else "FAIL",
+        reg, "PASS" if reg_pass else ("PARTIAL" if reg["manifest"]["pass"] else "FAIL"),
         [results["regression_artifact"]],
-        note=exec_note,
+        note=(execution or {}).get("split_reason", "") if executed else
+             "432-node 실행 evidence 미결속",
     ))
     return records
 
@@ -502,15 +527,19 @@ def multi_records(evidence_dir: Path, results: dict) -> list[dict]:
         "tests/contract/test_phy11_boundaries.py",
     ])
     reg = results["regression_manifest"]
+    execution = reg.get("stage04_execution")
+    executed = bool(execution and execution.get("pass"))
+    multi6_ok = link11["failed"] == 0 and reg["manifest"]["pass"] and executed
     records.append(record(
         "TC-PHY-MULTI-006", ["PHY-REQ-09"],
         "Link 11 frozen vector와 Stage 0~4 회귀 exact",
-        {"link11": link11, "stage04_manifest": reg["manifest"]},
-        "PARTIAL" if link11["failed"] == 0 and reg["manifest"]["pass"] else "FAIL",
+        {"link11": link11, "stage04_manifest": reg["manifest"],
+         "stage04_execution": execution},
+        "PASS" if multi6_ok else
+        ("PARTIAL" if link11["failed"] == 0 and reg["manifest"]["pass"] else "FAIL"),
         [results["regression_artifact"],
          _write_json(evidence_dir / "link11_fast_results.json", link11)],
-        note="빠른 Link 11 suite + manifest identity. 긴 receiver/loopback은 별도 "
-             "실행 기록(268 subtests PASS) 참조",
+        note="긴 receiver/loopback frozen 회귀는 432-node 실행에 포함",
     ))
 
     split = run_pytest(["tests/integration/test_stream_split.py::StreamSplitTest"])
@@ -670,7 +699,9 @@ def main(argv=None) -> int:
     parser.add_argument("--awgn-ext17-run", default="results/runs/stage6-awgn-ext17-20260824")
     parser.add_argument("--awgn-ext19-run", default="results/runs/stage6-awgn-ext19-20260824")
     parser.add_argument("--resampler-run", default="results/runs/stage6-resampler-gate")
-    parser.add_argument("--stage04-run", default="")
+    parser.add_argument(
+        "--stage04-run",
+        default="results/runs/stage04-frozen432-split-20260824/result.json")
     arguments = parser.parse_args(argv)
 
     started = time.time()
