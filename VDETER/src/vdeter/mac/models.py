@@ -935,6 +935,12 @@ class MacRuntimeProfile:
     sample_rate_hz: int
     #: Radio가 수락하는 가장 먼 미래 송수신 시각까지의 거리. 0이면 상한이 없다.
     schedule_horizon_nanoseconds: int = 0
+    #: `DR-STAGE6-MR-001` §13.2.2: 할당 DC/DSCH의 immutable Link ID. 기본 11은 legacy와
+    #: byte-exact 동일 경로다. BBSC/RAC/ASC/Short Data 제어는 항상 Link 11이다.
+    data_link_id: int = 11
+    #: 이 배치의 lower/upper Physical Channel alias. 기본값은 동결 Stage 4 25 kHz alias다.
+    lower_channel: PhysicalChannel = PhysicalChannel("VDETER_LOWER_25_TEST")
+    upper_channel: PhysicalChannel = PhysicalChannel("VDETER_UPPER_25_TEST")
 
     def __post_init__(self) -> None:
         if not isinstance(self.canonical_tbb, CanonicalStage4TbbProfile):
@@ -958,6 +964,13 @@ class MacRuntimeProfile:
             or self.sample_rate_hz <= 0
         ):
             raise InvalidValueError("MacRuntimeProfile.sample_rate_hz: 양의 정수여야 합니다")
+        if self.data_link_id not in (11, 17, 19):
+            raise InvalidValueError("MacRuntimeProfile.data_link_id: 11, 17 또는 19여야 합니다")
+        for name in ("lower_channel", "upper_channel"):
+            if not isinstance(getattr(self, name), PhysicalChannel):
+                raise InvalidValueError(f"MacRuntimeProfile.{name}: PhysicalChannel이어야 합니다")
+        if self.lower_channel.name == self.upper_channel.name:
+            raise InvalidValueError("MacRuntimeProfile: lower/upper alias가 같을 수 없습니다")
 
 
 __all__ = (

@@ -167,11 +167,12 @@ from .models import (
     Type0Lease,
 )
 from .tbb import (
-    LOWER_CHANNEL,
     STAGE4_BBSC_BOOTSTRAP_V1,
     UPPER_CHANNEL,
+    WIDEBAND_BOOTSTRAP_ID,
     SlotFunction,
     SlotMap,
+    build_bootstrap_slot_map,
     received_tbb_fingerprint,
 )
 from .tdma import (
@@ -300,7 +301,13 @@ class MacCoordinator:
         self._link_profiles = link_profile_registry
         self._phy_profiles = phy_profile_registry
         self._repository = repository
-        self._bootstrap = STAGE4_BBSC_BOOTSTRAP_V1
+        self._bootstrap = (
+            STAGE4_BBSC_BOOTSTRAP_V1
+            if profile.upper_channel.name == UPPER_CHANNEL.name
+            else build_bootstrap_slot_map(
+                upper=profile.upper_channel, map_id=WIDEBAND_BOOTSTRAP_ID
+            )
+        )
 
     # --- 관찰 ---
 
@@ -354,7 +361,11 @@ class MacCoordinator:
         return active.slot_map
 
     def _receive_channel(self) -> PhysicalChannel:
-        return routing_module.receive_physical_channel(self.is_control)
+        return routing_module.receive_physical_channel(
+            self.is_control,
+            lower=self._profile.lower_channel,
+            upper=self._profile.upper_channel,
+        )
 
     def _selection_interval(
         self, state: MacState, reference_nanoseconds: int
@@ -600,6 +611,9 @@ class MacCoordinator:
         link_id = self._link_id_for(11)
         if link_id.is_err:
             return state
+        data_link_id = self._link_id_for(self._profile.data_link_id)
+        if data_link_id.is_err:
+            return state
         slots = self.required_rx_slots(state, frame_ordinal)
         windows = rx_windows_for_frame(slots, frame_ordinal)
         planned = set(state.planned_rx_windows)
@@ -633,11 +647,16 @@ class MacCoordinator:
                 if not armed:
                     next_state = next_state.without_deferred_rx_window(window.key)
                 continue
+            window_link_id = (
+                data_link_id.value
+                if window.slot_function in (SlotFunction.DC, SlotFunction.DSCH)
+                else link_id.value
+            )
             plan = PhyReceiveWindowPlan(
                 channel=PhysicalChannel(window.channel_name),
                 start_at=self._utc(window.start_nanoseconds),
                 duration_nanoseconds=window.duration_nanoseconds,
-                allowed_link_ids=(link_id.value,),
+                allowed_link_ids=(window_link_id,),
             )
             commands.append(
                 self._new_command(
@@ -1137,7 +1156,7 @@ class MacCoordinator:
         candidates = enumerate_function_slots(
             slot_map=self._bootstrap,
             function=SlotFunction.BBSC,
-            physical_channel=UPPER_CHANNEL,
+            physical_channel=self._profile.upper_channel,
             from_utc_nanoseconds=now + lead,
             until_utc_nanoseconds=min(search_end, valid_until),
             transmit=True,
@@ -1151,7 +1170,7 @@ class MacCoordinator:
             packet_id=packet.packet_id,
             packet=packet.packet,
             link_id=link_id.value,
-            channel=UPPER_CHANNEL,
+            channel=self._profile.upper_channel,
             transmit_at=self._utc(slot.start_nanoseconds),
         )
         command = self._new_command(
@@ -1189,7 +1208,9 @@ class MacCoordinator:
                 observed_source_id=verified.source_id.value,
                 observed_control_station_id=verified.control_station_id,
             )
-        _, fingerprint = received_tbb_fingerprint(verified, canonical.fixture.fixture_id)
+        _, fingerprint = received_tbb_fingerprint(
+            verified, canonical.semantic_fixture_id, schema=canonical.semantic_schema
+        )
         active = state.active_tbb
         if active is None:
             if fingerprint != canonical.canonical_tbb_fingerprint:
@@ -1466,7 +1487,7 @@ class MacCoordinator:
         candidates = enumerate_function_slots(
             slot_map=self.active_slot_map(state),
             function=SlotFunction.ASC,
-            physical_channel=UPPER_CHANNEL,
+            physical_channel=self._profile.upper_channel,
             from_utc_nanoseconds=now + lead,
             until_utc_nanoseconds=now + lead + FRAME_NANOSECONDS * 2,
             transmit=True,
@@ -1485,7 +1506,7 @@ class MacCoordinator:
             intent_id=self._id_source.new_event_id(),
             kind="ENCODE",
             transmit_at_nanoseconds=slot.start_nanoseconds,
-            channel_name=UPPER_CHANNEL.name,
+            channel_name=self._profile.upper_channel.name,
             encode_request=LinkPacketEncodeRequest(
                 link_id=link_id.value,
                 messages=(MessageEncodeRequest(body=body, correlation=Correlation()),),
@@ -1561,6 +1582,8 @@ class MacCoordinator:
             local_station_id=self.local_station_id,
             route=requirement.route,
             ack_required=requirement.ack_required,
+            lower=self._profile.lower_channel,
+            upper=self._profile.upper_channel,
         )
         if placement.is_err:
             return CoordinatorPlan(result=placement, next_state=state, batch=None)
@@ -1768,6 +1791,8 @@ class MacCoordinator:
             profile=self._deployment,
             local_station_id=self.local_station_id,
             route=requirement.route,
+            lower=self._profile.lower_channel,
+            upper=self._profile.upper_channel,
         )
         if plan.is_err:
             return CoordinatorPlan(result=plan, next_state=state, batch=None)
@@ -1780,7 +1805,7 @@ class MacCoordinator:
                 node_source=NodeSource(self.local_station_id),
                 node_destination=NodeDestination(Addressed(plan.first_hop_peer)),
             )
-        link_id = self._link_id_for(11)
+        link_id = self._link_id_for(self._profile.data_link_id)
         if link_id.is_err:
             return CoordinatorPlan(result=link_id, next_state=state, batch=None)
         link_requirement = next(
@@ -1882,6 +1907,9 @@ class MacCoordinator:
         link_id = self._link_id_for(11)
         if link_id.is_err:
             return link_id
+        data_link_id = self._link_id_for(self._profile.data_link_id)
+        if data_link_id.is_err:
+            return data_link_id
 
         if session_plan.request_slot_function is SlotFunction.RAC:
             interval = self._selection_interval(state, now)
@@ -1926,8 +1954,8 @@ class MacCoordinator:
                 direction=session_plan.direction,
                 allocations=state.lc_allocations,
                 frame_ordinal=transmit_frame,
-                lower=LOWER_CHANNEL,
-                upper=UPPER_CHANNEL,
+                lower=self._profile.lower_channel,
+                upper=self._profile.upper_channel,
             )
             if pair is None:
                 return transfer_module.resource_busy_error()
@@ -1942,7 +1970,7 @@ class MacCoordinator:
                 destination=route.original_destination.address,
                 logical_channel_tx=pair.logical_channel_tx,
                 logical_channel_rx=pair.logical_channel_rx,
-                link_id=link_id.value,
+                link_id=data_link_id.value,
             )
             messages = (
                 MessageEncodeRequest(body=announcement, correlation=Correlation()),
@@ -1967,7 +1995,7 @@ class MacCoordinator:
                     self._advanced_context(
                         context,
                         phase=TransferPhase.AWAITING_RESOURCE,
-                        link_id=link_id.value,
+                        link_id=data_link_id.value,
                         physical_channel_name=pair.tx_physical_channel.name,
                         logical_channel_tx=pair.logical_channel_tx,
                         logical_channel_rx=pair.logical_channel_rx,
@@ -3373,7 +3401,7 @@ class MacCoordinator:
         ack_slot = slot_map.slot_for_logical_channel(allocation.logical_channel_rx)
         if ack_slot is None or ack_slot.function is not SlotFunction.DSCH:
             return state
-        link_id = self._link_id_for(11)
+        link_id = self._link_id_for(self._profile.data_link_id)
         if link_id.is_err:
             return state
         now = self._now_utc_nanoseconds()
@@ -4402,7 +4430,7 @@ class MacCoordinator:
             None,
         )
         replay = None
-        link_id = self._link_id_for(11)
+        link_id = self._link_id_for(self._profile.data_link_id)
         if allocation is not None and link_id.is_ok:
             ack_slot = self.active_slot_map(state).slot_for_logical_channel(
                 allocation.logical_channel_rx
@@ -4605,7 +4633,7 @@ class MacCoordinator:
             presentation_size=requirement.presentation_size,
             public_state=TransferState.QUEUED,
             link_id=LinkId(11),
-            physical_channel_name=UPPER_CHANNEL.name,
+            physical_channel_name=self._profile.upper_channel.name,
             total_fragments=link_requirement.data_session_fragment_count,
             relay_source_transfer_id=relay.relay_transfer_id.value,
         )
@@ -4618,7 +4646,7 @@ class MacCoordinator:
                 relay_required=False,
                 first_hop_peer=destination,
                 final_destination=destination,
-                request_physical_channel=UPPER_CHANNEL,
+                request_physical_channel=self._profile.upper_channel,
                 request_slot_function=SlotFunction.ASC,
             ),
             route=relay.second_hop_route,
@@ -5224,13 +5252,16 @@ class MacCoordinator:
         link_id = self._link_id_for(11)
         if link_id.is_err:
             return next_state
+        data_link_id = self._link_id_for(self._profile.data_link_id)
+        if data_link_id.is_err:
+            return next_state
         now = self._now_utc_nanoseconds()
         lead = self._profile.transmit_lead_nanoseconds
         slot_map = self.active_slot_map(next_state)
         asc = enumerate_function_slots(
             slot_map=slot_map,
             function=SlotFunction.ASC,
-            physical_channel=UPPER_CHANNEL,
+            physical_channel=self._profile.upper_channel,
             from_utc_nanoseconds=now + lead,
             until_utc_nanoseconds=now + lead + FRAME_NANOSECONDS * 2,
             transmit=True,
@@ -5277,7 +5308,7 @@ class MacCoordinator:
                             destination=destination,
                             logical_channel_tx=chain.logical_channel_tx,
                             logical_channel_rx=chain.logical_channel_rx,
-                            link_id=link_id.value,
+                            link_id=data_link_id.value,
                             tdma_frame_delay=delay,
                         ),
                         correlation=Correlation(),
@@ -5306,8 +5337,8 @@ class MacCoordinator:
                 direction=resource_module.Direction.SHIP_TO_ROC,
                 allocations=next_state.lc_allocations,
                 frame_ordinal=transmit_frame,
-                lower=LOWER_CHANNEL,
-                upper=UPPER_CHANNEL,
+                lower=self._profile.lower_channel,
+                upper=self._profile.upper_channel,
             )
             if pair is None:
                 messages.append(rejection)
@@ -5317,7 +5348,7 @@ class MacCoordinator:
                 destination=destination,
                 logical_channel_tx=pair.logical_channel_tx,
                 logical_channel_rx=pair.logical_channel_rx,
-                link_id=link_id.value,
+                link_id=data_link_id.value,
             )
             messages.append(MessageEncodeRequest(body=body, correlation=Correlation()))
             resource_chain_station_ids.append(candidate.node_source_id_value)
@@ -5350,7 +5381,7 @@ class MacCoordinator:
             intent_id=self._id_source.new_event_id(),
             kind="ENCODE",
             transmit_at_nanoseconds=slot.start_nanoseconds,
-            channel_name=UPPER_CHANNEL.name,
+            channel_name=self._profile.upper_channel.name,
             encode_request=LinkPacketEncodeRequest(
                 link_id=link_id.value, messages=tuple(messages), correlation=Correlation()
             ),
@@ -5512,6 +5543,8 @@ class MacCoordinator:
             local_station_id=self.local_station_id,
             sender_station_id=StationId(sender_value),
             broadcast=False,
+            lower=self._profile.lower_channel,
+            upper=self._profile.upper_channel,
         )
         if placement.is_err:
             return None

@@ -1,0 +1,78 @@
+schema_version = 3
+
+[endpoint]
+id = "wideband-software-ship"
+role = "SHIP"
+station_id = 111111111
+scope = "TEST"
+code_version = "0.1.0"
+
+[service]
+max_payload_bytes = 65531
+max_concurrent_transfers = 8
+
+[link]
+supported_link_ids = [11, 17, 19]
+
+[mac]
+link_id = 11
+data_link_id = 17
+tx_channel = "VDETER_LOWER_100_TEST"
+rx_channel = "VDETER_UPPER_100_TEST"
+transmit_lead_nanoseconds = 0
+
+[phy]
+sample_rate_hz = 307200
+
+[radio]
+adapter = "SOFTWARE"
+clock_reference = "INTERNAL"
+sample_format = "cf32le"
+
+[radio.timing]
+profile = "INTERNAL_FREE_RUNNING"
+clock_source = "INTERNAL"
+time_source = "INTERNAL"
+pps_source = "NONE"
+mapping_attempt_count = 8
+mapping_valid_for_nanoseconds = 1000000000
+max_mapping_uncertainty_ns = 10000000
+
+[radio.resource_limits]
+tx_queue_max_count = 64
+tx_queue_max_bytes = 8388608
+rx_window_max_count = 64
+rx_queue_max_count = 64
+rx_queue_max_bytes = 8388608
+stop_timeout_ns = 5000000000
+
+[[radio.channels]]
+name = "VDETER_LOWER_100_TEST"
+center_frequency_hz = 157237500
+sample_rate_hz = 307200
+tx_gain_db = 0
+rx_gain_db = 0
+waveform_bandwidth_hz = 100000
+analog_bandwidth_hz = 100000
+tx_enabled = true
+rx_enabled = false
+
+[[radio.channels]]
+name = "VDETER_UPPER_100_TEST"
+center_frequency_hz = 161837500
+sample_rate_hz = 307200
+tx_gain_db = 0
+rx_gain_db = 0
+waveform_bandwidth_hz = 100000
+analog_bandwidth_hz = 100000
+tx_enabled = false
+rx_enabled = true
+
+[sources]
+time = "TEST"
+random = "SEEDED"
+id = "DETERMINISTIC"
+seed = 3
+
+[test]
+peer_station_id = 222222222

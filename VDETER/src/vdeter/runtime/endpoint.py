@@ -1727,15 +1727,33 @@ class Stage4Support:
         return True
 
     def on_samples_received(self, event) -> bool:
-        """window의 sample을 기존 PHY decode와 동결 `MacPort` 경로로 보낸다."""
+        """window의 sample을 기존 PHY decode와 동결 `MacPort` 경로로 보낸다.
+
+        `DR-STAGE6-MR-001` §13.2.3: window intent가 있으면 그 `allowed_link_ids`를
+        PhyDecodeRequest에 그대로 사용한다. plan이 단일 rate family를 이미 결정했으므로
+        family 사이 silent fallback이 없다. 상관되는 계획이 없으면 legacy와 같이 endpoint
+        supported set을 사용한다(legacy 25 kHz 경로에서는 항상 `(11,)`과 동일하다).
+        """
 
         received = event.payload
         endpoint_config = self._endpoint._dependencies.configuration.endpoint
+        window_key = (
+            received.channel.name,
+            received.samples.first_sample_at.total_nanoseconds(),
+        )
+        window_command = self._rx_commands.get(window_key)
+        allowed = endpoint_config.link.supported_link_ids
+        if window_command is not None:
+            plan_allowed = getattr(
+                getattr(window_command.payload, "request", None), "allowed_link_ids", None
+            )
+            if plan_allowed:
+                allowed = plan_allowed
         recovered = self._endpoint._phy.decode_samples(
             PhyDecodeRequest(
                 channel=received.channel,
                 samples=received.samples,
-                allowed_link_ids=endpoint_config.link.supported_link_ids,
+                allowed_link_ids=allowed,
             )
         )
         if recovered.is_err:

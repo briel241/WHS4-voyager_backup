@@ -117,7 +117,9 @@ _SECTION_KEYS = {
     "endpoint": frozenset({"id", "role", "station_id", "scope", "code_version"}),
     "service": frozenset({"max_payload_bytes", "max_concurrent_transfers"}),
     "link": frozenset({"supported_link_ids"}),
-    "mac": frozenset({"link_id", "tx_channel", "rx_channel", "transmit_lead_nanoseconds"}),
+    "mac": frozenset(
+        {"link_id", "tx_channel", "rx_channel", "transmit_lead_nanoseconds", "data_link_id"}
+    ),
     "phy": frozenset({"sample_rate_hz"}),
     "radio": _RADIO_V1_KEYS,
     "logging": frozenset({"jsonl_enabled", "console_enabled"}),
@@ -174,6 +176,7 @@ _RESOURCE_LIMIT_KEYS = frozenset(
 )
 _B210_STREAM_KEYS = frozenset({"master_clock_rate_hz", "cpu_format", "otw_format"})
 _CANONICAL_CHANNELS = ("VDETER_LOWER_25_TEST", "VDETER_UPPER_25_TEST")
+_WIDEBAND_CANONICAL_CHANNELS = ("VDETER_LOWER_100_TEST", "VDETER_UPPER_100_TEST")
 
 
 def _error(code: str, message: str, **details):
@@ -278,7 +281,7 @@ def load_configuration(text: str, source_path: str = ""):
         forbidden = _check_forbidden(section, content)
         if forbidden is not None:
             return forbidden
-        section_allowed = _RADIO_V2_KEYS if section == "radio" and schema_version == 2 else allowed
+        section_allowed = _RADIO_V2_KEYS if section == "radio" and schema_version in (2, 3) else allowed
         unknown = _check_unknown(section, content, section_allowed)
         if unknown is not None:
             return unknown
@@ -287,7 +290,7 @@ def load_configuration(text: str, source_path: str = ""):
             if missing is not None:
                 return missing
 
-    if schema_version == 2:
+    if schema_version in (2, 3):
         radio = data["radio"]
         for section_name, keys in (
             ("radio.timing", _TIMING_KEYS),
@@ -346,7 +349,7 @@ def _build(data: dict, source_path: str):
     radio_section = data["radio"]
     channels = radio_section["channels"]
     schema_version = data["schema_version"]
-    if schema_version == 2:
+    if schema_version in (2, 3):
         adapter_name = radio_section.get("adapter")
         if adapter_name == RadioAdapterKind.SOFTWARE.value:
             if "device_selector" in radio_section:
@@ -386,8 +389,10 @@ def _build(data: dict, source_path: str):
     for channel in channels:
         if not isinstance(channel, dict):
             return _error(ErrorCode.CONFIG_SCHEMA_INVALID, "radio.channels 항목은 table이어야 합니다")
-        channel_keys = _V2_CHANNEL_KEYS if schema_version == 2 else _CHANNEL_KEYS
-        required_channel_keys = _V2_CHANNEL_REQUIRED_KEYS if schema_version == 2 else _CHANNEL_KEYS
+        channel_keys = _V2_CHANNEL_KEYS if schema_version in (2, 3) else _CHANNEL_KEYS
+        required_channel_keys = (
+            _V2_CHANNEL_REQUIRED_KEYS if schema_version in (2, 3) else _CHANNEL_KEYS
+        )
         unknown = _check_unknown("radio.channels", channel, channel_keys)
         if unknown is not None:
             return unknown
@@ -404,7 +409,7 @@ def _build(data: dict, source_path: str):
                 rx_gain_db=channel["rx_gain_db"],
             )
         )
-        if schema_version == 2:
+        if schema_version in (2, 3):
             channel_bindings.append(
                 RadioChannelBinding(
                     channel=PhysicalChannel(channel["name"]),
@@ -419,14 +424,15 @@ def _build(data: dict, source_path: str):
                 )
             )
 
-    if schema_version == 2:
+    if schema_version in (2, 3):
+        canonical = _CANONICAL_CHANNELS if schema_version == 2 else _WIDEBAND_CANONICAL_CHANNELS
         by_name = {value.channel.name: (value, channel_bindings[index]) for index, value in enumerate(channel_settings)}
-        if set(by_name) != set(_CANONICAL_CHANNELS) or len(channel_settings) != 2:
+        if set(by_name) != set(canonical) or len(channel_settings) != 2:
             return _error(
                 ErrorCode.CONFIG_SEMANTIC_INVALID,
-                "v2 radio.channels에는 lower와 upper channel이 각각 정확히 하나 필요합니다",
+                "radio.channels에는 이 schema의 lower와 upper channel이 각각 정확히 하나 필요합니다",
             )
-        ordered = tuple(by_name[name] for name in _CANONICAL_CHANNELS)
+        ordered = tuple(by_name[name] for name in canonical)
         channel_settings = [item[0] for item in ordered]
         channel_bindings = [item[1] for item in ordered]
 
@@ -457,6 +463,7 @@ def _build(data: dict, source_path: str):
                 tx_channel=PhysicalChannel(data["mac"]["tx_channel"]),
                 rx_channel=PhysicalChannel(data["mac"]["rx_channel"]),
                 transmit_lead_nanoseconds=data["mac"]["transmit_lead_nanoseconds"],
+                data_link_id=LinkId(data["mac"].get("data_link_id", 11)),
             ),
             phy=PhyConfig(sample_rate_hz=data["phy"]["sample_rate_hz"]),
             sources=SourceSelection(
@@ -485,7 +492,7 @@ def _build(data: dict, source_path: str):
         timing = None
         limits = None
         stream = None
-        if schema_version == 2:
+        if schema_version in (2, 3):
             timing_section = radio_section["timing"]
             limits_section = radio_section["resource_limits"]
             timing = RadioTimingConfiguration(
@@ -555,7 +562,17 @@ def _validate_semantics(configuration: LoadedConfiguration):
             sample_format=radio.sample_format,
         )
 
-    if endpoint.schema_version == CONFIG_SCHEMA_CURRENT_VERSION:
+    if endpoint.schema_version == 3:
+        v3_error = _validate_v3_semantics(configuration)
+        if v3_error is not None:
+            return v3_error
+    elif endpoint.schema_version == CONFIG_SCHEMA_CURRENT_VERSION:
+        if endpoint.mac.data_link_id.value != 11:
+            return _error(
+                ErrorCode.CONFIG_SEMANTIC_INVALID,
+                "v2 설정의 mac.data_link_id는 11이어야 합니다",
+                data_link_id=endpoint.mac.data_link_id.value,
+            )
         v2_error = _validate_v2_semantics(configuration)
         if v2_error is not None:
             return v2_error
@@ -706,6 +723,109 @@ def _validate_v2_semantics(configuration: LoadedConfiguration):
     else:
         if not _is_exact_serial_selector(radio.device_selector) or radio.b210_stream is None:
             return _error(ErrorCode.RADIO_UNSUPPORTED_SETTING, "B210 selector/stream 설정이 필요합니다")
+    return None
+
+
+def _validate_v3_semantics(configuration: LoadedConfiguration):
+    """`DR-STAGE6-MR-001` §13.2.2: 2-PC 100 kHz wideband profile semantic 검증."""
+
+    endpoint = configuration.endpoint
+    radio = configuration.radio
+    try:
+        adapter = RadioAdapterKind(radio.adapter_kind)
+    except ValueError:
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, "v3 Radio adapter가 잘못되었습니다")
+    if adapter is not RadioAdapterKind.SOFTWARE:
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 wideband profile은 Software adapter만 지원한다. B210은 Stage 7 범위다.",
+        )
+    if radio.clock_reference is not ClockReference.INTERNAL or radio.sample_format != SAMPLE_FORMAT_CF32LE:
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 Radio는 INTERNAL clock_reference와 cf32le sample format이 필요합니다",
+        )
+    timing = radio.timing
+    if timing is None or radio.resource_limits is None:
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, "v3 timing/resource_limits가 필요합니다")
+    if (
+        timing.profile is not RadioTimingProfile.INTERNAL_FREE_RUNNING
+        or timing.clock_source is not ClockReference.INTERNAL
+        or timing.time_source is not ClockReference.INTERNAL
+        or timing.pps_source is not ClockReference.NONE
+        or timing.mapping_attempt_count != 8
+        or timing.mapping_valid_for_nanoseconds != 1_000_000_000
+        or timing.max_mapping_uncertainty_ns != 10_000_000
+    ):
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, "승인된 INTERNAL_FREE_RUNNING timing 설정과 다릅니다")
+
+    if endpoint.mac.data_link_id.value not in (17, 19):
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 wideband profile의 mac.data_link_id는 17 또는 19여야 합니다",
+            data_link_id=endpoint.mac.data_link_id.value,
+        )
+    if endpoint.mac.link_id.value != 11:
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 wideband profile의 mac.link_id(제어)는 11이어야 합니다",
+        )
+    supported = {value.value for value in endpoint.link.supported_link_ids}
+    if 11 not in supported or endpoint.mac.data_link_id.value not in supported:
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 link.supported_link_ids에는 11과 data_link_id가 있어야 합니다",
+        )
+    if endpoint.phy.sample_rate_hz != 307_200:
+        return _error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            "v3 wideband device rate는 307,200 samples/s여야 합니다",
+            sample_rate_hz=endpoint.phy.sample_rate_hz,
+        )
+
+    settings = {value.channel.name: value for value in radio.channels}
+    bindings = {value.channel.name: value for value in radio.channel_bindings}
+    if tuple(value.channel.name for value in radio.channels) != _WIDEBAND_CANONICAL_CHANNELS or tuple(
+        value.channel.name for value in radio.channel_bindings
+    ) != _WIDEBAND_CANONICAL_CHANNELS:
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, "wideband channel canonical order가 잘못되었습니다")
+    expected_directions = {
+        ServiceRole.SHIP: ((True, False), (False, True)),
+        ServiceRole.CONTROL: ((False, True), (True, False)),
+    }[endpoint.role]
+    expected_frequencies = {
+        "VDETER_LOWER_100_TEST": 157_237_500,
+        "VDETER_UPPER_100_TEST": 161_837_500,
+    }
+    for index, name in enumerate(_WIDEBAND_CANONICAL_CHANNELS):
+        setting = settings[name]
+        binding = bindings[name]
+        if (
+            setting.center_frequency_hz != expected_frequencies[name]
+            or setting.sample_rate_hz != 307_200
+            or setting.tx_gain_db != 0
+            or setting.rx_gain_db != 0
+            or binding.waveform_bandwidth_hz != 100_000
+            or binding.analog_bandwidth_hz != 100_000
+            or (binding.tx_enabled, binding.rx_enabled) != expected_directions[index]
+        ):
+            return _error(
+                ErrorCode.RADIO_UNSUPPORTED_SETTING,
+                "wideband channel 주파수/rate/gain/bandwidth 또는 역할 방향이 승인 설정과 다릅니다",
+                channel=name,
+            )
+        if any(
+            value is not None
+            for value in (
+                binding.tx_device_channel,
+                binding.rx_device_channel,
+                binding.tx_antenna,
+                binding.rx_antenna,
+            )
+        ):
+            return _error(ErrorCode.RADIO_UNSUPPORTED_SETTING, "Software binding에 hardware key를 사용할 수 없습니다", channel=name)
+    if radio.device_selector or radio.b210_stream is not None:
+        return _error(ErrorCode.RADIO_UNSUPPORTED_SETTING, "Software backend에 B210 설정을 사용할 수 없습니다")
     return None
 
 

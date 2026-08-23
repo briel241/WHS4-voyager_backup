@@ -45,6 +45,7 @@ class ShortDataPlacement:
 
 
 #: mobile station이 송신하면 RAC, ROC Control station이 송신하면 ASC를 사용한다.
+#: 기본 표는 동결 25 kHz alias이며, 다른 alias 배치는 `short_data_placements()`로 만든다.
 _SHORT_DATA_PLACEMENTS = {
     ShortDataDirection.ROC_TO_MASS: ShortDataPlacement(
         direction=ShortDataDirection.ROC_TO_MASS,
@@ -135,12 +136,19 @@ def resolve_short_data_direction(
     local_station_id: StationId,
     route: RouteAddresses,
     ack_required: bool,
+    lower: PhysicalChannel = LOWER_CHANNEL,
+    upper: PhysicalChannel = UPPER_CHANNEL,
 ):
     """Short Data route를 검증하고 canonical 방향·배치를 결정한다.
 
     Short Data는 ROC relay를 사용하지 않는 한 hop이므로 Original과 Node가 같아야 한다.
     """
 
+    placements = (
+        _SHORT_DATA_PLACEMENTS
+        if lower.name == LOWER_CHANNEL.name and upper.name == UPPER_CHANNEL.name
+        else short_data_placements(lower, upper)
+    )
     source = route.original_source.station_id
     destination = route.original_destination.address
     if source.value != local_station_id.value:
@@ -166,7 +174,7 @@ def resolve_short_data_direction(
                 "single-leg fixture에서 MASS-originated broadcast는 지원하지 않습니다",
                 MacReasonCode.MASS_BROADCAST_NOT_SUPPORTED,
             )
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.ROC_BROADCAST])
+        return Ok(placements[ShortDataDirection.ROC_BROADCAST])
 
     peer = destination.station_id
     if not profile.is_member(peer):
@@ -176,10 +184,10 @@ def resolve_short_data_direction(
     if peer.value == local_station_id.value:
         return invalid_request_error("Short Data destination이 로컬 endpoint와 같습니다")
     if is_roc:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.ROC_TO_MASS])
+        return Ok(placements[ShortDataDirection.ROC_TO_MASS])
     if peer.value == profile.roc_station_id.value:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.MASS_TO_ROC])
-    return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.MASS_TO_MASS])
+        return Ok(placements[ShortDataDirection.MASS_TO_ROC])
+    return Ok(placements[ShortDataDirection.MASS_TO_MASS])
 
 
 def receive_short_data_placement(
@@ -188,23 +196,54 @@ def receive_short_data_placement(
     local_station_id: StationId,
     sender_station_id: StationId,
     broadcast: bool,
+    lower: PhysicalChannel = LOWER_CHANNEL,
+    upper: PhysicalChannel = UPPER_CHANNEL,
 ):
     """수신 endpoint가 ACK를 보낼 배치를 결정한다."""
 
+    placements = (
+        _SHORT_DATA_PLACEMENTS
+        if lower.name == LOWER_CHANNEL.name and upper.name == UPPER_CHANNEL.name
+        else short_data_placements(lower, upper)
+    )
     if broadcast:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.ROC_BROADCAST])
+        return Ok(placements[ShortDataDirection.ROC_BROADCAST])
     is_roc = local_station_id.value == profile.roc_station_id.value
     sender_is_roc = sender_station_id.value == profile.roc_station_id.value
     if is_roc and not sender_is_roc:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.MASS_TO_ROC])
+        return Ok(placements[ShortDataDirection.MASS_TO_ROC])
     if not is_roc and sender_is_roc:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.ROC_TO_MASS])
+        return Ok(placements[ShortDataDirection.ROC_TO_MASS])
     if not is_roc and not sender_is_roc:
-        return Ok(_SHORT_DATA_PLACEMENTS[ShortDataDirection.MASS_TO_MASS])
+        return Ok(placements[ShortDataDirection.MASS_TO_MASS])
     return unexpected_control_station_error(
         "ROC가 다른 Control station의 Short Data를 받았습니다",
         sender_station_id=sender_station_id.value,
     )
+
+
+def short_data_placements(
+    lower: PhysicalChannel, upper: PhysicalChannel
+) -> dict:
+    """주어진 lower/upper alias에 대한 Short Data 배치 표."""
+
+    def remap(placement: ShortDataPlacement) -> ShortDataPlacement:
+        def channel(value):
+            if value is None:
+                return None
+            if value.name == LOWER_CHANNEL.name:
+                return lower
+            return upper
+
+        return ShortDataPlacement(
+            direction=placement.direction,
+            tx_physical_channel=channel(placement.tx_physical_channel),
+            tx_slot_function=placement.tx_slot_function,
+            ack_physical_channel=channel(placement.ack_physical_channel),
+            ack_slot_function=placement.ack_slot_function,
+        )
+
+    return {key: remap(value) for key, value in _SHORT_DATA_PLACEMENTS.items()}
 
 
 def placement_for(direction: ShortDataDirection) -> ShortDataPlacement:
@@ -228,6 +267,8 @@ def resolve_data_session_plan(
     profile: MacDeploymentProfile,
     local_station_id: StationId,
     route: RouteAddresses,
+    lower: PhysicalChannel = LOWER_CHANNEL,
+    upper: PhysicalChannel = UPPER_CHANNEL,
 ):
     """Data Session route를 검증하고 방향·relay 여부를 결정한다.
 
@@ -263,7 +304,7 @@ def resolve_data_session_plan(
                 relay_required=False,
                 first_hop_peer=final,
                 final_destination=final,
-                request_physical_channel=UPPER_CHANNEL,
+                request_physical_channel=upper,
                 request_slot_function=SlotFunction.ASC,
             )
         )
@@ -274,7 +315,7 @@ def resolve_data_session_plan(
             relay_required=relay_required,
             first_hop_peer=profile.roc_station_id,
             final_destination=final,
-            request_physical_channel=LOWER_CHANNEL,
+            request_physical_channel=lower,
             request_slot_function=SlotFunction.RAC,
         )
     )
@@ -336,14 +377,22 @@ def relay_second_hop_route(
     )
 
 
-def receive_physical_channel(is_control: bool) -> PhysicalChannel:
+def receive_physical_channel(
+    is_control: bool,
+    lower: PhysicalChannel = LOWER_CHANNEL,
+    upper: PhysicalChannel = UPPER_CHANNEL,
+) -> PhysicalChannel:
     """ROC는 lower leg, MASS는 upper leg를 수신한다."""
 
-    return LOWER_CHANNEL if is_control else UPPER_CHANNEL
+    return lower if is_control else upper
 
 
-def transmit_physical_channel(is_control: bool) -> PhysicalChannel:
-    return UPPER_CHANNEL if is_control else LOWER_CHANNEL
+def transmit_physical_channel(
+    is_control: bool,
+    lower: PhysicalChannel = LOWER_CHANNEL,
+    upper: PhysicalChannel = UPPER_CHANNEL,
+) -> PhysicalChannel:
+    return upper if is_control else lower
 
 
 __all__ = (
