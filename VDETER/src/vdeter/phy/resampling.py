@@ -68,6 +68,15 @@ PROTOTYPE_TAPS = tuple(
 _NATIVE_DELAY = PROTOTYPE_GROUP_DELAY_DEVICE_SAMPLES // RATE_FACTOR
 
 
+def _index_order_sum(values) -> float:
+    # §13.5: 정규화 합은 tap index 오름차순의 순차 binary64 덧셈이다. `fsum` 같은
+    # extended-precision 누적은 승인 nominal DC 이득과 1 ULP 다른 계수를 만든다.
+    total = 0.0
+    for value in values:
+        total += value
+    return total
+
+
 def _interpolation_branches() -> tuple[tuple[float, ...], ...]:
     branches = []
     for phase in range(RATE_FACTOR):
@@ -75,13 +84,13 @@ def _interpolation_branches() -> tuple[tuple[float, ...], ...]:
             RATE_FACTOR * PROTOTYPE_TAPS[index]
             for index in range(phase, PROTOTYPE_TAP_COUNT, RATE_FACTOR)
         ]
-        scale = math.fsum(raw)
+        scale = _index_order_sum(raw)
         branches.append(tuple(value / scale for value in raw))
     return tuple(branches)
 
 
 def _decimation_taps() -> tuple[float, ...]:
-    scale = math.fsum(PROTOTYPE_TAPS)
+    scale = _index_order_sum(PROTOTYPE_TAPS)
     return tuple(value / scale for value in PROTOTYPE_TAPS)
 
 

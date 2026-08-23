@@ -56,6 +56,61 @@ class PrototypeIdentityTest(unittest.TestCase):
             self.assertLess(response, 10 ** (-87 / 20), msg=f"omega={fraction}*pi")
 
 
+class ArithmeticOrderIdentityTest(unittest.TestCase):
+    """`TC-PHY-MULTI-011`: §13.5 산술 순서·정규화 파생값과 impulse vector hash."""
+
+    def test_branch_dc_gains_match_the_baseline_exactly(self):
+        # branch 정규화 뒤 같은 index 순서로 다시 더한 nominal DC 이득 (§13.5).
+        expected = (1.0, 1.0000000000000004, 1.0, 1.0000000000000002)
+        for phase, expected_gain in enumerate(expected):
+            raw = [
+                RATE_FACTOR * PROTOTYPE_TAPS[index]
+                for index in range(phase, PROTOTYPE_TAP_COUNT, RATE_FACTOR)
+            ]
+            scale = 0.0
+            for value in raw:
+                scale += value
+            gain = 0.0
+            for value in raw:
+                gain += value / scale
+            self.assertEqual(expected_gain, gain, msg=f"branch {phase}")
+
+    def test_decimation_gain_and_energy_match_the_baseline_exactly(self):
+        scale = 0.0
+        for value in PROTOTYPE_TAPS:
+            scale += value
+        gain = 0.0
+        energy = 0.0
+        for value in PROTOTYPE_TAPS:
+            normalized = value / scale
+            gain += normalized
+            energy += normalized * normalized
+        self.assertEqual(0.9999999999999998, gain)
+        self.assertEqual(0.23928822132142086, energy)
+
+    def test_interpolation_impulse_vector_hash_is_exact(self):
+        from vdeter.phy.burst.rrc import to_cf32le
+
+        stimulus = [0j] * NATIVE_SLOT_SAMPLES
+        stimulus[1024] = 1 + 0j
+        digest = hashlib.sha256(to_cf32le(interpolate_slot(stimulus))).hexdigest()
+        self.assertEqual(
+            "e83069a99ab9d1aac8199512cad7353db4d0ba2ddc5a1cfaf130455ac63f3d4c",
+            digest,
+        )
+
+    def test_decimation_impulse_vector_hash_is_exact(self):
+        from vdeter.phy.burst.rrc import to_cf32le
+
+        stimulus = [0j] * DEVICE_SLOT_SAMPLES
+        stimulus[4096] = 1 + 0j
+        digest = hashlib.sha256(to_cf32le(decimate_slot(stimulus))).hexdigest()
+        self.assertEqual(
+            "6c0d0965ddba3d2dfcd0742615c0e987d98f2fde7ecf8e256e5ca976bc54ac8c",
+            digest,
+        )
+
+
 class ExactCountAndValidationTest(unittest.TestCase):
     def test_exact_output_counts(self):
         up = interpolate_slot((0.5 + 0.25j,) * NATIVE_SLOT_SAMPLES)
