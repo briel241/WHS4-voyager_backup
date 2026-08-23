@@ -667,7 +667,8 @@ def main(argv=None) -> int:
     parser.add_argument("--result",
                         default="results/phy_profile_verification_v2.json")
     parser.add_argument("--awgn-run", default="results/runs/stage6-awgn-20260823")
-    parser.add_argument("--awgn-ext-run", default="results/runs/stage6-awgn-ext17-20260824")
+    parser.add_argument("--awgn-ext17-run", default="results/runs/stage6-awgn-ext17-20260824")
+    parser.add_argument("--awgn-ext19-run", default="results/runs/stage6-awgn-ext19-20260824")
     parser.add_argument("--resampler-run", default="results/runs/stage6-resampler-gate")
     parser.add_argument("--stage04-run", default="")
     arguments = parser.parse_args(argv)
@@ -692,23 +693,34 @@ def main(argv=None) -> int:
     awgn_dir = VDETER_ROOT / arguments.awgn_run
     if (awgn_dir / "result.json").exists():
         payload = json.loads((awgn_dir / "result.json").read_text(encoding="utf-8"))
+        combined = {"core_run": payload}
+        extensions = {}
+        for link, run_arg in (("17", arguments.awgn_ext17_run),
+                              ("19", arguments.awgn_ext19_run)):
+            ext_path = VDETER_ROOT / run_arg / "result.json"
+            if ext_path.exists():
+                extensions[link] = json.loads(ext_path.read_text(encoding="utf-8"))
+        combined["extension_runs"] = extensions
         for link, data in payload.get("links", {}).items():
             noise = data.get("noise_only", [])
             noise_pass = bool(noise) and all(
                 p["empty"] == p["slots"] and p["slots"] > 0 for p in noise)
-            complete = payload.get("run", {}).get("complete_sweep", False)
+            core_complete = payload.get("run", {}).get("complete_sweep", False)
+            gate = data.get("proposed_empirical_gate")
+            ext_points = 0
+            if gate is None and link in extensions:
+                ext_link = extensions[link].get("links", {}).get(link, {})
+                gate = ext_link.get("proposed_empirical_gate")
+                ext_points = len([p for p in ext_link.get("sweep", [])
+                                  if p.get("bursts") == 1000])
             awgn_summary[link] = {
-                "proposed_empirical_gate": data.get("proposed_empirical_gate"),
+                "proposed_empirical_gate": gate,
                 "noise_only_pass": noise_pass,
-                "complete": complete,
-                "sweep_points": len(data.get("sweep", [])),
+                "complete": core_complete and gate is not None,
+                "core_sweep_points": len(data.get("sweep", [])),
+                "extension_points_1000": ext_points,
             }
         awgn_artifact_path = evidence_dir / "awgn_results.json"
-        combined = {"core_run": payload}
-        ext_dir = VDETER_ROOT / arguments.awgn_ext_run
-        if (ext_dir / "result.json").exists():
-            combined["extension_run"] = json.loads(
-                (ext_dir / "result.json").read_text(encoding="utf-8"))
         awgn_artifact_path.write_text(
             json.dumps(combined, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
