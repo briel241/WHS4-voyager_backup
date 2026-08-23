@@ -56,3 +56,56 @@ class TransferRecord:
         return TransferRecord(
             transfer_id=self.transfer_id, state=state, updated_at=updated_at, error=error
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Stage5ServicePolicy:
+    """Stage 5 wiring이 주입하는 immutable 내부 정책 값 (`stage5` §10, `DR-STAGE5-014`).
+
+    공개 config schema를 확장하지 않는다. Stage 5 적합 profile에서는 runtime override할 수
+    없으며 아래 기본값이 승인된 규범값이다.
+    """
+
+    max_application_bytes: int = 65_531
+    max_encoded_bytes: int = 65_535
+    max_nonterminal_transfers: int = 8
+    max_queued_transfers: int = 8
+    terminal_retention_nanoseconds: int = 15 * 60 * 1_000_000_000
+    terminal_retention_max_records: int = 1_024
+    event_queue_capacity: int = 256
+    event_general_capacity: int = 240
+    event_cleanup_reserve: int = 16
+    state_chain_tokens_per_transfer: int = 2
+    event_payload_budget_bytes: int = 16 * 1024 * 1024
+    event_publish_max_retries: int = 3
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_application_bytes",
+            "max_encoded_bytes",
+            "max_nonterminal_transfers",
+            "max_queued_transfers",
+            "terminal_retention_nanoseconds",
+            "terminal_retention_max_records",
+            "event_queue_capacity",
+            "event_general_capacity",
+            "event_cleanup_reserve",
+            "state_chain_tokens_per_transfer",
+            "event_payload_budget_bytes",
+            "event_publish_max_retries",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise InvalidValueError(f"Stage5ServicePolicy.{name}: 양의 정수여야 합니다")
+        if self.event_general_capacity + self.event_cleanup_reserve != self.event_queue_capacity:
+            raise InvalidValueError(
+                "Stage5ServicePolicy: 일반 영역과 cleanup reserve의 합은 총 event 상한이어야 합니다"
+            )
+        if self.max_queued_transfers > self.max_nonterminal_transfers:
+            raise InvalidValueError(
+                "Stage5ServicePolicy: QUEUED 상한은 nonterminal 상한 안이어야 합니다"
+            )
+        if self.max_application_bytes + 4 > self.max_encoded_bytes:
+            raise InvalidValueError(
+                "Stage5ServicePolicy: application 상한이 encoded 상한과 모순됩니다"
+            )

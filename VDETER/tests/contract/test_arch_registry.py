@@ -106,10 +106,25 @@ class RegistryLifecycleTest(unittest.TestCase):
         self.assertEqual(found.value, wire.value)
 
     def test_TC_ARCH_017_operational_catalogues_follow_current_stage(self):
-        self.assertEqual((), operational_entries())
+        # Stage 5 승인 catalogue (`stage5_service_integration_baseline.md` §7):
+        # 운영 registry에는 R1027 공식 mapping 두 entry만 등록하고 시험 VPFI는
+        # 등록하지 않는다. 전자해도(`electronic_chart.data`)는 registry entry가 없다.
+        operational = operational_entries()
+        self.assertEqual(
+            ("ais.authentication_integrity.scheme1", "x509.certificate_report"),
+            tuple(sorted(entry.payload_format.value for entry in operational)),
+        )
+        self.assertNotIn(
+            TEST_PAYLOAD_FORMAT,
+            {entry.payload_format.value for entry in operational},
+        )
+        self.assertNotIn(
+            "electronic_chart.data",
+            {entry.payload_format.value for entry in operational},
+        )
         payload_format = build_payload_format_registry(RegistryScope.OPERATIONAL, "v1").value
         payload_format.freeze()
-        self.assertEqual(0, payload_format.entry_count())
+        self.assertEqual(2, payload_format.entry_count())
         message = build_message_registry(RegistryScope.OPERATIONAL, "v1").value
         message.freeze()
         self.assertEqual(13, message.entry_count())

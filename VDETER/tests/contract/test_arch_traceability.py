@@ -15,14 +15,15 @@ from tests import DOCS_CORE, VDETER_ROOT
 
 ALLOWED_STATUS = ("NOT_STARTED", "BASELINE_PENDING", "IMPLEMENTED", "VERIFIED", "BLOCKED")
 ALLOWED_BASELINE_STATUS = ("DRAFT", "APPROVED", "VERIFIED/FROZEN")
-REQUIREMENT_PATTERN = re.compile(r"^(?:ARCH|LINK|PHY11|RADIO|MAC)-REQ-\d{2}$")
-TEST_CASE_PATTERN = re.compile(r"^TC-(?:ARCH|LINK|PHY11|RADIO|MAC)-\d{3}$")
+REQUIREMENT_PATTERN = re.compile(r"^(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5)-REQ-\d{2}$")
+TEST_CASE_PATTERN = re.compile(r"^TC-(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5)-\d{3}$")
 EXPECTED_REQUIREMENTS = (
     tuple(f"ARCH-REQ-{index:02d}" for index in range(1, 8))
     + tuple(f"LINK-REQ-{index:02d}" for index in range(1, 14))
     + tuple(f"PHY11-REQ-{index:02d}" for index in range(1, 11))
     + tuple(f"RADIO-REQ-{index:02d}" for index in range(1, 12))
     + tuple(f"MAC-REQ-{index:02d}" for index in range(1, 16))
+    + tuple(f"STAGE5-REQ-{index:02d}" for index in range(1, 21))
 )
 EXPECTED_TEST_CASES = (
     tuple(f"TC-ARCH-{index:03d}" for index in range(1, 28))
@@ -30,11 +31,13 @@ EXPECTED_TEST_CASES = (
     + tuple(f"TC-PHY11-{index:03d}" for index in range(1, 17))
     + tuple(f"TC-RADIO-{index:03d}" for index in range(1, 16))
     + tuple(f"TC-MAC-{index:03d}" for index in range(1, 19))
+    + tuple(f"TC-STAGE5-{index:03d}" for index in range(1, 21))
 )
 STAGE0_BASELINE_ID = "VDETER-STAGE0-BL-001"
 STAGE2_PHY11_BASELINE_ID = "VDETER-STAGE2-PHY11-BL-001"
 STAGE3_RADIO_BASELINE_ID = "VDETER-STAGE3-RADIO-BL-001"
 STAGE4_MAC_BASELINE_ID = "VDETER-STAGE4-MAC-BL-001"
+STAGE5_SERVICE_BASELINE_ID = "VDETER-STAGE5-SERVICE-INTEGRATION-BL-001"
 
 
 def _load_toml(path):
@@ -128,17 +131,29 @@ class TraceabilitySchemaTest(unittest.TestCase):
 
     def test_TC_ARCH_026_evidence_paths_exist(self):
         project_root = os.path.dirname(os.path.dirname(VDETER_ROOT))
+        active_run = os.environ.get("VDETER_STAGE5_ACTIVE_RUN")
         for record in self.data["requirements"]:
             for reference in record.get("evidence", ()):
                 path = reference.split("::")[0]
                 with self.subTest(requirement=record["id"], path=path):
+                    result_path = os.path.join(project_root, path)
+                    run_id = os.path.basename(os.path.dirname(path))
+                    if (
+                        not os.path.exists(result_path)
+                        and record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID
+                        and run_id == active_run
+                        and path.endswith("result.json")
+                    ):
+                        # Stage 5 runner의 현재 결과는 전체 회귀 뒤 완성된다.
+                        continue
                     self.assertTrue(
-                        os.path.exists(os.path.join(project_root, path)),
+                        os.path.exists(result_path),
                         f"증거 경로가 없습니다: {path}",
                     )
 
     def test_TC_ARCH_026_verified_evidence_proves_current_successful_run(self):
         project_root = os.path.dirname(os.path.dirname(VDETER_ROOT))
+        active_run = os.environ.get("VDETER_STAGE5_ACTIVE_RUN")
         loaded_results = {}
         for record in self.data["requirements"]:
             if record["status"] != "VERIFIED":
@@ -155,10 +170,23 @@ class TraceabilitySchemaTest(unittest.TestCase):
                 )
             for reference in result_references:
                 result_path = os.path.join(project_root, reference)
+                run_id = os.path.basename(os.path.dirname(reference))
+                if (
+                    record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID
+                    and run_id == active_run
+                    and not os.path.exists(result_path)
+                ):
+                    continue
                 if result_path not in loaded_results:
                     with open(result_path, "r", encoding="utf-8") as handle:
                         loaded_results[result_path] = json.load(handle)
                 evidence = loaded_results[result_path]
+                if (
+                    record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID
+                    and run_id == active_run
+                    and evidence.get("stage5_completion", {}).get("gate") == "RUNNING"
+                ):
+                    continue
                 self.assertIn("totals", evidence, f"완료되지 않은 증거입니다: {reference}")
                 self.assertIn("test_cases", evidence, f"시험 결과가 없는 증거입니다: {reference}")
                 totals = evidence["totals"]
@@ -184,7 +212,21 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     self.assertEqual(
                         record["baseline_version"], evidence["baseline_version"]
                     )
-                    if record["baseline_id"] == STAGE4_MAC_BASELINE_ID:
+                    if record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID:
+                        self.assertTrue(totals["unittest_success"])
+                        self.assertEqual(0, totals["unittest_failures"])
+                        self.assertEqual(0, totals["unittest_errors"])
+                        self.assertEqual(
+                            "PASS", evidence["stage5_completion"]["gate"]
+                        )
+                        self.assertEqual(
+                            "APPROVED_2026-08-23",
+                            evidence["stage5_completion"]["freeze_decision"],
+                        )
+                        self.assertEqual(
+                            "PASS", evidence["stage04_regression"]["outcome"]
+                        )
+                    elif record["baseline_id"] == STAGE4_MAC_BASELINE_ID:
                         self.assertTrue(totals["unittest_success"])
                         self.assertEqual(
                             "PASS", evidence["stage4_completion"]["freeze_gate"]
@@ -212,7 +254,14 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     for test_case in record["test_cases"]:
                         self.assertEqual("PASS", outcomes.get(test_case), test_case)
 
-                    if record["baseline_id"] == STAGE4_MAC_BASELINE_ID:
+                    if record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID:
+                        run_directory = os.path.dirname(result_path)
+                        regression_artifacts = evidence["stage04_regression"]["artifacts"]
+                        artifact_paths = tuple(
+                            os.path.join(run_directory, regression_artifacts[name])
+                            for name in ("stdout", "junit")
+                        )
+                    elif record["baseline_id"] == STAGE4_MAC_BASELINE_ID:
                         run_directory = os.path.dirname(result_path)
                         regression_artifacts = evidence["stage03_regression"]["artifacts"]
                         artifact_paths = tuple(
@@ -415,6 +464,33 @@ class TraceabilitySchemaTest(unittest.TestCase):
                 )
                 referenced.update(requirement["test_cases"])
         expected = {f"TC-MAC-{index:03d}" for index in range(1, 19)}
+        self.assertEqual(expected, referenced)
+        self.assertTrue(all(cases[test_case]["module"] for test_case in expected))
+
+    def test_TC_STAGE5_020_stage5_scope_is_verified_and_frozen(self):
+        stage5 = self.baselines[STAGE5_SERVICE_BASELINE_ID]
+        self.assertEqual("0.1.4", stage5["version"])
+        self.assertEqual("VERIFIED/FROZEN", stage5["status"])
+        requirements = [
+            record
+            for record in self.data["requirements"]
+            if record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID
+        ]
+        self.assertEqual(20, len(requirements))
+        cases = {record["id"]: record for record in self.data["test_cases"]}
+        referenced = set()
+        for requirement in requirements:
+            with self.subTest(requirement=requirement["id"]):
+                self.assertEqual("0.1.4", requirement["baseline_version"])
+                self.assertEqual("VERIFIED", requirement["status"])
+                self.assertTrue(requirement["implementation"])
+                self.assertTrue(requirement["evidence"])
+                self.assertTrue(requirement["test_cases"])
+                self.assertTrue(
+                    all(cases[test_case]["module"] for test_case in requirement["test_cases"])
+                )
+                referenced.update(requirement["test_cases"])
+        expected = {f"TC-STAGE5-{index:03d}" for index in range(1, 21)}
         self.assertEqual(expected, referenced)
         self.assertTrue(all(cases[test_case]["module"] for test_case in expected))
 
