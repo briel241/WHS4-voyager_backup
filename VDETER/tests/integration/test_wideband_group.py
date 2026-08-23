@@ -109,7 +109,7 @@ class WidebandGroupIdentityTest(unittest.TestCase):
             identity = next(iter(profiles))
             self.assertEqual("VDETER_WIDEBAND_100_TBB_V3", identity[0])
             self.assertEqual(17, identity[1])
-            self.assertEqual("stage6-phy11-17-19-v5", identity[5])
+            self.assertEqual("stage6-phy11-17-19-v6", identity[5])
         finally:
             group.stop()
 
@@ -259,6 +259,51 @@ class WidebandNegativeTest(unittest.TestCase):
         built = build_wideband_group(mixed, crypto_by_station=crypto)
         self.assertTrue(built.is_err)
         self.assertEqual("CONFIG_SEMANTIC_INVALID", built.error.code)
+
+    def test_NEG_001_missing_wideband_tx_profile_is_rejected(self):
+        """NEG-001 부분: 선택 TX profile(17 또는 19)이 registry에 없으면 시작 거부."""
+
+        from dataclasses import replace as dataclass_replace
+
+        from vdeter.common.results import Ok
+        from vdeter.profiles import link_phy
+        from vdeter.profiles.models import ExplicitRegistry, RegistryScope
+
+        for removed, data_link_id in ((17, 17), (19, 19)):
+            with self.subTest(removed=removed):
+                clock, descriptors, crypto = build_wideband_descriptors(
+                    data_link_id=data_link_id
+                )
+                entries = tuple(
+                    entry
+                    for entry in link_phy.combined_phy_profile_entries()
+                    if entry.link_id.value != removed
+                )
+                broken = ExplicitRegistry(
+                    "phy_profile",
+                    RegistryScope.OPERATIONAL,
+                    link_phy.STAGE6_REGISTRY_CONTENT_VERSION,
+                    link_phy.PhyProfileEntry,
+                )
+                registered = broken.register_all(entries)
+                self.assertIsInstance(registered, Ok)
+                frozen = broken.freeze()
+                self.assertTrue(frozen.is_ok)
+                crippled = tuple(
+                    (
+                        dataclass_replace(
+                            dependencies,
+                            registries=dataclass_replace(
+                                dependencies.registries, phy_profile=broken
+                            ),
+                        ),
+                        deployment,
+                    )
+                    for dependencies, deployment in descriptors
+                )
+                built = build_wideband_group(crippled, crypto_by_station=crypto)
+                self.assertTrue(built.is_err)
+                self.assertEqual("CONFIG_SEMANTIC_INVALID", built.error.code)
 
 
 if __name__ == "__main__":
