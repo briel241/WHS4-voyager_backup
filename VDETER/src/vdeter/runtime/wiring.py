@@ -205,7 +205,7 @@ def build_registries(configuration: LoadedConfiguration, *, combined_phy: bool =
     """모든 registry를 만들고 명시적으로 등록한 뒤 freeze한다.
 
     `combined_phy=True`는 Stage 6 wideband profile 전용으로 three-entry combined
-    `phy_profile` registry(`stage6-phy11-17-19-v5`)를 사용한다.
+    `phy_profile` registry(`stage6-phy11-17-19-v6`)를 사용한다.
     """
 
     from ..profiles.payload_formats import STAGE5_PAYLOAD_CONTENT_VERSION

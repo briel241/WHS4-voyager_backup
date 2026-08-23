@@ -32,7 +32,7 @@ TEST_LINK_ID = 63
 
 PHY11_PROFILE_SCHEMA_ID = "phy11-profile-v2"
 STAGE6_PROFILE_SCHEMA_ID = "stage6-phy-profile-v4"
-STAGE6_REGISTRY_CONTENT_VERSION = "stage6-phy11-17-19-v5"
+STAGE6_REGISTRY_CONTENT_VERSION = "stage6-phy11-17-19-v6"
 PHY11_REGISTRY_CONTENT_VERSION = "stage2-phy11-v2"
 PHY11_REGISTRY_FINGERPRINT = (
     "ce8760138f3a7640705b71af4500520afabf26e9fb5300db524f61a5b0114898"
@@ -704,10 +704,10 @@ def _phy17_content() -> dict:
         "profile_schema_id": "stage6-phy-profile-v4",
         "identity": {
             "baseline_id": "VDETER-STAGE6-PHY17-BL-001",
-            "baseline_version": "0.7.2",
+            "baseline_version": "0.8.0",
             "link_id": 17,
             "pl_format": "TER-MCS-1.100",
-            "profile_id": "phy17-markdown-v4",
+            "profile_id": "phy17-markdown-v5",
             "scope": "OPERATIONAL",
             "source_document": "ITU-R M.2092-2",
             "source_edition": "02/2026",
@@ -882,7 +882,7 @@ def _phy17_content() -> dict:
             "cfo_hz_range": [-2000, 2000],
             "detector_id": "two-stage-normalized-training-correlation-v2",
             "demapper_id": "max-log-positive-is-bit-0-v1",
-            "error_precedence_id": "stage6-common-7.8-v1",
+            "error_precedence_id": "stage6-common-7.8-v2",
             "fec_aided_cfo_coarse_hz": [-400, 400, 25],
             "fec_aided_cfo_fine_hz": [-25, 25, 1],
             "fec_aided_reference_symbols": 1920,
@@ -948,9 +948,9 @@ def _phy17_content() -> dict:
         "normative_source": {
             "binding_algorithm": "markdown-region-lf-normalized-sha256-v1",
             "common_baseline_id": "VDETER-STAGE6-PHY-COMMON-BL-001",
-            "common_baseline_version": "0.5.2",
-            "common_normative_sha256": "b6d0e76ba71b040a73f012b3f98b33337a4424f9777f95a497cf40183f6b3927",
-            "link_normative_sha256": "ec61c00822a81606a8d7ed68a2080eedd3f12dd28a3576acf0e47afffed687aa",
+            "common_baseline_version": "0.7.0",
+            "common_normative_sha256": "bf59d86c4ecf342b67b4739157d4cac77e8fecbdb29c4666593f79faea633bf1",
+            "link_normative_sha256": "891168b1aea45185b74140e9fc6489b78bd10ed093e5ead30b2a41e366e831e1",
         },
     }
 
@@ -960,10 +960,10 @@ def _phy19_content() -> dict:
         "profile_schema_id": "stage6-phy-profile-v4",
         "identity": {
             "baseline_id": "VDETER-STAGE6-PHY19-BL-001",
-            "baseline_version": "0.7.2",
+            "baseline_version": "0.8.0",
             "link_id": 19,
             "pl_format": "TER-MCS-5.100",
-            "profile_id": "phy19-markdown-v4",
+            "profile_id": "phy19-markdown-v5",
             "scope": "OPERATIONAL",
             "source_document": "ITU-R M.2092-2",
             "source_edition": "02/2026",
@@ -1150,7 +1150,7 @@ def _phy19_content() -> dict:
             "data_tracking_id": "normalized-16qam-decision-directed-v1",
             "detector_id": "two-stage-normalized-training-correlation-v2",
             "demapper_id": "max-log-positive-is-bit-0-v1",
-            "error_precedence_id": "stage6-common-7.8-v1",
+            "error_precedence_id": "stage6-common-7.8-v2",
             "fec_aided_cfo_coarse_hz": [-400, 400, 25],
             "fec_aided_cfo_fine_hz": [-25, 25, 1],
             "fec_aided_reference_symbols": 1920,
@@ -1216,9 +1216,9 @@ def _phy19_content() -> dict:
         "normative_source": {
             "binding_algorithm": "markdown-region-lf-normalized-sha256-v1",
             "common_baseline_id": "VDETER-STAGE6-PHY-COMMON-BL-001",
-            "common_baseline_version": "0.5.2",
-            "common_normative_sha256": "b6d0e76ba71b040a73f012b3f98b33337a4424f9777f95a497cf40183f6b3927",
-            "link_normative_sha256": "7fc05a010651e07364001634a73e7efa04fe571cb981aeb463c851285f26ea39",
+            "common_baseline_version": "0.7.0",
+            "common_normative_sha256": "bf59d86c4ecf342b67b4739157d4cac77e8fecbdb29c4666593f79faea633bf1",
+            "link_normative_sha256": "0521711e1c1666b5446b805d07c0fa3f1d86b36d810017de81479466a6490c11",
         },
     }
 
