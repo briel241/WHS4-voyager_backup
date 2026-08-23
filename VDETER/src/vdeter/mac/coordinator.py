@@ -2872,7 +2872,7 @@ class MacCoordinator:
     ) -> MacState:
         """수신 Type 74/75/76은 ACTIVE Rx DC·peer·route가 맞을 때만 Link로 넘긴다."""
 
-        if decoded.link_id.value != 11:
+        if decoded.link_id.value != self._profile.data_link_id:
             if errors is not None:
                 errors.append(transfer_module.unsupported_profile_error(decoded.link_id.value))
             return state
@@ -4619,7 +4619,12 @@ class MacCoordinator:
             return state
         requirement = relay.requirement
         link_requirement = next(
-            (item for item in requirement.profiles if item.link_id.value == 11), None
+            (
+                item
+                for item in requirement.profiles
+                if item.link_id.value == self._profile.data_link_id
+            ),
+            None,
         )
         if link_requirement is None:
             return state
@@ -4632,7 +4637,7 @@ class MacCoordinator:
             ack_required=True,
             presentation_size=requirement.presentation_size,
             public_state=TransferState.QUEUED,
-            link_id=LinkId(11),
+            link_id=LinkId(self._profile.data_link_id),
             physical_channel_name=self._profile.upper_channel.name,
             total_fragments=link_requirement.data_session_fragment_count,
             relay_source_transfer_id=relay.relay_transfer_id.value,
@@ -5664,13 +5669,25 @@ class MacCoordinator:
                     errors.append(ack_module.replay_resource_expired_error())
                 break
             slot = candidates[0]
+            record_link_id = self._link_id_for(context.link_id.value)
+            if record_link_id.is_err:
+                next_state = next_state.with_ledger_record(
+                    replace(
+                        record,
+                        ack_state=AckPendingState.ACK_SENT,
+                        replay_command_id=None,
+                    )
+                )
+                if errors is not None:
+                    errors.append(ack_module.replay_resource_expired_error())
+                break
             intent = ScheduledTxIntent(
                 intent_id=self._id_source.new_event_id(),
                 kind="ENCODE",
                 transmit_at_nanoseconds=slot.start_nanoseconds,
                 channel_name=context.physical_channel.name,
                 encode_request=LinkPacketEncodeRequest(
-                    link_id=link_id.value,
+                    link_id=record_link_id.value,
                     messages=(
                         MessageEncodeRequest(body=context.ack_body, correlation=Correlation()),
                     ),
