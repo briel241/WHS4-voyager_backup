@@ -109,7 +109,7 @@ class WidebandGroupIdentityTest(unittest.TestCase):
             identity = next(iter(profiles))
             self.assertEqual("VDETER_WIDEBAND_100_TBB_V3", identity[0])
             self.assertEqual(17, identity[1])
-            self.assertEqual("stage6-phy11-17-19-v6", identity[5])
+            self.assertEqual("stage6-phy11-17-19-v7", identity[5])
         finally:
             group.stop()
 

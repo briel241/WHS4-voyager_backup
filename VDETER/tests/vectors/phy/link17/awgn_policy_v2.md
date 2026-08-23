@@ -1,6 +1,7 @@
 # Link ID 17 AWGN policy (v2)
 
-- sweep: 정수 tenth-dB `-10..50` (61 points), point당 1,000 bursts, canonical Packet 반복(`REPEAT-CANONICAL-PACKET-1000`).
+- core sweep: 정수 tenth-dB `-10..50` (61 points), point당 1,000 bursts, canonical Packet 반복(`REPEAT-CANONICAL-PACKET-1000`).
+- gate 미발견 시 §7.7 조건부 연장(`DR-STAGE6-AWGN-001`): 같은 grid를 tenth-dB `100`(공식 `+9.0 dB`)까지 오름차순 연장하며 실행 point×1,000을 evidence에 기록한다. noise-only 지점은 바뀌지 않는다.
 - `Es_tx = 1/1` (고정 TX scale 제곱), `N0=Es_tx*10^(-gamma/10)`, scale identity `mpfr256-db-to-binary64-rne-v1`.
 - 난수: `sha256-counter-box-muller-mpfr256-v2`, domain `VDETER-PHY17-AWGN-V1`, seed `0x5644455445520000 + link_id*0x100 + sequence(0..999)`, burst마다 counter 0 reset, 같은 sequence는 전 SNR point에서 같은 stream.
 - noise-only: tenth-dB (-10, 10, 50) 대응 N0에서 각 1,000 slots, domain `VDETER-PHY17-NOISE-V1`, 모두 정상 `NO_BURST_DETECTED`.

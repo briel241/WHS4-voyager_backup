@@ -1,6 +1,6 @@
 # Link ID 17 공식 상수 (v2)
 
-- baseline: `VDETER-STAGE6-PHY17-BL-001` v0.8.0 (`phy17-markdown-v5`)
+- baseline: `VDETER-STAGE6-PHY17-BL-001` v0.9.0 (`phy17-markdown-v6`)
 - PL format: `TER-MCS-1.100`
 - Packet: `234 bytes` / information `1872 bits`
 - interleaver: `K=1872, k1=6, k2=312, p=(211, 61, 227, 239, 181, 79, 73, 193)`

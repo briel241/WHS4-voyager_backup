@@ -27,14 +27,14 @@ GENERATOR_ID = "generate-phy17-19-vectors"
 GENERATOR_VERSION = "2.0.0"
 ARTIFACT_VERSION = "v2"
 
-COMMON_BASELINE = ("VDETER-STAGE6-PHY-COMMON-BL-001", "0.7.1")
+COMMON_BASELINE = ("VDETER-STAGE6-PHY-COMMON-BL-001", "0.8.0")
 LINK_BASELINES = {
-    17: ("VDETER-STAGE6-PHY17-BL-001", "0.8.0", "phy17-markdown-v5"),
-    19: ("VDETER-STAGE6-PHY19-BL-001", "0.8.0", "phy19-markdown-v5"),
+    17: ("VDETER-STAGE6-PHY17-BL-001", "0.9.0", "phy17-markdown-v6"),
+    19: ("VDETER-STAGE6-PHY19-BL-001", "0.9.0", "phy19-markdown-v6"),
 }
 COMBINED_REGISTRY = (
-    "stage6-phy11-17-19-v6",
-    "fbed7c508b22a75a7d390344a1d3073b8f5b92f21f0266c6f6e752ad9996a673",
+    "stage6-phy11-17-19-v7",
+    "0a2b8cb8a72727bd54c05c5dd6e6ac5aeeec7a0b51f6ebe41a72bfa2482ae5d2",
 )
 LINK11_BASE_REGISTRY_FINGERPRINT = (
     "ce8760138f3a7640705b71af4500520afabf26e9fb5300db524f61a5b0114898"
@@ -598,8 +598,11 @@ def write_artifacts(link_id: int, out_root: Path, generated: dict) -> None:
     awgn_policy = [
         f"# Link ID {link_id} AWGN policy (v2)",
         "",
-        f"- sweep: 정수 tenth-dB `{low}..{high}` (61 points), point당 1,000 bursts,"
+        f"- core sweep: 정수 tenth-dB `{low}..{high}` (61 points), point당 1,000 bursts,"
         " canonical Packet 반복(`REPEAT-CANONICAL-PACKET-1000`).",
+        f"- gate 미발견 시 §7.7 조건부 연장(`DR-STAGE6-AWGN-001`): 같은 grid를 tenth-dB"
+        f" `{high + 50}`(공식 `+9.0 dB`)까지 오름차순 연장하며 실행 point×1,000을 evidence에"
+        " 기록한다. noise-only 지점은 바뀌지 않는다.",
         f"- `Es_tx = {profile['es_tx_ratio']}` (고정 TX scale 제곱), `N0=Es_tx*10^(-gamma/10)`,"
         " scale identity `mpfr256-db-to-binary64-rne-v1`.",
         "- 난수: `sha256-counter-box-muller-mpfr256-v2`, domain"

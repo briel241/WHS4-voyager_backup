@@ -2,15 +2,15 @@
 
 ## Identity
 
-- link baseline: `VDETER-STAGE6-PHY19-BL-001` v`0.8.0`, profile `phy19-markdown-v5`
-- common baseline: `VDETER-STAGE6-PHY-COMMON-BL-001` v`0.7.1`
-- combined registry: `stage6-phy11-17-19-v6`, fingerprint `fbed7c508b22a75a7d390344a1d3073b8f5b92f21f0266c6f6e752ad9996a673`
+- link baseline: `VDETER-STAGE6-PHY19-BL-001` v`0.9.0`, profile `phy19-markdown-v6`
+- common baseline: `VDETER-STAGE6-PHY-COMMON-BL-001` v`0.8.0`
+- combined registry: `stage6-phy11-17-19-v7`, fingerprint `0a2b8cb8a72727bd54c05c5dd6e6ac5aeeec7a0b51f6ebe41a72bfa2482ae5d2`
 - Link 11 base registry fingerprint: `ce8760138f3a7640705b71af4500520afabf26e9fb5300db524f61a5b0114898`
 
 ## Generator
 
 - id/version: `generate-phy17-19-vectors` `2.0.0`
-- source SHA-256: `68859f3320664e7a852f39592615ee8c6a99ba6bfede5b259eae6e03714d3da9`
+- source SHA-256: `c6e25e7e6e34f18947c940c5ac24a38d3ee3a6a37a27b662893e21c6c678ef59`
 - production import 금지: 이 generator는 표준 라이브러리와 mpmath만 사용하며 `vdeter` package를 import하지 않는다.
 - 생성 명령: `.venv/Scripts/python.exe tools/generate_phy17_19_vectors.py`
 
@@ -24,9 +24,9 @@
 
 | path | role | media type | bytes | format/tolerance | SHA-256 |
 | --- | --- | --- | ---: | --- | --- |
-| `awgn_policy_v2.md` | AWGN policy | text/markdown | 1094 | exact | `2fdf38f869ac24ca51dd8316600602ea59a6f14ad4af77b0526f0128e2a8bbf6` |
+| `awgn_policy_v2.md` | AWGN policy | text/markdown | 1337 | exact | `fc7e951989359f6d46506dee21516b5c4bbedc175b2c73122da5c24b7371096b` |
 | `impairment_policy_v2.md` | impairment policy | text/markdown | 1129 | exact | `445f7066e43fdadb13d199b704842c63b073d9e637bab3038616403284537577` |
-| `official_constants_v2.md` | official constants | text/markdown | 546 | exact | `098f76528d01290a0409308239f1d1e9cbdd3818ba6c341c2c8c93332f70d3c8` |
+| `official_constants_v2.md` | official constants | text/markdown | 546 | exact | `3cc59d622d5cbac0b99cc4bbf8ff544006cff3471abf4346c089ccaf2d5219b4` |
 | `packet_type0_v2.hex` | canonical Packet | text/plain | 1405 | byte-exact | `155f78a71ec7eb0fe02a7f7ea9371f5778e4c968f9804a3c6a555cefa78db64a` |
 | `rx_samples_v2/cfo_max.cf32le` | deterministic RX samples | application/octet-stream | 65536 | cf32le byte-exact | `a669a4b288c066edb2469b1a1be3dc153b0a8afce0aa81268cd1f84a0e1e2003` |
 | `rx_samples_v2/cfo_min.cf32le` | deterministic RX samples | application/octet-stream | 65536 | cf32le byte-exact | `5eb154af24eef49d9239bd58faee361d970a75248116a556e699cbd109a49946` |
@@ -42,11 +42,11 @@
 | `tx_samples_v2.cf32le` | canonical slot | application/octet-stream | 65536 | cf32le byte-exact | `6be378ee5ad6409740c8f84d47e82b8580153007b13aa466b4a37a67895b2f09` |
 | `tx_stages_v2.md` | TX stage bits | text/markdown | 21064 | bit-exact | `acc3097184c442464311068ea896f7479ca0bf572dfad088666d00bf9fbbcb8c` |
 | `tx_symbols_v2.md` | body symbols | text/markdown | 86933 | binary64 bit-exact | `1c9b6bc9795e6a392735d76f929ebeab761bff3af9056e51ffb0dc0f751d6e20` |
-| `SHA256SUMS` | machine manifest | text/plain | 1649 | LF, path-ascending | `73dc86fe51a79dad4bc20d373cb87f15c823b18a7422c541b31215dd9e4a90fd` |
+| `SHA256SUMS` | machine manifest | text/plain | 1649 | LF, path-ascending | `1c40edf5d8c2442bfee8c0fe267c247760f89b73bad3f3b19a607391384584ee` |
 
 ## 확인
 
 - 공식 표 대조 책임: 이 manifest의 상수는 승인 기준선 v0.8.0에서 옮겨 적은 값이며 공식 PDF 대조는 기준선 승인 절차가 수행했다.
 - historical v1 artifact는 이 v2 corpus로 승격하지 않았다 (`manifest_v1.json` 계열은 존재하지 않으며 새로 생성했다).
 - AWGN/noise-only의 1,000-burst 실제 결과와 RF 측정값은 vector가 아니라 evidence다.
-- 생성 시각(참고, identity 아님): 2026-08-23T14:02:24.100265+00:00
+- 생성 시각(참고, identity 아님): 2026-08-23T15:14:08.103862+00:00
