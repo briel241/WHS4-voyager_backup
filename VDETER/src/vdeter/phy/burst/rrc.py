@@ -101,6 +101,27 @@ def from_cf32le(data: bytes) -> tuple[complex, ...]:
     return tuple(complex(i, q) for i, q in struct.iter_unpack("<ff", data))
 
 
+def validate_cf32le_full_scale(data: bytes) -> None:
+    """Validate the frozen Radio unit-circle contract on serialized samples.
+
+    The Radio contract is defined on the binary32 values that cross the
+    ``cf32le`` boundary, not on their pre-serialization Python values.  Values
+    yielded by ``struct.iter_unpack`` are exact binary32-to-binary64
+    promotions, so the arithmetic below is the required ``I*I + Q*Q`` test.
+    """
+
+    if not isinstance(data, bytes) or len(data) % 8:
+        raise ValueError("cf32le data length must be a multiple of eight")
+    for i_value, q_value in struct.iter_unpack("<ff", data):
+        i_binary64 = float(i_value)
+        q_binary64 = float(q_value)
+        magnitude_squared = (
+            i_binary64 * i_binary64 + q_binary64 * q_binary64
+        )
+        if not math.isfinite(magnitude_squared) or magnitude_squared > 1.0:
+            raise ValueError("cf32le sample exceeds the Radio TX unit-circle contract")
+
+
 def _round_half_away_from_zero(value: float) -> int:
     return math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
 

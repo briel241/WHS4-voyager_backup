@@ -199,6 +199,7 @@ class Stage5Endpoint(VdeTerEndpoint):
         "_rx_reservation_alerted",
         "_delivery_degraded",
         "_crypto_dependencies",
+        "_wideband_profile",
         "_last_rx_error_signature",
     )
 
@@ -228,6 +229,7 @@ class Stage5Endpoint(VdeTerEndpoint):
         self._rx_reservation_alerted = set()
         self._delivery_degraded = False
         self._crypto_dependencies = None
+        self._wideband_profile = None
         self._last_rx_error_signature = None
 
     # --- 관찰 (시험·진단; 공개 Service 계약이 아니다) ---
@@ -1509,6 +1511,7 @@ class Stage5Endpoint(VdeTerEndpoint):
     def _validate_effective_graph(self):
         from ..link.data_plane import LinkDataPlane
         from ..mac.interface import Stage4Mac
+        from ..phy.multilink import MultiRatePhy
         from ..phy.transmitter import Link11Phy
         from ..presentation.adapter import RegistryPresentationAdapter
         from ..radio.software import SoftwareRadioAdapter
@@ -1517,7 +1520,7 @@ class Stage5Endpoint(VdeTerEndpoint):
             ("presentation", self._presentation, RegistryPresentationAdapter),
             ("link", self._link, LinkDataPlane),
             ("mac", self._mac, Stage4Mac),
-            ("phy", self._phy, Link11Phy),
+            ("phy", self._phy, (Link11Phy, MultiRatePhy)),
             ("radio", self._radio, SoftwareRadioAdapter),
         )
         for layer_name, instance, expected in checks:

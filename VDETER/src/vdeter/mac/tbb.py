@@ -7,7 +7,7 @@ MAC은 TBB wire bytes, 서명 또는 fragment 조립을 다루지 않는다. Lin
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from ..common.contracts.message import (
@@ -50,6 +50,14 @@ STAGE4_BOOTSTRAP_ID = "STAGE4_BBSC_BOOTSTRAP_V1"
 LOWER_CHANNEL = PhysicalChannel("VDETER_LOWER_25_TEST")
 UPPER_CHANNEL = PhysicalChannel("VDETER_UPPER_25_TEST")
 STAGE4_LINK_ID = LinkId(11)
+
+#: `DR-STAGE6-MR-001` §13.2.1: 2-PC 100 kHz 통합 fixture 식별자와 alias.
+WIDEBAND_FIXTURE_ID = "VDETER_WIDEBAND_100_TBB_V3"
+WIDEBAND_BOOTSTRAP_ID = "WIDEBAND_BBSC_BOOTSTRAP_V1"
+WIDEBAND_LOWER_CHANNEL = PhysicalChannel("VDETER_LOWER_100_TEST")
+WIDEBAND_UPPER_CHANNEL = PhysicalChannel("VDETER_UPPER_100_TEST")
+WIDEBAND_TBB_SEMANTIC_SCHEMA = "VDETER-WIDEBAND-TBB-SEMANTIC-V2"
+WIDEBAND_DEPLOYMENT_SCHEMA = "VDETER-WIDEBAND-DEPLOYMENT-V2"
 
 #: canonical fixture의 고정 wire 값 (`DR-STAGE4-MAC-004` 표).
 FIXTURE_SERVICE_CAPABILITY = 2
@@ -273,8 +281,26 @@ def build_fixture_bulletin_board(fixture: Stage4TbbFixtureProfile) -> BulletinBo
     )
 
 
+def build_wideband_bulletin_board(fixture: Stage4TbbFixtureProfile) -> BulletinBoardBody:
+    """`VDETER_WIDEBAND_100_TBB_V3`: base LC 배치를 보존하고 bandwidth wire 값만 100 kHz다.
+
+    §13.2.1: base 두 PC의 LC tuple·RA/Short Data 파라미터·mobile Tx flag를 semantic-exact
+    보존하고 Physical Channel bandwidth(`0`→`2`)와 alias/setting만 바꾼다.
+    """
+
+    base = build_fixture_bulletin_board(fixture)
+    channels = tuple(
+        replace(definition, bandwidth=PhysicalChannelBandwidth.KHZ_100)
+        for definition in base.physical_channels
+    )
+    return replace(base, physical_channels=channels)
+
+
 #: fixture PC 순서(index) → Stage 4 Physical Channel 이름.
 _PHYSICAL_CHANNEL_BY_INDEX = (LOWER_CHANNEL, UPPER_CHANNEL)
+
+#: wideband fixture PC 순서(index) → 100 kHz Physical Channel 이름.
+WIDEBAND_PHYSICAL_CHANNEL_BY_INDEX = (WIDEBAND_LOWER_CHANNEL, WIDEBAND_UPPER_CHANNEL)
 
 
 def slot_map_from_bulletin_board(
@@ -333,18 +359,20 @@ def slot_map_from_bulletin_board(
     )
 
 
-def build_bootstrap_slot_map() -> SlotMap:
-    """`STAGE4_BBSC_BOOTSTRAP_V1`: upper PC TDMA channel 0 slot 0의 BBSC 한 slot만 연다.
+def build_bootstrap_slot_map(
+    upper: PhysicalChannel = UPPER_CHANNEL, map_id: str = STAGE4_BOOTSTRAP_ID
+) -> SlotMap:
+    """BBSC bootstrap: upper PC TDMA channel 0 slot 0의 BBSC 한 slot만 연다.
 
     RAC/ASC/DC/DSCH 또는 데이터 송신 권한을 부여하지 않는다. ROC만 이 slot에서 TBB를
-    송신하며 MASS는 계속 수신한다.
+    송신하며 MASS는 계속 수신한다. 기본값은 동결 `STAGE4_BBSC_BOOTSTRAP_V1`이다.
     """
 
     return SlotMap(
-        map_id=STAGE4_BOOTSTRAP_ID,
+        map_id=map_id,
         slots=(
             LogicalChannelSlot(
-                physical_channel=UPPER_CHANNEL,
+                physical_channel=upper,
                 tdma_channel=0,
                 slot_in_frame=0,
                 function=SlotFunction.BBSC,
@@ -407,6 +435,7 @@ def tbb_semantic_value(
     bulletin_board_version: int,
     bulletin_board: BulletinBoardBody,
     certificate_fingerprint: bytes,
+    schema: str = TBB_SEMANTIC_SCHEMA,
 ) -> dict:
     """`VDETER-STAGE4-TBB-SEMANTIC-V1` canonical JSON object.
 
@@ -429,7 +458,7 @@ def tbb_semantic_value(
         "certificate_fingerprint": certificate_fingerprint.hex(),
         "control_station_id": control_station_id,
         "fixture_id": fixture_id,
-        "schema": TBB_SEMANTIC_SCHEMA,
+        "schema": schema,
         "service_capability": service_capability,
         "source_id": source_id.value,
     }
@@ -456,6 +485,9 @@ class CanonicalStage4TbbProfile:
     canonical_tbb_fingerprint: str
     canonical_bytes: bytes
     slot_map: SlotMap
+    #: `DR-STAGE6-MR-001`: 수신 projection에 쓰는 semantic identity. 기본은 legacy V1이다.
+    semantic_fixture_id: str = STAGE4_TBB_FIXTURE_ID
+    semantic_schema: str = TBB_SEMANTIC_SCHEMA
 
     def __post_init__(self) -> None:
         if not isinstance(self.fixture, Stage4TbbFixtureProfile):
@@ -530,7 +562,54 @@ def build_canonical_tbb_profile(
     )
 
 
-def received_tbb_fingerprint(verified: VerifiedTbb, fixture_id: str) -> tuple[bytes, str]:
+def build_wideband_canonical_tbb_profile(
+    deployment: MacDeploymentProfile,
+) -> CanonicalStage4TbbProfile:
+    """`VDETER_WIDEBAND_100_TBB_V3` canonical TBB profile (`DR-STAGE6-MR-001` §13.2.1).
+
+    base fixture field를 그대로 상속하고 board의 bandwidth wire 값과 semantic
+    schema/fixture-id, slot map alias만 wideband 값으로 바꾼다.
+    """
+
+    if not isinstance(deployment, MacDeploymentProfile):
+        raise InvalidValueError(
+            "build_wideband_canonical_tbb_profile: MacDeploymentProfile이 필요합니다"
+        )
+    board = build_wideband_bulletin_board(deployment.tbb_fixture)
+    value = tbb_semantic_value(
+        fixture_id=WIDEBAND_FIXTURE_ID,
+        source_id=deployment.roc_station_id,
+        control_station_id=deployment.tbb_control_station_id,
+        service_capability=FIXTURE_SERVICE_CAPABILITY,
+        bulletin_board_version=FIXTURE_BULLETIN_BOARD_VERSION,
+        bulletin_board=board,
+        certificate_fingerprint=deployment.expected_tbb_certificate_fingerprint,
+        schema=WIDEBAND_TBB_SEMANTIC_SCHEMA,
+    )
+    canonical, fingerprint = tbb_semantic_fingerprint(value)
+    return CanonicalStage4TbbProfile(
+        fixture=deployment.tbb_fixture,
+        source_id=deployment.roc_station_id,
+        control_station_id=deployment.tbb_control_station_id,
+        service_capability=FIXTURE_SERVICE_CAPABILITY,
+        bulletin_board_version=FIXTURE_BULLETIN_BOARD_VERSION,
+        bulletin_board=board,
+        expected_certificate_fingerprint=deployment.expected_tbb_certificate_fingerprint,
+        canonical_tbb_fingerprint=fingerprint,
+        canonical_bytes=canonical,
+        slot_map=slot_map_from_bulletin_board(
+            board,
+            WIDEBAND_FIXTURE_ID,
+            physical_channels=WIDEBAND_PHYSICAL_CHANNEL_BY_INDEX,
+        ),
+        semantic_fixture_id=WIDEBAND_FIXTURE_ID,
+        semantic_schema=WIDEBAND_TBB_SEMANTIC_SCHEMA,
+    )
+
+
+def received_tbb_fingerprint(
+    verified: VerifiedTbb, fixture_id: str, schema: str = TBB_SEMANTIC_SCHEMA
+) -> tuple[bytes, str]:
     """수신 `VerifiedTbb`의 semantic projection.
 
     wire에 없는 schema tag와 `fixture_id`만 기대 local profile에서 넣고, 그 밖의 모든 값은
@@ -547,6 +626,7 @@ def received_tbb_fingerprint(verified: VerifiedTbb, fixture_id: str) -> tuple[by
         bulletin_board_version=verified.bulletin_board_version,
         bulletin_board=verified.bulletin_board,
         certificate_fingerprint=verified.certificate_fingerprint,
+        schema=schema,
     )
     return tbb_semantic_fingerprint(value)
 
@@ -571,8 +651,17 @@ __all__ = (
     "TBB_START_TIME_EPOCH_SECONDS",
     "UPPER_CHANNEL",
     "VALIDITY_UNIT_NANOSECONDS",
+    "WIDEBAND_BOOTSTRAP_ID",
+    "WIDEBAND_DEPLOYMENT_SCHEMA",
+    "WIDEBAND_FIXTURE_ID",
+    "WIDEBAND_LOWER_CHANNEL",
+    "WIDEBAND_PHYSICAL_CHANNEL_BY_INDEX",
+    "WIDEBAND_TBB_SEMANTIC_SCHEMA",
+    "WIDEBAND_UPPER_CHANNEL",
     "build_bootstrap_slot_map",
     "build_canonical_tbb_profile",
+    "build_wideband_bulletin_board",
+    "build_wideband_canonical_tbb_profile",
     "build_fixture_bulletin_board",
     "received_tbb_fingerprint",
     "slot_map_from_bulletin_board",

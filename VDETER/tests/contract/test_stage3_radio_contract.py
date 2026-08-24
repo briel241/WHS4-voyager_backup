@@ -37,7 +37,10 @@ class RadioContractTest(unittest.TestCase):
 
     def test_TC_RADIO_002_schema_v2_is_explicit_and_canonical(self):
         self.assertEqual(2, CONFIG_SCHEMA_CURRENT_VERSION)
-        self.assertEqual((1, 2), CONFIG_SCHEMA_SUPPORTED_VERSIONS)
+        # `DR-STAGE6-MR-001` (stage6_phy_common_baseline.md §13.2.2): wideband 2-PC
+        # profile 전용 schema 3을 additive로 허용한다. v1/v2 의미는 아래 단언들이
+        # 그대로 고정한다.
+        self.assertEqual((1, 2, 3), CONFIG_SCHEMA_SUPPORTED_VERSIONS)
         left = load_configuration(software_v2_toml(reverse_channels=False))
         right = load_configuration(software_v2_toml(reverse_channels=True))
         self.assertTrue(left.is_ok, left)

@@ -88,6 +88,7 @@ def _solve_candidate(
     filtered: tuple[complex, ...],
     coarse_epoch: float,
     peak_ratio: float,
+    symbol_rate_hz: int = SYMBOL_RATE_HZ,
 ) -> Acquisition | None:
     refined = []
     for step in range(-8, 9):
@@ -112,13 +113,13 @@ def _solve_candidate(
 
     coarse = []
     for cfo_hz in range(-2200, 2201, 50):
-        slope = 2.0 * math.pi * cfo_hz / SYMBOL_RATE_HZ
+        slope = 2.0 * math.pi * cfo_hz / symbol_rate_hz
         correlation, coherent = evaluate_slope(slope)
         coarse.append((correlation, abs(cfo_hz), cfo_hz, slope, coherent))
     _, _, best_hz, _, _ = max(coarse, key=lambda item: (item[0], -item[1], -item[2]))
     fine = []
     for cfo_hz in range(max(-2200, best_hz - 50), min(2200, best_hz + 50) + 1, 5):
-        slope = 2.0 * math.pi * cfo_hz / SYMBOL_RATE_HZ
+        slope = 2.0 * math.pi * cfo_hz / symbol_rate_hz
         correlation, coherent = evaluate_slope(slope)
         fine.append((correlation, abs(cfo_hz), cfo_hz, slope, coherent))
     correlation, _, _, slope, coherent = max(
@@ -133,7 +134,7 @@ def _solve_candidate(
         return None
     intercept = cmath.phase(coherent)
     gain = abs(coherent) / 27.0
-    cfo_hz = slope * SYMBOL_RATE_HZ / (2.0 * math.pi)
+    cfo_hz = slope * symbol_rate_hz / (2.0 * math.pi)
     if (
         not all(math.isfinite(value) for value in (epoch, intercept, slope, gain, cfo_hz))
         or gain <= 0.0
@@ -153,14 +154,19 @@ def _solve_candidate(
     )
 
 
-def acquire_candidates(input_samples) -> tuple[Acquisition, ...]:
+def acquire_candidates(
+    input_samples,
+    *,
+    body_symbols: int = 480,
+    symbol_rate_hz: int = SYMBOL_RATE_HZ,
+) -> tuple[Acquisition, ...]:
     source = tuple(complex(value) for value in input_samples)
     if not source or all(value == 0.0 + 0.0j for value in source):
         raise NoBurstDetected
     if any(not math.isfinite(value.real) or not math.isfinite(value.imag) for value in source):
         raise SynchronizationFailed("input samples are non-finite")
     filtered = matched_filter(source)
-    last_epoch_exclusive = len(filtered) - LAST_BODY_SYMBOL_OFFSET
+    last_epoch_exclusive = len(filtered) - SAMPLES_PER_SYMBOL * (body_symbols - 1)
     if last_epoch_exclusive <= 20:
         raise NoBurstDetected
     metrics = []
@@ -187,15 +193,16 @@ def acquire_candidates(input_samples) -> tuple[Acquisition, ...]:
             default=0.0,
         )
         peak_ratio = math.inf if secondary == 0.0 else main_correlation / secondary
-        solved = _solve_candidate(filtered, coarse_epoch, peak_ratio)
+        solved = _solve_candidate(filtered, coarse_epoch, peak_ratio, symbol_rate_hz)
         if solved is not None:
             confirmed.append(solved)
     if not confirmed:
         raise NoBurstDetected
+    # §7.6: 확인된 candidate의 처리 순서는 정확히 (training C 내림차순, epoch 오름차순)이다.
     return tuple(
         sorted(
             confirmed,
-            key=lambda item: (-item.correlation, -item.peak_ratio, item.training_epoch_samples),
+            key=lambda item: (-item.correlation, item.training_epoch_samples),
         )
     )
 
@@ -232,18 +239,25 @@ def estimate_training_noise(equalized_training) -> float:
 def equalize_body(
     acquisition: Acquisition,
     reference_symbols: tuple[complex, ...] | None = None,
+    *,
+    body_symbols: int = 480,
+    symbol_rate_hz: int = SYMBOL_RATE_HZ,
+    data_decision=None,
 ) -> EqualizedBody:
+    if data_decision is None:
+        def data_decision(current: complex, index: int) -> complex:
+            return map_labels((hard_label(current, index),), index)[0]
     raw = tuple(
         cubic_interpolate(
             acquisition.matched_samples,
             acquisition.training_epoch_samples + SAMPLES_PER_SYMBOL * index,
         )
-        for index in range(480)
+        for index in range(body_symbols)
     )
     rho_hat = 1.0
     if reference_symbols is not None:
-        if len(reference_symbols) not in (43, 480):
-            raise SynchronizationFailed("carrier reference must contain 43 or 480 symbols")
+        if len(reference_symbols) not in (43, body_symbols):
+            raise SynchronizationFailed("carrier reference must contain the prefix or full body")
         z = tuple(
             value * reference.conjugate()
             for value, reference in zip(raw[:len(reference_symbols)], reference_symbols)
@@ -256,18 +270,18 @@ def equalize_body(
 
         search = []
         for cfo_hz in range(-2200, 2201, 25):
-            candidate_slope = 2.0 * math.pi * cfo_hz / SYMBOL_RATE_HZ
+            candidate_slope = 2.0 * math.pi * cfo_hz / symbol_rate_hz
             search.append((abs(coherent_for(candidate_slope)), abs(cfo_hz), cfo_hz, candidate_slope))
         _, _, best_hz, _ = max(search, key=lambda item: (item[0], -item[1], -item[2]))
         fine = []
         for cfo_hz in range(max(-2200, best_hz - 25), min(2200, best_hz + 25) + 1):
-            candidate_slope = 2.0 * math.pi * cfo_hz / SYMBOL_RATE_HZ
+            candidate_slope = 2.0 * math.pi * cfo_hz / symbol_rate_hz
             candidate_coherent = coherent_for(candidate_slope)
             fine.append((abs(candidate_coherent), abs(cfo_hz), cfo_hz, candidate_slope, candidate_coherent))
         _, _, best_hz, slope, coherent = max(
             fine, key=lambda item: (item[0], -item[1], -item[2])
         )
-        if len(reference_symbols) == 480:
+        if len(reference_symbols) == body_symbols:
             sro_candidates = []
             for sro_ppm in range(-10, 11):
                 candidate_rho = 1.0 + sro_ppm * 1e-6
@@ -277,7 +291,7 @@ def equalize_body(
                         acquisition.training_epoch_samples
                         + SAMPLES_PER_SYMBOL * candidate_rho * index,
                     )
-                    for index in range(480)
+                    for index in range(body_symbols)
                 )
                 candidate_z = tuple(
                     value * reference.conjugate()
@@ -311,7 +325,7 @@ def equalize_body(
 
             final_frequency = []
             for cfo_hz in range(max(-2200, best_hz - 2), min(2200, best_hz + 2) + 1):
-                candidate_slope = 2.0 * math.pi * cfo_hz / SYMBOL_RATE_HZ
+                candidate_slope = 2.0 * math.pi * cfo_hz / symbol_rate_hz
                 candidate_coherent = refined_coherent(candidate_slope)
                 final_frequency.append(
                     (abs(candidate_coherent), -abs(cfo_hz), -cfo_hz, candidate_slope, candidate_coherent)
@@ -326,13 +340,12 @@ def equalize_body(
             equalized.append(
                 raw[index] * cmath.exp(-1j * (intercept + slope * index)) / gain
             )
-        if len(reference_symbols) < 480:
+        if len(reference_symbols) < body_symbols:
             phase = intercept + slope * len(reference_symbols)
             frequency = slope
-            for index in range(len(reference_symbols), 480):
+            for index in range(len(reference_symbols), body_symbols):
                 current = raw[index] * cmath.exp(-1j * phase) / gain
-                decision = hard_label(current, index)
-                decision_symbol = map_labels((decision,), index)[0]
+                decision_symbol = data_decision(current, index)
                 error = cmath.phase(current * decision_symbol.conjugate())
                 correction = 0.08 * error
                 equalized.append(current * cmath.exp(-1j * correction))
@@ -347,10 +360,9 @@ def equalize_body(
             equalized.append(raw[index] * rotation / acquisition.gain_magnitude)
         phase = acquisition.phase_intercept + acquisition.phase_slope_per_symbol * 27.0
         frequency = acquisition.phase_slope_per_symbol
-        for index in range(27, 480):
+        for index in range(27, body_symbols):
             current = raw[index] * cmath.exp(-1j * phase) / acquisition.gain_magnitude
-            decision = hard_label(current, index)
-            decision_symbol = map_labels((decision,), index)[0]
+            decision_symbol = data_decision(current, index)
             error = cmath.phase(current * decision_symbol.conjugate())
             correction = 0.10 * error
             equalized.append(current * cmath.exp(-1j * correction))

@@ -119,12 +119,15 @@ from .projection import PublicErrorCode, to_service_error
 from .wiring import EndpointDependencies, build_stage0_layers
 
 #: Runtime이 다음 Port 호출로 route하는 event 종류. 그 밖의 event는 기록만 한다.
+#: `LAYER_ERROR`는 wideband bridge ledger가 Radio RX terminal을 결속할 때만 소비하고
+#: 그 밖의 경우는 기존과 같이 기록만 한다 (`stage6_phy_common_baseline.md` §13.2).
 ROUTED_EVENT_TYPES = frozenset(
     {
         InternalEventType.TRANSMISSION_PLANNED,
         InternalEventType.BURST_COMPLETED,
         InternalEventType.SAMPLES_RECEIVED,
         InternalEventType.RADIO_RX_WINDOW_COMPLETED,
+        InternalEventType.LAYER_ERROR,
     }
 )
 
@@ -155,6 +158,7 @@ class VdeTerEndpoint:
         "_link",
         "_mac",
         "_phy",
+        "_phy_radio_bridge",
         "_radio",
         "_health",
         "_transfers",
@@ -170,6 +174,7 @@ class VdeTerEndpoint:
         self._presentation, self._link, self._mac, self._phy = build_stage0_layers(
             dependencies, dependencies.internal_event_sink
         )
+        self._phy_radio_bridge = None
         # 하위 계층은 상위 concrete 구현을 직접 호출하지 않는다. event bus가 내부 event를
         # 기록한 뒤 Runtime router에만 전달한다. binding은 조립 시 한 번만 한다.
         dependencies.internal_event_sink.bind_router(self)
@@ -252,6 +257,20 @@ class VdeTerEndpoint:
         )
         if configured.is_err:
             return self._fail_start(configured.error)
+        if self._phy_radio_bridge is not None:
+            applied = getattr(configured.value, "applied_settings", None)
+            self._phy_radio_bridge.begin_generation(
+                applied.configure_generation if applied is not None else 1
+            )
+            radio_config = self._dependencies.configuration.radio
+            limits = radio_config.resource_limits
+            if limits is not None:
+                rx_channels = sum(
+                    1 for binding in radio_config.channel_bindings if binding.rx_enabled
+                )
+                self._phy_radio_bridge.set_buffer_budget(
+                    rx_channels * limits.rx_window_max_count * 65_536
+                )
         started = self._radio.start(RadioStartRequest(reason="endpoint start"))
         if started.is_err:
             return self._fail_start(started.error)
@@ -548,6 +567,9 @@ class VdeTerEndpoint:
         elif event.event_type is InternalEventType.RADIO_RX_WINDOW_COMPLETED:
             if self._stage4 is not None:
                 self._stage4.on_rx_window_completed(event)
+        elif event.event_type is InternalEventType.LAYER_ERROR:
+            if self._stage4 is not None and self._phy_radio_bridge is not None:
+                self._stage4.on_layer_error(event)
 
     def _route_transmission_plan(self, event: InternalEvent) -> None:
         plan = event.payload
@@ -592,6 +614,12 @@ class VdeTerEndpoint:
             self._fail_transfer(transfer_id, encoded.error)
             return
         burst = encoded.value
+        if self._phy_radio_bridge is not None:
+            converted = self._phy_radio_bridge.to_device_burst(burst)
+            if converted.is_err:
+                self._fail_transfer(transfer_id, converted.error)
+                return
+            burst = converted.value
         self._burst_transfers[burst.burst_id.value] = transfer_id
         self._record(
             InternalEventType.BURST_ENCODED,
@@ -637,13 +665,20 @@ class VdeTerEndpoint:
     def _route_samples_received(self, event: InternalEvent) -> None:
         received = event.payload
         endpoint_config = self._dependencies.configuration.endpoint
-        recovered = self._phy.decode_samples(
-            PhyDecodeRequest(
-                channel=received.channel,
-                samples=received.samples,
-                allowed_link_ids=endpoint_config.link.supported_link_ids,
-            )
+        decode_request = PhyDecodeRequest(
+            channel=received.channel,
+            samples=received.samples,
+            allowed_link_ids=endpoint_config.link.supported_link_ids,
         )
+        if self._phy_radio_bridge is not None:
+            prepared = self._phy_radio_bridge.to_native_decode_request(decode_request)
+            if prepared.is_err:
+                self._report_internal_error(prepared.error)
+                return
+            if prepared.value is None:
+                return
+            decode_request = prepared.value
+        recovered = self._phy.decode_samples(decode_request)
         if recovered.is_err:
             self._report_internal_error(recovered.error)
             return
@@ -995,10 +1030,14 @@ class VdeTerEndpoint:
         self._transfers.clear()
         self._pending_presentation.clear()
         self._burst_transfers.clear()
+        retained_native_phy = self._phy if self._phy_radio_bridge is not None else None
         presentation, link, legacy_mac, phy = build_stage0_layers(
             self._dependencies, self._dependencies.internal_event_sink
         )
         self._presentation, self._link, self._phy = presentation, link, phy
+        if retained_native_phy is not None:
+            self._phy = retained_native_phy
+            self._phy_radio_bridge.reset_stream()
         if self._stage4 is None:
             self._mac = legacy_mac
             return
@@ -1571,6 +1610,12 @@ class Stage4Support:
             self._fail(command, encoded.error)
             return
         burst = encoded.value
+        if self._endpoint._phy_radio_bridge is not None:
+            converted = self._endpoint._phy_radio_bridge.to_device_burst(burst)
+            if converted.is_err:
+                self._fail(command, converted.error)
+                return
+            burst = converted.value
         self._endpoint._record(
             InternalEventType.BURST_ENCODED,
             Layer.PHY,
@@ -1607,9 +1652,34 @@ class Stage4Support:
         )
 
     def _execute_rx(self, command, request) -> None:
-        """RX dispatcher: 기존 `RadioAdapter.request_rx()`로 변환한다."""
+        """RX dispatcher: 기존 `RadioAdapter.request_rx()`로 변환한다.
+
+        wideband bridge 경로에서는 §13.2에 따라 device-rate window intent가 정확히
+        `(11,)`, `(17,)`, `(19,)` 중 하나인지와 MAC plan 시간·expected count 정합을
+        ledger entry·Radio 요청을 만들기 전에 검증한다. `start_at`과
+        `duration_nanoseconds`는 frozen Stage 4 MAC plan 값을 그대로 복사한다.
+        """
 
         sample_rate = self._endpoint._dependencies.configuration.endpoint.phy.sample_rate_hz
+        bridge = self._endpoint._phy_radio_bridge
+        canonical_allowed = None
+        if bridge is not None:
+            intent = bridge.validate_window_intent(
+                getattr(request, "allowed_link_ids", ())
+            )
+            if intent.is_err:
+                # §13.2 위반은 command 실패와 별도로 health/internal evidence에 남긴다.
+                self.report_error(intent.error)
+                self._fail(command, intent.error)
+                return
+            canonical_allowed = intent.value
+            timing = bridge.validate_window_timing(
+                request.duration_nanoseconds, sample_rate
+            )
+            if timing.is_err:
+                self.report_error(timing.error)
+                self._fail(command, timing.error)
+                return
         accepted = self._endpoint._radio.request_rx(
             RadioRxRequest(
                 channel=request.channel,
@@ -1621,6 +1691,15 @@ class Stage4Support:
         if accepted.is_err:
             self._fail(command, accepted.error)
             return
+        if bridge is not None:
+            admitted = bridge.admit_window(
+                request.channel,
+                request.start_at,
+                request.duration_nanoseconds,
+                canonical_allowed,
+            )
+            if admitted.is_err:
+                self.report_error(admitted.error)
         key = (request.channel.name, request.start_at.total_nanoseconds())
         self._rx_commands[key] = command
         self.enqueue(
@@ -1709,9 +1788,21 @@ class Stage4Support:
 
     def on_rx_window_completed(self, event) -> bool:
         payload = event.payload
+        bridge = self._endpoint._phy_radio_bridge
+        if bridge is not None:
+            # §13.2: 정상 completion에서만 buffered window를 native로 변환해 PHY를
+            # 정확히 한 번 호출한다. Packet 전달은 window closed event보다 앞선다.
+            prepared = bridge.complete_window(payload)
+            if prepared.is_err:
+                self.report_error(prepared.error)
+            elif prepared.value is not None:
+                self._decode_and_deliver(prepared.value)
         key = (payload.channel.name, payload.requested_start_at.total_nanoseconds())
         command = self._rx_commands.pop(key, None)
         if command is None:
+            if bridge is not None:
+                self.pump()
+                return True
             return False
         self.enqueue(
             PhyRxWindowClosedEvent(
@@ -1726,18 +1817,74 @@ class Stage4Support:
         self.pump()
         return True
 
+    def _decode_and_deliver(self, decode_request) -> None:
+        recovered = self._endpoint._phy.decode_samples(decode_request)
+        if recovered.is_err:
+            self.report_error(recovered.error)
+            return
+        self._endpoint._record(
+            InternalEventType.PACKETS_RECOVERED, Layer.PHY, payload=recovered.value
+        )
+        self._endpoint._deliver_recovered(recovered.value, stage4=self)
+
+    def on_layer_error(self, event) -> bool:
+        """Radio RX terminal·overflow LAYER_ERROR만 ledger에 반영한다."""
+
+        bridge = self._endpoint._phy_radio_bridge
+        if bridge is None or event.layer is not Layer.RADIO or event.error is None:
+            return False
+        error_code = event.error.code
+        from .phy_bridge import RX_TERMINAL_ERROR_CODES
+
+        if (
+            error_code != ErrorCode.RADIO_RX_OVERFLOW
+            and error_code not in RX_TERMINAL_ERROR_CODES
+        ):
+            return False
+        details = event.details.as_dict() if event.details is not None else {}
+        if event.error.details is not None:
+            for key, value in event.error.details.as_dict().items():
+                details.setdefault(key, value)
+        recorded = bridge.record_rx_fault(error_code, details)
+        if recorded.is_err:
+            self.report_error(recorded.error)
+        return True
+
     def on_samples_received(self, event) -> bool:
-        """window의 sample을 기존 PHY decode와 동결 `MacPort` 경로로 보낸다."""
+        """window의 sample을 기존 PHY decode와 동결 `MacPort` 경로로 보낸다.
+
+        wideband bridge 경로(§13.2)에서는 sample event 도착 즉시 decode하지 않고
+        accepted RX-window ledger에 terminal event까지 보관한다. 실제 decode는
+        `on_rx_window_completed`의 정상 completion에서 정확히 한 번 수행한다.
+        legacy 25 kHz 경로(bridge 없음)는 기존 즉시-decode 동작을 그대로 유지한다.
+        """
 
         received = event.payload
+        bridge = self._endpoint._phy_radio_bridge
+        if bridge is not None:
+            observed = bridge.observe_samples(received)
+            if observed.is_err:
+                self.report_error(observed.error)
+            return True
         endpoint_config = self._endpoint._dependencies.configuration.endpoint
-        recovered = self._endpoint._phy.decode_samples(
-            PhyDecodeRequest(
-                channel=received.channel,
-                samples=received.samples,
-                allowed_link_ids=endpoint_config.link.supported_link_ids,
-            )
+        window_key = (
+            received.channel.name,
+            received.samples.first_sample_at.total_nanoseconds(),
         )
+        window_command = self._rx_commands.get(window_key)
+        allowed = endpoint_config.link.supported_link_ids
+        if window_command is not None:
+            plan_allowed = getattr(
+                getattr(window_command.payload, "request", None), "allowed_link_ids", None
+            )
+            if plan_allowed:
+                allowed = plan_allowed
+        decode_request = PhyDecodeRequest(
+            channel=received.channel,
+            samples=received.samples,
+            allowed_link_ids=allowed,
+        )
+        recovered = self._endpoint._phy.decode_samples(decode_request)
         if recovered.is_err:
             self.report_error(recovered.error)
             return True
