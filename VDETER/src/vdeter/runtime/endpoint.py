@@ -1668,6 +1668,8 @@ class Stage4Support:
                 getattr(request, "allowed_link_ids", ())
             )
             if intent.is_err:
+                # §13.2 위반은 command 실패와 별도로 health/internal evidence에 남긴다.
+                self.report_error(intent.error)
                 self._fail(command, intent.error)
                 return
             canonical_allowed = intent.value
@@ -1675,6 +1677,7 @@ class Stage4Support:
                 request.duration_nanoseconds, sample_rate
             )
             if timing.is_err:
+                self.report_error(timing.error)
                 self._fail(command, timing.error)
                 return
         accepted = self._endpoint._radio.request_rx(

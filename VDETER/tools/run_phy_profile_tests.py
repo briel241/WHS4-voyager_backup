@@ -636,29 +636,46 @@ def integration_records(evidence_dir: Path) -> list[dict]:
             [],
         ))
     negatives = run_pytest(["tests/integration/test_wideband_group.py::WidebandNegativeTest"])
+    seam_suite = "tests/integration/test_wideband_negative_seams.py"
     neg_map = (
-        ("NEG-001", 6, "TX profile/binding/capability 제거 → CONFIG_SEMANTIC_INVALID·"
-                       "UNSUPPORTED_PROFILE, fallback 0",
-         "config-loader 4 + registry 결손 2 subcase로 부분 커버; MAC capability-제거 "
-         "2 subcase는 후속 audit 항목"),
-        ("NEG-002", 2, "lower TX setting 적용 거부 → 원 오류 보존·DEPENDENCY_FAILED",
-         "loader-수준 RADIO_UNSUPPORTED_SETTING 커버; adapter-적용 시점 subcase는 "
-         "후속 audit 항목"),
-        ("NEG-003", 6, "제어/할당 window 허용 집합 위반·native rate 계획·empty tuple "
-                       "→ CONFIG_SEMANTIC_INVALID",
-         "empty-tuple·timing-정합·intent 단위 gate(bridge ledger)로 부분 커버"),
+        ("NEG-001", "Neg001MacCapabilityTest", 4, 2,
+         "TX profile/binding/capability 제거 → CONFIG_SEMANTIC_INVALID·"
+         "UNSUPPORTED_PROFILE, fallback 0",
+         "capability 2 + lower TX binding 2는 seam suite, registry TX-profile 결손 "
+         "2는 WidebandNegativeTest negatives artifact에서 PASS — 합계 6/6"),
+        ("NEG-002", "Neg002AdapterApplyTest", 2, 0,
+         "lower TX setting 적용 거부 → 원 오류(RADIO_UNSUPPORTED_SETTING) 보존, "
+         "전송 진행 불가",
+         "이 조립에서 adapter는 setting을 start-configure 시점에 적용·검증하므로 "
+         "적용 거부는 start 실패로 표면화 — 원 오류 internal evidence 보존, "
+         "submit 거부·수신 0 확인"),
+        ("NEG-003", "Neg003WindowIntentTest", 6, 0,
+         "제어/할당 window 허용 집합 위반·native rate 계획·empty tuple "
+         "→ CONFIG_SEMANTIC_INVALID, window 미실행",
+         "MacCoordinator._window_intent_for seam 주입으로 6 subcase 전수 실행"),
     )
+    neg_results = {}
+    neg_records = []
+    for record_id, klass, seam_expected, shared_expected, predicate, note in neg_map:
+        seam = run_pytest([f"{seam_suite}::{klass}"], timeout=3600)
+        neg_results[record_id] = seam
+        shared_ok = negatives["failed"] == 0 and negatives["exit_code"] == 0
+        expected = seam_expected + shared_expected
+        observed = seam["passed"] + (shared_expected if shared_ok else 0)
+        ok = (seam["failed"] == 0 and seam["exit_code"] == 0
+              and seam["passed"] == seam_expected and shared_ok)
+        neg_records.append((record_id, predicate, seam, ok, expected, observed, note))
     neg_artifact = _write_json(evidence_dir / "integration_results.json",
-                               {"scenarios": outcomes, "negatives": negatives})
-    for record_id, expected, predicate, note in neg_map:
+                               {"scenarios": outcomes, "negatives": negatives,
+                                "negative_seams": neg_results})
+    for record_id, predicate, seam, ok, expected, observed, note in neg_records:
         records.append(record(
             record_id, ["TEST-REQ-07"], predicate,
-            negatives,
-            "PARTIAL" if negatives["failed"] == 0 and negatives["exit_code"] == 0
-            else "FAIL",
+            seam,
+            "PASS" if ok else "FAIL",
             [neg_artifact],
-            subcases={"expected": expected, "observed": None,
-                      "passed": negatives["passed"], "failed": negatives["failed"]},
+            subcases={"expected": expected, "observed": observed,
+                      "passed": seam["passed"], "failed": seam["failed"]},
             note=note,
         ))
     return records

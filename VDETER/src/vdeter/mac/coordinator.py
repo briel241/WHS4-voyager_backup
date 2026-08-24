@@ -647,11 +647,25 @@ class MacCoordinator:
                 if not armed:
                     next_state = next_state.without_deferred_rx_window(window.key)
                 continue
-            window_link_id = (
+            window_link_id = self._window_intent_for(
+                window, link_id.value, data_link_id.value
+            )
+            expected_link_id = (
                 data_link_id.value
                 if window.slot_function in (SlotFunction.DC, SlotFunction.DSCH)
                 else link_id.value
             )
+            observed_value = getattr(window_link_id, "value", window_link_id)
+            expected_value = getattr(expected_link_id, "value", expected_link_id)
+            if observed_value != expected_value:
+                # §13.2: slot function과 window intent의 mapping 위반은 window 계획을
+                # 만들기 전에 거부하며 Link 11 fallback은 없다.
+                errors.append(
+                    self._window_intent_mapping_error(
+                        window, observed_value, expected_value
+                    )
+                )
+                continue
             plan = PhyReceiveWindowPlan(
                 channel=PhysicalChannel(window.channel_name),
                 start_at=self._utc(window.start_nanoseconds),
@@ -694,6 +708,37 @@ class MacCoordinator:
         if horizon <= 0:
             return True
         return end_nanoseconds - now_nanoseconds <= horizon
+
+    def _window_intent_for(
+        self, window, control_link_id: int, data_link_id: int
+    ) -> int:
+        """§13.2 slot-function window intent 결정 seam.
+
+        BBSC/RAC/ASC는 Link 11, 할당 DC/DSCH는 실행 `data_link_id`다. test-only
+        nonconforming 주입은 이 seam을 우회할 수 있으며, 호출자의 mapping guard가
+        계획 생성 전에 `CONFIG_SEMANTIC_INVALID`로 거부한다.
+        """
+
+        return (
+            data_link_id
+            if window.slot_function in (SlotFunction.DC, SlotFunction.DSCH)
+            else control_link_id
+        )
+
+    @staticmethod
+    def _window_intent_mapping_error(window, observed: int, expected: int):
+        return _mac_error(
+            ErrorCode.CONFIG_SEMANTIC_INVALID,
+            ErrorCategory.VALIDATION,
+            "RX window 허용 집합이 slot function의 §13.2 mapping과 다릅니다",
+            MacFailureReason.EVENT_INVALID,
+            None,
+            procedure="RX_WINDOW_INTENT",
+            slot_function=str(getattr(window, "slot_function", None)),
+            observed_link_id=observed,
+            expected_link_id=expected,
+            window_channel=window.channel_name,
+        )
 
     @staticmethod
     def _slot_missed_error(procedure: str, **details):
