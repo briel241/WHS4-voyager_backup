@@ -661,21 +661,24 @@ def integration_records(evidence_dir: Path) -> list[dict]:
         neg_results[record_id] = seam
         shared_ok = negatives["failed"] == 0 and negatives["exit_code"] == 0
         expected = seam_expected + shared_expected
-        observed = seam["passed"] + (shared_expected if shared_ok else 0)
+        observed = seam["passed"] + seam["failed"] + shared_expected
+        passed = seam["passed"] + (shared_expected if shared_ok else 0)
+        failed = seam["failed"] + (0 if shared_ok else shared_expected)
         ok = (seam["failed"] == 0 and seam["exit_code"] == 0
               and seam["passed"] == seam_expected and shared_ok)
-        neg_records.append((record_id, predicate, seam, ok, expected, observed, note))
+        neg_records.append(
+            (record_id, predicate, seam, ok, expected, observed, passed, failed, note))
     neg_artifact = _write_json(evidence_dir / "integration_results.json",
                                {"scenarios": outcomes, "negatives": negatives,
                                 "negative_seams": neg_results})
-    for record_id, predicate, seam, ok, expected, observed, note in neg_records:
+    for record_id, predicate, seam, ok, expected, observed, passed, failed, note in neg_records:
         records.append(record(
             record_id, ["TEST-REQ-07"], predicate,
             seam,
             "PASS" if ok else "FAIL",
             [neg_artifact],
             subcases={"expected": expected, "observed": observed,
-                      "passed": seam["passed"], "failed": seam["failed"]},
+                      "passed": passed, "failed": failed},
             note=note,
         ))
     return records
