@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""시나리오 선택·재현 인터페이스 (작업 D, 선택 항목).
+"""시나리오 선택·재현 인터페이스.
 
-    python3 apps/scenario_runner.py list
+    python3 apps/scenario_runner.py            # 대화형 메뉴 (번호 고르면 바로 실행)
+    python3 apps/scenario_runner.py menu       # 위와 같음
+    python3 apps/scenario_runner.py list       # 목록만 출력
     python3 apps/scenario_runner.py run SC-VDE-001
     python3 apps/scenario_runner.py run SC-VDE-001 --json
+
+서브명령 없이 실행하면 대화형 메뉴로 들어간다. 메뉴에서 번호(1·2·3)나 시나리오
+ID를 입력하면 즉시 실행하고 타임라인·판정을 보여준 뒤 다시 메뉴로 돌아온다.
+`a`=전체 실행, `q`=종료. 실행할 때마다 로그가 results/에 JSON으로 저장된다.
 
 각 시나리오는 작업 A~C 에서 만든 함수를 호출하는 **얇은 어댑터**다. 실행은
 현재 모의(in-process)다 — 링크(VDE-TER)를 타지 않는다. 통합 시
@@ -355,20 +361,15 @@ def command_list(_args) -> int:
     return 0
 
 
-def command_run(args) -> int:
-    scenario_id = args.scenario_id
-    if scenario_id not in SCENARIOS:
-        print(f"알 수 없는 시나리오: {scenario_id}", file=sys.stderr)
-        print("사용 가능한 목록은 'list' 명령으로 확인하라.", file=sys.stderr)
-        return 2
-
+def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> int:
+    """시나리오 하나를 실행하고 타임라인·판정을 출력, results/에 로그 저장."""
     name, runner = SCENARIOS[scenario_id]
-    now = float(args.now) if args.now is not None else time.time()
+    now = time.time() if now is None else float(now)
 
     run, expected = runner(now)
     summary = analyze(run, expected)
 
-    if args.json:
+    if as_json:
         print(json.dumps({"run": run.to_dict(), "summary": summary},
                          ensure_ascii=False, indent=2))
     else:
@@ -381,25 +382,77 @@ def command_run(args) -> int:
         print()
         print(to_text(summary))
 
-    if not args.no_save:
+    if save:
         os.makedirs(RESULTS_DIR, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
         path = os.path.join(RESULTS_DIR, f"{scenario_id}_{stamp}.json")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"run": run.to_dict(), "summary": summary},
                                     ensure_ascii=False, indent=2))
-        if not args.json:
+        if not as_json:
             print(f"\n로그 저장: {path}")
 
     return 0 if summary["passed"] else 1
+
+
+def command_run(args) -> int:
+    scenario_id = args.scenario_id
+    if scenario_id not in SCENARIOS:
+        print(f"알 수 없는 시나리오: {scenario_id}", file=sys.stderr)
+        print("사용 가능한 목록은 'list' 명령으로 확인하라.", file=sys.stderr)
+        return 2
+    return _run_and_report(scenario_id, now=args.now, as_json=args.json,
+                           save=not args.no_save)
+
+
+def command_interactive(args) -> int:
+    """대화형 메뉴 — 번호나 ID를 고르면 바로 실행한다."""
+    ordered = sorted(SCENARIOS)
+    print("=== MASS/ROC 시나리오 재현 (대화형) ===")
+    print("번호나 시나리오 ID를 입력하면 바로 실행합니다.\n")
+    while True:
+        for index, scenario_id in enumerate(ordered, 1):
+            print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+        print("  a) 전체 실행")
+        print("  q) 종료")
+        try:
+            choice = input("\n선택 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+
+        if not choice:
+            continue
+        lowered = choice.lower()
+        if lowered in ("q", "quit", "exit", "종료"):
+            print("종료합니다.")
+            return 0
+        if lowered in ("a", "all", "전체"):
+            targets = ordered
+        elif choice.isdigit() and 1 <= int(choice) <= len(ordered):
+            targets = [ordered[int(choice) - 1]]
+        elif choice.upper() in SCENARIOS:
+            targets = [choice.upper()]
+        else:
+            print(f"  알 수 없는 선택: {choice!r}\n")
+            continue
+
+        for scenario_id in targets:
+            print("\n" + "=" * 60)
+            _run_and_report(scenario_id)
+        print()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scenario_runner",
         description="MASS/ROC 시나리오를 골라 실행하고 로그·판정을 낸다")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # 서브명령 없이 실행하면 대화형 메뉴로 들어간다.
+    parser.set_defaults(handler=command_interactive)
+    subparsers = parser.add_subparsers(dest="command")
 
+    subparsers.add_parser("menu", help="대화형 메뉴로 골라 실행(기본)").set_defaults(
+        handler=command_interactive)
     subparsers.add_parser("list", help="시나리오 목록").set_defaults(
         handler=command_list)
 
