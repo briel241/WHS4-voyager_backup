@@ -24,6 +24,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from common import codec
+from common.messages import route_instruction as route
 from common.messages import route_json_bridge as bridge
 from common.observe.scenario_analysis import analyze, to_json, to_text
 from common.observe.scenario_log import ScenarioRun
@@ -210,12 +212,136 @@ def run_route_scenario(now: float) -> tuple[ScenarioRun, dict]:
 
 
 # --------------------------------------------------------------------------
+# SC-VDE-006 — MASS-ROC 원격 조종 (S-421 노선 교환의 하위 시나리오)
+#
+# 노선(S-421)이 이미 교환된 상황을 전제로, ROC가 조종 데이터(heading setpoint·
+# fallback·속도 조정)를 발행하고 MASS가 검증·반영 후 S-421 ACK를 돌려준다.
+# 노선 계획 교환(SC-VDE-005)과 달리 여기서는 조종 개념(heading/fallback)이
+# 핵심이며, 압축 코덱(route_instruction, Message ID 2)이 그 필드들을 실제로
+# 전선에 싣는지 encode→decode 왕복으로 확인한다.
+# --------------------------------------------------------------------------
+
+# 조종 데이터. 같은 routeID의 개정본(editionNo=2)으로 기존 노선을 갱신한다.
+SAMPLE_CONTROL = {
+    "sourceMMSI": "004401234",
+    "destinationMMSI": "440123456",
+    "routeFormatVersion": "1.0",
+    "routeID": "urn:route:roc01:demo-0001",
+    "routeEditionNo": 2,
+    "routeInfo": {
+        "routeInfoName": "ROC 조종 명령 0001",
+        "routeInfoAuthor": "ROC-01",
+        "routeInfoStatus": 3,        # Recommended (조종 지시)
+    },
+    "headingSetPoint": 92.5,
+    "fallbackState": "Anchoring",
+    "routeWaypoints": [
+        {"id": "WP1",
+         "position": {"lat": {"degrees": 35, "minutes": 6.0, "hemisphere": "N"},
+                      "lon": {"degrees": 129, "minutes": 3.0, "hemisphere": "E"}},
+         "turn_radius": 0.3, "leg_geometry": "Lexodrome"},
+        {"id": "WP2",
+         "position": {"lat": {"degrees": 35, "minutes": 8.0, "hemisphere": "N"},
+                      "lon": {"degrees": 129, "minutes": 6.0, "hemisphere": "E"}},
+         "turn_radius": 0.3, "leg_geometry": "Lexodrome"},
+    ],
+    "routeSchedule": [
+        {"id": "WP1", "planned_SOG": 6.0},
+        {"id": "WP2", "planned_SOG": 4.0},
+    ],
+}
+
+_FALLBACK_CODE = {
+    "Anchoring": route.FALLBACK_ANCHORING,
+    "DynamicPositioning": route.FALLBACK_DYNAMIC_POSITIONING,
+    "Drifting": route.FALLBACK_DRIFTING,
+}
+_GEOMETRY_CODE = {
+    "Lexodrome": route.LEG_GEOMETRY_LEXODROME,
+    "Orthodrome": route.LEG_GEOMETRY_ORTHODROME,
+}
+
+
+def _control_to_route_instruction(control: dict) -> route.RouteInstruction:
+    """조종 데이터 JSON을 실제 RouteInstruction(Message ID 2)으로 만든다."""
+    waypoints = []
+    schedule = {s["id"]: s["planned_SOG"] for s in control.get("routeSchedule", [])}
+    for wp in control["routeWaypoints"]:
+        pos = wp["position"]
+        lon = bridge.dmm_to_dd(pos["lon"]["degrees"], pos["lon"]["minutes"],
+                               pos["lon"]["hemisphere"])
+        lat = bridge.dmm_to_dd(pos["lat"]["degrees"], pos["lat"]["minutes"],
+                               pos["lat"]["hemisphere"])
+        waypoints.append(route.waypoint_from_degrees(
+            lon, lat,
+            turn_radius_nm=wp.get("turn_radius"),
+            planned_sog_knots=schedule.get(wp["id"]),
+            leg_geometry=_GEOMETRY_CODE.get(wp.get("leg_geometry"), route.LEG_GEOMETRY_NONE),
+        ))
+    return route.RouteInstruction(
+        waypoints=waypoints,
+        heading_setpoint=round(control["headingSetPoint"] * route.HEADING_SETPOINT_SCALE),
+        fallback_state=_FALLBACK_CODE.get(control.get("fallbackState"), route.FALLBACK_NONE),
+    )
+
+
+def run_control_scenario(now: float) -> tuple[ScenarioRun, dict]:
+    """ROC 조종 데이터 발행 → 압축 코덱 왕복 확인 → MASS 반영 → ACK."""
+    run = ScenarioRun(scenario_id="SC-VDE-006", started=now)
+
+    run.record(now, "ROC->MASS", "note",
+               "전제: S-421 노선(SC-VDE-005)이 이미 교환됨. 이 명령은 개정본"
+               f"(editionNo={SAMPLE_CONTROL['routeEditionNo']})으로 조종을 지시한다")
+
+    # ROC: 조종 데이터 → 실제 RouteInstruction → 압축 payload
+    command = _control_to_route_instruction(SAMPLE_CONTROL)
+    payload = codec.encode(command)
+    waypoints = len(command.waypoints)
+    run.record(now + 0.3, "ROC->MASS", "send",
+               f"조종 데이터 (heading {SAMPLE_CONTROL['headingSetPoint']}°, "
+               f"fallback {SAMPLE_CONTROL['fallbackState']})",
+               corr="control-1", source_id=ROC_ID, destination_id=MASS_ID,
+               waypoints=waypoints, payload_bytes=len(payload))
+
+    # MASS: 압축 payload를 풀어 조종 필드가 전선을 그대로 탔는지 확인(반영 전 검증)
+    received = codec.decode(payload)
+    heading_ok = received.heading_setpoint_degrees == SAMPLE_CONTROL["headingSetPoint"]
+    fallback_ok = received.fallback_name == SAMPLE_CONTROL["fallbackState"]
+    sog_ok = received.waypoints[0].planned_sog_knots == SAMPLE_CONTROL["routeSchedule"][0]["planned_SOG"]
+    fields_ok = heading_ok and fallback_ok and sog_ok
+    run.record(now + 0.7, "MASS->ROC", "verify",
+               f"조종 필드 압축 왕복: heading={received.heading_setpoint_degrees}° "
+               f"fallback={received.fallback_name} SOG={received.waypoints[0].planned_sog_knots}kn",
+               ok=fields_ok, corr="control-1")
+
+    # MASS: 검증 통과 → 반영 후 S-421 ACK (Acknowledged=4)
+    ack_status = 4 if fields_ok else 8   # 통과=Acknowledged, 실패=Incomplete
+    ack_json = bridge.ack_json_for(SAMPLE_CONTROL, ack_status)
+    ack_fields = bridge.route_json_to_fields(ack_json)
+    run.record(now + 0.9, "MASS->ROC", "ack",
+               f"S-421 ACK (routeID {ack_json['routeID']}, editionNo {ack_json['routeEditionNo']})",
+               corr="control-1", source_id=MASS_ID, destination_id=ROC_ID,
+               status=ack_fields["status"])
+    run.finish(now + 1.1)
+
+    expected = {
+        "scenario_id": "SC-VDE-006",
+        "verify_ok": True,            # 조종 필드 압축 왕복 검증
+        "ack_status": 4,
+        "waypoints": waypoints,
+        "max_latency_seconds": 2.0,
+    }
+    return run, expected
+
+
+# --------------------------------------------------------------------------
 # 시나리오 등록 — 통합 시 여기만 실제 행위자 호출로 바꾸면 된다
 # --------------------------------------------------------------------------
 
 SCENARIOS = {
     "SC-VDE-001": ("X.509 인증서 송수신", run_certificate_scenario),
     "SC-VDE-005": ("S-421 노선 계획 교환", run_route_scenario),
+    "SC-VDE-006": ("MASS-ROC 원격 조종", run_control_scenario),
 }
 
 

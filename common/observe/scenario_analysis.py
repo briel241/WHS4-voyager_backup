@@ -6,7 +6,8 @@
 --------------------------------------------------------------------------
 expected 키 (있는 항목만 검사한다 — 없는 키는 체크를 만들지 않는다)
 --------------------------------------------------------------------------
-    signature_verified   bool  kind="verify" 항목이 하나 이상 있고 전부 ok=True
+    signature_verified   bool  kind="verify" 항목이 하나 이상 있고 전부 ok=True (서명 검증)
+    verify_ok            bool  signature_verified와 같은 검사, 서명 아닌 일반 검증용 이름
     payload_sha256       str   재조립 payload SHA-256 hex 가 이 값과 일치
     fragments            int   fragment 총 개수가 이 값과 일치, 빠진 번호 없음
     all_fragments_acked  bool  ack 개수가 fragment 개수 이상
@@ -128,15 +129,23 @@ def _any_detail(run: ScenarioRun, key: str):
 # 개별 체크
 # --------------------------------------------------------------------------
 
-def _check_signature(run: ScenarioRun, _expected) -> tuple[bool, str]:
+def _verify_entries_all_ok(run: ScenarioRun, noun: str) -> tuple[bool, str]:
     verifications = run.by_kind("verify")
     if not verifications:
-        return False, "서명 검증 기록이 없다"
+        return False, f"{noun} 기록이 없다"
     failed = [e for e in verifications if e.detail.get("ok") is not True]
     if failed:
         reasons = ", ".join(str(e.detail.get("reason", "unknown")) for e in failed)
-        return False, f"검증 실패 {len(failed)}건: {reasons}"
-    return True, f"검증 {len(verifications)}건 모두 통과"
+        return False, f"{noun} 실패 {len(failed)}건: {reasons}"
+    return True, f"{noun} {len(verifications)}건 모두 통과"
+
+
+def _check_signature(run: ScenarioRun, _expected) -> tuple[bool, str]:
+    return _verify_entries_all_ok(run, "서명 검증")
+
+
+def _check_verify_ok(run: ScenarioRun, _expected) -> tuple[bool, str]:
+    return _verify_entries_all_ok(run, "검증")
 
 
 def _check_payload(run: ScenarioRun, expected) -> tuple[bool, str]:
@@ -224,6 +233,7 @@ def _check_min_entries(run: ScenarioRun, expected) -> tuple[bool, str]:
 #: expected 키 → (체크 이름, 판정 함수)
 _CHECKS = {
     "signature_verified": ("signature-verified", _check_signature),
+    "verify_ok": ("fields-verified", _check_verify_ok),
     "payload_sha256": ("payload-matches", _check_payload),
     "fragments": ("fragments-complete", _check_fragments),
     "all_fragments_acked": ("all-fragments-acked", _check_all_acked),
