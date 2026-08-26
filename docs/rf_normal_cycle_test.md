@@ -60,6 +60,10 @@ uhd_find_devices
 물리 결선·감쇠기·게인은 Hello 때와 동일하다: **안테나 금지**, `A.TX/RX ─ 30 dB
 감쇠기 ─ 동축 ─ B.RX2`, 감쇠기 없이 직결하면 수신단 손상.
 
+> **감쇠기 대안 — Faraday Cage.** 안테나로 공중 실험을 하려면(동축 직결 대신) 전파가
+> 밖으로 새지 않는 차폐 공간이 필요하다. 팀 계획서:
+> `references/VDE-TER_Faraday_Cage_구축계획서.html`.
+
 ---
 
 ## 실행 순서

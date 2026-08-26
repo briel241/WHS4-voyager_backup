@@ -37,6 +37,23 @@ API 계약도 같은 경계를 정한다.
 [PHY]               ← 팀원
 ```
 
+### 1.1 VDETER 연동 (팀원 API 가이드 반영)
+
+팀원이 실제 연동 API를 냈다(`docs/vdeter_mass_roc_api_guide.md`). 경계가 구체화됐다.
+
+- 우리 앱은 `vdeter.service.VdeService`의 `start/submit/status/cancel/stop`만 호출한다.
+  MASS=`SHIP`, ROC=`CONTROL`. `submit(destination, payload_format, payload, ack_required)`.
+- **payload는 VDE 헤더 없는 순수 bytes**다. **VPFI는 VDETER가 `PayloadFormat`(문자열 키)으로
+  관리**한다(28-bit). → **우리 codec의 16-bit VPFI 봉투는 연동 시 제거**해야 한다(이중 부착 방지).
+- **운영 지원 format은 둘뿐**: `x509.certificate_report`(SC-VDE-001) ·
+  `ais.authentication_integrity.scheme1`(SC-VDE-003, 정확히 82 B). → **이 둘이 지금 바로
+  연동 가능한 경로**다.
+- **미지원**: route/항행경보/환경/기상은 registry format이 없어 불가(링크 팀이 추가 필요).
+  **MASS 발신 broadcast 미지원** → 위치보고 broadcast는 현재 VDETER로 못 보낸다.
+
+→ 연동은 **어댑터(`common/service.py`) 교체 + codec VPFI 제거 + payload_format 배정** 셋이 핵심.
+   메시지·행위자 코드는 거의 그대로다.
+
 ---
 
 ## 2. 요구사항 목록
@@ -300,6 +317,9 @@ VDES 브로드캐스트를 대상으로 80비트 MAC·Tint 500 ms·d=2를 권장
   원칙, 상태 불일치 DoS, 물리계층 방어, "표준 암호는 10년 뒤" 근거
 - `docs/vde_service_api(prototype).md`
 - `docs/mass_roc_background.md` — 계층·위협 모델·인증 근거
+- `docs/mass_roc_control_and_ack_message_format.md` — MASS 조작 데이터·ACK 형식 (S-421 기반, 멘토 자문 반영)
+- `docs/vdeter_mass_roc_api_guide.md` — **VDETER 연동 API** (팀원 제공): VdeService.submit, PayloadFormat, 지원 format은 인증서·AIS인증값 둘뿐, MASS broadcast·route/경보 format 미지원
+- `references/VDE-TER_Faraday_Cage_구축계획서.html` — RF 실험용 Faraday Cage 계획
 - `docs/mass_roc_message_set.md` — 응용 메시지 설계
 - `docs/scenarios/scenario_list.md` — 시나리오 목록 (§2 암호 축)
 - `docs/scenarios/SC-VDE-008-broadcast-authentication.md` — 암호 개발 시나리오
