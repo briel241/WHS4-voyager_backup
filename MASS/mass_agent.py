@@ -414,26 +414,26 @@ class MassAgent:
     # 항로 지시를 받아들일지 판정한다. 여기서는 상태를 바꾸지 않는다.
     def _evaluate(self, message: route.RouteInstruction) -> RouteDecision:
         if message.is_cancellation:
-            return RouteDecision(status=ack.STATUS_COMPLETED, cancel=True)
+            return RouteDecision(status=ack.STATUS_ACKNOWLEDGED, cancel=True)
 
         if not message.waypoints:
             return RouteDecision(
-                status=ack.STATUS_REJECTED, reason=ack.REASON_ROUTE_UNSUITABLE
+                status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
             )
 
         if message.route_type == route.ROUTE_TYPE_NOT_AVAILABLE:
             return RouteDecision(
-                status=ack.STATUS_REJECTED, reason=ack.REASON_ROUTE_UNSUITABLE
+                status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
             )
 
         # 좌표가 not available인 waypoint는 따라갈 수 없다.
         for waypoint in message.waypoints:
             if waypoint.latitude_degrees is None or waypoint.longitude_degrees is None:
                 return RouteDecision(
-                    status=ack.STATUS_REJECTED, reason=ack.REASON_ROUTE_UNSUITABLE
+                    status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
                 )
 
-        return RouteDecision(status=ack.STATUS_ACCEPTED, accept=True)
+        return RouteDecision(status=ack.STATUS_ACKNOWLEDGED, accept=True)
 
     # 검증을 통과한 항로를 적용한다.
     def _apply_route(self, message: route.RouteInstruction, now: float) -> None:

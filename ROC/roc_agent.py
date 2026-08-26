@@ -122,7 +122,11 @@ class RocAgent:
         now: float = 0.0,
         route_type: int = route.ROUTE_TYPE_MANDATORY,
         duration: int = route.DURATION_NOT_AVAILABLE,
+        heading_setpoint: float | None = None,
+        fallback_state: int = route.FALLBACK_NONE,
     ) -> Outbound:
+        # heading setpoint·fallback은 S-421 조작 데이터의 제어 필드다(선택).
+        # waypoint별 turn radius·계획 SOG가 필요하면 waypoint_from_degrees로 직접 만든다.
         instruction = route.RouteInstruction(
             waypoints=[
                 route.waypoint_from_degrees(longitude, latitude)
@@ -132,6 +136,11 @@ class RocAgent:
             sender_classification=route.SENDER_AUTHORITY,
             route_type=route_type,
             duration=duration,
+            heading_setpoint=(
+                route.HEADING_SETPOINT_NOT_AVAILABLE if heading_setpoint is None
+                else round(heading_setpoint * route.HEADING_SETPOINT_SCALE)
+            ),
+            fallback_state=fallback_state,
         )
         return self._send(instruction, destination_id, now, "Route Instruction")
 

@@ -161,8 +161,8 @@ check(codec.decode(codec.encode(empty)) == empty, "not available 보고도 왕�
 
 section("Route Instruction — IFM DAC=001/FI=28 차용 (IMO SN.1/Circ.289)")
 
-check(route.FIXED_BITS == 61, "고정부 61 bit", f"실제 {route.FIXED_BITS}")
-check(route.WAYPOINT_BITS == 55, "waypoint 55 bit", "경도 28 + 위도 27")
+check(route.FIXED_BITS == 76, "고정부 76 bit", f"실제 {route.FIXED_BITS}")
+check(route.WAYPOINT_BITS == 77, "waypoint 77 bit", "경도 28 + 위도 27 + 제어 22")
 check(route.MAX_WAYPOINTS == 16, "waypoint 최대 16개")
 check(route.ROUTE_TYPE_MANDATORY == 1, "Route Type 1 = mandatory route")
 check(route.ROUTE_TYPE_CANCELLATION == 31, "Route Type 31 = cancellation")
@@ -206,8 +206,10 @@ check(not instruction.is_cancellation, "정상 항로는 취소가 아니다")
 # waypoint 개수별 크기 — 설계 문서 6.1 표와 대조
 section("Route Instruction — waypoint 개수별 payload 크기")
 
+# S-421 제어 필드(turn radius·SOG·leg geometry)가 waypoint당 22 bit 추가되면서
+# Link ID 11 수용 한계가 waypoint 3개 → 2개로 줄었다.
 LINK_ID_11_BUDGET = 37  # docs/mass_roc_message_set.md 6
-for count, fits_link11 in [(1, True), (2, True), (3, True), (4, False), (16, False)]:
+for count, fits_link11 in [(1, True), (2, True), (3, False), (4, False), (16, False)]:
     wps = [route.waypoint_from_degrees(129.0 + i * 0.01, 35.0) for i in range(count)]
     size = len(codec.encode(route.RouteInstruction(waypoints=wps, linkage_id=1)))
     actual_fits = size <= LINK_ID_11_BUDGET
@@ -216,6 +218,54 @@ for count, fits_link11 in [(1, True), (2, True), (3, True), (4, False), (16, Fal
         f"waypoint {count}개 = {size} byte, Link ID 11({LINK_ID_11_BUDGET} B) "
         + ("수용" if fits_link11 else "초과"),
     )
+
+# S-421 제어 필드 (조작 데이터) — heading·fallback·waypoint별 turn radius·SOG·leg
+section("Route Instruction — S-421 제어 필드 왕복")
+
+control = route.RouteInstruction(
+    waypoints=[
+        route.waypoint_from_degrees(129.10, 35.10),
+        route.waypoint_from_degrees(
+            129.12, 35.12,
+            turn_radius_nm=0.3, planned_sog_knots=10.0,
+            leg_geometry=route.LEG_GEOMETRY_LEXODROME,
+        ),
+    ],
+    linkage_id=7,
+    heading_setpoint=750,  # 75.0도 (0.1도 단위)
+    fallback_state=route.FALLBACK_DYNAMIC_POSITIONING,
+)
+restored = codec.decode(codec.encode(control))
+check(restored == control, "제어 필드 포함 항로가 왕복한다")
+check(abs(restored.heading_setpoint_degrees - 75.0) < 1e-9, "Heading Setpoint 75.0도 유지")
+check(restored.fallback_name == "DynamicPositioning", "Fallback 상태 유지")
+wp2 = restored.waypoints[1]
+check(abs(wp2.turn_radius_nm - 0.3) < 1e-9, "Turn Radius 0.3 NM 유지", f"{wp2.turn_radius_nm}")
+check(abs(wp2.planned_sog_knots - 10.0) < 1e-9, "Planned SOG 10.0 kn 유지")
+check(wp2.leg_geometry_name == "Lexodrome", "Leg Geometry 유지")
+# 설정 안 한 제어 필드는 not available로 복원
+check(restored.waypoints[0].turn_radius_nm is None
+      and restored.waypoints[0].planned_sog_knots is None,
+      "설정 안 한 waypoint 제어값은 not available")
+plain = codec.decode(codec.encode(route.RouteInstruction(
+    waypoints=[route.waypoint_from_degrees(129.0, 35.0)], linkage_id=1)))
+check(plain.heading_setpoint_degrees is None and plain.fallback_name == "none",
+      "제어 필드 생략 시 not available/none")
+
+# ACK — S-421 routeInfoStatus 코드
+section("Application ACK — S-421 상태 코드")
+
+for status, name in [
+    (ack.STATUS_ACKNOWLEDGED, "acknowledged"),
+    (ack.STATUS_ERRORS, "errors"),
+    (ack.STATUS_INCOMPLETE, "incomplete"),
+    (ack.STATUS_ROUTE_ISSUES, "route issues"),
+]:
+    got = codec.decode(codec.encode(ack.ApplicationAck(linkage_id=9, status=status)))
+    check(got.status == status and got.status_name == name,
+          f"S-421 상태 {status}={name} 왕복")
+check(ack.STATUS_ACKNOWLEDGED == 4 and ack.STATUS_ROUTE_ISSUES == 9,
+      "S-421 코드값(4·7·8·9) 일치")
 
 # 표준 상한 초과는 거부해야 한다
 try:
@@ -228,14 +278,14 @@ except ValueError:
 
 section("Application ACK")
 
-check(ack.BODY_BITS == 16, "본문 16 bit", f"실제 {ack.BODY_BITS}")
-acknowledgement = ack.ApplicationAck(linkage_id=42, status=ack.STATUS_ACCEPTED)
+check(ack.BODY_BITS == 17, "본문 17 bit", f"실제 {ack.BODY_BITS}")
+acknowledgement = ack.ApplicationAck(linkage_id=42, status=ack.STATUS_ACKNOWLEDGED)
 ack_payload = codec.encode(acknowledgement)
-check(len(ack_payload) == 5, "payload 5 byte", f"실제 {len(ack_payload)} byte")
+check(len(ack_payload) == 6, "payload 6 byte", f"실제 {len(ack_payload)} byte")
 decoded_ack = codec.decode(ack_payload)
 check(decoded_ack == acknowledgement, "ACK가 왕복한다")
 check(decoded_ack.linkage_id == 42, "Linkage ID로 대상을 참조한다")
-check(decoded_ack.status_name == "accepted", "Status 이름 복원")
+check(decoded_ack.status_name == "acknowledged", "Status 이름 복원")
 
 # --------------------------------------------------------------- 봉투
 

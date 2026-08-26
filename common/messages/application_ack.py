@@ -19,8 +19,12 @@ Application ACK - 응용 수준 확인응답
     개념만 차용해 본 프로젝트가 정의한 것이다. 원문 확보 시 교체한다.
     docs/mass_roc_message_set.md 7.1 참조.
 
-필드 구성 (본문 16 bit)
-    [Message Linkage ID 10 | Status 3 | Reason 3]
+필드 구성 (본문 17 bit)
+    [Message Linkage ID 10 | Status 4 | Reason 3]
+
+Status는 S-421 Edition 1.0.0의 routeInfoStatus 코드에 맞춘다
+(docs/mass_roc_control_and_ack_message_format.md 4~5절).
+Reason은 그 문서의 routeInfoDescription을 좁은 링크에 맞게 코드로 대신한 것이다.
 """
 
 from __future__ import annotations
@@ -33,25 +37,27 @@ MESSAGE_ID = 3
 NAME = "Application ACK"
 
 LINKAGE_ID_BITS = 10
-STATUS_BITS = 3
+STATUS_BITS = 4
 REASON_BITS = 3
 
 BODY_BITS = LINKAGE_ID_BITS + STATUS_BITS + REASON_BITS
 
-# Status - 본 프로젝트 정의
-STATUS_RECEIVED = 0
-STATUS_ACCEPTED = 1
-STATUS_REJECTED = 2
-STATUS_COMPLETED = 3
+# Status - S-421 routeInfoStatus 코드에 정렬한다.
+STATUS_RECEIVED = 0        # 본 프로젝트: 수신했으나 아직 처리 전 (S-421 외)
+STATUS_ACKNOWLEDGED = 4    # S-421 Acknowledged - 정상 수신·검증
+STATUS_ERRORS = 7          # S-421 Errors - 스키마/응용 검증 오류
+STATUS_INCOMPLETE = 8      # S-421 Incomplete - 필요한 필드 누락
+STATUS_ROUTE_ISSUES = 9    # S-421 Route issues - 해석되나 경로 문제
 
 STATUS_NAMES = {
     STATUS_RECEIVED: "received",
-    STATUS_ACCEPTED: "accepted",
-    STATUS_REJECTED: "rejected",
-    STATUS_COMPLETED: "completed",
+    STATUS_ACKNOWLEDGED: "acknowledged",
+    STATUS_ERRORS: "errors",
+    STATUS_INCOMPLETE: "incomplete",
+    STATUS_ROUTE_ISSUES: "route issues",
 }
 
-# Reason - 본 프로젝트 정의. 거부·실패 사유.
+# Reason - routeInfoDescription을 대신하는 코드. 본 프로젝트 정의.
 REASON_NONE = 0
 REASON_ROUTE_UNSUITABLE = 1
 REASON_EXPIRED = 2

@@ -128,7 +128,7 @@ check(recovered_route.sender_name == "authority", "Sender Classification 유지"
 
 section("다중 메시지 — 한 VDE Packet에 위치보고 + ACK")
 
-acknowledgement = ack.ApplicationAck(linkage_id=42, status=ack.STATUS_ACCEPTED)
+acknowledgement = ack.ApplicationAck(linkage_id=42, status=ack.STATUS_ACKNOWLEDGED)
 multi = [
     Type93Message(
         source_id=config.MASS_MMSI,

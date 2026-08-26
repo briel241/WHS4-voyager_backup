@@ -57,7 +57,7 @@
 | 통신 두절 판정 | **10.0 s** 미수신 |
 | VPFI | `0xFF01` (시험용 임의값) |
 
-Link ID 11로도 동작하나 **waypoint가 3개로 제한**된다(§5.3).
+Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 제어 필드 확장 후).
 
 ---
 
@@ -77,8 +77,8 @@ Link ID 11로도 동작하나 **waypoint가 3개로 제한**된다(§5.3).
 
 | 항목 | 내용 |
 | --- | --- |
-| 형식 | IFM DAC=001 / FI=28 "Route information (addressed)" 차용 |
-| 크기 | **18 byte~** (waypoint 수에 따라 가변, §5.3) |
+| 형식 | IFM DAC=001/FI=28 차용 + S-421 조작 데이터 제어 필드(heading·fallback·turn radius·SOG·leg) |
+| 크기 | **23 byte~** (waypoint 수에 따라 가변, §5.3) |
 | 내용 | Linkage ID · 발신자 분류 · 항로 종류 · 시작 시각 · **유효기간** · waypoint 목록 |
 | 표준 근거 | IMO SN.1/Circ.289 Table 13.2 / 13.3 |
 
@@ -93,8 +93,8 @@ Link ID 11로도 동작하나 **waypoint가 3개로 제한**된다(§5.3).
 | 항목 | 내용 |
 | --- | --- |
 | 형식 | IFM FI=5 개념 차용 |
-| 크기 | **5 byte** |
-| 내용 | Linkage ID · 상태(수신/수락/거부/완료) · 사유 |
+| 크기 | **6 byte** |
+| 내용 | Linkage ID · 상태(S-421 routeInfoStatus: acknowledged/errors/incomplete/route issues) · 사유 |
 | 프로젝트 정의 | 상태·사유 값 — FI=5의 비트 구조는 ITU-R M.1371 Annex 5 소관이며 미확보 |
 
 > **링크 ACK와 응용 ACK는 다른 층위다.** 전자는 "전파가 도달했다", 후자는 "명령을 수락했다".
@@ -120,11 +120,11 @@ MASS                                                    ROC
  │──[1] Position Report  Type 93  17 B ────────────────▶ │  항적 갱신
  │      (2초마다 반복)                                     │
  │                                                       │
- │◀─[2] Route Instruction  Type 92  32 B ─────────────── │  waypoint 3개
+ │◀─[2] Route Instruction  Type 92  55 B ─────────────── │  waypoint 3개 (Link ID 17)
  │                                                       │
  │      검증 → 통과한 경우에만 항로 적용                       │
  │                                                       │
- │──[3] Application ACK  Type 93  5 B ─────────────────▶ │  accepted
+ │──[3] Application ACK  Type 93  6 B ─────────────────▶ │  acknowledged
  │                                                       │
  │      침로 변경 · waypoint 추종                           │
  │                                                       │
@@ -135,20 +135,25 @@ MASS                                                    ROC
 
 payload → Type 92/93 → Temporary Burst 순이다.
 
+> ⚠️ 크기 갱신: 항로 지시가 S-421 조작 데이터 형식으로 확장됐다(heading setpoint·
+> fallback·waypoint별 turn radius·계획 SOG·leg geometry 추가).
+> 상세 형식은 [`../mass_roc_control_and_ack_message_format.md`](../mass_roc_control_and_ack_message_format.md).
+> 아래는 확장 후 실측값이다.
+
 | 메시지 | payload | 링크 메시지 | Burst |
 | --- | ---: | ---: | ---: |
 | Position Report | 17 B | 29 B | **33 B** |
-| Route Instruction (WP 1) | 18 B | 31 B | 35 B |
-| Route Instruction (WP 2) | 25 B | 38 B | 42 B |
-| Route Instruction (WP 3) | 32 B | 45 B | **49 B** |
-| Route Instruction (WP 4) | 39 B | 52 B | 56 B |
-| Route Instruction (WP 16) | 121 B | 134 B | 138 B |
+| Route Instruction (WP 1) | 23 B | 36 B | 40 B |
+| Route Instruction (WP 2) | 32 B | 45 B | 49 B |
+| Route Instruction (WP 3) | 42 B | 55 B | **59 B** |
+| Route Instruction (WP 4) | 51 B | 64 B | 68 B |
+| Route Instruction (WP 16) | 167 B | 180 B | 184 B |
 | Application ACK | 5 B | 17 B | **21 B** |
 
 Link ID별 waypoint 수용 한계.
 
 ```text
-Link ID 11  가용  37 B  →  waypoint 최대  3개
+Link ID 11  가용  37 B  →  waypoint 최대  2개
 Link ID 17  가용 217 B  →  waypoint 최대 16개 (표준 상한)
 Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 ```
@@ -214,7 +219,7 @@ Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 ### 7.1 기준선 실측 (600초 시뮬레이션)
 
 ```text
-    20s   ROC → MASS 항로 지시 (Type 92, Burst 49 B); MASS → ROC ACK accepted (21 B)
+    20s   ROC → MASS 항로 지시 (Type 92, Burst 59 B); MASS → ROC ACK acknowledged (22 B)
    128s   WP1 통과   COG 354°
    261s   WP2 통과   COG  19°
    404s   항로 완주  COG   1°
@@ -234,10 +239,10 @@ Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 
 | 조건 | ACK 상태 | 사유 | 기존 항로 |
 | --- | --- | --- | :-: |
-| waypoint 없음 | `rejected` | route unsuitable | **유지** |
-| Route Type 미지정 | `rejected` | route unsuitable | **유지** |
-| 좌표가 not available | `rejected` | route unsuitable | **유지** |
-| 취소 지시 (Type 31 / Duration 0) | `completed` | — | 해제 |
+| waypoint 없음 | `incomplete` | route unsuitable | **유지** |
+| Route Type 미지정 | `incomplete` | route unsuitable | **유지** |
+| 좌표가 not available | `incomplete` | route unsuitable | **유지** |
+| 취소 지시 (Type 31 / Duration 0) | `acknowledged` | — | 해제 |
 | 유효기간 경과 | — | — | 자동 해제 |
 | 다른 응용의 payload | 응답 없음 (무시) | — | **유지** |
 | VPFI 불일치 · 형식 손상 | 응답 없음 (무시) | — | **유지** |

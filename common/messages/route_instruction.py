@@ -13,10 +13,19 @@ Route Instruction - 항로 지시
     ROC 발신과 MASS 발신을 같은 메시지로 표현할 수 있다.
     즉 MASS<->MASS 시나리오에도 그대로 쓴다.
 
-필드 구성 (고정부 61 bit + waypoint 55 bit x n)
+S-421 제어 필드
+    ROC 조작 데이터(docs/mass_roc_control_and_ack_message_format.md)의 S-421 기반
+    제어 항목을 좁은 링크에 맞게 비트로 추가한다.
+    - Heading Setpoint / Fallback State: 논문 기반 제어 개념(§1.2)
+    - waypoint별 Turn Radius / Planned SOG / Leg Geometry: S-421 필드
+    좌표는 여전히 1/10,000분 정수로 싣는다(전송용). DMM/WGS84는 논리 표현이다.
+
+필드 구성 (고정부 76 bit + waypoint 77 bit x n)
     [Message Linkage ID 10 | Sender Classification 3 | Route Type 5 |
      Start Month 4 | Start Day 5 | Start Hour 5 | Start Minute 6 |
-     Duration 18 | Number of Waypoints 5 | Waypoints n x 55]
+     Duration 18 | Heading Setpoint 12 | Fallback State 3 |
+     Number of Waypoints 5 |
+     Waypoints n x (경도 28 | 위도 27 | Turn Radius 10 | Planned SOG 10 | Leg Geometry 2)]
 """
 
 from __future__ import annotations
@@ -37,7 +46,13 @@ START_DAY_BITS = 5
 START_HOUR_BITS = 5
 START_MINUTE_BITS = 6
 DURATION_BITS = 18
+HEADING_SETPOINT_BITS = 12
+FALLBACK_BITS = 3
 WAYPOINT_COUNT_BITS = 5
+
+TURN_RADIUS_BITS = 10
+PLANNED_SOG_BITS = 10
+LEG_GEOMETRY_BITS = 2
 
 FIXED_BITS = (
     LINKAGE_ID_BITS
@@ -48,12 +63,54 @@ FIXED_BITS = (
     + START_HOUR_BITS
     + START_MINUTE_BITS
     + DURATION_BITS
+    + HEADING_SETPOINT_BITS
+    + FALLBACK_BITS
     + WAYPOINT_COUNT_BITS
 )
-WAYPOINT_BITS = coordinates.LONGITUDE_BITS + coordinates.LATITUDE_BITS
+WAYPOINT_BITS = (
+    coordinates.LONGITUDE_BITS
+    + coordinates.LATITUDE_BITS
+    + TURN_RADIUS_BITS
+    + PLANNED_SOG_BITS
+    + LEG_GEOMETRY_BITS
+)
 
 # 표준이 정한 waypoint 개수 상한
 MAX_WAYPOINTS = 16
+
+# Heading Setpoint - 진북 기준 목표 침로, 0.1도 단위 (논문 기반 제어)
+HEADING_SETPOINT_NOT_AVAILABLE = 3600
+HEADING_SETPOINT_SCALE = 10
+
+# Fallback State - 논문에 제시된 세 상태 (S-421 열거값 아님)
+FALLBACK_NONE = 0
+FALLBACK_ANCHORING = 1
+FALLBACK_DYNAMIC_POSITIONING = 2
+FALLBACK_DRIFTING = 3
+FALLBACK_NAMES = {
+    FALLBACK_NONE: "none",
+    FALLBACK_ANCHORING: "Anchoring",
+    FALLBACK_DYNAMIC_POSITIONING: "DynamicPositioning",
+    FALLBACK_DRIFTING: "Drifting",
+}
+
+# Turn Radius - S-421 routeWaypointTurnRadius, 0.01 해리(NM) 단위
+TURN_RADIUS_NOT_AVAILABLE = 1023
+TURN_RADIUS_SCALE = 100
+
+# Planned SOG - S-421 routeScheduleElementPlanSOG, 0.1 knot 단위
+PLANNED_SOG_NOT_AVAILABLE = 1023
+PLANNED_SOG_SCALE = 10
+
+# Leg Geometry - S-421 routeWaypointLegGeometryType
+LEG_GEOMETRY_NONE = 0
+LEG_GEOMETRY_LEXODROME = 1   # 등각항로 (rhumb line)
+LEG_GEOMETRY_ORTHODROME = 2  # 대권항로 (great circle)
+LEG_GEOMETRY_NAMES = {
+    LEG_GEOMETRY_NONE: "none",
+    LEG_GEOMETRY_LEXODROME: "Lexodrome",
+    LEG_GEOMETRY_ORTHODROME: "Orthodrome",
+}
 
 # Sender Classification (Table 13.2)
 SENDER_SHIP = 0
@@ -94,6 +151,9 @@ DURATION_CANCEL = 0
 class Waypoint:
     longitude: int = coordinates.LONGITUDE_NOT_AVAILABLE
     latitude: int = coordinates.LATITUDE_NOT_AVAILABLE
+    turn_radius: int = TURN_RADIUS_NOT_AVAILABLE      # 0.01 NM
+    planned_sog: int = PLANNED_SOG_NOT_AVAILABLE      # 0.1 knot
+    leg_geometry: int = LEG_GEOMETRY_NONE
 
     @property
     def longitude_degrees(self) -> float | None:
@@ -103,12 +163,45 @@ class Waypoint:
     def latitude_degrees(self) -> float | None:
         return coordinates.raw_to_latitude(self.latitude)
 
+    @property
+    def turn_radius_nm(self) -> float | None:
+        return (
+            None if self.turn_radius == TURN_RADIUS_NOT_AVAILABLE
+            else self.turn_radius / TURN_RADIUS_SCALE
+        )
 
-# 도 단위 좌표로 Waypoint를 만든다.
-def waypoint_from_degrees(longitude_degrees: float, latitude_degrees: float) -> Waypoint:
+    @property
+    def planned_sog_knots(self) -> float | None:
+        return (
+            None if self.planned_sog == PLANNED_SOG_NOT_AVAILABLE
+            else self.planned_sog / PLANNED_SOG_SCALE
+        )
+
+    @property
+    def leg_geometry_name(self) -> str:
+        return LEG_GEOMETRY_NAMES.get(self.leg_geometry, f"reserved({self.leg_geometry})")
+
+
+# 도 단위 좌표로 Waypoint를 만든다. 제어 필드는 실측값(NM·knot)으로 받는다.
+def waypoint_from_degrees(
+    longitude_degrees: float,
+    latitude_degrees: float,
+    turn_radius_nm: float | None = None,
+    planned_sog_knots: float | None = None,
+    leg_geometry: int = LEG_GEOMETRY_NONE,
+) -> Waypoint:
     return Waypoint(
         longitude=coordinates.longitude_to_raw(longitude_degrees),
         latitude=coordinates.latitude_to_raw(latitude_degrees),
+        turn_radius=(
+            TURN_RADIUS_NOT_AVAILABLE if turn_radius_nm is None
+            else round(turn_radius_nm * TURN_RADIUS_SCALE)
+        ),
+        planned_sog=(
+            PLANNED_SOG_NOT_AVAILABLE if planned_sog_knots is None
+            else round(planned_sog_knots * PLANNED_SOG_SCALE)
+        ),
+        leg_geometry=leg_geometry,
     )
 
 
@@ -123,6 +216,8 @@ class RouteInstruction:
     start_hour: int = HOUR_NOT_AVAILABLE
     start_minute: int = MINUTE_NOT_AVAILABLE
     duration: int = DURATION_NOT_AVAILABLE
+    heading_setpoint: int = HEADING_SETPOINT_NOT_AVAILABLE  # 0.1도
+    fallback_state: int = FALLBACK_NONE
 
     def __post_init__(self) -> None:
         if len(self.waypoints) > MAX_WAYPOINTS:
@@ -137,6 +232,17 @@ class RouteInstruction:
     @property
     def sender_name(self) -> str:
         return SENDER_NAMES.get(self.sender_classification, f"reserved({self.sender_classification})")
+
+    @property
+    def heading_setpoint_degrees(self) -> float | None:
+        return (
+            None if self.heading_setpoint == HEADING_SETPOINT_NOT_AVAILABLE
+            else self.heading_setpoint / HEADING_SETPOINT_SCALE
+        )
+
+    @property
+    def fallback_name(self) -> str:
+        return FALLBACK_NAMES.get(self.fallback_state, f"reserved({self.fallback_state})")
 
     # 항로 취소 지시인지 판정한다. Table 13.2가 정한 두 가지 표현을 모두 본다.
     @property
@@ -171,11 +277,16 @@ def write_body(writer: BitWriter, message: RouteInstruction) -> None:
     writer.write_uint(message.start_hour, START_HOUR_BITS, "Start Hour")
     writer.write_uint(message.start_minute, START_MINUTE_BITS, "Start Minute")
     writer.write_uint(message.duration, DURATION_BITS, "Duration")
+    writer.write_uint(message.heading_setpoint, HEADING_SETPOINT_BITS, "Heading Setpoint")
+    writer.write_uint(message.fallback_state, FALLBACK_BITS, "Fallback State")
     writer.write_uint(len(message.waypoints), WAYPOINT_COUNT_BITS, "Number of Waypoints")
 
     for index, waypoint in enumerate(message.waypoints, start=1):
         writer.write_int(waypoint.longitude, coordinates.LONGITUDE_BITS, f"WP{index} Longitude")
         writer.write_int(waypoint.latitude, coordinates.LATITUDE_BITS, f"WP{index} Latitude")
+        writer.write_uint(waypoint.turn_radius, TURN_RADIUS_BITS, f"WP{index} Turn Radius")
+        writer.write_uint(waypoint.planned_sog, PLANNED_SOG_BITS, f"WP{index} Planned SOG")
+        writer.write_uint(waypoint.leg_geometry, LEG_GEOMETRY_BITS, f"WP{index} Leg Geometry")
 
 
 # reader에서 본문을 읽어 RouteInstruction을 만든다.
@@ -190,6 +301,8 @@ def read_body(reader: BitReader) -> RouteInstruction:
     start_hour = reader.read_uint(START_HOUR_BITS, "Start Hour")
     start_minute = reader.read_uint(START_MINUTE_BITS, "Start Minute")
     duration = reader.read_uint(DURATION_BITS, "Duration")
+    heading_setpoint = reader.read_uint(HEADING_SETPOINT_BITS, "Heading Setpoint")
+    fallback_state = reader.read_uint(FALLBACK_BITS, "Fallback State")
     waypoint_count = reader.read_uint(WAYPOINT_COUNT_BITS, "Number of Waypoints")
 
     if waypoint_count > MAX_WAYPOINTS:
@@ -201,6 +314,9 @@ def read_body(reader: BitReader) -> RouteInstruction:
         Waypoint(
             longitude=reader.read_int(coordinates.LONGITUDE_BITS, f"WP{index} Longitude"),
             latitude=reader.read_int(coordinates.LATITUDE_BITS, f"WP{index} Latitude"),
+            turn_radius=reader.read_uint(TURN_RADIUS_BITS, f"WP{index} Turn Radius"),
+            planned_sog=reader.read_uint(PLANNED_SOG_BITS, f"WP{index} Planned SOG"),
+            leg_geometry=reader.read_uint(LEG_GEOMETRY_BITS, f"WP{index} Leg Geometry"),
         )
         for index in range(1, waypoint_count + 1)
     ]
@@ -215,6 +331,8 @@ def read_body(reader: BitReader) -> RouteInstruction:
         start_hour=start_hour,
         start_minute=start_minute,
         duration=duration,
+        heading_setpoint=heading_setpoint,
+        fallback_state=fallback_state,
     )
 
 
@@ -230,10 +348,25 @@ def describe(message: RouteInstruction) -> str:
             if message.duration == DURATION_NOT_AVAILABLE
             else f"{message.duration} min"
         ),
+        f"Heading Setpoint: "
+        + (
+            "not available"
+            if message.heading_setpoint == HEADING_SETPOINT_NOT_AVAILABLE
+            else f"{message.heading_setpoint_degrees} deg"
+        ),
+        f"Fallback: {message.fallback_name}",
         f"Waypoints: {len(message.waypoints)}",
     ]
     for index, waypoint in enumerate(message.waypoints, start=1):
+        extra = []
+        if waypoint.turn_radius_nm is not None:
+            extra.append(f"turn {waypoint.turn_radius_nm} NM")
+        if waypoint.planned_sog_knots is not None:
+            extra.append(f"SOG {waypoint.planned_sog_knots} kn")
+        if waypoint.leg_geometry != LEG_GEOMETRY_NONE:
+            extra.append(waypoint.leg_geometry_name)
+        suffix = f" ({', '.join(extra)})" if extra else ""
         lines.append(
-            f"  WP{index}: {waypoint.latitude_degrees}, {waypoint.longitude_degrees}"
+            f"  WP{index}: {waypoint.latitude_degrees}, {waypoint.longitude_degrees}{suffix}"
         )
     return "\n".join(lines)

@@ -156,7 +156,7 @@ check(len(replies) == 1, "ACK를 하나 낸다")
 
 reply = codec.decode(replies[0].payload)
 command_linkage = codec.decode(command.payload).linkage_id
-check(reply.status == ack.STATUS_ACCEPTED, "ACK accepted")
+check(reply.status == ack.STATUS_ACKNOWLEDGED, "ACK acknowledged")
 check(reply.linkage_id == command_linkage,
       "ACK가 같은 Linkage ID를 참조한다", f"Linkage {command_linkage}")
 
@@ -205,7 +205,7 @@ check(mass.has_route, "정상 항로를 받았다")
 empty = route.RouteInstruction(linkage_id=99, route_type=route.ROUTE_TYPE_MANDATORY)
 replies = mass.receive(codec.encode(empty), roc.mmsi, 1.0)
 answer = codec.decode(replies[0].payload)
-check(answer.status == ack.STATUS_REJECTED, "waypoint 없는 지시를 거부한다")
+check(answer.status == ack.STATUS_INCOMPLETE, "waypoint 없는 지시를 거부한다")
 check(answer.reason == ack.REASON_ROUTE_UNSUITABLE, "사유가 route unsuitable")
 check(mass.route_linkage_id == good_linkage,
       "거부된 지시는 기존 항로를 바꾸지 않는다", "검증 -> 상태 변경 순서")
@@ -217,7 +217,7 @@ bad_type = route.RouteInstruction(
     route_type=route.ROUTE_TYPE_NOT_AVAILABLE,
 )
 replies = mass.receive(codec.encode(bad_type), roc.mmsi, 2.0)
-check(codec.decode(replies[0].payload).status == ack.STATUS_REJECTED,
+check(codec.decode(replies[0].payload).status == ack.STATUS_INCOMPLETE,
       "Route Type 미지정을 거부한다")
 check(mass.route_linkage_id == good_linkage, "역시 상태가 유지된다")
 check(mass.rejected_count == 2, "거부 횟수를 센다", f"{mass.rejected_count}건")
@@ -233,7 +233,7 @@ section("MassAgent — 항로 취소")
 
 cancel = roc.cancel_route(mass.mmsi, good_linkage, now=4.0)
 replies = mass.receive(cancel.payload, roc.mmsi, 4.0)
-check(codec.decode(replies[0].payload).status == ack.STATUS_COMPLETED,
+check(codec.decode(replies[0].payload).status == ack.STATUS_ACKNOWLEDGED,
       "취소에 completed로 답한다")
 check(not mass.has_route, "항로가 해제된다")
 
