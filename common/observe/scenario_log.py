@@ -146,3 +146,14 @@ class ScenarioRun:
         run.entries = [LogEntry.from_dict(d) for d in data.get("entries", [])]
         run.finished = data.get("finished")
         return run
+
+
+# 이 파일은 라이브러리다. 직접 실행하면 자체 점검용 예시 로그를 보여준다.
+if __name__ == "__main__":
+    demo = ScenarioRun(scenario_id="DEMO", started=0.0)
+    demo.record(0.0, "ROC->MASS", "send", "예시 송신", corr="d1")
+    demo.record(0.5, "MASS->ROC", "ack", "예시 ACK", corr="d1", status=4)
+    demo.finish(0.6)
+    print("이 파일은 라이브러리입니다(직접 실행 대상 아님). 자체 점검용 예시 로그(JSON):\n")
+    print(demo.to_json())
+    print("\n실제 시나리오 로그·판정을 보려면:  python3 apps/scenario_runner.py")

@@ -35,7 +35,15 @@ from __future__ import annotations
 
 import json
 
-from .scenario_log import ScenarioRun
+try:
+    from .scenario_log import ScenarioRun
+except ImportError:  # `python3 common/observe/scenario_analysis.py`로 직접 실행하는 경우
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+    from common.observe.scenario_log import ScenarioRun
 
 #: S-421 Edition 1.0.0 ACK 상태 코드
 ACK_STATUS_NAMES = {
@@ -340,3 +348,14 @@ def to_text(summary: dict) -> str:
 def to_json(summary: dict, *, indent: int = 2) -> str:
     """판정 요약을 JSON 문자열로."""
     return json.dumps(summary, ensure_ascii=False, indent=indent)
+
+
+# 이 파일은 라이브러리다. 직접 실행하면 자체 점검용 예시 판정을 보여준다.
+if __name__ == "__main__":
+    demo = ScenarioRun(scenario_id="DEMO", started=0.0)
+    demo.record(0.0, "ROC->MASS", "send", "예시 송신", corr="d1")
+    demo.record(0.5, "MASS->ROC", "ack", "예시 ACK", corr="d1", status=4)
+    demo.finish(0.6)
+    print("이 파일은 라이브러리입니다(직접 실행 대상 아님). 자체 점검용 예시 판정:\n")
+    print(to_text(analyze(demo, {"ack_status": 4, "max_latency_seconds": 2.0})))
+    print("\n실제 시나리오 로그·판정을 보려면:  python3 apps/scenario_runner.py")
