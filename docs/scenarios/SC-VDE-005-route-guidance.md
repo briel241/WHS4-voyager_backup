@@ -305,4 +305,4 @@ duration = 1분 지시
 - ITU-R M.2092-2 — §A4-4.2.5, §A4-4.15, Table 8 · 35 · 40 · 41
 - 구현: `MASS/mass_agent.py`, `ROC/roc_agent.py`, `common/messages/route_instruction.py`
 - 시험: `tests/test_mass_roc_agents.py`, `test_mass_roc_link_integration.py`
-- 실행: `/opt/homebrew/bin/python3 apps/mass_roc_sim.py`
+- 실행: `python3 apps/scenario_runner.py run SC-VDE-005`

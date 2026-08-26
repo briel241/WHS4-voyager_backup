@@ -23,7 +23,6 @@ from MASS import MassAgent, ShipState
 from ROC import RocAgent
 from common.outbound import DATA_TYPE_AIS_AUTH_INTEGRITY
 from common.messages import ais_auth
-from common.service import to_send_request, validate_send_request
 
 FAILED: list[str] = []
 
@@ -127,10 +126,8 @@ result = mass.ais_results[-1]
 check(result.verified, "정상 인증값이 검증을 통과한다", f"reason={result.reason}")
 check(mass.ais_verified_count == 1 and mass.ais_failed_count == 0, "성공 집계")
 
-# API 계약 준수
-request = to_send_request(outbound, roc.mmsi)
-check(validate_send_request(request) == [], "SendRequest가 API 계약을 지킨다")
-check(request["data_type"] == "AIS_AUTH_INTEGRITY", "계약의 data_type 사용")
+# VDETER 지원 포맷으로 매핑되는 data_type을 단다
+check(outbound.data_type == "AIS_AUTH_INTEGRITY", "AIS 인증값 data_type")
 
 # ------------------------------------------------------- 공격 케이스
 

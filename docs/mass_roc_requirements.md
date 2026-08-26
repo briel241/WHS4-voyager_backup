@@ -7,7 +7,7 @@
 | ---- | ---------------------------------------------------------- |
 | 대상   | MASS/ROC 응용 계층 및 PI                                        |
 | 인접   | VDE-TER 링크·물리 계층 (팀원, `VDETER_Link/`)                      |
-| 계약   | `docs/vde_service_api(prototype).md`                            |
+| 계약   | `docs/vdeter_mass_roc_api_guide.md`                            |
 | 시나리오 | [`scenarios/scenario_list.md`](scenarios/scenario_list.md) |
 
 ---
@@ -25,7 +25,7 @@
 API 계약도 같은 경계를 정한다.
 
 > MASS/ROC는 Link ID, Message Type, CRC, FEC, Burst, slot과 재전송 절차를 전달하거나
-> 구현하지 않는다. — `docs/vde_service_api(prototype).md` §6
+> 구현하지 않는다. — `docs/vdeter_mass_roc_api_guide.md` §6
 
 ```text
 [MASS / ROC 응용]   ← 본 문서의 대상
@@ -51,7 +51,7 @@ API 계약도 같은 경계를 정한다.
 - **미지원**: route/항행경보/환경/기상은 registry format이 없어 불가(링크 팀이 추가 필요).
   **MASS 발신 broadcast 미지원** → 위치보고 broadcast는 현재 VDETER로 못 보낸다.
 
-→ 연동은 **어댑터(`common/service.py`) 교체 + codec VPFI 제거 + payload_format 배정** 셋이 핵심.
+→ 연동은 **`common/vdeter_bridge.py`가 Outbound↔SubmitTransferRequest 매핑**을 담당한다(인증서 경로 연동 완료).
    메시지·행위자 코드는 거의 그대로다.
 
 ---
@@ -70,7 +70,7 @@ API 계약도 같은 경계를 정한다.
 | A6  | **검증 후 상태 변경** 순서 강제       | ✅   | `mass.py` `_evaluate()`   |
 | A7  | 통신 두절 판정 (별도 heartbeat 없이) | ✅   | `roc.py`                  |
 | A8  | 관찰 기록·보고서                  | ✅   | `common/observe/`       |
-| A9  | Service API 어댑터 + 계약 검증    | ✅   | `common/service.py`     |
+| A9  | VDETER Service 연동 브리지        | ✅   | `common/vdeter_bridge.py` |
 
 검증: 시험 222항목 통과 (`tests/test_mass_roc_*.py`, `tests/test_phy_primitives.py`)
 
@@ -315,7 +315,7 @@ VDES 브로드캐스트를 대상으로 80비트 MAC·Tint 500 ms·d=2를 권장
 - Ziazi et al., *Sliding into the Flight Deck's DMs: Practical Message Attacks on CPDLC*,
   USENIX Security 2026 — 동형 체계(항공 관제-조종 데이터링크) 공격 연구. 풀스택 실증
   원칙, 상태 불일치 DoS, 물리계층 방어, "표준 암호는 10년 뒤" 근거
-- `docs/vde_service_api(prototype).md`
+- `docs/vdeter_mass_roc_api_guide.md`
 - `docs/mass_roc_background.md` — 계층·위협 모델·인증 근거
 - `docs/mass_roc_control_and_ack_message_format.md` — MASS 조작 데이터·ACK 형식 (S-421 기반, 멘토 자문 반영)
 - `docs/vdeter_mass_roc_api_guide.md` — **VDETER 연동 API** (팀원 제공): VdeService.submit, PayloadFormat, 지원 format은 인증서·AIS인증값 둘뿐, MASS broadcast·route/경보 format 미지원

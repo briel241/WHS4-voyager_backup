@@ -174,29 +174,24 @@ ROC                                                    MASS
 MASS는 **검증을 마친 뒤에만** 인증서를 신뢰 저장소에 반영한다. 검증 실패 시 기존
 저장소를 건드리지 않는다.
 
-### 6.2 API 계약과의 대응
+### 6.2 실제 연동 (구현 완료)
 
-`docs/vde_service_api(prototype).md` 기준으로 응용이 하는 일은 두 줄뿐이다.
+응용이 하는 일은 짧다. 상세: `docs/vdeter_mass_roc_api_guide.md`.
 
 ```python
-# ROC application
-transfer_id = vde.send({
-    "source_id": ROC_ID,
-    "destination_id": MASS_ID,
-    "data_type": "X509_CERTIFICATE",
-    "payload": certificate_der,      # DER 바이트 그대로
-    "ack_required": True,
-    "content_type": "application/pkix-cert",
-})
+# ROC — 인증서를 Certificate Report 본문으로 감싸 송신 요청 생성
+outbound = roc_issue_certificate_report(certificate_der, mass_id=MASS_ID)
+request = vdeter_bridge.to_submit_request(outbound)   # → VDETER SubmitTransferRequest
+service.submit(request)                                # payload_format=x509.certificate_report
 
-# MASS application
-def handle_received_message(message):
-    if message.data_type == "X509_CERTIFICATE":
-        verify_x509_certificate(message.payload)
+# MASS — 수신 통지를 받아 검증·저장
+def on_data(inbound):                                  # vdeter_bridge.Inbound
+    if inbound.is_certificate_report:
+        mass_receive_certificate_report(inbound.payload, trust, anchor_der, now)
 ```
 
-**분할·재조립·자원할당·ACK는 전부 VDE-TER Service 내부 일**이다(API 계약 §5, §6).
-응용은 Link ID도 Message Type도 만들지 않는다.
+**분할·재조립·자원할당·ACK는 전부 VDE-TER Service 내부 일**이다. 응용은 Link ID도
+Message Type도 만들지 않는다. 종단 왕복은 `apps/cert_loopback_demo.py`로 확인된다.
 
 ---
 
@@ -310,5 +305,5 @@ provisioning 절차가 모두 비어 있다.**
 - ITU-R M.2092-2 §A4-4.2.5(short data message), §A4-4.9(메시지 정의),
   §A4-4.15(디지털 서명), §A4-4.29(segmentation), Table 8(Link ID), Table 38(ACK/NACK),
   Table 49~51(fragment), Table 54~55(segment)
-- `docs/vde_service_api(prototype).md` §3.1.2, §5, §6
+- `docs/vdeter_mass_roc_api_guide.md` §3.1.2, §5, §6
 - `docs/mass_roc_background.md` §6.4

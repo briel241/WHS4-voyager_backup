@@ -50,7 +50,7 @@ class OnAir:
     payload: bytes
 
 
-# ack_required가 Type 92/93 선택을 결정한다 (응용 계층의 결정, mass_roc_sim과 동일).
+# ack_required가 Type 92/93 선택을 결정한다 (응용 계층의 결정).
 def _type_of(outbound: Outbound) -> int:
     return 92 if outbound.ack_required else 93
 

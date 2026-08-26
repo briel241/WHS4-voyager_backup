@@ -41,7 +41,7 @@
 "응용 계층만으론 부족하다"를 확인했다. 링크 계층 팀원과의 협업 지점이다.
 
 > 근거: IALA G1117(VDES 활용 시나리오) · IALA *Use Cases on VTS Digital Communications* ·
-> ITU-R M.2092-2 · `docs/vde_service_api(prototype).md` · 구상도 ·
+> ITU-R M.2092-2 · `docs/vdeter_mass_roc_api_guide.md` · 구상도 ·
 > TESLA 논문(Lee & Lee, IEEE Access 2025) · CPDLC 공격 논문(Ziazi et al., USENIX Sec 2026)
 
 ---
@@ -269,7 +269,7 @@ IALA G1117의 VDES 활용 시나리오에서 서비스를 뽑아, 각 서비스�
 
 - **009 항행 경보 (S-124)**: **육상국이 경보 방송 → MASS 반영**까지 구현. 압축 스키마
   (Message ID 5) + 행위자 연결(`issue_warning`/수신·저장·유효기간 만료·위험구역 인식) +
-  데모 `apps/warning_broadcast.py` + 시험. **지금 실물 링크(Type 93)를 통과해 동작한다.**
+  시험(`tests/test_mass_roc_env_messages.py`). 경보 방송→MASS 반영 흐름 검증.
 - **010 환경 정보 (S-104/411/412)**: 압축 스키마(Message ID 6) 구현. 방송용 보완 경로이며
   전체 격자(HDF5)는 data session 유지. 행위자 연결은 미착수.
 - **013 기상관측 보고 (BUFR)**: 압축 스키마(Message ID 7) 구현. ship→shore. 행위자 미연결.
