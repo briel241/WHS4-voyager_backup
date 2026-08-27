@@ -27,6 +27,8 @@ references/
 results/*.iq
 # 생성되는 관찰 보고서 (앱 실행 시 재생성)
 results/*.html
+# 시나리오 실행 로그 (scenario_runner 실행 시 재생성)
+results/*.json
 # RF 실측 원시 캡처 (.bin, 대용량). 그래프(.png)는 추적한다
 results/captures/*.bin
 
@@ -36,3 +38,6 @@ results/captures/*.bin
 # 링크·PHY 계층은 GitHub VDETER/ 로 관리한다.
 # 로컬 작업 사본(VDETER_Link/)은 커밋하지 않는다.
 VDETER_Link/
+
+# GNU Radio 실험용 플로우그래프 (RF 벤치 로컬 작업물, 재생성 가능)
+grc/

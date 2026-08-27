@@ -18,43 +18,44 @@
 
 ### 고정부 (76 bit) — 조종의 핵심은 굵게
 
-| 필드 | bit | 형식 | 값·N/A |
-| --- |:---:| --- | --- |
-| Message Linkage ID | 10 | uint | 0=N/A. ACK 상관 ID |
-| Sender Classification | 3 | uint | 0=ship, 1=authority |
-| Route Type | 5 | uint | 1=mandatory,2=recommended,5=ship-route-plan,31=cancellation,0=N/A |
-| Start Month/Day/Hour/Minute | 4/5/5/6 | uint | 유효 시작. N/A=0/0/24/60 |
-| Duration | 18 | uint | 유효 지속(분). 262143=N/A |
-| **Heading Setpoint** | 12 | uint | **목표 침로. ×10→0.1° (0–359.9°), 3600=N/A** |
-| **Fallback State** | 3 | uint | **0=none,1=Anchoring,2=DynamicPositioning,3=Drifting** |
-| Number of Waypoints | 5 | uint | 0–16 (=n) |
+| 필드                          | bit     | 형식   | 값·N/A                                                             |
+| --------------------------- |:-------:| ---- | ----------------------------------------------------------------- |
+| Message Linkage ID          | 10      | uint | 0=N/A. ACK 상관 ID                                                  |
+| Sender Classification       | 3       | uint | 0=ship, 1=authority                                               |
+| Route Type                  | 5       | uint | 1=mandatory,2=recommended,5=ship-route-plan,31=cancellation,0=N/A |
+| Start Month/Day/Hour/Minute | 4/5/5/6 | uint | 유효 시작. N/A=0/0/24/60                                              |
+| Duration                    | 18      | uint | 유효 지속(분). 262143=N/A                                              |
+| **Heading Setpoint**        | 12      | uint | **목표 침로. ×10→0.1° (0–359.9°), 3600=N/A**                          |
+| **Fallback State**          | 3       | uint | **0=none,1=Anchoring,2=DynamicPositioning,3=Drifting**            |
+| Number of Waypoints         | 5       | uint | 0–16 (=n)                                                         |
 
 ### 웨이포인트 (n번 반복, 각 77 bit)
 
-| 필드 | bit | 형식 | 값·N/A |
-| --- |:---:| --- | --- |
-| Longitude | 28 | int(2의보수) | 181°=108,600,000 → N/A |
-| Latitude | 27 | int(2의보수) | 91°=54,600,000 → N/A |
-| Turn Radius | 10 | uint | 1023=N/A, ×100→0.01 NM |
-| Planned SOG | 10 | uint | 1023=N/A, ×10→0.1 kn |
-| Leg Geometry | 2 | uint | 0=none,1=Lexodrome,2=Orthodrome |
+| 필드           | bit | 형식        | 값·N/A                           |
+| ------------ |:---:| --------- | ------------------------------- |
+| Longitude    | 28  | int(2의보수) | 181°=108,600,000 → N/A          |
+| Latitude     | 27  | int(2의보수) | 91°=54,600,000 → N/A            |
+| Turn Radius  | 10  | uint      | 1023=N/A, ×100→0.01 NM          |
+| Planned SOG  | 10  | uint      | 1023=N/A, ×10→0.1 kn            |
+| Leg Geometry | 2   | uint      | 0=none,1=Lexodrome,2=Orthodrome |
 
 **좌표**: `raw = round(도 × 600,000)` (1도=600,000단위), 남·서는 음수. 복원 `도=raw/600,000`.
 
 ## 예시 벡터 (검증용, 32 byte, VPFI 포함)
 
 디코드 시 → **heading 92.5°, fallback Anchoring**, WP1 SOG6.0, WP2 SOG4.0
+
 ```text
 FF 01 02 01 C8 40 18 F3 FF FF 39 D2 24 9D 7C F0 28 2B 34 00 F0 78 A4 EF 91 01 41 A6 F8 07 82 84
 ```
 
 ## ACK (MASS→ROC 응답, Message ID 3, 6 byte)
 
-| 필드 | bit | 값 |
-| --- |:---:| --- |
-| Message Linkage ID | 10 | 원 명령의 linkage_id |
-| Status | 4 | 4=Acknowledged,7=Errors,8=Incomplete,9=Route issues,0=received |
-| Reason | 3 | 0=none,1=route_unsuitable,2=expired,3=not_authorized |
+| 필드                 | bit | 값                                                              |
+| ------------------ |:---:| -------------------------------------------------------------- |
+| Message Linkage ID | 10  | 원 명령의 linkage_id                                               |
+| Status             | 4   | 4=Acknowledged,7=Errors,8=Incomplete,9=Route issues,0=received |
+| Reason             | 3   | 0=none,1=route_unsuitable,2=expired,3=not_authorized           |
 
 예시(Acknowledged): `FF 01 03 01 D0 00`
 
