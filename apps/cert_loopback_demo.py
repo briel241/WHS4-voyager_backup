@@ -44,18 +44,20 @@ if not cert._HAVE_CRYPTOGRAPHY:
     sys.exit(0)
 
 try:
-    from tests.support.stage5 import (  # VDETER 소프트웨어 무선 하네스
+    from tests.support.stage5 import (  # VDETER 소프트웨어 무선 하네스(launcher 역할)
         MASS_A_STATION_ID,
         ROC_STATION_ID,
+        STATION_ENDPOINT_IDS,
         build_stage5_software_group,
         drive_stage5_group,
-        received_payloads,
         start_stage5_group,
     )
     from vdeter.common.contracts.service import (
         TransferState,
         TransferStatusRequest,
     )
+    from vdeter.common.events import ServiceEventType
+    from vdeter.service import HandlerServiceEventSink  # 공식 이벤트 binding
 except ImportError as exc:
     print(f"SKIP: VDETER 소프트웨어 무선 하네스를 불러올 수 없습니다 ({exc}).")
     sys.exit(0)
@@ -105,43 +107,63 @@ def _drive_to_terminal(clock, group, endpoint, transfer_id):
     return state
 
 
+class _ReceiverApp:
+    """공식 binding — DATA_RECEIVED로 온 application data를 모은다.
+
+    실 launcher(또는 Stage 7)가 우리 앱에 넘길 방식과 동일하다:
+    `HandlerServiceEventSink(handle)`로 endpoint에 연결되고, handle은 event를
+    받아 두기만 한다(무거운 검증은 callback 밖에서).
+    """
+
+    def __init__(self) -> None:
+        self.received = []
+
+    def handle(self, event) -> None:
+        if event.event_type is ServiceEventType.DATA_RECEIVED:
+            self.received.append(event.received_data)
+
+
 def _send_certificate(cert_der, ca_der):
     """ROC→MASS로 인증서를 보내고, 수신·검증 결과를 돌려준다.
 
-    전송 하나마다 소프트웨어 무선 그룹을 새로 세운다. ACK 전송을 한 그룹에서
-    연달아 돌리면 TDMA·재전송 상태가 얽혀 뒤 전송이 실패할 수 있어, 시연에서는
-    전송을 격리한다(VDETER 통합 시험도 전송당 그룹을 격리한다).
+    수신은 공식 `HandlerServiceEventSink` + `DATA_RECEIVED`로 받는다(가이드 §13·
+    VDETER `stage5_service_api_demo`와 동일). 전송 하나마다 그룹을 격리한다.
     """
-    clock, group = build_stage5_software_group()
+    receiver = _ReceiverApp()
+    mass_endpoint_id = STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value]
+
+    def service_sink_factory(endpoint_id):
+        handler = receiver.handle if endpoint_id == mass_endpoint_id else (lambda _e: None)
+        return HandlerServiceEventSink(handler)
+
+    clock, group = build_stage5_software_group(service_sink_factory=service_sink_factory)
     start_stage5_group(clock, group)
     try:
-        by_station = group.by_station()
-        roc = by_station[ROC_STATION_ID.value]
-        mass = by_station[MASS_A_STATION_ID.value]
+        roc = group.by_station()[ROC_STATION_ID.value]
 
         outbound = roc_issue_certificate_report(cert_der, mass_id=MASS_A_STATION_ID.value)
         request = bridge.to_submit_request(outbound)
 
-        before = len(received_payloads(mass))
         accepted = roc.submit(request)
         if not accepted.is_ok:
             raise RuntimeError(f"submit 거부: {getattr(accepted, 'error', accepted)}")
 
         state = _drive_to_terminal(clock, group, roc, accepted.value.transfer_id)
-        received = received_payloads(mass)[before:]
     finally:
         group.stop()
 
+    # 공식 수신 경로: ServiceEvent → vdeter_bridge.Inbound → 우리 앱 검증
+    inbounds = [bridge.inbound_from_received(rd) for rd in receiver.received]
     trust = TrustStore()
     results = []
-    if received:
-        results = mass_receive_certificate_report(received[0], trust, ca_der, NOW)
+    if inbounds:
+        results = mass_receive_certificate_report(inbounds[0].payload, trust, ca_der, NOW)
 
     return {
         "submitted_bytes": len(request.payload),
         "state": state,
-        "received": received,
-        "byte_equal": bool(received) and received[0] == request.payload,
+        "received": inbounds,
+        "byte_equal": bool(inbounds) and inbounds[0].payload == request.payload,
         "verify_results": results,
         "trust_size": len(trust),
     }

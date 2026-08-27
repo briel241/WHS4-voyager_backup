@@ -36,9 +36,9 @@ try:
     from tests.support.stage5 import (
         MASS_A_STATION_ID,
         ROC_STATION_ID,
+        STATION_ENDPOINT_IDS,
         build_stage5_software_group,
         drive_stage5_group,
-        received_payloads,
         start_stage5_group,
     )
     from vdeter.common.addressing import Addressed
@@ -47,16 +47,34 @@ try:
         TransferState,
         TransferStatusRequest,
     )
+    from vdeter.common.events import ServiceEventType
     from vdeter.common.identifiers import PayloadFormat
+    from vdeter.service import HandlerServiceEventSink  # 공식 이벤트 binding
 except ImportError as exc:
     print(f"SKIP: VDETER 소프트웨어 무선 하네스를 불러올 수 없습니다 ({exc}).")
     sys.exit(0)
 
 from common import codec
+from common import vdeter_bridge as bridge
 from common.messages import route_instruction as route
 
 OPAQUE = "test.stage0.opaque"   # ⚠ 시험 전용 통과 포맷
 MAX_DRIVE_STEPS = 800
+
+
+class _ReceiverApp:
+    """공식 binding — DATA_RECEIVED로 온 application data를 모은다.
+
+    실 launcher/Stage 7이 우리 앱에 넘길 방식과 동일: HandlerServiceEventSink로
+    endpoint에 연결되고, handle은 event를 받아 두기만 한다.
+    """
+
+    def __init__(self) -> None:
+        self.received = []
+
+    def handle(self, event) -> None:
+        if event.event_type is ServiceEventType.DATA_RECEIVED:
+            self.received.append(event.received_data)
 
 
 def _make_route():
@@ -94,12 +112,17 @@ def _send_opaque(payload: bytes):
 
     전송마다 그룹을 격리한다(ACK 전송 연속 시 상태 얽힘 회피).
     """
-    clock, group = build_stage5_software_group()
+    receiver = _ReceiverApp()
+    mass_endpoint_id = STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value]
+
+    def service_sink_factory(endpoint_id):
+        handler = receiver.handle if endpoint_id == mass_endpoint_id else (lambda _e: None)
+        return HandlerServiceEventSink(handler)
+
+    clock, group = build_stage5_software_group(service_sink_factory=service_sink_factory)
     start_stage5_group(clock, group)
     try:
-        by_station = group.by_station()
-        roc = by_station[ROC_STATION_ID.value]
-        mass = by_station[MASS_A_STATION_ID.value]
+        roc = group.by_station()[ROC_STATION_ID.value]
 
         request = SubmitTransferRequest(
             destination=Addressed(MASS_A_STATION_ID),
@@ -107,7 +130,6 @@ def _send_opaque(payload: bytes):
             payload=payload,
             ack_required=True,
         )
-        before = len(received_payloads(mass))
         accepted = roc.submit(request)
         if not accepted.is_ok:
             raise RuntimeError(f"submit 거부: {getattr(accepted, 'error', accepted)}")
@@ -119,10 +141,12 @@ def _send_opaque(payload: bytes):
             if state in (TransferState.COMPLETED, TransferState.FAILED,
                          TransferState.CANCELLED):
                 break
-        received = received_payloads(mass)[before:]
-        return state, received
     finally:
         group.stop()
+
+    # 공식 수신 경로: ServiceEvent → vdeter_bridge.Inbound → payload
+    received = [bridge.inbound_from_received(rd).payload for rd in receiver.received]
+    return state, received
 
 
 def _run_case(title, message, checks):
