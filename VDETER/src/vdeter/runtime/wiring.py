@@ -51,7 +51,7 @@ from ..mac.deployment import (
 from ..mac.interface import Stage4Mac
 from ..mac.models import MacPlanningDefaults, MacRuntimeProfile, MacStateRepository
 from ..mac.stub import StubMac
-from ..mac.tbb import build_canonical_tbb_profile
+from ..mac.tbb import WIDEBAND_DEPLOYMENT_SCHEMA, build_canonical_tbb_profile
 from ..phy.models import PhyCapabilities
 from ..phy.stub import StubPhy
 from ..phy.transmitter import Link11Phy
@@ -201,8 +201,12 @@ def build_radio_adapter(configuration: LoadedConfiguration, time_source, id_sour
     )
 
 
-def build_registries(configuration: LoadedConfiguration):
-    """모든 registry를 만들고 명시적으로 등록한 뒤 freeze한다."""
+def build_registries(configuration: LoadedConfiguration, *, combined_phy: bool = False):
+    """모든 registry를 만들고 명시적으로 등록한 뒤 freeze한다.
+
+    `combined_phy=True`는 Stage 6 wideband profile 전용으로 three-entry combined
+    `phy_profile` registry(`stage6-phy11-17-19-v7`)를 사용한다.
+    """
 
     from ..profiles.payload_formats import STAGE5_PAYLOAD_CONTENT_VERSION
 
@@ -227,7 +231,12 @@ def build_registries(configuration: LoadedConfiguration):
     if link_profile_result.is_err:
         return link_profile_result
     link_profile = link_profile_result.value
-    phy_profile_result = build_phy_profile_registry(scope, version)
+    if combined_phy:
+        from ..profiles.link_phy import build_combined_phy_profile_registry
+
+        phy_profile_result = build_combined_phy_profile_registry()
+    else:
+        phy_profile_result = build_phy_profile_registry(scope, version)
     if phy_profile_result.is_err:
         return phy_profile_result
     phy_profile = phy_profile_result.value
@@ -901,3 +910,318 @@ def build_stage4_group(descriptors, *, crypto_by_station=None):
             return built
         endpoints.append(built.value)
     return Ok(tuple(endpoints))
+
+
+# --- Stage 6 wideband 2-PC 조립 (`DR-STAGE6-MR-001` §13.2) ---
+
+
+@dataclass(frozen=True)
+class WidebandDataProfile:
+    """Runtime composition이 소유하는 immutable wideband 실행 identity (§13.2.2)."""
+
+    fixture_id: str
+    data_link_id: int
+    base_canonical_tbb_fingerprint: str
+    wideband_canonical_tbb_fingerprint: str
+    wideband_deployment_fingerprint: str
+    combined_registry_content_version: str
+    combined_registry_fingerprint: str
+    channels: tuple
+    device_sample_rate_hz: int
+    device_slot_samples: int
+    link11_native_sample_rate_hz: int
+    link11_native_slot_samples: int
+
+
+def _wideband_deployment_identity(
+    deployment: MacDeploymentProfile,
+    *,
+    base_canonical_tbb_fingerprint: str,
+    wideband_canonical_tbb_fingerprint: str,
+    data_link_id: int,
+    combined_registry_content_version: str,
+    combined_registry_fingerprint: str,
+):
+    """§13.2.1 `VDETER-WIDEBAND-DEPLOYMENT-V2` canonical JSON bytes와 SHA-256."""
+
+    from ..mac.deployment import canonical_json_bytes, sha256_lowercase_hex
+
+    override = deployment.type0_override
+    value = {
+        "base_canonical_tbb_fingerprint": base_canonical_tbb_fingerprint,
+        "combined_registry_content_version": combined_registry_content_version,
+        "combined_registry_fingerprint": combined_registry_fingerprint,
+        "data_link_id": data_link_id,
+        "expected_tbb_certificate_fingerprint": deployment.expected_tbb_certificate_fingerprint.hex(),
+        "member_station_ids": [item.value for item in deployment.member_station_ids],
+        "roc_station_id": deployment.roc_station_id.value,
+        "schema": WIDEBAND_DEPLOYMENT_SCHEMA,
+        "service_area_mode": deployment.service_area_mode.value,
+        "tbb_control_station_id": deployment.tbb_control_station_id,
+        "type0_override": None if override is None else override.canonical_json_value(),
+        "wideband_canonical_tbb_fingerprint": wideband_canonical_tbb_fingerprint,
+    }
+    canonical = canonical_json_bytes(value)
+    return canonical, sha256_lowercase_hex(canonical)
+
+
+def build_wideband_profile(dependencies: EndpointDependencies, deployment: MacDeploymentProfile):
+    """endpoint 하나의 `WidebandDataProfile`을 파생하고 registry identity를 검증한다."""
+
+    from ..mac.tbb import (
+        WIDEBAND_FIXTURE_ID,
+        WIDEBAND_LOWER_CHANNEL,
+        WIDEBAND_UPPER_CHANNEL,
+        build_wideband_canonical_tbb_profile,
+    )
+    from ..phy import resampling
+    from ..profiles.link_phy import STAGE6_REGISTRY_CONTENT_VERSION
+
+    endpoint_config = dependencies.configuration.endpoint
+    if endpoint_config.schema_version != 3:
+        return config_error(
+            "wideband 2-PC profile은 schema_version 3 설정에서만 명시적으로 선택한다",
+            schema_version=endpoint_config.schema_version,
+        )
+    registry_fingerprint = dependencies.registries.phy_profile.fingerprint()
+    if registry_fingerprint.content_version != STAGE6_REGISTRY_CONTENT_VERSION:
+        return config_error(
+            "wideband profile은 three-entry combined phy_profile registry가 필요합니다",
+            content_version=registry_fingerprint.content_version,
+        )
+    for link_id in (11, endpoint_config.mac.data_link_id.value):
+        if dependencies.registries.phy_profile.lookup(link_id).is_err:
+            return config_error(
+                "combined registry에 필요한 Link profile이 없습니다", link_id=link_id
+            )
+    from ..phy.wideband import profile_content_mismatch
+
+    for link_id in (17, 19):
+        entry = dependencies.registries.phy_profile.lookup(link_id)
+        if entry.is_err:
+            return config_error(
+                "combined registry에 wideband Link profile이 없습니다", link_id=link_id
+            )
+        mismatch = profile_content_mismatch(
+            link_id, entry.value.parameters.fingerprint_content()
+        )
+        if mismatch is not None:
+            return config_error(
+                "combined registry content가 frozen wideband runtime과 다릅니다",
+                link_id=link_id,
+                reason=mismatch,
+            )
+    base = build_canonical_tbb_profile(deployment)
+    wideband_tbb = build_wideband_canonical_tbb_profile(deployment)
+    data_link_id = endpoint_config.mac.data_link_id.value
+    _, deployment_fingerprint = _wideband_deployment_identity(
+        deployment,
+        base_canonical_tbb_fingerprint=base.canonical_tbb_fingerprint,
+        wideband_canonical_tbb_fingerprint=wideband_tbb.canonical_tbb_fingerprint,
+        data_link_id=data_link_id,
+        combined_registry_content_version=registry_fingerprint.content_version,
+        combined_registry_fingerprint=registry_fingerprint.fingerprint,
+    )
+    return Ok(
+        WidebandDataProfile(
+            fixture_id=WIDEBAND_FIXTURE_ID,
+            data_link_id=data_link_id,
+            base_canonical_tbb_fingerprint=base.canonical_tbb_fingerprint,
+            wideband_canonical_tbb_fingerprint=wideband_tbb.canonical_tbb_fingerprint,
+            wideband_deployment_fingerprint=deployment_fingerprint,
+            combined_registry_content_version=registry_fingerprint.content_version,
+            combined_registry_fingerprint=registry_fingerprint.fingerprint,
+            channels=(WIDEBAND_LOWER_CHANNEL.name, WIDEBAND_UPPER_CHANNEL.name),
+            device_sample_rate_hz=resampling.DEVICE_SAMPLE_RATE_HZ,
+            device_slot_samples=resampling.DEVICE_SLOT_SAMPLES,
+            link11_native_sample_rate_hz=resampling.NATIVE_SAMPLE_RATE_HZ,
+            link11_native_slot_samples=resampling.NATIVE_SLOT_SAMPLES,
+        )
+    )
+
+
+def build_wideband_endpoint(
+    dependencies: EndpointDependencies,
+    deployment: MacDeploymentProfile,
+    *,
+    crypto_dependencies=None,
+    readiness_utc=None,
+    policy=None,
+):
+    """wideband 2-PC endpoint 하나를 조립한다. group 검증은 `build_wideband_group`이 한다."""
+
+    from ..mac.tbb import (
+        WIDEBAND_LOWER_CHANNEL,
+        WIDEBAND_UPPER_CHANNEL,
+        build_wideband_canonical_tbb_profile,
+    )
+    from ..phy.multilink import MultiRatePhy
+    from ..presentation.adapter import build_presentation_adapter
+    from ..service.models import Stage5ServicePolicy
+    from .stage5 import Stage5Endpoint, Stage5Support
+
+    endpoint_config = dependencies.configuration.endpoint
+    if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
+        return config_error(
+            "wideband profile의 max_payload_bytes는 65,531이어야 합니다",
+            configured=endpoint_config.service.max_payload_bytes,
+        )
+    if endpoint_config.service.max_concurrent_transfers != STAGE5_MAX_CONCURRENT_TRANSFERS:
+        return config_error(
+            "wideband profile의 max_concurrent_transfers는 8이어야 합니다",
+            configured=endpoint_config.service.max_concurrent_transfers,
+        )
+    wideband = build_wideband_profile(dependencies, deployment)
+    if wideband.is_err:
+        return wideband
+    wideband_profile = wideband.value
+
+    is_control = endpoint_config.role is ServiceRole.CONTROL
+    signer = None if crypto_dependencies is None else crypto_dependencies.tbb_signer
+    trust_store = None if crypto_dependencies is None else crypto_dependencies.tbb_trust_store
+    preflight = preflight_tbb_certificate(
+        readiness_utc=readiness_utc or dependencies.time_source.now_utc(),
+        signer=signer,
+        trust_store=trust_store,
+        expected_fingerprint=deployment.expected_tbb_certificate_fingerprint,
+        is_control=is_control,
+    )
+    if preflight.is_err:
+        return preflight
+
+    canonical_tbb = build_wideband_canonical_tbb_profile(deployment)
+    capacity = _validate_type4_capacity(dependencies.registries.link_profile)
+    if capacity.is_err:
+        return capacity
+
+    endpoint = Stage5Endpoint(dependencies, policy or Stage5ServicePolicy())
+
+    link = LinkDataPlane(
+        dependencies.id_source,
+        dependencies.registries.message_codec,
+        dependencies.registries.link_profile,
+        crypto_dependencies=crypto_dependencies,
+    )
+    adapter = build_presentation_adapter(dependencies.registries.payload_format)
+    if adapter.is_err:
+        return adapter
+    endpoint._presentation = adapter.value
+    endpoint._link = link
+    endpoint._phy = MultiRatePhy(
+        dependencies.registries.phy_profile,
+        dependencies.time_source,
+        dependencies.id_source,
+    )
+    from .phy_bridge import RuntimePhyRadioBridge
+
+    endpoint._phy_radio_bridge = RuntimePhyRadioBridge(endpoint._phy)
+    endpoint._crypto_dependencies = crypto_dependencies
+    endpoint._wideband_profile = wideband_profile
+
+    capabilities = _radio_capabilities(dependencies.radio)
+    horizon = _radio_schedule_horizon(dependencies.configuration)
+    profile = MacRuntimeProfile(
+        canonical_tbb=canonical_tbb,
+        deployment_fingerprint=wideband_profile.wideband_deployment_fingerprint,
+        local_station_id=endpoint_config.station_id,
+        is_control=is_control,
+        transmit_lead_nanoseconds=capabilities[0],
+        receive_lead_nanoseconds=capabilities[1],
+        channel_switch_gap_nanoseconds=capabilities[2],
+        sample_rate_hz=endpoint_config.phy.sample_rate_hz,
+        schedule_horizon_nanoseconds=horizon,
+        data_link_id=wideband_profile.data_link_id,
+        lower_channel=WIDEBAND_LOWER_CHANNEL,
+        upper_channel=WIDEBAND_UPPER_CHANNEL,
+    )
+    repository = MacStateRepository()
+    lock = RLock()
+    health = EndpointHealthLog()
+    outbox = MacCommandOutbox(dependencies.id_source, lock, health)
+    ingress = MacIngressQueue(lock, dependencies.time_source, dependencies.id_source)
+    coordinator = MacCoordinator(
+        profile=profile,
+        deployment=deployment,
+        time_source=dependencies.time_source,
+        random_source=dependencies.random_source,
+        id_source=dependencies.id_source,
+        link_profile_registry=dependencies.registries.link_profile,
+        phy_profile_registry=dependencies.registries.phy_profile,
+        repository=repository,
+    )
+    mac = Stage4Mac(coordinator, repository, outbox, lock, dependencies.id_source)
+    endpoint._mac = mac
+    support = Stage5Support(endpoint, mac, outbox, ingress, health, lock)
+    endpoint.attach_stage4(support)
+    graph = endpoint._validate_effective_graph()
+    if graph is not None:
+        return graph
+    return Ok(endpoint)
+
+
+def build_wideband_group(descriptors, *, crypto_by_station=None, policy=None):
+    """세 endpoint의 wideband identity가 exact-equal일 때만 group을 조립한다 (§13.2.2)."""
+
+    from ..radio.software import SoftwareRadioAdapter
+
+    if not isinstance(descriptors, tuple) or len(descriptors) != 3:
+        return config_error("wideband group은 정확히 세 endpoint여야 합니다")
+    entries = []
+    for dependencies, deployment in descriptors:
+        endpoint_config = dependencies.configuration.endpoint
+        entries.append(
+            EndpointDescriptor(
+                station_id=endpoint_config.station_id,
+                role=endpoint_config.role,
+                profile=deployment,
+            )
+        )
+    # 먼저 base Stage 4 group과 fingerprint를 검증한다 (§13.2.1).
+    fingerprints = tuple(
+        build_canonical_tbb_profile(deployment).canonical_tbb_fingerprint
+        for _dependencies, deployment in descriptors
+    )
+    validated = validate_endpoint_group(tuple(entries), fingerprints)
+    if validated.is_err:
+        return validated
+
+    media = set()
+    for dependencies, _deployment in descriptors:
+        radio = dependencies.radio
+        if not isinstance(radio, SoftwareRadioAdapter):
+            return config_error(
+                "wideband profile은 SoftwareRadioAdapter만 사용할 수 있습니다",
+                adapter=type(radio).__name__,
+            )
+        media.add(id(radio._medium))
+    if len(media) != 1:
+        return config_error("세 endpoint는 같은 SoftwareRadioMedium을 공유해야 합니다")
+
+    profiles = []
+    for dependencies, deployment in descriptors:
+        derived = build_wideband_profile(dependencies, deployment)
+        if derived.is_err:
+            return derived
+        profiles.append(derived.value)
+    if len({tuple(sorted(vars(item).items())) for item in profiles}) != 1:
+        return config_error(
+            "세 endpoint의 wideband identity가 exact-equal이 아닙니다",
+            fixture_id=profiles[0].fixture_id,
+        )
+
+    readiness_utc = descriptors[0][0].time_source.now_utc()
+    endpoints = []
+    crypto_by_station = crypto_by_station or {}
+    for dependencies, deployment in descriptors:
+        station_id = dependencies.configuration.endpoint.station_id
+        built = build_wideband_endpoint(
+            dependencies,
+            deployment,
+            crypto_dependencies=crypto_by_station.get(station_id.value),
+            readiness_utc=readiness_utc,
+            policy=policy,
+        )
+        if built.is_err:
+            return built
+        endpoints.append(built.value)
+    return Ok(Stage5Group(tuple(endpoints)))

@@ -28,7 +28,9 @@ from ..profiles.models import RegistryScope
 
 CONFIG_SCHEMA_VERSION = 1  # legacy compatibility alias for frozen Stage 0 fixtures
 CONFIG_SCHEMA_CURRENT_VERSION = 2
-CONFIG_SCHEMA_SUPPORTED_VERSIONS = (1, 2)
+#: `DR-STAGE6-MR-001`: 2-PC 100 kHz wideband profile 전용 schema. v2와 silent 호환되지 않는다.
+CONFIG_SCHEMA_WIDEBAND_VERSION = 3
+CONFIG_SCHEMA_SUPPORTED_VERSIONS = (1, 2, 3)
 
 
 class TimeSourceKind(str, Enum):
@@ -108,10 +110,14 @@ class MacConfig:
     tx_channel: PhysicalChannel
     rx_channel: PhysicalChannel
     transmit_lead_nanoseconds: int
+    #: `DR-STAGE6-MR-001` §13.2.2: 할당 DC/DSCH의 immutable Link ID. 기본 11은 legacy다.
+    data_link_id: LinkId = LinkId(11)
 
     def __post_init__(self) -> None:
         if not isinstance(self.link_id, LinkId):
             raise InvalidValueError("MacConfig.link_id: LinkId여야 합니다")
+        if not isinstance(self.data_link_id, LinkId) or self.data_link_id.value not in (11, 17, 19):
+            raise InvalidValueError("MacConfig.data_link_id: 11, 17 또는 19여야 합니다")
         for name in ("tx_channel", "rx_channel"):
             if not isinstance(getattr(self, name), PhysicalChannel):
                 raise InvalidValueError(f"MacConfig.{name}: PhysicalChannel이어야 합니다")
@@ -275,9 +281,9 @@ def radio_fingerprint_of(configuration: RadioConfiguration, schema_version: int)
         canonical = json.dumps(
             to_reference_json(projection), ensure_ascii=False, sort_keys=True
         )
-    elif schema_version == 2:
+    elif schema_version in (2, 3):
         envelope = {
-            "schema_version": 2,
+            "schema_version": schema_version,
             "radio": to_reference_json(configuration),
         }
         canonical = json.dumps(
@@ -287,5 +293,5 @@ def radio_fingerprint_of(configuration: RadioConfiguration, schema_version: int)
             separators=(",", ":"),
         )
     else:
-        raise InvalidValueError("radio fingerprint schema version은 1 또는 2여야 합니다")
+        raise InvalidValueError("radio fingerprint schema version은 1, 2 또는 3이어야 합니다")
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -41,6 +41,53 @@ def puncture(data_rows, tail_rows) -> tuple[int, ...]:
     return output
 
 
+def puncture_general(data_rows, tail_rows, data_patterns, tail_patterns) -> tuple[int, ...]:
+    """공통 §5 general puncturing: 임의 clock 수와 pattern 주기를 지원한다."""
+
+    data = tuple(data_rows)
+    tail = tuple(tail_rows)
+    if len(tail) != len(tail_patterns):
+        raise ValueError("general puncturing requires one tail pattern row per tail clock")
+    if len(data) % len(data_patterns):
+        raise ValueError("general puncturing requires whole data pattern periods")
+    return _select(data, tuple(data_patterns)) + _select(tail, tuple(tail_patterns))
+
+
+def rate_recover_general(
+    channel_llrs, data_clocks: int, data_patterns, tail_patterns
+) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]:
+    """general LLR rate recovery: punctured 위치에 exact `+0.0`을 둔다."""
+
+    values = tuple(float(value) for value in channel_llrs)
+    patterns = tuple(data_patterns)
+    tails = tuple(tail_patterns)
+    expected = sum(
+        sum(patterns[clock % len(patterns)]) for clock in range(data_clocks)
+    ) + sum(sum(pattern) for pattern in tails)
+    if len(values) != expected:
+        raise ValueError("general rate recovery LLR count mismatch")
+    position = 0
+    data_rows = []
+    for clock in range(data_clocks):
+        row = [0.0] * 6
+        for stream, keep in enumerate(patterns[clock % len(patterns)]):
+            if keep:
+                row[stream] = values[position]
+                position += 1
+        data_rows.append(tuple(row))
+    tail_rows = []
+    for pattern in tails:
+        row = [0.0] * 6
+        for stream, keep in enumerate(pattern):
+            if keep:
+                row[stream] = values[position]
+                position += 1
+        tail_rows.append(tuple(row))
+    if position != expected:
+        raise AssertionError("general rate recovery count invariant failed")
+    return tuple(data_rows), tuple(tail_rows)
+
+
 def rate_recover(channel_llrs) -> tuple[tuple[float, ...], tuple[tuple[float, ...], ...]]:
     values = tuple(float(value) for value in channel_llrs)
     if len(values) != CHANNEL_BITS:

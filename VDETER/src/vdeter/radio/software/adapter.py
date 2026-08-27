@@ -1062,7 +1062,21 @@ def _validate_software_configuration(configuration: RadioConfiguration):
         (binding.tx_enabled, binding.rx_enabled)
         for binding in configuration.channel_bindings
     )
-    if (
+    # `DR-STAGE6-MR-001`: 승인 profile은 legacy 25 kHz 2-PC 또는 wideband 100 kHz 2-PC다.
+    # 두 profile 사이 silent fallback은 없고 alias 이름이 profile을 명시적으로 선택한다.
+    wideband = names == ("VDETER_LOWER_100_TEST", "VDETER_UPPER_100_TEST")
+    if wideband:
+        if frequencies != (157_237_500, 161_837_500) or directions not in (
+            ((True, False), (False, True)),
+            ((False, True), (True, False)),
+        ):
+            return internal_error(
+                Layer.RADIO,
+                ErrorCode.RADIO_UNSUPPORTED_SETTING,
+                ErrorCategory.VALIDATION,
+                "Software wideband channel 순서·주파수·역할 방향이 승인 profile과 다릅니다",
+            )
+    elif (
         names != ("VDETER_LOWER_25_TEST", "VDETER_UPPER_25_TEST")
         or frequencies != (157_237_500, 161_837_500)
         or directions
@@ -1077,14 +1091,16 @@ def _validate_software_configuration(configuration: RadioConfiguration):
             ErrorCategory.VALIDATION,
             "Software channel 순서·주파수·역할 방향이 승인 profile과 다릅니다",
         )
+    expected_rate = 307_200 if wideband else 76_800
+    expected_bandwidth = 100_000 if wideband else 25_000
     for setting, binding in zip(configuration.channels, configuration.channel_bindings, strict=True):
         if (
             setting.channel != binding.channel
-            or setting.sample_rate_hz != 76_800
+            or setting.sample_rate_hz != expected_rate
             or not 0 <= setting.tx_gain_db <= 89
             or not 0 <= setting.rx_gain_db <= 76
-            or binding.waveform_bandwidth_hz != 25_000
-            or binding.analog_bandwidth_hz != 25_000
+            or binding.waveform_bandwidth_hz != expected_bandwidth
+            or binding.analog_bandwidth_hz != expected_bandwidth
         ):
             return internal_error(Layer.RADIO, ErrorCode.RADIO_UNSUPPORTED_SETTING, ErrorCategory.VALIDATION, "Software channel setting이 승인값과 다릅니다")
         if any(value is not None for value in (binding.tx_device_channel, binding.rx_device_channel, binding.tx_antenna, binding.rx_antenna)):

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -15,8 +16,12 @@ from tests import DOCS_CORE, VDETER_ROOT
 
 ALLOWED_STATUS = ("NOT_STARTED", "BASELINE_PENDING", "IMPLEMENTED", "VERIFIED", "BLOCKED")
 ALLOWED_BASELINE_STATUS = ("DRAFT", "APPROVED", "VERIFIED/FROZEN")
-REQUIREMENT_PATTERN = re.compile(r"^(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5)-REQ-\d{2}$")
-TEST_CASE_PATTERN = re.compile(r"^TC-(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5)-\d{3}$")
+REQUIREMENT_PATTERN = re.compile(
+    r"^(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5|PHY17|PHY19|PHY-MULTI)-REQ-\d{2}$"
+)
+TEST_CASE_PATTERN = re.compile(
+    r"^TC-(?:ARCH|LINK|PHY11|RADIO|MAC|STAGE5|PHY17|PHY19|PHY-MULTI)-\d{3}$"
+)
 EXPECTED_REQUIREMENTS = (
     tuple(f"ARCH-REQ-{index:02d}" for index in range(1, 8))
     + tuple(f"LINK-REQ-{index:02d}" for index in range(1, 14))
@@ -24,6 +29,9 @@ EXPECTED_REQUIREMENTS = (
     + tuple(f"RADIO-REQ-{index:02d}" for index in range(1, 12))
     + tuple(f"MAC-REQ-{index:02d}" for index in range(1, 16))
     + tuple(f"STAGE5-REQ-{index:02d}" for index in range(1, 21))
+    + tuple(f"PHY17-REQ-{index:02d}" for index in range(1, 11))
+    + tuple(f"PHY19-REQ-{index:02d}" for index in range(1, 11))
+    + ("PHY-MULTI-REQ-01",)
 )
 EXPECTED_TEST_CASES = (
     tuple(f"TC-ARCH-{index:03d}" for index in range(1, 28))
@@ -32,12 +40,23 @@ EXPECTED_TEST_CASES = (
     + tuple(f"TC-RADIO-{index:03d}" for index in range(1, 16))
     + tuple(f"TC-MAC-{index:03d}" for index in range(1, 19))
     + tuple(f"TC-STAGE5-{index:03d}" for index in range(1, 21))
+    + tuple(f"TC-PHY17-{index:03d}" for index in range(1, 17))
+    + tuple(f"TC-PHY19-{index:03d}" for index in range(1, 17))
+    + tuple(f"TC-PHY-MULTI-{index:03d}" for index in range(1, 12))
 )
 STAGE0_BASELINE_ID = "VDETER-STAGE0-BL-001"
 STAGE2_PHY11_BASELINE_ID = "VDETER-STAGE2-PHY11-BL-001"
 STAGE3_RADIO_BASELINE_ID = "VDETER-STAGE3-RADIO-BL-001"
 STAGE4_MAC_BASELINE_ID = "VDETER-STAGE4-MAC-BL-001"
 STAGE5_SERVICE_BASELINE_ID = "VDETER-STAGE5-SERVICE-INTEGRATION-BL-001"
+STAGE6_COMMON_BASELINE_ID = "VDETER-STAGE6-PHY-COMMON-BL-001"
+STAGE6_PHY17_BASELINE_ID = "VDETER-STAGE6-PHY17-BL-001"
+STAGE6_PHY19_BASELINE_ID = "VDETER-STAGE6-PHY19-BL-001"
+STAGE6_BASELINE_IDS = (
+    STAGE6_COMMON_BASELINE_ID,
+    STAGE6_PHY17_BASELINE_ID,
+    STAGE6_PHY19_BASELINE_ID,
+)
 
 
 def _load_toml(path):
@@ -73,6 +92,40 @@ class TraceabilitySchemaTest(unittest.TestCase):
                 self.assertTrue(record["version"])
                 self.assertIn(record["status"], ALLOWED_BASELINE_STATUS)
                 self.assertTrue(os.path.isfile(os.path.join(project_root, record["document"])))
+        expected_stage6 = {
+            STAGE6_COMMON_BASELINE_ID: ("0.8.0", 1),
+            STAGE6_PHY17_BASELINE_ID: ("0.9.0", 10),
+            STAGE6_PHY19_BASELINE_ID: ("0.9.0", 10),
+        }
+        cases = {record["id"]: record for record in self.data["test_cases"]}
+        referenced = set()
+        for baseline_id, (version, requirement_count) in expected_stage6.items():
+            baseline = self.baselines[baseline_id]
+            self.assertEqual(version, baseline["version"])
+            self.assertEqual("VERIFIED/FROZEN", baseline["status"])
+            requirements = [
+                record
+                for record in self.data["requirements"]
+                if record["baseline_id"] == baseline_id
+            ]
+            self.assertEqual(requirement_count, len(requirements))
+            for requirement in requirements:
+                with self.subTest(requirement=requirement["id"]):
+                    self.assertEqual(version, requirement["baseline_version"])
+                    self.assertEqual("VERIFIED", requirement["status"])
+                    self.assertTrue(requirement["implementation"])
+                    self.assertTrue(requirement["evidence"])
+                    self.assertTrue(requirement["test_cases"])
+                    self.assertTrue(
+                        all(cases[test_case]["module"] for test_case in requirement["test_cases"])
+                    )
+                    referenced.update(requirement["test_cases"])
+        expected = (
+            {f"TC-PHY17-{index:03d}" for index in range(1, 17)}
+            | {f"TC-PHY19-{index:03d}" for index in range(1, 17)}
+            | {f"TC-PHY-MULTI-{index:03d}" for index in range(1, 12)}
+        )
+        self.assertEqual(expected, referenced)
 
     def test_TC_ARCH_026_requirement_ids_are_unique_and_defined(self):
         ids = [record["id"] for record in self.data["requirements"]]
@@ -161,7 +214,15 @@ class TraceabilitySchemaTest(unittest.TestCase):
             result_references = [
                 reference.split("::")[0]
                 for reference in record.get("evidence", ())
-                if reference.split("::")[0].endswith("result.json")
+                if (
+                    reference.split("::")[0].endswith("result.json")
+                    or (
+                        record["baseline_id"] in STAGE6_BASELINE_IDS
+                        and reference.split("::")[0].endswith(
+                            "phy_profile_verification_v2.json"
+                        )
+                    )
+                )
             ]
             with self.subTest(requirement=record["id"]):
                 self.assertTrue(
@@ -181,6 +242,36 @@ class TraceabilitySchemaTest(unittest.TestCase):
                     with open(result_path, "r", encoding="utf-8") as handle:
                         loaded_results[result_path] = json.load(handle)
                 evidence = loaded_results[result_path]
+                if record["baseline_id"] in STAGE6_BASELINE_IDS:
+                    records = {
+                        entry["record_id"]: entry
+                        for entry in evidence.get("records", ())
+                    }
+                    self.assertEqual(53, evidence.get("record_count"))
+                    self.assertEqual(53, evidence.get("expected_record_count"))
+                    self.assertEqual({"PASS": 53}, evidence.get("status_counts"))
+                    baseline_test_cases = {
+                        test_case
+                        for requirement in self.data["requirements"]
+                        if requirement["baseline_id"] == record["baseline_id"]
+                        for test_case in requirement["test_cases"]
+                    }
+                    self.assertTrue(baseline_test_cases)
+                    self.assertTrue(baseline_test_cases.issubset(records))
+                    self.assertTrue(
+                        all(records[test_case]["status"] == "PASS"
+                            for test_case in baseline_test_cases)
+                    )
+                    for entry in records.values():
+                        for artifact in entry.get("artifacts", ()):
+                            artifact_path = os.path.join(
+                                VDETER_ROOT, artifact["path"]
+                            )
+                            self.assertTrue(os.path.isfile(artifact_path), artifact_path)
+                            with open(artifact_path, "rb") as handle:
+                                digest = hashlib.sha256(handle.read()).hexdigest()
+                            self.assertEqual(artifact["sha256"], digest, artifact_path)
+                    continue
                 if (
                     record["baseline_id"] == STAGE5_SERVICE_BASELINE_ID
                     and run_id == active_run
@@ -493,7 +584,6 @@ class TraceabilitySchemaTest(unittest.TestCase):
         expected = {f"TC-STAGE5-{index:03d}" for index in range(1, 21)}
         self.assertEqual(expected, referenced)
         self.assertTrue(all(cases[test_case]["module"] for test_case in expected))
-
 
 if __name__ == "__main__":
     unittest.main()

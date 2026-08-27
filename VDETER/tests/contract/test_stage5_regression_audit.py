@@ -231,14 +231,34 @@ class Stage5TraceabilityAuditTest(unittest.TestCase):
                     "기준선 문서가 evidence 생성 이후 변경되었습니다",
                 )
                 # source manifest가 현재 tree와 일치해야 코드↔결과 1:1 연결이 성립한다.
+                # `DR-STAGE6-MR-001` 부속 결정: 동결 evidence는 자신이 생성된 tree를
+                # 식별한다. 동결 뒤 선언된 후속 개발(Stage 6)이 진행 중이면 현재 tree와의
+                # 동일성은 성립하지 않으므로, 대신 후속 기준선이 이 evidence의 raw file
+                # SHA-256을 pin하고 있는지 확인한다. pin이 없거나 evidence bytes가 pin과
+                # 다르면 변조이므로 실패한다.
                 from tools.run_stage5_tests import _source_manifest
 
                 current_sources = _source_manifest()
-                self.assertEqual(
-                    current_sources["sha256"],
-                    evidence["source_manifest"]["sha256"],
-                    "구현 tree가 evidence 생성 이후 변경되었습니다",
-                )
+                if current_sources["sha256"] != evidence["source_manifest"]["sha256"]:
+                    evidence_digest = hashlib.sha256(
+                        open(result_path, "rb").read()
+                    ).hexdigest()
+                    successor_baseline = open(
+                        os.path.join(DOCS_CORE, "stage6_phy_common_baseline.md"),
+                        "r",
+                        encoding="utf-8",
+                    ).read()
+                    self.assertIn(
+                        evidence_digest,
+                        successor_baseline,
+                        "구현 tree가 evidence와 다르지만 후속 기준선이 이 evidence의"
+                        " SHA-256을 pin하지 않았습니다 (동결 tree 또는 evidence 변조)",
+                    )
+                else:
+                    self.assertEqual(
+                        current_sources["sha256"],
+                        evidence["source_manifest"]["sha256"],
+                    )
 
 
 class Stage5GoldenVectorManifestAuditTest(unittest.TestCase):

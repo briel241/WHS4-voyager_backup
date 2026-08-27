@@ -285,6 +285,8 @@ class RxWindowRequest:
     frame_ordinal: int
     start_nanoseconds: int
     duration_nanoseconds: int
+    #: 계획 근원 slot의 function (window intent). key에는 포함하지 않는다.
+    slot_function: object = None
 
     @property
     def key(self) -> tuple:
@@ -320,6 +322,7 @@ def rx_windows_for_frame(slots, frame_ordinal: int) -> tuple[RxWindowRequest, ..
                 frame_ordinal=frame_ordinal,
                 start_nanoseconds=start,
                 duration_nanoseconds=channel_slot_duration_nanoseconds(slot.tdma_channel),
+                slot_function=getattr(slot, "function", None),
             )
         )
     windows.sort(key=lambda item: (item.start_nanoseconds, item.channel_name))
