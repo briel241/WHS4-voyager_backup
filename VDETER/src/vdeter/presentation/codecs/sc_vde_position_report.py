@@ -86,6 +86,8 @@ def _validate_position_fields(
             correlation=correlation,
             navigation_status=navigation_status,
         )
+    # §6.5.13: 오류 세부정보에 실제 위치를 불필요하게 기록하지 않는다. 좌표 거부
+    # 오류에는 거부된 raw 값을 details에 담지 않는다 (field 식별은 message로 충분).
     longitude = _field(bits, _TOTAL_BITS, 23, _LONGITUDE_BITS)
     if not _validate_coordinate(
         longitude, _LONGITUDE_BITS, _LONGITUDE_ABS_MAX, _LONGITUDE_NA
@@ -93,7 +95,6 @@ def _validate_position_fields(
         return error_factory(
             "Longitude는 ±108000000 또는 108600000(N/A)만 허용합니다",
             correlation=correlation,
-            longitude_raw=longitude,
         )
     latitude = _field(bits, _TOTAL_BITS, 51, _LATITUDE_BITS)
     if not _validate_coordinate(
@@ -102,7 +103,6 @@ def _validate_position_fields(
         return error_factory(
             "Latitude는 ±54000000 또는 54600000(N/A)만 허용합니다",
             correlation=correlation,
-            latitude_raw=latitude,
         )
     cog = _field(bits, _TOTAL_BITS, 78, 12)
     if cog > _COG_NA:
