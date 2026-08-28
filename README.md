@@ -8,6 +8,7 @@ Presentation Interface**를 담고, 링크·PHY 계층은 `VDETER/`(팀원 담�
 
 ```bash
 python3 apps/scenario_runner.py          # 시나리오를 골라 실행(대화형)
+python3 apps/console_server.py           # 콘솔 GUI — 브라우저에서 ROC/MASS 두 창
 ```
 
 ## 문서

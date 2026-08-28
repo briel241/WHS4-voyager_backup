@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROC 콘솔 — MASS/ROC</title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body data-console="roc">
+
+<header class="topbar">
+  <div class="brand">
+    <span class="eyebrow">VDE-TER · Remote Operation Centre</span>
+    <h1>ROC 콘솔 <span id="own-mmsi" style="color:var(--dim);font-weight:400;font-family:var(--mono);font-size:13px"></span></h1>
+  </div>
+  <div class="spacer"></div>
+  <div class="readout"><span class="k">SIM</span><span id="sim-time">T+00:00.0</span></div>
+  <span class="pill up" id="link-pill"><i></i><span>LINK</span></span>
+  <button class="btn ghost small" id="btn-reset" title="시뮬레이션을 처음 상태로 되돌린다">초기화</button>
+</header>
+
+<main class="layout">
+  <section class="chart-wrap pickable" id="chart-wrap" aria-label="항적 해도">
+    <svg id="chart" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="chart-legend">
+      <span><i class="plan"></i>지시한 계획 항로</span>
+      <span><i class="track"></i>관측 항적</span>
+      <span><i class="pend"></i>편집 중 웨이포인트</span>
+    </div>
+    <div class="chart-scale" id="chart-scale"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <h2>추적 중인 선박 <span class="count" id="track-count"></span></h2>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr>
+            <th>MMSI</th><th>모드</th><th class="num">최종 수신</th><th class="num">보고</th><th>상태</th>
+          </tr></thead>
+          <tbody id="tracks"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="tracks-hint"></p>
+    </div>
+
+    <div class="panel">
+      <h2>명령 발행</h2>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="route">노선 지시<small>SC-VDE-005</small></button>
+        <button role="tab" aria-selected="false" data-tab="control">원격 조종<small>SC-VDE-006</small></button>
+        <button role="tab" aria-selected="false" data-tab="cancel">항로 취소<small>Cancellation</small></button>
+      </div>
+
+      <div class="tab-pane active" data-pane="route">
+        <p class="hint">해도를 클릭하면 웨이포인트가 순서대로 찍힙니다. 좌표는 직접 고쳐도 됩니다.</p>
+        <div class="wp-list" id="wp-list"></div>
+        <div class="actions">
+          <button class="btn small" id="btn-wp-add">＋ 웨이포인트 추가</button>
+          <button class="btn small ghost" id="btn-wp-clear">모두 지우기</button>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="route-type">항로 종류</label>
+            <select id="route-type">
+              <option value="1">Mandatory</option>
+              <option value="2">Recommended</option>
+              <option value="3">Alternative</option>
+              <option value="5">Ship route plan</option>
+              <option value="0">not available — 거절 시연용</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="route-duration">유효 시간 (분, 비우면 무기한)</label>
+            <input id="route-duration" type="number" min="1" max="262142" placeholder="—">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="btn-route">노선 발행</button>
+          <span class="msg" id="msg-route"></span>
+        </div>
+      </div>
+
+      <div class="tab-pane" data-pane="control">
+        <p class="hint">Heading Setpoint과 Fallback State를 채워 보내면 원격 조종입니다. 수락되면 본선 모드가 RC로 바뀝니다.</p>
+        <div class="compass">
+          <div class="field">
+            <label for="ctl-heading">목표 침로 (0–359.9°)</label>
+            <input id="ctl-heading" type="number" min="0" max="359.9" step="0.1" value="90.0">
+          </div>
+          <div class="preview" id="ctl-preview">090.0°</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="ctl-fallback">복귀 모드 (Fallback)</label>
+            <select id="ctl-fallback">
+              <option value="0">none</option>
+              <option value="1" selected>Anchoring</option>
+              <option value="2">Dynamic Positioning</option>
+              <option value="3">Drifting</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ctl-sog">계획 속력 (kn, 선택)</label>
+            <input id="ctl-sog" type="number" min="0" max="102.2" step="0.1" placeholder="유지">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="btn-control">조종 발행</button>
+          <span class="msg" id="msg-control"></span>
+        </div>
+      </div>
+
+      <div class="tab-pane" data-pane="cancel">
+        <p class="cancel-box" id="cancel-box">취소할 항로가 없습니다.</p>
+        <div class="actions">
+          <button class="btn danger" id="btn-cancel">취소 발행</button>
+          <span class="msg" id="msg-cancel"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>명령 이력 <span class="count" id="cmd-count"></span></h2>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr>
+            <th class="num">ID</th><th class="num">발행</th><th>명령</th><th>응답</th>
+          </tr></thead>
+          <tbody id="commands"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>교신 로그</h2>
+      <ul class="list" id="log"></ul>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/console.js"></script>
+</body>
+</html>
