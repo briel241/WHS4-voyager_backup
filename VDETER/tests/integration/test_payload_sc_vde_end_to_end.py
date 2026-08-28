@@ -27,11 +27,16 @@ from tests.support.stage5 import (
     received_payloads,
     start_stage5_group,
 )
+from pathlib import Path
+
+from tests.unit.test_payload_sc_vde_position_report import pack_position_report
 from tests.unit.test_payload_sc_vde_route_control import (
     pack_ack_application,
     pack_command_application,
 )
 from vdeter.presentation.codecs.sc_vde_route_control import command_application_bytes
+
+VECTOR_ROOT = Path(__file__).resolve().parents[1] / "vectors" / "presentation"
 from vdeter.common.addressing import (
     Addressed,
     Broadcast,
@@ -49,6 +54,7 @@ from vdeter.common.identifiers import PayloadFormat
 
 COMMAND = PayloadFormat("sc_vde.route_control.command")
 ACK = PayloadFormat("sc_vde.route_control.ack")
+POSITION_REPORT = PayloadFormat("sc_vde.position_report")
 FAST_TYPE0 = Type0OverrideProfile(selection_interval=30, short_data_limit=4, system_status=0)
 
 #: 현재 Link ID 11 Short Data 한도 (`stage5` §11): ACK 있음 33, ACK 없음 34 bytes.
@@ -310,7 +316,8 @@ class ScVdeEndToEndTest(unittest.TestCase):
             waypoints=_waypoints(2)
         )
         ack_wire = b"\xff\x7f\x03" + pack_ack_application()
-        for wire in (command_wire, ack_wire):
+        position_wire = b"\xff\x7f\x01" + pack_position_report()
+        for wire in (command_wire, ack_wire, position_wire):
             with self.subTest(prefix=wire[:3].hex()):
                 received_before = len(received_payloads(self.mass))
                 result = self.mass._deliver_presentation_bytes(
@@ -330,6 +337,149 @@ class ScVdeEndToEndTest(unittest.TestCase):
             ("destination", "payload_format", "payload", "ack_required"),
             SubmitTransferRequest.__slots__,
         )
+
+    def test_TC_PAYLOAD_003_three_endpoints_share_the_approved_fingerprint(self):
+        # §13.2: 세 endpoint 사이 registry fingerprint가 같고 §7.3(`DR-PAYLOAD-017`)
+        # 승인 TEST 기대값과도 exact 일치한다.
+        approved_test_fingerprint = (
+            "f648e89c0bbb3b6923f0fac11ab611e33d595a6a1ffdd5f82eb1cf2e68740f02"
+        )
+        fingerprints = {
+            endpoint._presentation.registry_fingerprint()
+            for endpoint in self.group.endpoints
+        }
+        self.assertEqual({approved_test_fingerprint}, fingerprints)
+
+    def test_TC_PAYLOAD_003_position_report_mass_to_roc_short_data_e2e(self):
+        # `PAYLOAD-REQ-13/14`, `ROLE-DIR-01`: 승인 route(MASS→ROC addressed,
+        # ack_required=false)에서 wire 17 bytes Type 93 Short Data로 byte-exact
+        # 송수신된다. destination은 deployment의 실제 configured ROC station이다.
+        payload = (VECTOR_ROOT / "sc_vde_position_report.application.bin").read_bytes()
+        presentation, decoded = self._transfer(
+            self.mass, self.roc, ROC_STATION_ID, POSITION_REPORT, payload, ack=False
+        )
+        self.assertEqual(17, len(presentation.data))
+        self.assertEqual(b"\xff\x7f\x01", presentation.data[:3])
+        self.assertEqual(payload, presentation.data[3:])
+        self.assertEqual(16383, presentation.vpfi.value)
+        self.assertEqual(1, presentation.message_format)
+        self.assertLessEqual(len(presentation.data), SHORT_DATA_NOACK_LIMIT)
+        self.assertIn(93, decoded)
+        # `ROLE-DIR-01` evidence: 송신 endpoint는 SHIP(MASS), 수신 endpoint는
+        # CONTROL(ROC)이며 destination station이 configured roc_id다.
+        from vdeter.common.contracts.service import ServiceRole
+
+        self.assertIs(
+            ServiceRole.SHIP, self.mass.dependencies.configuration.endpoint.role
+        )
+        self.assertIs(
+            ServiceRole.CONTROL, self.roc.dependencies.configuration.endpoint.role
+        )
+        self.assertEqual(
+            ROC_STATION_ID.value,
+            self.roc.dependencies.configuration.endpoint.station_id.value,
+        )
+        event = [
+            item
+            for item in self.roc.dependencies.service_event_sink.events()
+            if item.event_type is ServiceEventType.DATA_RECEIVED
+            and item.received_data is not None
+            and item.received_data.payload == payload
+        ][-1]
+        self.assertEqual(MASS_A_STATION_ID, event.received_data.original_source)
+        self.assertEqual(
+            ROC_STATION_ID, event.received_data.original_destination.station_id
+        )
+        # `SESSION-01` NOT_APPLICABLE 계산 근거: MF 1 wire는 고정 17 bytes로 ACK
+        # 없음 Short Data 한도(34)를 넘을 수 없어 Data Session/fragmentation 사례가
+        # 존재하지 않는다.
+        self.assertLess(17, SHORT_DATA_NOACK_LIMIT)
+
+    def test_TC_PAYLOAD_003_position_report_ack_required_true_is_rejected(self):
+        # §6.5.10: addressed+`ack_required=true`는 MF 1 ACK 정책 위반으로 공개
+        # transfer ID·record 없이 INVALID_REQUEST다.
+        nonterminal_before = self.mass._nonterminal_count_locked()
+        transfers_before = set(self.mass._transfers)
+        result = self.mass.submit(
+            SubmitTransferRequest(
+                destination=Addressed(ROC_STATION_ID),
+                payload_format=POSITION_REPORT,
+                payload=pack_position_report(),
+                ack_required=True,
+            )
+        )
+        self.assertTrue(result.is_err)
+        self.assertEqual("INVALID_REQUEST", result.error.code)
+        self.assertIsNone(result.error.transfer_id)
+        self.assertEqual(nonterminal_before, self.mass._nonterminal_count_locked())
+        self.assertEqual(transfers_before, set(self.mass._transfers))
+
+    def test_TC_PAYLOAD_003_position_report_broadcast_is_rejected_without_public_id(self):
+        # `DR-PAYLOAD-016`: MASS-originated broadcast는 Service route admission이,
+        # ROC-originated broadcast는 adapter의 addressed-only 정책이 각각 공개
+        # transfer ID 없이 UNSUPPORTED_REQUEST로 거부한다.
+        for source in (self.mass, self.roc):
+            with self.subTest(
+                source=source.dependencies.configuration.endpoint.endpoint_id
+            ):
+                nonterminal_before = source._nonterminal_count_locked()
+                transfers_before = set(source._transfers)
+                result = source.submit(
+                    SubmitTransferRequest(
+                        destination=Broadcast(),
+                        payload_format=POSITION_REPORT,
+                        payload=pack_position_report(),
+                        ack_required=False,
+                    )
+                )
+                self.assertTrue(result.is_err)
+                self.assertEqual("UNSUPPORTED_REQUEST", result.error.code)
+                self.assertIsNone(result.error.transfer_id)
+                self.assertEqual(
+                    nonterminal_before, source._nonterminal_count_locked()
+                )
+                self.assertEqual(transfers_before, set(source._transfers))
+
+
+class ScVdeOperationalScopeServiceTest(unittest.TestCase):
+    """`AUTH-SCOPE-01`/§9.1: OPERATIONAL scope endpoint의 SC-VDE 운영 사용 거부.
+
+    TEST 전용 entry는 OPERATIONAL registry에 없으므로 submit이 Phase A
+    `encoded_size_bound` lookup에서 `UNSUPPORTED_REQUEST`로 거부되고 공개
+    transfer ID·Service record를 만들지 않는다.
+    """
+
+    def test_TC_PAYLOAD_003_operational_endpoint_rejects_sc_vde_submit_in_phase_a(self):
+        from vdeter.profiles.models import RegistryScope
+
+        clock, group = build_stage5_software_group(
+            payload_scope=RegistryScope.OPERATIONAL, type0_override=FAST_TYPE0
+        )
+        try:
+            start_stage5_group(clock, group)
+            roc = group.by_station()[ROC_STATION_ID.value]
+            mass = group.by_station()[MASS_A_STATION_ID.value]
+            for source, destination_station, payload_format, payload in (
+                (roc, MASS_A_STATION_ID, COMMAND, pack_command_application(waypoints=_waypoints(2))),
+                (mass, ROC_STATION_ID, ACK, pack_ack_application()),
+                (mass, ROC_STATION_ID, POSITION_REPORT, pack_position_report()),
+            ):
+                with self.subTest(payload_format=payload_format.value):
+                    transfers_before = set(source._transfers)
+                    result = source.submit(
+                        SubmitTransferRequest(
+                            destination=Addressed(destination_station),
+                            payload_format=payload_format,
+                            payload=payload,
+                            ack_required=False,
+                        )
+                    )
+                    self.assertTrue(result.is_err)
+                    self.assertEqual("UNSUPPORTED_REQUEST", result.error.code)
+                    self.assertIsNone(result.error.transfer_id)
+                    self.assertEqual(transfers_before, set(source._transfers))
+        finally:
+            group.stop()
 
 
 if __name__ == "__main__":

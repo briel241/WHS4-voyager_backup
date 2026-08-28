@@ -10,10 +10,16 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from pathlib import Path
+
 from vdeter.common.addressing import Addressed, OriginalDestination, OriginalSource, RouteAddresses
-from vdeter.common.contracts.presentation import PresentationDecodeRequest
+from vdeter.common.contracts.presentation import (
+    PresentationDecodeRequest,
+    PresentationEncodeRequest,
+)
 from vdeter.common.errors import ErrorCode
-from vdeter.common.identifiers import PayloadFormat, StationId, Vpfi
+from vdeter.common.identifiers import PayloadFormat, StationId, TransferId, Vpfi
+from vdeter.common.results import Ok
 from vdeter.presentation.adapter import _CODEC_DECLARATIONS, build_presentation_adapter
 from vdeter.presentation.codecs.base import WireDiscriminator
 from vdeter.presentation.registry import build_payload_format_registry
@@ -27,6 +33,7 @@ from vdeter.profiles.payload_formats import (
     SC_VDE_COMMAND_CODEC_REF,
     SC_VDE_COMMAND_MESSAGE_FORMAT,
     SC_VDE_LOGICAL_VPFI,
+    SC_VDE_POSITION_REPORT_CODEC_REF,
     STAGE5_PAYLOAD_CONTENT_VERSION,
     PayloadFormatEntry,
 )
@@ -54,14 +61,15 @@ def _adapter(scope: RegistryScope):
 
 class Stage5RegistryLifecycleTest(unittest.TestCase):
     def test_TC_STAGE5_008_catalogue_and_content_version(self):
-        # Payload 확장 (`payload_extension_baseline.md` §7.3): OPERATIONAL entry set은
-        # 기존 두 entry로 불변이고, TEST는 기존 3개 + SC-VDE 2개로 정확히 5개다.
+        # Payload 확장 (`payload_extension_baseline.md` §7.3, `DR-PAYLOAD-017`):
+        # OPERATIONAL entry set은 기존 두 entry로 불변이고, TEST는 기존 3개 + SC-VDE
+        # MF 1/2/3 세 개로 정확히 6개다.
         operational = _registry(RegistryScope.OPERATIONAL)
         self.assertEqual(2, operational.entry_count())
         test = _registry(RegistryScope.TEST)
-        self.assertEqual(5, test.entry_count())
+        self.assertEqual(6, test.entry_count())
         self.assertEqual(
-            "payload-extension-project-sc-vde-route-control-v1",
+            "payload-extension-project-sc-vde-family-v2",
             STAGE5_PAYLOAD_CONTENT_VERSION,
         )
         fingerprint = test.fingerprint()
@@ -232,8 +240,9 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
         self.assertFalse(x509.conflicts_with(opaque))
 
     def test_TC_STAGE5_008_sc_vde_discriminators_are_pairwise_disjoint(self):
-        # `payload_extension_baseline.md` §8.2: 신규 두 pattern은 서로와 기존 세
+        # `payload_extension_baseline.md` §8.2: SC-VDE 세 pattern은 서로와 기존 세
         # pattern 모두에 대해 pairwise disjoint여야 한다.
+        position_report = WireDiscriminator(prefix=b"\xff\x7f\x01")
         command = WireDiscriminator(prefix=b"\xff\x7f\x02")
         ack = WireDiscriminator(prefix=b"\xff\x7f\x03")
         existing = (
@@ -241,11 +250,13 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
             WireDiscriminator(prefix=b"\x00\x07", third_byte_mask=0xFC, third_byte_value=0x04),
             WireDiscriminator(prefix=b"\x0f\xff\xff\xff"),
         )
-        self.assertFalse(command.conflicts_with(ack))
-        self.assertFalse(ack.conflicts_with(command))
-        for pattern in existing:
-            self.assertFalse(command.conflicts_with(pattern))
-            self.assertFalse(ack.conflicts_with(pattern))
+        sc_vde = (position_report, command, ack)
+        for index, first in enumerate(sc_vde):
+            for second in sc_vde[index + 1 :]:
+                self.assertFalse(first.conflicts_with(second))
+                self.assertFalse(second.conflicts_with(first))
+            for pattern in existing:
+                self.assertFalse(first.conflicts_with(pattern))
         # 같은 prefix끼리는 충돌로 판정된다 (교집합 판정 자체의 sanity).
         self.assertTrue(command.conflicts_with(WireDiscriminator(prefix=b"\xff\x7f\x02")))
         # 한쪽 prefix가 다른 쪽의 진부분 prefix면 mask 구분이 없는 한 충돌이다.
@@ -308,7 +319,7 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
         self.assertEqual(ErrorCode.INVALID_REQUEST, built.error.code)
         self.assertIn("선언", built.error.message)
 
-    def test_TC_STAGE5_008_codec_declarations_cover_all_five_refs_uniquely(self):
+    def test_TC_STAGE5_008_codec_declarations_cover_all_six_refs_uniquely(self):
         refs = [codec_ref for codec_ref, _codec in _CODEC_DECLARATIONS]
         self.assertEqual(sorted(set(refs)), sorted(refs))
         self.assertEqual(
@@ -316,6 +327,7 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
                 OPAQUE_CODEC_REF,
                 CERTIFICATE_REPORT_CODEC_REF,
                 AIS_SCHEME1_CODEC_REF,
+                SC_VDE_POSITION_REPORT_CODEC_REF,
                 SC_VDE_COMMAND_CODEC_REF,
                 SC_VDE_ACK_CODEC_REF,
             },
@@ -323,6 +335,58 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
         )
         for codec_ref, codec in _CODEC_DECLARATIONS:
             self.assertEqual(codec_ref, codec.codec_ref)
+
+    def _build_with_extra_declaration(self, codec):
+        # 정책 metadata build 검사용 helper: fake codec을 선언 sequence에 추가하고
+        # 표준 TEST registry로 adapter를 조립한다. 검사 7·8은 선언 검증 단계에서
+        # 수행되므로 registry entry 없이도 판정된다.
+        registry = _registry(RegistryScope.TEST)
+        registry.freeze()
+        extended = _CODEC_DECLARATIONS + ((codec.codec_ref, codec),)
+        with patch("vdeter.presentation.adapter._CODEC_DECLARATIONS", extended):
+            return build_presentation_adapter(registry)
+
+    def test_TC_STAGE5_008_non_bool_addressed_only_rejects_adapter_build(self):
+        # `payload_extension_baseline.md` §8.1 검사 7.
+        class _BadAddressedOnly:
+            codec_ref = "project.test.bad.addressed.v1"
+            vpfi = 90
+            message_format = 1
+            discriminator = WireDiscriminator(prefix=b"\x00\x5a")
+            min_wire_length = 2
+            max_application_bytes = 8
+            max_wire_bytes = 10
+            addressed_only = 1  # bool이 아닌 truthy 값
+
+        built = self._build_with_extra_declaration(_BadAddressedOnly())
+        self.assertTrue(built.is_err)
+        self.assertEqual(ErrorCode.INVALID_REQUEST, built.error.code)
+        self.assertIn("addressed_only", built.error.message)
+
+    def test_TC_STAGE5_008_malformed_allowed_ack_required_rejects_adapter_build(self):
+        # `payload_extension_baseline.md` §8.1 검사 8: 빈 집합, non-bool 원소,
+        # mutable set 선언은 각각 build 실패다.
+        cases = {
+            "empty": frozenset(),
+            "non_bool_elements": frozenset((0, 1)),
+            "mutable_set": {False},
+        }
+        for name, declared in cases.items():
+            with self.subTest(case=name):
+                class _BadAllowedAck:
+                    codec_ref = "project.test.bad.ack.v1"
+                    vpfi = 91
+                    message_format = 1
+                    discriminator = WireDiscriminator(prefix=b"\x00\x5b")
+                    min_wire_length = 2
+                    max_application_bytes = 8
+                    max_wire_bytes = 10
+                    allowed_ack_required = declared
+
+                built = self._build_with_extra_declaration(_BadAllowedAck())
+                self.assertTrue(built.is_err)
+                self.assertEqual(ErrorCode.INVALID_REQUEST, built.error.code)
+                self.assertIn("allowed_ack_required", built.error.message)
 
 
 class Stage5PrefixFirstDispatchTest(unittest.TestCase):
@@ -393,14 +457,25 @@ class Stage5PrefixFirstDispatchTest(unittest.TestCase):
         self.assertTrue(result.is_err)
         self.assertEqual(ErrorCode.PRESENTATION_UNKNOWN_WIRE_KEY, result.error.code)
 
-    #: `payload_extension_baseline.md` §6.4.6 승인 vector (TEST wire).
+    #: `payload_extension_baseline.md` §6.4.6·§6.5.6 승인 vector (TEST wire).
+    SC_VDE_POSITION_REPORT_WIRE = bytes.fromhex(
+        "ff7f010001f493b73c050579407605ef04"
+    )
     SC_VDE_COMMAND_WIRE = bytes.fromhex(
         "ff7f0201c84018f3ffff39d2249d7cf0282b3400f078a4ef910141a6f8078284"
     )
     SC_VDE_ACK_WIRE = bytes.fromhex("ff7f0301d000")
 
     def test_TC_STAGE5_008_sc_vde_prefixes_dispatch_to_each_codec_only(self):
-        # `DISC-01`: exact `ff 7f 02`/`ff 7f 03`이 각각 정확히 하나의 entry로 결정된다.
+        # `DISC-01`: exact `ff 7f 01/02/03`이 각각 정확히 하나의 entry로 결정된다.
+        position = self._decode(self.test_adapter, self.SC_VDE_POSITION_REPORT_WIRE)
+        self.assertTrue(position.is_ok, getattr(position, "error", None))
+        self.assertEqual(
+            "sc_vde.position_report", position.value.payload_format.value
+        )
+        self.assertEqual(
+            self.SC_VDE_POSITION_REPORT_WIRE[3:], position.value.application_payload
+        )
         command = self._decode(self.test_adapter, self.SC_VDE_COMMAND_WIRE)
         self.assertTrue(command.is_ok, getattr(command, "error", None))
         self.assertEqual(
@@ -454,13 +529,179 @@ class Stage5PrefixFirstDispatchTest(unittest.TestCase):
 
     def test_TC_STAGE5_008_operational_scope_rejects_known_sc_vde_wire(self):
         # `REG-01`/`AUTH-SCOPE-01`: TEST 전용 entry는 OPERATIONAL scope에서 unknown이다.
-        for data in (self.SC_VDE_COMMAND_WIRE, self.SC_VDE_ACK_WIRE, b"\xff\x7f"):
+        for data in (
+            self.SC_VDE_POSITION_REPORT_WIRE,
+            self.SC_VDE_COMMAND_WIRE,
+            self.SC_VDE_ACK_WIRE,
+            b"\xff\x7f",
+        ):
             with self.subTest(data=data[:3].hex()):
                 result = self._decode(self.operational_adapter, data)
                 self.assertTrue(result.is_err)
                 self.assertEqual(
                     ErrorCode.PRESENTATION_UNKNOWN_WIRE_KEY, result.error.code
                 )
+
+
+_VECTOR_ROOT = Path(__file__).resolve().parents[1] / "vectors" / "presentation"
+_BOUND_ROUTE = RouteAddresses(
+    original_source=OriginalSource(StationId(111111111)),
+    original_destination=OriginalDestination(Addressed(StationId(333333333))),
+)
+_BOUND_TRANSFER_ID = TransferId("4c1ad0be-0000-4000-8000-0000000000bb")
+
+
+class _FakeBoundCodec:
+    """`payload_extension_baseline.md` §8.1 방어 bound 검증용 fake codec."""
+
+    codec_ref = "project.test.fake.bound.v1"
+    vpfi = 92
+    message_format = 1
+    discriminator = WireDiscriminator(prefix=b"\x00\x5c")
+    min_wire_length = 2
+    max_application_bytes = 100
+    max_wire_bytes = 100
+
+    def __init__(self, bound_result, wire=b"\x00\x5c" + b"\x00" * 8):
+        self._bound_result = bound_result
+        self._wire = wire
+
+    def encoded_size_bound(self, application_length):
+        return self._bound_result
+
+    def encode(self, application_payload, correlation=None):
+        return Ok(self._wire)
+
+    def decode(self, wire, correlation=None):
+        return Ok(wire[2:])
+
+
+class Stage5ValidatedBoundTest(unittest.TestCase):
+    """§8.1 공용 validated-bound helper: malformed bound·actual mismatch 거부와
+    모든 active codec의 public/direct 판정 일치 (`BOUND-01`, §13.2)."""
+
+    FAKE_FORMAT = PayloadFormat("test.fake.bound")
+
+    def _adapter_with_fake(self, fake_codec):
+        registry = build_payload_format_registry(
+            RegistryScope.TEST, STAGE5_PAYLOAD_CONTENT_VERSION
+        ).value
+        registry.register(
+            PayloadFormatEntry(
+                payload_format=self.FAKE_FORMAT,
+                vpfi=Vpfi(_FakeBoundCodec.vpfi),
+                scope=RegistryScope.TEST,
+                support_status=SupportStatus.SUPPORTED,
+                source=SOURCE,
+                message_format=_FakeBoundCodec.message_format,
+                codec_ref=_FakeBoundCodec.codec_ref,
+            )
+        )
+        registry.freeze()
+        extended = _CODEC_DECLARATIONS + ((_FakeBoundCodec.codec_ref, fake_codec),)
+        with patch("vdeter.presentation.adapter._CODEC_DECLARATIONS", extended):
+            built = build_presentation_adapter(registry)
+        self.assertTrue(built.is_ok, getattr(built, "error", None))
+        return built.value
+
+    def _encode(self, adapter, payload=b"\x00" * 8):
+        return adapter.encode_payload(
+            PresentationEncodeRequest(
+                transfer_id=_BOUND_TRANSFER_ID,
+                route=_BOUND_ROUTE,
+                payload_format=self.FAKE_FORMAT,
+                application_payload=payload,
+            )
+        )
+
+    def test_TC_STAGE5_008_malformed_bound_results_are_internal_errors(self):
+        # `InternalResult`가 아니거나 `Ok` 값이 exact int가 아닌(bool 포함) 반환은
+        # codec 계약 위반이므로 INTERNAL_ERROR다.
+        for name, bound_result in (("raw_int", 10), ("ok_bool", Ok(True))):
+            with self.subTest(case=name):
+                adapter = self._adapter_with_fake(_FakeBoundCodec(bound_result))
+                public = adapter.encoded_size_bound(self.FAKE_FORMAT, 8)
+                self.assertTrue(public.is_err)
+                self.assertEqual(ErrorCode.INTERNAL_ERROR, public.error.code)
+                direct = self._encode(adapter)
+                self.assertTrue(direct.is_err)
+                self.assertEqual(ErrorCode.INTERNAL_ERROR, direct.error.code)
+
+    def test_TC_STAGE5_008_out_of_range_bounds_are_invalid_requests(self):
+        for name, bound_result in (("zero", Ok(0)), ("over_max", Ok(65_536))):
+            with self.subTest(case=name):
+                adapter = self._adapter_with_fake(_FakeBoundCodec(bound_result))
+                public = adapter.encoded_size_bound(self.FAKE_FORMAT, 8)
+                self.assertTrue(public.is_err)
+                self.assertEqual(ErrorCode.INVALID_REQUEST, public.error.code)
+                direct = self._encode(adapter)
+                self.assertTrue(direct.is_err)
+                self.assertEqual(ErrorCode.INVALID_REQUEST, direct.error.code)
+
+    def test_TC_STAGE5_008_actual_encode_length_must_match_bound(self):
+        # bound Ok(10)인데 encode 결과가 9 bytes면 Phase C와 동일하게 거부한다.
+        adapter = self._adapter_with_fake(
+            _FakeBoundCodec(Ok(10), wire=b"\x00\x5c" + b"\x00" * 7)
+        )
+        result = self._encode(adapter)
+        self.assertTrue(result.is_err)
+        self.assertEqual(ErrorCode.INVALID_REQUEST, result.error.code)
+        self.assertIn("bound", result.error.message)
+
+    def test_TC_STAGE5_008_public_bound_matches_actual_encode_for_all_codecs(self):
+        # §13.2: 모든 active codec에서 public bound와 실제 encode 길이가 exact
+        # 일치하고 기존 codec의 bound/error 결과가 불변이다.
+        registry = build_payload_format_registry(
+            RegistryScope.TEST, STAGE5_PAYLOAD_CONTENT_VERSION
+        ).value
+        registry.freeze()
+        adapter = build_presentation_adapter(registry).value
+        cases = (
+            ("test.stage0.opaque", b"\x07\x01\x02"),
+            (
+                "x509.certificate_report",
+                (_VECTOR_ROOT / "gv_stage5_pres_x509_001.application.bin").read_bytes(),
+            ),
+            (
+                "ais.authentication_integrity.scheme1",
+                (_VECTOR_ROOT / "gv_stage5_pres_ais1_001.application.bin").read_bytes(),
+            ),
+            (
+                "sc_vde.position_report",
+                (_VECTOR_ROOT / "sc_vde_position_report.application.bin").read_bytes(),
+            ),
+            (
+                "sc_vde.route_control.command",
+                (
+                    _VECTOR_ROOT
+                    / "sc_vde_route_control.remote_command_n2.application.bin"
+                ).read_bytes(),
+            ),
+            (
+                "sc_vde.route_control.ack",
+                (_VECTOR_ROOT / "sc_vde_route_control.ack.application.bin").read_bytes(),
+            ),
+        )
+        for format_value, application in cases:
+            with self.subTest(payload_format=format_value):
+                bound = adapter.encoded_size_bound(
+                    PayloadFormat(format_value), len(application)
+                )
+                self.assertTrue(bound.is_ok, getattr(bound, "error", None))
+                encoded = adapter.encode_payload(
+                    PresentationEncodeRequest(
+                        transfer_id=_BOUND_TRANSFER_ID,
+                        route=_BOUND_ROUTE,
+                        payload_format=PayloadFormat(format_value),
+                        application_payload=application,
+                    )
+                )
+                self.assertTrue(encoded.is_ok, getattr(encoded, "error", None))
+                self.assertEqual(bound.value, len(encoded.value.data))
+                # 기존 error 결과 불변: 잘못된 길이는 여전히 INVALID_REQUEST다.
+                invalid = adapter.encoded_size_bound(PayloadFormat(format_value), 0)
+                self.assertTrue(invalid.is_err)
+                self.assertEqual(ErrorCode.INVALID_REQUEST, invalid.error.code)
 
 
 if __name__ == "__main__":

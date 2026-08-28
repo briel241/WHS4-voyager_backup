@@ -32,7 +32,7 @@ from ..common.errors import (
     ErrorCode,
     Layer,
 )
-from ..common.results import Ok, internal_error
+from ..common.results import Err, Ok, internal_error
 from ..profiles.models import RegistryScope
 from ..profiles.payload_formats import (
     AIS_SCHEME1_CODEC_REF,
@@ -40,11 +40,13 @@ from ..profiles.payload_formats import (
     OPAQUE_CODEC_REF,
     SC_VDE_ACK_CODEC_REF,
     SC_VDE_COMMAND_CODEC_REF,
+    SC_VDE_POSITION_REPORT_CODEC_REF,
 )
 from .codecs.ais_scheme1 import AisAuthenticationScheme1Codec
 from .codecs.base import MAX_ENCODED_BYTES, decode_structure_error, truncated_error
 from .codecs.certificate_report import CertificateReportCodec
 from .codecs.opaque import OpaqueTestCodec
+from .codecs.sc_vde_position_report import ScVdePositionReportCodec
 from .codecs.sc_vde_route_control import (
     ScVdeRouteControlAckCodec,
     ScVdeRouteControlCommandCodec,
@@ -58,6 +60,7 @@ _CODEC_DECLARATIONS = (
     (OPAQUE_CODEC_REF, OpaqueTestCodec()),
     (CERTIFICATE_REPORT_CODEC_REF, CertificateReportCodec()),
     (AIS_SCHEME1_CODEC_REF, AisAuthenticationScheme1Codec()),
+    (SC_VDE_POSITION_REPORT_CODEC_REF, ScVdePositionReportCodec()),
     (SC_VDE_COMMAND_CODEC_REF, ScVdeRouteControlCommandCodec()),
     (SC_VDE_ACK_CODEC_REF, ScVdeRouteControlAckCodec()),
 )
@@ -81,10 +84,72 @@ def _error(
     )
 
 
+#: `allowed_ack_required` 미선언 codec의 기존 호환 기본값 (`payload_extension_baseline.md`
+#: §8.1): Link `ack_required` 양 값을 모두 허용한다.
+_DEFAULT_ALLOWED_ACK_REQUIRED = frozenset((False, True))
+
+
 def _is_addressed_only(codec) -> bool:
-    """payload-specific addressed-only 정책 선언 (`payload_extension_baseline.md` §6.4.4)."""
+    """payload-specific addressed-only 정책 선언 (`payload_extension_baseline.md` §6.4.4,
+    §6.5.4). 미선언 codec은 기존 호환 기본값 `False`다."""
 
     return bool(getattr(codec, "addressed_only", False))
+
+
+def _allowed_ack_required(codec) -> frozenset:
+    """payload-specific Link ACK 정책 선언 (`payload_extension_baseline.md` §8.1)."""
+
+    return getattr(codec, "allowed_ack_required", _DEFAULT_ALLOWED_ACK_REQUIRED)
+
+
+def _validated_encoded_size_bound(
+    codec,
+    application_length: int,
+    *,
+    correlation: Correlation = Correlation(),
+    payload_format_value: str = "",
+):
+    """format별 length/bound의 공용 방어 검증 (`payload_extension_baseline.md` §8.1).
+
+    Service Phase A가 호출하는 공개 `encoded_size_bound()`와 direct encode preflight가
+    같은 판정을 공유하도록 이 helper 하나만 사용한다. codec bound의 `Err`는 그대로
+    반환하고, `Ok` 값은 `bool`이 아닌 exact `int`이며 1..65,535 범위여야 한다.
+    `InternalResult`가 아니거나 exact int가 아닌 malformed 반환은 사용자 입력 오류가
+    아니라 codec 계약 위반이므로 `INTERNAL_ERROR/INTERNAL`로 처리한다.
+    """
+
+    bound = codec.encoded_size_bound(application_length)
+    if not isinstance(bound, (Ok, Err)):
+        return _error(
+            ErrorCode.INTERNAL_ERROR,
+            ErrorCategory.INTERNAL,
+            "codec encoded_size_bound가 InternalResult를 반환하지 않았습니다",
+            correlation=correlation,
+            payload_format=payload_format_value,
+            codec_ref=codec.codec_ref,
+        )
+    if bound.is_err:
+        return bound
+    value = bound.value
+    if type(value) is not int:
+        return _error(
+            ErrorCode.INTERNAL_ERROR,
+            ErrorCategory.INTERNAL,
+            "codec encoded_size_bound의 Ok 값이 exact int가 아닙니다",
+            correlation=correlation,
+            payload_format=payload_format_value,
+            codec_ref=codec.codec_ref,
+        )
+    if not 1 <= value <= MAX_ENCODED_BYTES:
+        return _error(
+            ErrorCode.INVALID_REQUEST,
+            ErrorCategory.VALIDATION,
+            "encoded 크기 상한이 1..65,535 bytes 범위를 벗어났습니다",
+            correlation=correlation,
+            payload_format=payload_format_value,
+            payload_size=value,
+        )
+    return Ok(value)
 
 
 class RegistryPresentationAdapter:
@@ -122,7 +187,11 @@ class RegistryPresentationAdapter:
     # --- Service pre-admission 지원 ---
 
     def encoded_size_bound(self, payload_format, application_length: int):
-        """format descriptor의 결정적 encoded 크기 상한 (`stage5` §5.4 Phase A)."""
+        """format descriptor의 결정적 encoded 크기 상한 (`stage5` §5.4 Phase A).
+
+        direct encode preflight와 같은 `_validated_encoded_size_bound` helper를
+        사용한다 (`payload_extension_baseline.md` §8.1).
+        """
 
         found = self._registry.lookup(payload_format)
         if found.is_err:
@@ -133,7 +202,11 @@ class RegistryPresentationAdapter:
                 payload_format=payload_format.value,
             )
         codec = self._codecs[found.value.codec_ref]
-        return codec.encoded_size_bound(application_length)
+        return _validated_encoded_size_bound(
+            codec,
+            application_length,
+            payload_format_value=payload_format.value,
+        )
 
     # --- PresentationPort ---
 
@@ -156,8 +229,20 @@ class RegistryPresentationAdapter:
             )
         entry = found.value
         codec = self._codecs[entry.codec_ref]
-        # §6.4.4: addressed 전용 format의 송신 broadcast는 codec encode 전에 거부해
-        # Phase C commit과 하위 작업을 남기지 않는다.
+        # §6.5.13/§8.1 오류 우선순위: registry lookup 다음은 format별 length/bound다.
+        # Service Phase A가 같은 bound를 이미 확인했더라도 direct Presentation 호출과
+        # 구현 편차에서 우선순위를 보존하기 위한 방어적 재검증이므로 생략하지 않는다.
+        bound = _validated_encoded_size_bound(
+            codec,
+            len(request.application_payload),
+            correlation=correlation,
+            payload_format_value=request.payload_format.value,
+        )
+        if bound.is_err:
+            return bound
+        # §6.4.4/§6.5.4: addressed 전용 format의 송신 broadcast는 codec encode 전에
+        # 거부해 Phase C commit과 하위 작업을 남기지 않는다. route와 ACK가 동시에
+        # 위반되면 route 오류가 우선한다 (§8.1).
         if (
             _is_addressed_only(codec)
             and request.route.original_destination.address.is_broadcast
@@ -169,18 +254,31 @@ class RegistryPresentationAdapter:
                 correlation=correlation,
                 payload_format=request.payload_format.value,
             )
+        # §8.1: format별 Link ACK 정책. payload key가 아니라 codec metadata로 판정한다.
+        if request.ack_required not in _allowed_ack_required(codec):
+            return _error(
+                ErrorCode.INVALID_REQUEST,
+                ErrorCategory.VALIDATION,
+                "이 payload format이 허용하지 않는 ack_required 값입니다",
+                correlation=correlation,
+                payload_format=request.payload_format.value,
+                ack_required=request.ack_required,
+            )
         encoded = codec.encode(request.application_payload, correlation)
         if encoded.is_err:
             return encoded
         wire = encoded.value
-        if not 1 <= len(wire) <= MAX_ENCODED_BYTES:
+        # §8.1: 실제 wire 길이가 사전 bound와 정확히 같고 같은 범위인지 재확인한다
+        # (Stage 5 Phase C와 동일 판정).
+        if len(wire) != bound.value or not 1 <= len(wire) <= MAX_ENCODED_BYTES:
             return _error(
                 ErrorCode.INVALID_REQUEST,
                 ErrorCategory.VALIDATION,
-                "encoded Presentation data가 1..65,535 bytes 상한을 벗어났습니다",
+                "encode 결과 길이가 사전 bound 또는 1..65,535 bytes 범위와 다릅니다",
                 correlation=correlation,
                 payload_format=request.payload_format.value,
                 payload_size=len(wire),
+                expected_size=bound.value,
             )
         return Ok(
             PresentationData(
@@ -297,6 +395,9 @@ def build_presentation_adapter(registry: PayloadFormatRegistry):
     4. 모든 discriminator가 pairwise disjoint (`stage5` §6.1.1-6)
     5. discriminator가 요구하는 최소 header 길이와 codec 최소 wire 길이가 모순되지 않음
     6. format별 최대 wire 길이가 65,535 이하
+    7. `addressed_only`를 선언한 codec의 값 type이 정확히 `bool`
+    8. `allowed_ack_required`를 선언한 codec의 값이 비어 있지 않은 `frozenset`이고
+       원소가 정확히 `bool`의 부분집합
     """
 
     if not isinstance(registry, PayloadFormatRegistry):
@@ -329,6 +430,30 @@ def build_presentation_adapter(registry: PayloadFormatRegistry):
                 codec_ref=codec_ref,
                 metadata_ref=codec.codec_ref,
             )
+        # 검사 7: `addressed_only`를 선언하면 type이 정확히 bool이어야 한다.
+        if hasattr(codec, "addressed_only") and type(codec.addressed_only) is not bool:
+            return _error(
+                ErrorCode.INVALID_REQUEST,
+                ErrorCategory.VALIDATION,
+                "codec addressed_only 정책은 bool이어야 합니다",
+                codec_ref=codec_ref,
+            )
+        # 검사 8: `allowed_ack_required`를 선언하면 비어 있지 않은 frozenset이고 원소가
+        # 정확히 bool의 부분집합이어야 한다 (mutable set 선언 거부 포함).
+        if hasattr(codec, "allowed_ack_required"):
+            allowed_ack = codec.allowed_ack_required
+            if (
+                not isinstance(allowed_ack, frozenset)
+                or not allowed_ack
+                or any(type(value) is not bool for value in allowed_ack)
+            ):
+                return _error(
+                    ErrorCode.INVALID_REQUEST,
+                    ErrorCategory.VALIDATION,
+                    "codec allowed_ack_required 정책은 비어 있지 않은 bool frozenset이어야"
+                    " 합니다",
+                    codec_ref=codec_ref,
+                )
         declared[codec_ref] = codec
 
     codecs = {}

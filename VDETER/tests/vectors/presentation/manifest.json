@@ -79,6 +79,22 @@
         "sha256": "09dac8e5270e49e2a1a5f66bde4cbf4ed64dcf90844cd564064bb7f5421e770d"
       }
     },
+    "GV-PAYLOAD-SCVDE-POSREP-001": {
+      "payload_format": "sc_vde.position_report",
+      "scope": "TEST",
+      "source": "docs/payload/payload_extension_baseline.md §6.5.6 (MF 1 position report); APPROVED 0.5.0",
+      "note": "production codec과 독립인 승인 hex에서 materialize했다. AIS-derived TEST/PROJECT profile이며 M.1371 적합성 vector가 아니다. TEST wire VPFI ff 7f는 R1027 Table 3 시험 전용 값이다.",
+      "application": {
+        "file": "sc_vde_position_report.application.bin",
+        "bytes": 14,
+        "sha256": "ecf52787bf8a14f02abd22e682f2af0ef885e07b71dcd15174e0b687a52465bb"
+      },
+      "wire": {
+        "file": "sc_vde_position_report.wire.bin",
+        "bytes": 17,
+        "sha256": "7ee1b782bb200755d5755b10039a19f564d17b6f7459d72796f3d3bc8545e25d"
+      }
+    },
     "GV-PAYLOAD-SCVDE-ACK-001": {
       "payload_format": "sc_vde.route_control.ack",
       "scope": "TEST",
