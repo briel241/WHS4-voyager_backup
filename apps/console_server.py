@@ -388,28 +388,25 @@ class Simulation:
     # - 노선 지시(005) 수락 → 본선이 항로를 스스로 따라가므로 감독 자율(MON).
     #   앞서 받은 조종은 새 노선으로 대체된 것으로 본다.
     # - 항로 취소 수락 → 세션은 남고 제어권은 본선으로: autonomy_mode = MON.
+    # 수락된 명령의 화면 표시용 부수효과.
+    #
+    # 운항 모드(MON/RC)·목표 침로·fallback·속력은 이제 MassAgent가 스스로
+    # 관리한다. 구동기가 상태를 덮어쓰면 실제 거동과 화면이 어긋나므로
+    # 여기서는 화면용 자료만 갱신한다.
     def _apply_verdict(self, meta: dict, verdict: dict) -> None:
         if not verdict["accepted"]:
             return
         kind = meta.get("kind")
         if kind == "route":
             self.mass_route = list(meta.get("waypoints", []))
-            self.mass_control = None
-            self.mass.state.autonomy_mode = pos.AUTONOMY_MON
         elif kind == "control":
-            self.mass_route = list(meta.get("waypoints", []))
-            self.mass.state.autonomy_mode = pos.AUTONOMY_RC
-            self.mass_control = {
-                "heading": meta.get("heading"),
-                "fallback": meta.get("fallback"),
-                "fallback_name": route.FALLBACK_NAMES.get(meta.get("fallback"), "?"),
-            }
+            self.mass_route = []
             if meta.get("sog") is not None:
+                # 계획 속력은 waypoint에 실리므로, 침로만 지시하는 조종에서
+                # 속력을 함께 바꾸려면 구동기가 넣어 준다.
                 self.mass.state.sog = float(meta["sog"])
         elif kind == "cancel":
             self.mass_route = []
-            self.mass_control = None
-            self.mass.state.autonomy_mode = pos.AUTONOMY_MON
 
     # ---------------------------------------------------------------- 명령 발행
 
@@ -476,14 +473,11 @@ class Simulation:
             if not 0.0 <= sog <= 102.2:
                 raise ValueError("속력은 0~102.2 knot 범위여야 합니다")
 
-        # ROC는 자기가 관측한 위치를 기준으로 목표점을 잡는다.
-        origin = self._observed_position() or _FALLBACK_ORIGIN
-        target = _project(origin[0], origin[1], heading, CONTROL_LEG_NM)
-        waypoints = [target]
-
+        # 조종은 waypoint가 아니라 침로로 지시한다. MassAgent가 Heading
+        # Setpoint로 직접 조타하므로 가상 목표점을 만들지 않는다.
         outbound = self.roc.issue_route(
             self.mass.mmsi,
-            waypoints,
+            [],
             now=now,
             route_type=route.ROUTE_TYPE_RECOMMENDED,
             heading_setpoint=heading,
@@ -491,7 +485,10 @@ class Simulation:
         )
         linkage_id = self._linkage_of(outbound)
         self._current_linkage = linkage_id
-        self.planned_route = [origin, target]
+        # 조종 중에는 따라갈 계획 항로가 없다. 화면의 계획 항로를 지운다.
+        origin = self._observed_position() or _FALLBACK_ORIGIN
+        waypoints = []
+        self.planned_route = []
         text = f"원격 조종 · 침로 {heading:05.1f}° · 복귀 {route.FALLBACK_NAMES[fallback]}"
         if sog is not None:
             text += f" · 속력 {sog:.1f} kn"
@@ -674,7 +671,19 @@ class Simulation:
                 "next_waypoint": next_waypoint,
                 "rejected_count": mass.rejected_count,
                 "ignored_count": mass.ignored_count,
-                "control": self.mass_control,
+                "link_loss_count": mass.link_loss_count,
+                "navigation_status": state.navigation_status,
+                # 배가 실제로 반영 중인 값을 그대로 읽는다. 구동기가 가진
+                # 사본이 아니라 행위자 상태라야 화면과 거동이 어긋나지 않는다.
+                "control": (
+                    None if (mass.heading_setpoint_degrees is None
+                             and mass.fallback_state == route.FALLBACK_NONE)
+                    else {
+                        "heading": mass.heading_setpoint_degrees,
+                        "fallback": mass.fallback_state,
+                        "fallback_name": mass.fallback_name,
+                    }
+                ),
                 "route": [[round(a, 5), round(b, 5)] for a, b in self.mass_route],
                 "track": [[round(a, 5), round(b, 5)] for a, b in self.track],
                 "log": self.mass_log[-60:],

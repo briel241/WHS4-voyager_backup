@@ -98,6 +98,14 @@ class MassAgent:
     # 반환이 False면 STATUS_ERRORS / REASON_NOT_AUTHORIZED로 거절한다.
     authority_policy: object = None
 
+    # 제어권을 가진 국에서 이 시간(초) 동안 아무것도 오지 않으면 원격 제어를
+    # 유지할 수 없다고 보고 fallback으로 전환한다(MASS Code). None이면 끈다.
+    link_timeout: float | None = config.CONTROL_LINK_TIMEOUT_SEC
+
+    # 연결이 끊겼을 때 들어갈 사전 정의 fallback. 실제로는 선박의 운항 한계와
+    # 비상 계획이 정한다.
+    link_loss_fallback: int = config.DEFAULT_LINK_LOSS_FALLBACK
+
     def __post_init__(self) -> None:
         self._waypoints: list[route.Waypoint] = []
         self._waypoint_index = 0
@@ -105,12 +113,20 @@ class MassAgent:
         self._route_expires_at: float | None = None
         # 현재 항로를 발행한 국. 만료 통지를 보낼 곳이다.
         self._route_issuer: int | None = None
+        # 원격 조종 — 지시받은 목표 침로(raw)와 반영 중인 fallback.
+        self._heading_setpoint = route.HEADING_SETPOINT_NOT_AVAILABLE
+        self._fallback_state = route.FALLBACK_NONE
+        # 제어권을 가진 국과 마지막으로 그 국에서 무언가를 받은 시각.
+        self._controlling_station: int | None = None
+        self._last_control_contact: float | None = None
         self._leg_origin: tuple[float, float] | None = None
         self._rate_of_turn: float | None = None
         self._last_report_at: float | None = None
         self._last_tick_at: float | None = None
         self.rejected_count = 0
         self.ignored_count = 0
+        # 원격 제어 중 링크가 끊겨 fallback으로 전환한 횟수.
+        self.link_loss_count = 0
         # SC-VDE-003 — AIS 채널로 들은 메시지와 신뢰하는 공개키
         self._heard_ais: dict[tuple[int, int], bytes] = {}
         self._trusted: dict[bytes, tuple[object, int]] = {}
@@ -193,6 +209,7 @@ class MassAgent:
         self._last_tick_at = now
 
         outbound = self._expire_route(now)
+        self._check_control_link(now)
         self._expire_warnings(now)
 
         if self._last_report_at is None or now - self._last_report_at >= self._report_interval():
@@ -207,19 +224,103 @@ class MassAgent:
             )
         return outbound
 
-    # 항로를 따라 침로와 위치를 갱신한다.
-    def _advance(self, elapsed: float) -> None:
-        if elapsed <= 0:
+    # 원격 제어 링크가 살아 있는지 보고, 끊겼으면 사전 정의 fallback으로 간다.
+    #
+    # MASS Code는 정상 운용 조건을 유지할 수 없을 때 사전 정의된 fallback으로
+    # 전환하도록 요구한다. 실제 운용에서도 연결이 기준 아래로 떨어지면 선박이
+    # fallback에 들어가고 제어권이 본선으로 돌아온다.
+    #
+    # 이것이 없으면 원격 제어 중 링크가 끊겨도 배는 마지막 명령대로 계속
+    # 움직이고, ROC는 두절을 알지만 배는 모르는 상태가 된다.
+    def _check_control_link(self, now: float) -> bool:
+        if self.link_timeout is None:
+            return False
+        if self.state.autonomy_mode != pos.AUTONOMY_RC:
+            return False
+        if self._last_control_contact is None:
+            return False
+        if now - self._last_control_contact < self.link_timeout:
+            return False
+
+        self.link_loss_count += 1
+        self._apply_fallback(self.link_loss_fallback)
+        # 제어권이 본선으로 돌아온다.
+        self.state.autonomy_mode = pos.AUTONOMY_MON
+        self._controlling_station = None
+        self._last_control_contact = None
+        return True
+
+    # fallback을 실제 선박 상태에 반영한다 (MASS Code의 사전 정의 fallback 상태).
+    #
+    # 셋 다 "정해진 항로를 따라가기를 그만두고 그 자리를 유지한다"는 점이 같고,
+    # 유지 방법이 다르다. 그래서 항행을 멈추고(속력 0) 항행상태를 바꾼다.
+    #
+    # Navigation Status는 ITU-R M.1371 Table 45를 쓴다. AIS에는 DP 전용 값이
+    # 없어 DP는 "엔진으로 항행 중"(0)으로 둔다. 표류는 능동 유지를 하지 않으므로
+    # "조종 불능"(2)으로 본다. 이 대응은 본 프로젝트가 정한 것이다.
+    _FALLBACK_NAV_STATUS = {
+        route.FALLBACK_ANCHORING: 1,             # at anchor
+        route.FALLBACK_DYNAMIC_POSITIONING: 0,   # under way using engine (위치 유지)
+        route.FALLBACK_DRIFTING: 2,              # not under command
+    }
+
+    def _apply_fallback(self, state: int) -> None:
+        self._fallback_state = state
+        if state == route.FALLBACK_NONE:
+            self.state.navigation_status = 0
             return
 
+        # 항행을 그만둔다. 남은 항로와 목표 침로는 더 이상 유효하지 않다.
+        self.state.sog = 0.0
+        self._heading_setpoint = route.HEADING_SETPOINT_NOT_AVAILABLE
+        self._waypoints = []
+        self._waypoint_index = 0
+        self._rate_of_turn = 0.0
+        self.state.navigation_status = self._FALLBACK_NAV_STATUS.get(state, 0)
+
+    @property
+    def fallback_state(self) -> int:
+        return self._fallback_state
+
+    @property
+    def fallback_name(self) -> str:
+        return route.FALLBACK_NAMES.get(self._fallback_state, "?")
+
+    @property
+    def heading_setpoint_degrees(self) -> float | None:
+        if self._heading_setpoint == route.HEADING_SETPOINT_NOT_AVAILABLE:
+            return None
+        return self._heading_setpoint / route.HEADING_SETPOINT_SCALE
+
+    # 지금 무엇을 향해 조타해야 하는지 정한다. None이면 조타할 목표가 없다.
+    #
+    # 우선순위
+    #   1) fallback이 걸려 있으면 항행하지 않는다 (투묘·DP·표류).
+    #   2) 목표 침로(Heading Setpoint)를 받았으면 그 침로를 잡는다.
+    #      원격 조종은 waypoint가 아니라 침로로 조타하는 것이다.
+    #   3) 그 밖에는 다음 waypoint 방위를 따른다.
+    def _steering_target(self) -> float | None:
+        if self._fallback_state != route.FALLBACK_NONE:
+            return None
+        if self._heading_setpoint != route.HEADING_SETPOINT_NOT_AVAILABLE:
+            return self._heading_setpoint / route.HEADING_SETPOINT_SCALE
         if self.has_route:
             waypoint = self._waypoints[self._waypoint_index]
-            target = navigation.bearing_degrees(
+            return navigation.bearing_degrees(
                 self.state.latitude,
                 self.state.longitude,
                 waypoint.latitude_degrees,
                 waypoint.longitude_degrees,
             )
+        return None
+
+    # 항로를 따라 침로와 위치를 갱신한다.
+    def _advance(self, elapsed: float) -> None:
+        if elapsed <= 0:
+            return
+
+        target = self._steering_target()
+        if target is not None:
             max_change = self.max_turn_rate * (elapsed / 60.0)
             self.state.heading, change = navigation.turn_toward(
                 self.state.heading, target, max_change
@@ -324,6 +425,11 @@ class MassAgent:
     # payload 하나를 처리하고 이번에 내보낼 송신 요청을 반환한다.
     # 우리 응용의 payload가 아니면 조용히 무시한다.
     def receive(self, payload: bytes, source_id: int, now: float = 0.0) -> list[Outbound]:
+        # 제어권을 가진 국에서 온 것이면 링크가 살아 있다는 신호다.
+        # 해석에 실패해도 그 국에서 무언가 도착했다는 사실은 유효하다.
+        if self._controlling_station is not None and source_id == self._controlling_station:
+            self._last_control_contact = now
+
         try:
             message = decode(payload)
         except ValueError:
@@ -516,7 +622,14 @@ class MassAgent:
                 )
 
         # ③ 누락 — 따라가는 데 필요한 것이 없다.
-        if not message.waypoints:
+        #
+        # 다만 원격 조종은 waypoint 없이도 성립한다. 목표 침로나 fallback을
+        # 지시하는 것 자체가 조종이며, 그때는 따라갈 항로가 없어도 된다.
+        controls = (
+            message.heading_setpoint != route.HEADING_SETPOINT_NOT_AVAILABLE
+            or message.fallback_state != route.FALLBACK_NONE
+        )
+        if not message.waypoints and not controls:
             return RouteDecision(
                 status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
             )
@@ -567,6 +680,34 @@ class MassAgent:
         else:
             self._route_expires_at = now + message.duration * 60.0
 
+        # ── 조종 데이터를 실제로 반영한다 (SC-VDE-006) ──────────────────
+        #
+        # 목표 침로와 fallback은 지시받은 값을 그대로 쓴다. waypoint의 계획
+        # 속력은 첫 구간 값을 명령 속력으로 본다. 이 값들이 실제로 배를
+        # 움직이지 않으면 조종 명령을 실증할 수 없다.
+        self._heading_setpoint = message.heading_setpoint
+
+        first = message.waypoints[0] if message.waypoints else None
+        if first is not None and first.planned_sog_knots is not None:
+            self.state.sog = first.planned_sog_knots
+
+        # fallback은 항행을 멈추므로 마지막에 적용한다(위 설정을 덮어쓴다).
+        self._apply_fallback(message.fallback_state)
+
+        # 제어권 — 조종 필드를 받았으면 원격 제어, 순수 노선이면 감독 자율.
+        remote = (
+            self._heading_setpoint != route.HEADING_SETPOINT_NOT_AVAILABLE
+            or message.fallback_state != route.FALLBACK_NONE
+        )
+        if remote:
+            self.state.autonomy_mode = pos.AUTONOMY_RC
+            self._controlling_station = issuer
+            self._last_control_contact = now
+        else:
+            self.state.autonomy_mode = pos.AUTONOMY_MON
+            self._controlling_station = None
+            self._last_control_contact = None
+
         self._check_arrival()
 
     def _clear_route(self) -> None:
@@ -576,3 +717,4 @@ class MassAgent:
         self._route_expires_at = None
         self._route_issuer = None
         self._leg_origin = None
+        self._heading_setpoint = route.HEADING_SETPOINT_NOT_AVAILABLE
