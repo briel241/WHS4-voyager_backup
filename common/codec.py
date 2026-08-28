@@ -91,6 +91,49 @@ def decode(payload: bytes, vpfi: int | None = None) -> ApplicationMessage:
     return message
 
 
+# --------------------------------------------------------------------------
+# VDETER application bytes (봉투 없음)
+#
+# VDETER가 SC-VDE format을 등록하면서 VPFI·Message Format은 VDETER
+# Presentation codec이 붙이기로 계약이 정해졌다(가이드 §8.2). 따라서 우리가
+# `submit(payload=...)`에 넣는 application bytes에는 봉투를 넣지 않는다.
+#
+#     application bytes  =  [ 본문 | byte 정렬 padding ]
+#     wire (VDETER 생성)  =  [ ff 7f | MF | application bytes ]
+#
+# 위 encode()/decode()는 우리끼리 쓰는 봉투 포함 형식이라 그대로 남긴다.
+# --------------------------------------------------------------------------
+
+
+def encode_body(message: ApplicationMessage) -> bytes:
+    """VDETER에 넘길 application bytes를 만든다. VPFI·Message ID를 붙이지 않는다."""
+    message_id = MESSAGE_IDS.get(type(message))
+    if message_id is None:
+        raise ValueError(f"등록되지 않은 응용 메시지입니다 ({type(message).__name__})")
+
+    writer = BitWriter()
+    MESSAGE_CODECS[message_id].write_body(writer, message)
+    writer.pad_to_byte()
+    return writer.to_bytes()
+
+
+def decode_body(payload: bytes, message_id: int) -> ApplicationMessage:
+    """application bytes를 복원한다. message_id는 payload_format이 알려준다."""
+    codec = MESSAGE_CODECS.get(message_id)
+    if codec is None:
+        raise ValueError(f"등록되지 않은 Message ID입니다 ({message_id})")
+
+    reader = BitReader(payload)
+    message = codec.read_body(reader)
+
+    # 남은 bit는 byte 정렬 padding뿐이어야 하고 전부 0이어야 한다(가이드 §8.3).
+    if reader.remaining >= 8:
+        raise ValueError(f"본문 뒤에 {reader.remaining} bit가 남았습니다")
+    reader.check_padding("padding")
+
+    return message
+
+
 # 파싱된 메시지를 콘솔 표시용 문자열로 만든다.
 def describe(message: ApplicationMessage) -> str:
     message_id = MESSAGE_IDS.get(type(message))

@@ -1,19 +1,29 @@
 # SC-VDE-005 노선 계획 — 전선 형식 (링크 팀 전달용)
 
-## 내용물 (무슨 데이터인가)
+## 무엇을 보내는가
 
-ROC가 MASS에게 **항로를 지시**한다 — "이 웨이포인트들을 이 속도로 따라가라."
-예: 필수 항로, 웨이포인트 2개(부산 앞바다), 12.5→8노트. **조종 명령(침로·모드)은 없음.**
+ROC가 MASS에 항로를 지시하는 메시지다. 어떤 웨이포인트를 어떤 속도로 따라갈지 알려준다.
+예를 들어 필수 항로에 부산 앞바다 웨이포인트 2개, 속도는 12.5노트에서 8노트로. 침로나
+조종 모드 같은 조종 명령은 담지 않는다.
 
-> 조종을 함께 지시하는 경우는 SC-VDE-006(원격 조종). **둘은 같은 메시지**(Message ID 2)이고,
-> 노선은 Heading·Fallback을 비우고 조종은 채운다. codec 하나로 둘 다 처리된다.
+> 조종까지 함께 지시하는 경우는 SC-VDE-006(원격 조종)이다. 노선과 조종은 같은
+> 메시지(Message ID 2)를 쓰며, 노선은 Heading·Fallback 필드를 비워 두고 조종은 이 필드를
+> 채운다. 그래서 codec 하나로 둘 다 처리한다.
 
-## 규격 (전선 바이트)
+> **등록 완료** — 링크 팀이 `sc_vde.route_control.command`(TEST scope)로 등록했다.
+> API 계약은 `vdeter_mass_roc_api_guide.md` §8.3이 정본이고, 이 문서는 그 요약이다.
 
-**봉투**: `[ VPFI 16bit | Message ID 8bit(=2) | 본문 | byte padding ]`.
-현재 VPFI=`0xFF01`(placeholder). big-endian bit, MSB first.
+## 바이트 형식
 
-**본문 = 고정부 76bit + 웨이포인트당 77bit.**
+우리가 `submit(payload=...)`에 넣는 것은 **본문뿐**이다. VPFI와 Message Format은 VDETER
+Presentation codec이 붙인다 — 직접 붙이면 거부된다.
+
+```text
+우리가 넣는 application bytes :  [ 본문 | byte padding ]
+VDETER가 만드는 wire         :  ff 7f 02 || application bytes
+```
+
+비트는 big-endian, MSB first. 본문은 **고정부 76bit + 웨이포인트마다 77bit**다.
 
 ### 고정부 (76 bit)
 
@@ -38,16 +48,29 @@ ROC가 MASS에게 **항로를 지시**한다 — "이 웨이포인트들을 이 
 | Planned SOG | 10 | uint | 1023=N/A, ×10→0.1 kn |
 | Leg Geometry | 2 | uint | 0=none,1=Lexodrome,2=Orthodrome |
 
-**좌표**: `raw = round(도 × 600,000)` (1도=600,000단위), 남·서는 음수. 복원 `도=raw/600,000`.
+좌표는 `raw = round(도 × 600,000)`으로 담는다(1도=600,000단위). 남·서는 음수이고,
+복원은 `도 = raw / 600,000`이다.
 
-## 예시 벡터 (검증용, 32 byte, VPFI 포함)
+허용되는 application 길이는 `ceil((76+77n)/8)`로 정해진 17가지뿐이다 —
+`10, 20, 29, 39, 48, 58, 68, 77, 87, 97, 106, 116, 125, 135, 145, 154, 164`.
+마지막 바이트의 남는 padding 비트는 모두 0이어야 한다.
 
-디코드 시 → mandatory, WP1 129.076°/35.102° SOG12.5 Lexodrome, WP2 129.333°/35.208° SOG8.0 Orthodrome
+## 예시 (승인된 참조 벡터, application 29 byte)
+
+디코드하면 Linkage 7, Sender authority, 필수 항로(mandatory), Heading N/A, Fallback None,
+WP1 129.076°/35.102° SOG 12.5 Lexodrome, WP2 129.333°/35.208° SOG 8.0 Orthodrome이 나온다.
+
 ```text
-FF 01 02 01 C8 40 18 F3 FF FF E1 00 24 9D B9 E0 28 2B CA 01 90 FA A5 00 A1 C1 42 56 C0 1E 05 08
+01 c8 40 18 f3 ff ff e1 00 24 9d b9 e0 28 2b ca 01 90 fa a5 00 a1 c1 42 56 c0 1e 05 08
 ```
 
-## ACK (MASS→ROC 응답, Message ID 3, 6 byte)
+앞에 `ff 7f 02`나 예전 임시 `ff 01`을 붙이지 않는다. 우리 저장소에서는
+`tests/test_sc_vde_contract.py`가 이 벡터와의 일치를 시험한다.
+
+## ACK — MASS가 ROC에 보내는 응답 (별도 format, application 3 byte)
+
+ACK은 `sc_vde.route_control.ack` 키로 **따로 submit** 한다. 링크의 `ack_required`가
+만드는 전달 ACK과는 별개이며, 자동 생성되지 않는다.
 
 | 필드 | bit | 값 |
 | --- |:---:| --- |
@@ -55,10 +78,15 @@ FF 01 02 01 C8 40 18 F3 FF FF E1 00 24 9D B9 E0 28 2B CA 01 90 FA A5 00 A1 C1 42
 | Status | 4 | 4=Acknowledged,7=Errors,8=Incomplete,9=Route issues,0=received |
 | Reason | 3 | 0=none,1=route_unsuitable,2=expired,3=not_authorized |
 
-예시(Acknowledged): `FF 01 03 01 D0 00`
+정상 수신(Linkage 7, Acknowledged, Reason None) 예시: `01 d0 00` — 여기에도 `ff 7f 03`을
+붙이지 않는다.
 
-## 요청
+## 남은 조건
 
-노선용 **codec + payload_format 등록**(인증서 codec 방식) + **VPFI 배정**. 등록되면 우리는
-`codec.py`의 16-bit VPFI를 제거해 응용 body를 `[Message ID | 본문 | padding]`으로 맞춘다.
-→ 노선이 opaque가 아닌 **운영 종단**. **조종(SC-VDE-006)도 같은 codec으로 처리된다.**
+계약은 승인됐지만 **배포 build에 SC-VDE codec이 들어와야** 실제로 쓸 수 있다(가이드 §17).
+codec이 없는 build나 OPERATIONAL scope에서는 `UNSUPPORTED_REQUEST`가 정상 결과이고, 그때
+다른 format 키나 opaque로 우회하지 않는다. 우리 loopback 데모는 registry를 확인해 SC-VDE가
+있으면 그 포맷으로, 없으면 시험용 opaque로 자동 전환한다.
+
+> **안전 제한** — SC-VDE는 서명·replay 보호가 없는 TEST 전용이다. 이 payload를 받았다는
+> 이유만으로 실제 조타·actuator를 구동해서는 안 된다.

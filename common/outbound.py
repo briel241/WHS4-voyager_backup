@@ -30,20 +30,28 @@ DATA_TYPE_AIS_AUTH_INTEGRITY = "AIS_AUTH_INTEGRITY"
 DATA_TYPE_ELECTRONIC_CHART = "ELECTRONIC_CHART"
 DATA_TYPE_X509_CERTIFICATE = "X509_CERTIFICATE"
 
+# SC-VDE 노선·원격조종 (가이드 §8.3·§8.4에서 계약 승인됨).
+# 노선(SC-VDE-005)과 조종(SC-VDE-006)은 같은 Message Format 2를 공유하므로
+# data_type도 하나다. 업무 구분(Heading·Fallback 유무)은 응용이 판단한다.
+DATA_TYPE_ROUTE_CONTROL_COMMAND = "ROUTE_CONTROL_COMMAND"
+DATA_TYPE_ROUTE_CONTROL_ACK = "ROUTE_CONTROL_ACK"
+
 API_DATA_TYPES = frozenset(
     {
         DATA_TYPE_TBB,
         DATA_TYPE_AIS_AUTH_INTEGRITY,
         DATA_TYPE_ELECTRONIC_CHART,
         DATA_TYPE_X509_CERTIFICATE,
+        DATA_TYPE_ROUTE_CONTROL_COMMAND,
+        DATA_TYPE_ROUTE_CONTROL_ACK,
     }
 )
 
 # 주의
-#     위 네 가지에는 MASS/ROC 운항 메시지(위치보고·항로지시·응답)에 해당하는
-#     값이 없다. 즉 현재 API 계약으로는 우리 운항 메시지를 보낼 분류가 없다.
-#     API 소유자와 합의해 분류를 추가해야 하며, 그전까지 data_type은 None으로
-#     둔다. 임의로 만들어 쓰지 않는다.
+#     노선·조종 두 분류는 TEST/PROJECT scope 전용이다(가이드 §8.5). 서명·replay
+#     보호가 없으므로 실제 선박·조종 장비를 구동하는 데 쓰면 안 된다.
+#     위치보고·경보·환경·기상에는 아직 대응 분류가 없다. 임의로 만들어 쓰지 않고
+#     data_type은 None으로 둔다.
 DATA_TYPE_UNASSIGNED = None
 
 

@@ -25,6 +25,10 @@ MASS/ROC 애플리케이션이 담당하는 범위는 다음과 같다.
 VDE-TER은 application bytes를 전달하고 protocol transport 결과를 제공한다. X.509 인증 성공,
 AIS 인증 성공 또는 전자해도 해석 성공을 판정하지 않는다.
 
+이 문서는 승인된 SC-VDE Route/Remote-control Command와 application ACK의 API 계약도 포함한다.
+두 형식은 프로젝트 `TEST` scope 전용이며, 실제 배포 build에 codec과 registry가 포함됐는지는
+§17에서 확인한다. 명세가 승인됐다는 사실과 현재 실행 코드에서 사용할 수 있다는 사실은 구분한다.
+
 ### 1.1 이 문서의 API 경계와 사용 전제
 
 | 구분 | 제공·구현하는 항목 |
@@ -323,11 +327,141 @@ MASS/ROC는 업무 데이터를 먼저 `bytes`로 직렬화한다. VDE-TER은 re
 protocol로 전달하고, 수신 시 원래 application bytes를 `DATA_RECEIVED`로 복원한다. 수신 애플리케이션은
 `received_data.payload_format`으로 분기하고 `received_data.payload`를 역직렬화한다.
 
-| `payload_format.value`                 | application `payload`                           | scope·현재 상태                   |
-| -------------------------------------- | ----------------------------------------------- | --------------------------------- |
-| `x509.certificate_report`              | R1027 Certificate Report body                   | 운영 지원                         |
-| `ais.authentication_integrity.scheme1` | R1027 Ed.1.1 Table 21 Scheme 1, 정확히 82 bytes | 운영 지원                         |
-| `electronic_chart.data`                | 미정                                            | key만 예약, 현재 미지원           |
+### 8.1 Payload Format 목록과 가용성
+
+| `payload_format.value`                 | application `payload`                           | scope                 | 계약·구현 상태 |
+| -------------------------------------- | ----------------------------------------------- | --------------------- | -------------- |
+| `x509.certificate_report`              | R1027 Certificate Report body                   | OPERATIONAL+TEST      | 구현됨 |
+| `ais.authentication_integrity.scheme1` | R1027 Ed.1.1 Table 21 Scheme 1, 정확히 82 bytes | OPERATIONAL+TEST      | 구현됨 |
+| `sc_vde.route_control.command`         | SC-VDE MF 2 body+zero padding                   | TEST/PROJECT only     | API 계약 승인; 배포 build의 구현 포함 여부 확인 필요 |
+| `sc_vde.route_control.ack`             | SC-VDE MF 3 ACK body+zero padding, 정확히 3 bytes | TEST/PROJECT only   | API 계약 승인; 배포 build의 구현 포함 여부 확인 필요 |
+| `electronic_chart.data`                | 미정                                            | 미지원                | key만 예약, registry/codec 없음 |
+
+endpoint의 registry scope는 launcher/config가 정한다. `SubmitTransferRequest`에는 scope를 선택하는
+field가 없다. SC-VDE 두 key는 TEST registry에서만 조회돼야 하며 OPERATIONAL endpoint에서는
+`UNSUPPORTED_REQUEST`가 정상 결과다. 실제 배포 build가 아직 이 확장을 포함하지 않은 경우에도 같은
+오류가 발생하므로, launcher 제공자는 사용 가능한 format 목록 또는 build 정보를 MASS/ROC 개발자에게
+함께 제공해야 한다.
+
+### 8.2 application bytes와 wire bytes 경계
+
+MASS/ROC가 `submit(..., payload=...)`에 넣는 값은 application bytes다. VPFI와 Message Format은
+Presentation codec이 붙인다. 수신 `received_data.payload`에서는 다시 제거된다.
+
+| format | MASS/ROC가 넣는 `payload` | VDE-TER이 만드는 wire Presentation data |
+| --- | --- | --- |
+| Certificate Report | certificate report body | `00 01 || body` |
+| AIS Scheme 1 | 82-byte body | R1027 VPFI 7/MF 1을 포함한 84-byte data |
+| SC-VDE command | 76-bit fixed body + `n×77`-bit waypoint + zero padding | `ff 7f 02 || application payload` |
+| SC-VDE ACK | 17-bit ACK body + 7 zero padding bits | `ff 7f 03 || application payload` |
+
+따라서 SC-VDE 송신 application은 `ff 7f 02` 또는 `ff 7f 03`을 `payload` 앞에 직접 붙이면 안 된다.
+원자료의 임시 `ff 01`도 넣거나 수신 fallback으로 허용하면 안 된다. 잘못 포함하면 구조 오류 또는
+unknown wire key로 거부된다.
+
+### 8.3 SC-VDE Route/Remote-control Command
+
+- canonical key: `sc_vde.route_control.command`
+- 방향: ROC/authority가 생성하고 MASS/ship이 소비
+- 목적지: `Addressed(mass_id)`만 허용; broadcast 금지
+- application 의미: 노선과 원격조종이 동일한 MF 2 schema를 공유
+- 업무 구분: Heading Setpoint와 Fallback State를 애플리케이션이 해석
+- waypoint 개수: `n=0..16`
+- bit order: MSB-first, multi-byte 값은 big-endian
+
+application payload의 고정부는 다음 76 bits다.
+
+| field | bits | application raw 규칙 |
+| --- | ---: | --- |
+| Message Linkage ID | 10 | unsigned, `0=N/A`; application ACK 상관에 사용 |
+| Sender Classification | 3 | `0=ship`, `1=authority`; 그 밖의 값 거부 |
+| Route Type | 5 | `0=N/A`, `1=Mandatory`, `2=Recommended`, `5=Ship route plan`, `31=Cancellation` |
+| Start Month/Day/Hour/Minute | 4/5/5/6 | 전체 `0/0/24/60=N/A` 또는 정상 범위 조합 |
+| Duration | 18 | 분, `262143=N/A` |
+| Heading Setpoint | 12 | `raw/10` degree, `0..3599`, `3600=N/A` |
+| Fallback State | 3 | `0=None`, `1=Anchoring`, `2=DynamicPositioning`, `3=Drifting` |
+| Number of Waypoints | 5 | `n=0..16` |
+
+각 waypoint는 다음 77 bits다.
+
+| field | bits | application raw 규칙 |
+| --- | ---: | --- |
+| Longitude | 28 signed | two's complement, `-108000000..108000000` 또는 `108600000=N/A` |
+| Latitude | 27 signed | two's complement, `-54000000..54000000` 또는 `54600000=N/A` |
+| Turn Radius | 10 | `raw/100` NM, `0..1022` 또는 `1023=N/A` |
+| Planned SOG | 10 | `raw/10` knot, `0..1022` 또는 `1023=N/A` |
+| Leg Geometry | 2 | `0=None`, `1=Lexodrome`, `2=Orthodrome` |
+
+마지막 byte의 미사용 padding bit는 모두 0이어야 한다. application 길이는
+`ceil((76+77*n)/8)`이며 허용되는 byte 길이는 다음 17개뿐이다.
+
+```text
+10, 20, 29, 39, 48, 58, 68, 77, 87,
+97, 106, 116, 125, 135, 145, 154, 164
+```
+
+VDE-TER이 붙이는 3-byte header까지 포함한 wire 길이는 application 길이+3이다. 현재 전송 선택
+규칙에서 `n=2`의 wire 32 bytes는 `ack_required` 값과 무관하게 Short Data가 가능하고,
+`n=3`의 wire 42 bytes부터는 addressed Data Session이 선택된다.
+
+승인된 원격조종 예제 application bytes는 29 bytes다. 이 값만 `payload`에 넣는다.
+
+```text
+01 c8 40 18 f3 ff ff 39 d2 24 9d 7c f0 28 2b 34
+00 f0 78 a4 ef 91 01 41 a6 f8 07 82 84
+```
+
+복원 결과는 Linkage 7, Sender authority, Heading 92.5°, Fallback Anchoring과 waypoint 2개다.
+이에 대응하는 wire 시작 `ff 7f 02`는 VDE-TER이 생성하며 애플리케이션 입력에는 포함하지 않는다.
+
+승인된 노선 예제도 29-byte application payload이며 Heading은 N/A, Fallback은 None이다.
+
+```text
+01 c8 40 18 f3 ff ff e1 00 24 9d b9 e0 28 2b ca
+01 90 fa a5 00 a1 c1 42 56 c0 1e 05 08
+```
+
+공개 API에는 field별 `RouteCommand` DTO나 degree 단위 encoder가 없다. 위 bit pack/unpack과
+degree-to-raw 변환은 MASS/ROC 업무 serialization 코드가 담당하고, VDE-TER codec은 완성된
+application bytes의 길이·field 범위·padding을 검증해 byte-exact로 전달한다.
+
+### 8.4 SC-VDE application ACK
+
+- canonical key: `sc_vde.route_control.ack`
+- 방향: MASS/ship이 생성하고 ROC/authority가 소비
+- 목적지: `Addressed(roc_id)`만 허용; broadcast 금지
+- application 길이: 정확히 3 bytes
+- body: `Message Linkage ID[10] | Status[4] | Reason[3] | zero padding[7]`
+
+| field | 허용 raw 값 |
+| --- | --- |
+| Status | `0=Received`, `4=Acknowledged`, `7=Errors detected`, `8=Incomplete`, `9=Route issues` |
+| Reason | `0=None`, `1=Route unsuitable`, `2=Expired`, `3=Not authorized` |
+
+Linkage 7, Acknowledged, Reason None의 application bytes는 다음과 같다.
+
+```text
+01 d0 00
+```
+
+VDE-TER이 실제 wire에 `ff 7f 03`을 붙인다. 이 MF 3 ACK는 MASS/ROC의 업무 응답이다.
+`SubmitTransferRequest.ack_required`가 요청하는 Link 전달 ACK와 다르며 자동 생성되지 않는다.
+MASS 애플리케이션은 command를 해석한 뒤 업무 정책에 따라 MF 3 payload를 만들고 별도의
+`service.submit()`을 호출해야 한다. MF 3 자체에 `ack_required=True`를 사용할 수 있지만 또 다른
+MF 3 ACK를 자동 생성하거나 재귀적으로 요구하지 않는다.
+
+### 8.5 SC-VDE 인증 및 안전 제한
+
+현재 SC-VDE command/ACK는 unsigned Segment Type 0으로 전달된다. 송신자 인증, payload의
+암호학적 무결성, replay protection과 freshness를 제공하지 않는다. CRC, Link ACK/NACK 또는 인증된
+TBB는 이 application payload의 인증을 대신하지 않는다.
+
+따라서 두 형식은 격리된 유선 시험과 프로젝트 데모 전용이다. 실제 선박, 항해·조종 장비 또는
+actuator를 구동하는 데 사용해서는 안 된다. MASS 수신 handler는 이 payload를 받았다는 이유만으로
+actuator를 실행해서는 안 된다. 운영 사용에는 별도의 위협 모델, Signed Segment 또는 승인된
+application 인증, replay/freshness 정책과 안전 동작 기준이 필요하다.
+
+### 8.6 기존 X.509와 AIS 형식
 
 JSON, protobuf, CBOR, route guidance 또는 chart-like bytes를 임의의 지원 format key 아래에 넣으면
 안 된다. 해당 application format을 운영에서 쓰려면 registry mapping, 공식/승인된 wire 식별자,
@@ -398,6 +532,8 @@ MASS와 ROC의 공개 호출 순서는 같다. station/role과 업무 handler만
 | 수신             | `DATA_RECEIVED`에서 업무 data 처리            | `DATA_RECEIVED`에서 MASS data 처리                        |
 | broadcast        | origin 미지원                                 | no-ACK Short Data만 제한 지원                             |
 | relay            | 목적지 MASS만 지정; relay hop을 조작하지 않음 | protocol relay는 내부 책임; 업무 재전송은 별도 `submit()` |
+| SC-VDE command   | addressed 수신·업무 해석                     | TEST endpoint에서 addressed 송신                          |
+| SC-VDE app ACK   | TEST endpoint에서 addressed 송신             | addressed 수신·업무 상관                                 |
 
 TBB, 자원할당, channel, Link ID와 direct/relay protocol 선택은 public request field가 아니다.
 ROC 애플리케이션이 받은 bytes를 정책 검증 후 MASS-B로 새로 제출할 수는 있지만, 이는 새로운 ROC
@@ -915,25 +1051,99 @@ result = mass_service.submit(
 여기서 `mass_service`, `roc_id`, `ais_scheme1_body`는 애플리케이션 entrypoint의 실제 입력이다.
 ROC는 `DATA_RECEIVED` 뒤 AIS 원문과 서명을 자체 정책으로 검증한다. `COMPLETED`는 AIS 인증 성공이 아니다.
 
-### 14.2 ROC → MASS 항해 경고 또는 route guidance
+### 14.2 ROC → MASS SC-VDE 원격조종 명령과 MASS → ROC 업무 ACK
 
-현재 운영 registry에는 항해 경고나 route guidance format이 없다. 다음 요청 모양은 public API에는
-맞지만 현재 구현에서는 `UNSUPPORTED_REQUEST`가 정상 결과다.
+다음 코드는 승인된 reference application bytes를 기존 공개 API로 송수신하는 호출 예다. 실행하려면
+launcher가 TEST scope와 SC-VDE payload 확장이 포함된 build의 `VdeService`를 주입해야 한다.
 
 ```python
-result = roc_service.submit(
-    SubmitTransferRequest(
-        destination=Addressed(mass_id),
-        payload_format=PayloadFormat("route.guidance"),
-        payload=route_guidance_bytes,
-        ack_required=True,
-    )
+from vdeter.common.addressing import Addressed
+from vdeter.common.contracts.service import SubmitTransferRequest, TransferAccepted
+from vdeter.common.identifiers import PayloadFormat, StationId
+from vdeter.service import VdeService
+
+
+SC_VDE_COMMAND = PayloadFormat("sc_vde.route_control.command")
+SC_VDE_ACK = PayloadFormat("sc_vde.route_control.ack")
+
+# application bytes만 사용한다. ff 7f 02를 앞에 붙이지 않는다.
+REMOTE_CONTROL_N2 = bytes.fromhex(
+    "01 c8 40 18 f3 ff ff 39 d2 24 9d 7c f0 28 2b 34 "
+    "00 f0 78 a4 ef 91 01 41 a6 f8 07 82 84"
 )
-assert result.is_err
-assert result.error.code == "UNSUPPORTED_REQUEST"
+
+# Linkage ID 7, Acknowledged, Reason None. ff 7f 03을 붙이지 않는다.
+ACK_LINKAGE_7 = bytes.fromhex("01 d0 00")
+
+
+def roc_submit_command(
+    roc_service: VdeService,
+    mass_id: StationId,
+) -> TransferAccepted:
+    result = roc_service.submit(
+        SubmitTransferRequest(
+            destination=Addressed(mass_id),
+            payload_format=SC_VDE_COMMAND,
+            payload=REMOTE_CONTROL_N2,
+            ack_required=True,
+        )
+    )
+    if result.is_err:
+        raise RuntimeError(
+            f"command submit failed: {result.error.code}: {result.error.message}"
+        )
+    return result.value
+
+
+def mass_submit_application_ack(
+    mass_service: VdeService,
+    roc_id: StationId,
+) -> TransferAccepted:
+    result = mass_service.submit(
+        SubmitTransferRequest(
+            destination=Addressed(roc_id),
+            payload_format=SC_VDE_ACK,
+            payload=ACK_LINKAGE_7,
+            ack_required=True,
+        )
+    )
+    if result.is_err:
+        raise RuntimeError(
+            f"ACK submit failed: {result.error.code}: {result.error.message}"
+        )
+    return result.value
 ```
 
-운영 지원을 추가하려면 임의 key만 쓰지 말고 registry mapping, wire 식별자와 codec을 먼저 제공해야 한다.
+MASS handler는 command를 다음처럼 분기한다. 실제 업무 코드는 payload의 Linkage ID와 field를
+역직렬화하고 정책을 판단한 뒤 ACK bytes를 생성해야 한다.
+
+```python
+from vdeter.common.events import ServiceEvent, ServiceEventType
+
+
+def mass_handle_received(event: ServiceEvent) -> None:
+    if event.event_type is not ServiceEventType.DATA_RECEIVED:
+        return
+    received = event.received_data
+    if received is None or received.payload_format != SC_VDE_COMMAND:
+        return
+
+    command_body = received.payload
+    # command_body에는 ff 7f 02가 없고 송신 application bytes만 들어 있다.
+    if command_body != REMOTE_CONTROL_N2:
+        raise RuntimeError("unexpected command bytes")
+
+    # 여기서 구조를 역직렬화하고 업무 정책을 판단한다.
+    # 이 TEST profile만으로 실제 actuator를 구동해서는 안 된다.
+```
+
+ROC handler도 `received.payload_format == SC_VDE_ACK`으로 분기하고 3-byte ACK body의 Linkage ID,
+Status와 Reason을 원 command 업무 record에 연결한다. `TRANSFER_STATE_CHANGED(COMPLETED)`와
+MF 3 ACK 수신은 별개의 결과이므로 둘을 하나의 event로 가정하면 안 된다.
+
+SC-VDE 확장이 없는 build 또는 OPERATIONAL scope에서는 위 `submit()`이
+`UNSUPPORTED_REQUEST`를 반환한다. 이때 다른 format key나 opaque payload로 우회하지 말고
+launcher/build의 payload capability를 확인한다.
 
 ### 14.3 MASS ↔ MASS direct payload
 
@@ -1017,6 +1227,11 @@ RPC, REST, WebSocket, queue와 socket schema는 VDE-TER 공개 Service API 자�
 - [ ] 목적지는 `Addressed` 또는 지원되는 ROC `Broadcast`로 만들었다.
 - [ ] relay hop이 아니라 최종 API 목적지를 지정했다.
 - [ ] 업무 데이터를 현재 등록된 `payload_format`의 정확한 `bytes`로 만들었다.
+- [ ] SC-VDE payload라면 TEST scope와 해당 codec이 포함된 build인지 확인했다.
+- [ ] SC-VDE application bytes 앞에 `ff 7f 02/03` 또는 임시 `ff 01`을 직접 넣지 않았다.
+- [ ] SC-VDE command와 application ACK를 addressed로만 사용했다.
+- [ ] Link `ack_required`와 SC-VDE MF 3 application ACK를 구분했다.
+- [ ] SC-VDE TEST command 수신으로 실제 actuator를 구동하지 않는다.
 - [ ] broadcast에서 ACK를 요청하지 않았다.
 - [ ] handler/sink가 endpoint 조립 때 실제로 연결됐다.
 - [ ] `TransferAccepted`와 `COMPLETED`를 구분한다.
@@ -1026,7 +1241,7 @@ RPC, REST, WebSocket, queue와 socket schema는 VDE-TER 공개 Service API 자�
 - [ ] application deadline에서 status/cancel 경쟁을 처리한다.
 - [ ] 새 submit을 닫은 뒤 service stop과 event consumer cleanup을 순서대로 수행한다.
 
-## 17. 현재 지원 상태와 제한
+## 17. 현재 구현·승인 상태와 제한
 
 | 기능                                        | 현재 코드 상태               | MASS/ROC 사용 가능 여부    | 비고                                                     |
 | ------------------------------------------- | ---------------------------- | -------------------------- | -------------------------------------------------------- |
@@ -1034,8 +1249,11 @@ RPC, REST, WebSocket, queue와 socket schema는 VDE-TER 공개 Service API 자�
 | `HandlerServiceEventSink`                   | 공개 adapter 구현            | 가능                       | 자동 queue/thread 없음                                   |
 | X.509 Certificate Report                    | 운영 registry/codec 구현     | 가능                       | trust/chain은 앱 책임                                    |
 | AIS Scheme 1 82 bytes                       | 운영 registry/codec 구현     | 가능                       | 인증 판정은 앱 책임                                      |
+| `sc_vde.route_control.command`              | TEST API 계약 승인, 구현 별도 | 배포 build에 포함된 뒤 가능 | ROC→MASS addressed; application에 VPFI/MF 제외           |
+| `sc_vde.route_control.ack`                  | TEST API 계약 승인, 구현 별도 | 배포 build에 포함된 뒤 가능 | MASS→ROC addressed; Link ACK와 별개                       |
+| SC-VDE 실제 선박 제어                       | 인증·운영 profile 없음       | 불가                       | 유선 시험·프로젝트 데모 전용, actuator 분리              |
 | 전자해도                                    | registry/codec 없음          | 불가                       | `electronic_chart.data` 예약 key뿐                       |
-| route guidance/항해 경고/일반 JSON·protobuf | registry mapping 없음        | 불가                       | registry/codec 추가 필요                                 |
+| 일반 항해 경고/JSON·protobuf                | registry mapping 없음        | 불가                       | 승인된 SC-VDE bytes 외에는 registry/codec 추가 필요      |
 | ROC addressed 송수신                        | 구현                         | 가능                       | configured member만                                      |
 | ROC no-ACK broadcast Short Data             | 제한 구현                    | format/크기 조건부 가능    | MASS broadcast 미지원                                    |
 | MASS↔MASS route                             | Service가 자동 결정          | 가능                       | 애플리케이션은 direct/relay를 강제하지 않음               |

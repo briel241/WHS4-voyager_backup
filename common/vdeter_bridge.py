@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from .outbound import (
     BROADCAST_ID,
     DATA_TYPE_AIS_AUTH_INTEGRITY,
+    DATA_TYPE_ROUTE_CONTROL_ACK,
+    DATA_TYPE_ROUTE_CONTROL_COMMAND,
     DATA_TYPE_X509_CERTIFICATE,
     Outbound,
 )
@@ -87,11 +89,38 @@ if VDETER_AVAILABLE:
 PAYLOAD_FORMAT_CERTIFICATE_REPORT = "x509.certificate_report"
 PAYLOAD_FORMAT_AIS_SCHEME1 = "ais.authentication_integrity.scheme1"
 
-#: 우리 data_type → VDETER payload_format 문자열. 운영 지원 두 가지만.
+#: SC-VDE 노선·조종 (TEST/PROJECT scope 전용, 가이드 §8.1)
+PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND = "sc_vde.route_control.command"
+PAYLOAD_FORMAT_ROUTE_CONTROL_ACK = "sc_vde.route_control.ack"
+
+#: TEST scope에서만 조회되는 키. OPERATIONAL endpoint에서는
+#: UNSUPPORTED_REQUEST가 정상 결과다(가이드 §8.1).
+TEST_SCOPE_PAYLOAD_FORMATS = frozenset(
+    {PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND, PAYLOAD_FORMAT_ROUTE_CONTROL_ACK}
+)
+
+#: 각 SC-VDE format이 싣는 Message Format(= 우리 Message ID).
+#: 수신 시 payload_format이 곧 message_id를 알려준다(application bytes에 없으므로).
+MESSAGE_ID_BY_PAYLOAD_FORMAT = {
+    PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND: 2,
+    PAYLOAD_FORMAT_ROUTE_CONTROL_ACK: 3,
+}
+
+#: 우리 data_type → VDETER payload_format 문자열.
 PAYLOAD_FORMAT_BY_DATA_TYPE = {
     DATA_TYPE_X509_CERTIFICATE: PAYLOAD_FORMAT_CERTIFICATE_REPORT,
     DATA_TYPE_AIS_AUTH_INTEGRITY: PAYLOAD_FORMAT_AIS_SCHEME1,
+    DATA_TYPE_ROUTE_CONTROL_COMMAND: PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND,
+    DATA_TYPE_ROUTE_CONTROL_ACK: PAYLOAD_FORMAT_ROUTE_CONTROL_ACK,
 }
+
+#: SC-VDE command의 허용 application byte 길이 (가이드 §8.3, n=0..16)
+SC_VDE_COMMAND_LENGTHS = frozenset(
+    {10, 20, 29, 39, 48, 58, 68, 77, 87, 97, 106, 116, 125, 135, 145, 154, 164}
+)
+
+#: SC-VDE application ACK은 정확히 3 bytes (가이드 §8.4)
+SC_VDE_ACK_LENGTH = 3
 
 
 class UnsupportedPayloadFormat(ValueError):
@@ -128,6 +157,46 @@ def payload_format_for(data_type: str | None):
 # --------------------------------------------------------------------------
 
 
+#: VDETER가 wire에 붙이는 header. application bytes에 들어 있으면 안 된다.
+_WIRE_PREFIXES = (bytes.fromhex("ff7f02"), bytes.fromhex("ff7f03"))
+#: 우리가 예전에 쓰던 임시 VPFI. 수신 fallback으로도 허용하지 않는다.
+_LEGACY_PREFIX = bytes.fromhex("ff01")
+
+
+def check_sc_vde_payload(payload_format: str, payload: bytes) -> None:
+    """SC-VDE application bytes가 계약을 지키는지 확인한다(가이드 §8.2·§8.3·§8.4).
+
+    봉투(`ff 7f 02/03`)나 임시 VPFI(`ff 01`)를 앞에 붙이면 VDETER가 구조 오류
+    또는 unknown wire key로 거부하므로, 그 전에 여기서 막는다.
+    """
+    if payload_format not in TEST_SCOPE_PAYLOAD_FORMATS:
+        return
+
+    payload = bytes(payload)
+    if payload.startswith(_WIRE_PREFIXES) or payload.startswith(_LEGACY_PREFIX):
+        raise ValueError(
+            "application bytes에 VPFI/Message Format 봉투가 들어 있습니다. "
+            "VDETER가 붙이므로 본문만 넣어야 합니다 (codec.encode_body 사용)."
+        )
+
+    if payload_format == PAYLOAD_FORMAT_ROUTE_CONTROL_ACK:
+        if len(payload) != SC_VDE_ACK_LENGTH:
+            raise ValueError(
+                f"application ACK은 정확히 {SC_VDE_ACK_LENGTH} bytes여야 합니다 "
+                f"(현재 {len(payload)})"
+            )
+    elif len(payload) not in SC_VDE_COMMAND_LENGTHS:
+        raise ValueError(
+            f"SC-VDE command 길이가 허용값이 아닙니다 ({len(payload)} bytes). "
+            f"허용: {sorted(SC_VDE_COMMAND_LENGTHS)}"
+        )
+
+
+def message_id_for_payload_format(payload_format: str) -> int | None:
+    """수신한 payload_format이 알려주는 Message Format(= Message ID)."""
+    return MESSAGE_ID_BY_PAYLOAD_FORMAT.get(payload_format)
+
+
 def to_submit_request(outbound: Outbound):
     """우리 `Outbound`를 VDETER `SubmitTransferRequest`로 바꾼다.
 
@@ -136,6 +205,15 @@ def to_submit_request(outbound: Outbound):
     """
     _require_vdeter()
     payload_format = payload_format_for(outbound.data_type)
+
+    # SC-VDE 노선·조종은 addressed 전용이고 application 길이가 정해져 있다
+    # (가이드 §8.3·§8.4). 어기면 VDETER가 거부하므로 여기서 먼저 막는다.
+    check_sc_vde_payload(payload_format.value, outbound.payload)
+    if payload_format.value in TEST_SCOPE_PAYLOAD_FORMATS:
+        if outbound.destination_id == BROADCAST_ID:
+            raise ValueError(
+                f"{payload_format.value}는 addressed 전용입니다 (broadcast 금지)"
+            )
 
     if outbound.destination_id == BROADCAST_ID:
         destination = Broadcast()

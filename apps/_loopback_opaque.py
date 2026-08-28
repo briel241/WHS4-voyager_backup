@@ -69,8 +69,30 @@ class _ReceiverApp:
             self.received.append(event.received_data)
 
 
-def _send_opaque(payload: bytes):
-    """ROC→MASS로 payload를 opaque 포맷으로 보내고 (전송상태, 수신 payload) 반환.
+def resolve_payload_format(preferred: str) -> tuple[str, bool]:
+    """이 빌드가 SC-VDE format을 지원하는지 보고 쓸 포맷을 고른다.
+
+    가이드 §17에 따라 SC-VDE codec은 별도 구현이라, 배포 build에 없으면
+    submit이 UNSUPPORTED_REQUEST를 낸다. 그때만 시험용 opaque로 내려간다.
+    """
+    try:
+        from vdeter.profiles.models import RegistryScope
+        from vdeter.profiles.payload_formats import entries_for
+    except ImportError:
+        return OPAQUE, False
+
+    try:
+        known = any(
+            entry.payload_format.value == preferred
+            for entry in entries_for(RegistryScope.TEST)
+        )
+    except Exception:
+        known = False
+    return (preferred, True) if known else (OPAQUE, False)
+
+
+def _send(payload: bytes, payload_format: str):
+    """ROC→MASS로 payload를 보내고 (전송상태, 수신 payload) 반환.
 
     전송마다 그룹을 격리한다(ACK 전송 연속 시 상태 얽힘 회피).
     """
@@ -88,7 +110,7 @@ def _send_opaque(payload: bytes):
 
         request = SubmitTransferRequest(
             destination=Addressed(MASS_A_STATION_ID),
-            payload_format=PayloadFormat(OPAQUE),
+            payload_format=PayloadFormat(payload_format),
             payload=payload,
             ack_required=True,
         )
@@ -112,17 +134,36 @@ def _send_opaque(payload: bytes):
 
 
 def run_scenario(title, message, checks) -> None:
-    """압축 메시지를 encode → opaque 전송 → 수신·복원·필드 검증 → 출력."""
-    payload = codec.encode(message)
-    state, received = _send_opaque(payload)
-    print(f"[{title}] 압축 payload {len(payload)} byte 제출")
+    """압축 메시지를 encode → 전송 → 수신·복원·필드 검증 → 출력.
+
+    SC-VDE format이 이 빌드에 있으면 계약대로 **봉투 없는 application bytes**를
+    보낸다(VPFI·MF는 VDETER가 붙임, 가이드 §8.2). 없으면 시험용 opaque로
+    내려가고, 그때는 우리 봉투 포함 형식을 그대로 쓴다.
+    """
+    preferred = bridge.PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND
+    payload_format, is_operational = resolve_payload_format(preferred)
+
+    if is_operational:
+        payload = codec.encode_body(message)
+        bridge.check_sc_vde_payload(payload_format, payload)
+    else:
+        payload = codec.encode(message)
+
+    state, received = _send(payload, payload_format)
+    scope = "SC-VDE 운영 포맷" if is_operational else "시험용 opaque"
+    print(f"[{title}] {scope} · application {len(payload)} byte 제출")
+    print(f"  payload_format: {payload_format}")
     print(f"  전송 상태     : {state.value}")
     byte_equal = bool(received) and received[0] == payload
     print(f"  수신 byte 일치: {byte_equal}")
     assert state is TransferState.COMPLETED, f"{title}: COMPLETED 아님 ({state})"
     assert byte_equal, f"{title}: 수신 byte 불일치"
 
-    decoded = codec.decode(received[0])
+    if is_operational:
+        message_id = bridge.message_id_for_payload_format(payload_format)
+        decoded = codec.decode_body(received[0], message_id)
+    else:
+        decoded = codec.decode(received[0])
     for label, actual, expected in checks(decoded):
         mark = "OK" if actual == expected else "FAIL"
         print(f"  {label}: {actual} (기대 {expected}) [{mark}]")
