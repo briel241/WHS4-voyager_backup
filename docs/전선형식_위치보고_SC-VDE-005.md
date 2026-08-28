@@ -1,4 +1,12 @@
-# 위치보고 — 전선 형식 (링크 팀 전달용)
+# 위치보고 — 전선 형식
+
+> **등록 완료** — `sc_vde.position_report`(VPFI `ff 7f`, Message Format 1, TEST scope)로
+> 링크 팀이 codec·registry를 반영했다. 우리 참조 벡터와 바이트 단위로 일치한다.
+>
+> **단 broadcast는 채택되지 않았다.** `DR-PAYLOAD-016` 승인에 따라
+> **addressed(MASS→ROC) · `ack_required=false` 전용**이다(아래 §요청사항 ③의 차선책).
+> AIS는 브로드캐스트지만 VDETER가 MASS-originated broadcast를 지원하지 않아 이렇게
+> 결정됐다. 실제 AIS 동작과 다른 점은 실험 해석 시 감안해야 한다.
 
 > 노선(SC-VDE-005)·원격조종(SC-VDE-006)이 성립하려면 ROC가 배의 현재 위치를 알아야 한다.
 > 이 문서는 그 위치보고의 전선 형식이다. 노선·조종과 **같은 carrier(`ff 7f`)** 를 쓰고

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from .outbound import (
     BROADCAST_ID,
     DATA_TYPE_AIS_AUTH_INTEGRITY,
+    DATA_TYPE_POSITION_REPORT,
     DATA_TYPE_ROUTE_CONTROL_ACK,
     DATA_TYPE_ROUTE_CONTROL_COMMAND,
     DATA_TYPE_X509_CERTIFICATE,
@@ -89,19 +90,25 @@ if VDETER_AVAILABLE:
 PAYLOAD_FORMAT_CERTIFICATE_REPORT = "x509.certificate_report"
 PAYLOAD_FORMAT_AIS_SCHEME1 = "ais.authentication_integrity.scheme1"
 
-#: SC-VDE 노선·조종 (TEST/PROJECT scope 전용, 가이드 §8.1)
+#: SC-VDE 노선·조종·위치보고 (TEST/PROJECT scope 전용, 가이드 §8.1)
 PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND = "sc_vde.route_control.command"
 PAYLOAD_FORMAT_ROUTE_CONTROL_ACK = "sc_vde.route_control.ack"
+PAYLOAD_FORMAT_POSITION_REPORT = "sc_vde.position_report"
 
 #: TEST scope에서만 조회되는 키. OPERATIONAL endpoint에서는
 #: UNSUPPORTED_REQUEST가 정상 결과다(가이드 §8.1).
 TEST_SCOPE_PAYLOAD_FORMATS = frozenset(
-    {PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND, PAYLOAD_FORMAT_ROUTE_CONTROL_ACK}
+    {
+        PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND,
+        PAYLOAD_FORMAT_ROUTE_CONTROL_ACK,
+        PAYLOAD_FORMAT_POSITION_REPORT,
+    }
 )
 
 #: 각 SC-VDE format이 싣는 Message Format(= 우리 Message ID).
 #: 수신 시 payload_format이 곧 message_id를 알려준다(application bytes에 없으므로).
 MESSAGE_ID_BY_PAYLOAD_FORMAT = {
+    PAYLOAD_FORMAT_POSITION_REPORT: 1,
     PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND: 2,
     PAYLOAD_FORMAT_ROUTE_CONTROL_ACK: 3,
 }
@@ -112,7 +119,11 @@ PAYLOAD_FORMAT_BY_DATA_TYPE = {
     DATA_TYPE_AIS_AUTH_INTEGRITY: PAYLOAD_FORMAT_AIS_SCHEME1,
     DATA_TYPE_ROUTE_CONTROL_COMMAND: PAYLOAD_FORMAT_ROUTE_CONTROL_COMMAND,
     DATA_TYPE_ROUTE_CONTROL_ACK: PAYLOAD_FORMAT_ROUTE_CONTROL_ACK,
+    DATA_TYPE_POSITION_REPORT: PAYLOAD_FORMAT_POSITION_REPORT,
 }
+
+#: 위치보고 application 길이 (본문 111 bit + padding 1 bit)
+SC_VDE_POSITION_REPORT_LENGTH = 14
 
 #: SC-VDE command의 허용 application byte 길이 (가이드 §8.3, n=0..16)
 SC_VDE_COMMAND_LENGTHS = frozenset(
@@ -179,7 +190,13 @@ def check_sc_vde_payload(payload_format: str, payload: bytes) -> None:
             "VDETER가 붙이므로 본문만 넣어야 합니다 (codec.encode_body 사용)."
         )
 
-    if payload_format == PAYLOAD_FORMAT_ROUTE_CONTROL_ACK:
+    if payload_format == PAYLOAD_FORMAT_POSITION_REPORT:
+        if len(payload) != SC_VDE_POSITION_REPORT_LENGTH:
+            raise ValueError(
+                f"위치보고는 정확히 {SC_VDE_POSITION_REPORT_LENGTH} bytes여야 합니다 "
+                f"(현재 {len(payload)})"
+            )
+    elif payload_format == PAYLOAD_FORMAT_ROUTE_CONTROL_ACK:
         if len(payload) != SC_VDE_ACK_LENGTH:
             raise ValueError(
                 f"application ACK은 정확히 {SC_VDE_ACK_LENGTH} bytes여야 합니다 "

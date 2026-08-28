@@ -52,6 +52,7 @@ from common.messages import application_ack as ack  # noqa: E402
 from common.messages import position_report as pos  # noqa: E402
 from common.messages import route_instruction as route  # noqa: E402
 from common.outbound import (  # noqa: E402
+    DATA_TYPE_POSITION_REPORT,
     DATA_TYPE_ROUTE_CONTROL_ACK,
     DATA_TYPE_ROUTE_CONTROL_COMMAND,
     Outbound,
@@ -205,14 +206,21 @@ class Simulation:
 
     # MASS→ROC. 위치보고가 이 길을 탄다.
     #
-    # 위치보고에는 등록된 payload_format이 아직 없어 VDETER로 보낼 수 없다.
-    # 그래서 전송 경로와 무관하게 직결로 넣는다. 등록되면 여기도 transport를
-    # 타게 하면 된다.
+    # sc_vde.position_report(MF 1)로 등록돼 transport를 탄다. addressed 전용이라
+    # broadcast가 아니라 ROC를 지정해 보낸다 (DR-PAYLOAD-016).
     def _deliver_to_roc(self, outbound: Outbound, now: float) -> None:
         if not self.link_up:
             self.dropped += 1
             return
-        self._roc_receives(outbound.payload, self.mass.mmsi, now)
+        ok, error = self.transport.send(
+            outbound.payload,
+            source_id=self.mass.mmsi,
+            destination_id=self.roc.mmsi,
+            data_type=DATA_TYPE_POSITION_REPORT,
+        )
+        if not ok:
+            self.dropped += 1
+            self._log(now, "MASS", "ROC", "lost", f"위치보고 전송 거부: {error}")
 
     # ROC(또는 누구든)→MASS. 명령이 MASS로 나가는 유일한 지점이다 (지시서 §8).
     # meta는 구동기가 표시·부수효과에 쓰는 정보이며 행위자에게는 가지 않는다.

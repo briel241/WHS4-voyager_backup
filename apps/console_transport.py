@@ -231,11 +231,15 @@ class VdeterTransport:
         except ValueError as exc:
             return False, str(exc)
 
+        # 위치보고는 no-ACK 전용이다(DR-PAYLOAD-016). ack_required=True로 내면
+        # INVALID_REQUEST로 거부된다. 명령·ACK은 링크 ACK을 받는다.
+        ack_required = fmt != bridge.PAYLOAD_FORMAT_POSITION_REPORT
+
         request = self._SubmitTransferRequest(
             destination=self._Addressed(station),
             payload_format=self._PayloadFormat(fmt),
             payload=application,
-            ack_required=True,
+            ack_required=ack_required,
         )
         accepted = service.submit(request)
         if not accepted.is_ok:
