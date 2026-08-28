@@ -201,7 +201,12 @@ def _der_int(value: int) -> bytes:
     return _tlv(_TAG_INTEGER, body)
 
 
-def _der_utf8(text: str) -> bytes:
+def _der_utf8(text) -> bytes:
+    # MMSI·IMO는 저장소 전체에서 정수로 다룬다(config.MASS_MMSI 등). 인증서
+    # 확장은 UTF8String이므로 여기서 문자열로 맞춘다. 정수를 넘겼을 때
+    # AttributeError로 죽지 않게 하려는 것이다.
+    if not isinstance(text, str):
+        text = str(text)
     return _tlv(_TAG_UTF8_STRING, text.encode("utf-8"))
 
 
