@@ -331,6 +331,58 @@ class ScVdeEndToEndTest(unittest.TestCase):
             SubmitTransferRequest.__slots__,
         )
 
+    def test_TC_PAYLOAD_003_three_endpoints_share_the_approved_fingerprint(self):
+        # §13.2: 세 endpoint 사이 registry fingerprint가 같고 §7.3 승인 TEST
+        # 기대값과도 exact 일치한다.
+        approved_test_fingerprint = (
+            "438f4cc8207deb77b9994e24d57cf9b4279713e59bc2f94f2a9739d371dd8434"
+        )
+        fingerprints = {
+            endpoint._presentation.registry_fingerprint()
+            for endpoint in self.group.endpoints
+        }
+        self.assertEqual({approved_test_fingerprint}, fingerprints)
+
+
+class ScVdeOperationalScopeServiceTest(unittest.TestCase):
+    """`AUTH-SCOPE-01`/§9.1: OPERATIONAL scope endpoint의 SC-VDE 운영 사용 거부.
+
+    TEST 전용 entry는 OPERATIONAL registry에 없으므로 submit이 Phase A
+    `encoded_size_bound` lookup에서 `UNSUPPORTED_REQUEST`로 거부되고 공개
+    transfer ID·Service record를 만들지 않는다.
+    """
+
+    def test_TC_PAYLOAD_003_operational_endpoint_rejects_sc_vde_submit_in_phase_a(self):
+        from vdeter.profiles.models import RegistryScope
+
+        clock, group = build_stage5_software_group(
+            payload_scope=RegistryScope.OPERATIONAL, type0_override=FAST_TYPE0
+        )
+        try:
+            start_stage5_group(clock, group)
+            roc = group.by_station()[ROC_STATION_ID.value]
+            mass = group.by_station()[MASS_A_STATION_ID.value]
+            for source, destination_station, payload_format, payload in (
+                (roc, MASS_A_STATION_ID, COMMAND, pack_command_application(waypoints=_waypoints(2))),
+                (mass, ROC_STATION_ID, ACK, pack_ack_application()),
+            ):
+                with self.subTest(payload_format=payload_format.value):
+                    transfers_before = set(source._transfers)
+                    result = source.submit(
+                        SubmitTransferRequest(
+                            destination=Addressed(destination_station),
+                            payload_format=payload_format,
+                            payload=payload,
+                            ack_required=False,
+                        )
+                    )
+                    self.assertTrue(result.is_err)
+                    self.assertEqual("UNSUPPORTED_REQUEST", result.error.code)
+                    self.assertIsNone(result.error.transfer_id)
+                    self.assertEqual(transfers_before, set(source._transfers))
+        finally:
+            group.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

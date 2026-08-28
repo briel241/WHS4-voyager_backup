@@ -336,8 +336,10 @@ class ScVdeCommandLengthTest(unittest.TestCase):
             waypoints=((77_430_000, 21_060_000, 30, 60, 1),) * 2
         )
         wire = command_wire(application)
-        # header truncation과 fixed body truncation은 PROTOCOL truncated다.
-        for cut in (3, 4, 12):
+        # header truncation, fixed body truncation과 waypoint 가변 field 중간
+        # 절단(cut=20: 첫 waypoint 내부, cut=25: 두 번째 waypoint 내부)은 모두
+        # PROTOCOL truncated다.
+        for cut in (3, 4, 12, 20, 25):
             with self.subTest(cut=cut):
                 result = self.codec.decode(wire[:cut])
                 self.assertTrue(result.is_err)
@@ -423,13 +425,8 @@ class ScVdeCommandFieldBoundaryTest(unittest.TestCase):
         self._assert_accepts(month=0, day=0, hour=24, minute=60)  # 전체 N/A
         self._assert_accepts(month=1, day=1, hour=0, minute=0)
         self._assert_accepts(month=12, day=31, hour=23, minute=59)
-        # 혼합 N/A와 범위 밖 값은 거부한다.
+        # 범위 밖 값은 거부한다.
         for overrides in (
-            dict(month=0, day=1, hour=0, minute=0),
-            dict(month=1, day=0, hour=0, minute=0),
-            dict(month=1, day=1, hour=24, minute=0),
-            dict(month=1, day=1, hour=0, minute=60),
-            dict(month=0, day=0, hour=24, minute=59),
             dict(month=13, day=1, hour=0, minute=0),
             dict(month=15, day=1, hour=0, minute=0),
             dict(month=1, day=1, hour=25, minute=0),
@@ -438,6 +435,19 @@ class ScVdeCommandFieldBoundaryTest(unittest.TestCase):
             dict(month=1, day=1, hour=0, minute=63),
         ):
             self._assert_rejects(**overrides)
+
+    def test_TC_PAYLOAD_001_every_mixed_na_start_tuple_is_rejected(self):
+        # §6.4.8: N/A는 `0/0/24/60` 전체 tuple만 허용한다. field별 N/A 표지와 정상
+        # 값이 섞인 나머지 14개 조합은 모두 혼합 N/A로 거부한다.
+        na_tuple = dict(month=0, day=0, hour=24, minute=60)
+        normal_tuple = dict(month=6, day=15, hour=12, minute=30)
+        for mask in range(1, 15):  # 0b0001..0b1110: 전체 N/A(15)와 전체 정상(0) 제외
+            overrides = {
+                name: (na_tuple[name] if mask & bit else normal_tuple[name])
+                for bit, name in ((8, "month"), (4, "day"), (2, "hour"), (1, "minute"))
+            }
+            with self.subTest(**overrides):
+                self._assert_rejects(**overrides)
 
     def test_TC_PAYLOAD_001_duration_full_width_is_allowed(self):
         for duration in (0, 262_142, 262_143):
