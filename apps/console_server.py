@@ -51,7 +51,13 @@ from common.codec import decode  # noqa: E402
 from common.messages import application_ack as ack  # noqa: E402
 from common.messages import position_report as pos  # noqa: E402
 from common.messages import route_instruction as route  # noqa: E402
-from common.outbound import Outbound  # noqa: E402
+from common.outbound import (  # noqa: E402
+    DATA_TYPE_ROUTE_CONTROL_ACK,
+    DATA_TYPE_ROUTE_CONTROL_COMMAND,
+    Outbound,
+)
+
+from apps.console_transport import build_transport  # noqa: E402
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console_static")
 STATIC_FILES = {
@@ -98,10 +104,14 @@ _FALLBACK_ORIGIN = (START_LATITUDE, START_LONGITUDE)
 class Simulation:
     """두 행위자를 잇고, 화면에 낼 스냅샷을 만든다. 모든 공개 메서드는 락을 잡는다."""
 
-    def __init__(self) -> None:
+    def __init__(self, transport_kind: str = "direct") -> None:
         self.lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
+        # 전송 경로. vdeter를 못 만들면 사유와 함께 direct로 내려간다.
+        self.transport, self.transport_note = build_transport(
+            transport_kind, mass_mmsi=config.MASS_MMSI, roc_mmsi=config.ROC_MMSI
+        )
         self._reset_unlocked()
 
     # ---------------------------------------------------------------- 초기화
@@ -129,6 +139,8 @@ class Simulation:
         # 덮어써지므로 표시용 이력은 여기서 따로 갖는다.
         self._history: list[dict] = []
         self._current_linkage: int | None = None
+        # ACK가 도착했을 때 원 명령을 찾기 위한 표. 전송이 비동기라 필요하다.
+        self._meta_by_linkage: dict[int, dict] = {}
 
         # 화면용 누적 자료
         self.track: list[tuple[float, float]] = []
@@ -174,19 +186,35 @@ class Simulation:
                 self._deliver_to_roc(out, now)
             self.roc.tick(now)
             self._drain_pending(now)
+            self._pump_transport(now)
             self._record_track()
             self._build_snapshot_unlocked()
 
+    # 전송 경로에서 도착한 payload를 수신 행위자에게 넣는다.
+    #
+    # 직결이면 같은 스텝에 도착하고, VDETER면 시계가 진행된 뒤 몇 스텝 후에
+    # 도착한다. 구동기는 그 차이를 몰라도 된다.
+    def _pump_transport(self, now: float) -> None:
+        for arrival in self.transport.pump():
+            if arrival.destination_id == self.mass.mmsi:
+                self._mass_receives(arrival.payload, arrival.source_id, now)
+            elif arrival.destination_id == self.roc.mmsi:
+                self._roc_receives(arrival.payload, arrival.source_id, now)
+
     # ---------------------------------------------------------------- 전달
 
-    # MASS→ROC. 위치보고와 응용 ACK가 이 길을 탄다.
+    # MASS→ROC. 위치보고가 이 길을 탄다.
+    #
+    # 위치보고에는 등록된 payload_format이 아직 없어 VDETER로 보낼 수 없다.
+    # 그래서 전송 경로와 무관하게 직결로 넣는다. 등록되면 여기도 transport를
+    # 타게 하면 된다.
     def _deliver_to_roc(self, outbound: Outbound, now: float) -> None:
         if not self.link_up:
             self.dropped += 1
             return
-        self.roc.receive(outbound.payload, source_id=self.mass.mmsi, now=now)
+        self._roc_receives(outbound.payload, self.mass.mmsi, now)
 
-    # ROC(또는 누구든)→MASS. 명령이 MASS에 들어가는 유일한 지점이다 (지시서 §8).
+    # ROC(또는 누구든)→MASS. 명령이 MASS로 나가는 유일한 지점이다 (지시서 §8).
     # meta는 구동기가 표시·부수효과에 쓰는 정보이며 행위자에게는 가지 않는다.
     def deliver_to_mass(
         self, outbound: Outbound, source_id: int, now: float, meta: dict | None = None
@@ -200,11 +228,35 @@ class Simulation:
             self._log(now, sender, "MASS", "lost", f"{text} — 링크 두절로 전달 실패")
             return
 
+        # ACK가 돌아왔을 때 어떤 명령이었는지 찾을 수 있게 남긴다.
+        linkage = meta.get("linkage_id")
+        if linkage is not None:
+            self._meta_by_linkage[linkage] = dict(meta, sender=sender, text=text)
+
+        ok, error = self.transport.send(
+            outbound.payload,
+            source_id=source_id,
+            destination_id=self.mass.mmsi,
+            data_type=DATA_TYPE_ROUTE_CONTROL_COMMAND,
+        )
+        if not ok:
+            self.dropped += 1
+            self._log(now, sender, "MASS", "lost", f"{text} — 전송 거부: {error}")
+            return
+
         self._log(now, sender, "MASS", "send", text)
-        replies = self.mass.receive(outbound.payload, source_id=source_id, now=now)
+
+    # ------------------------------------------------------- 수신 (도착 시점)
+
+    # MASS가 payload를 받는다. 응답(ACK)이 나오면 다시 전송 경로로 돌려보낸다.
+    def _mass_receives(self, payload: bytes, source_id: int, now: float) -> None:
+        sender = self._station_name(source_id)
+        replies = self.mass.receive(payload, source_id=source_id, now=now)
 
         for reply in replies:
             verdict = self._read_ack(reply)
+            meta = self._meta_by_linkage.get(verdict["linkage_id"], {})
+            text = meta.get("text", "명령")
             self._apply_verdict(meta, verdict)
             self.mass_log.append(
                 {
@@ -228,9 +280,25 @@ class Simulation:
                 verdict["status_name"]
                 + ("" if verdict["accepted"] else f" ({verdict['reason_name']})"),
             )
-            self._deliver_to_roc(reply, now)
-            if self.link_up:
-                self._record_answer(verdict, now)
+            if not self.link_up:
+                self.dropped += 1
+                continue
+            ok, error = self.transport.send(
+                reply.payload,
+                source_id=self.mass.mmsi,
+                destination_id=source_id,
+                data_type=DATA_TYPE_ROUTE_CONTROL_ACK,
+            )
+            if not ok:
+                self.dropped += 1
+                self._log(now, "MASS", sender, "lost", f"ACK 전송 거부: {error}")
+
+    # ROC가 payload를 받는다. 위치보고면 항적이 갱신되고, ACK면 이력에 적힌다.
+    def _roc_receives(self, payload: bytes, source_id: int, now: float) -> None:
+        self.roc.receive(payload, source_id=source_id, now=now)
+        verdict = self._read_ack_payload(payload)
+        if verdict is not None:
+            self._record_answer(verdict, now)
 
     # 큐에 쌓인 ROC 명령을 MASS에게 넘긴다.
     def _drain_pending(self, now: float) -> None:
@@ -251,6 +319,23 @@ class Simulation:
                 item["accepted"] = verdict["accepted"]
                 item["answered_at"] = now
                 return
+
+    # payload가 응용 ACK면 판정을 돌려주고, 아니면 None (위치보고 등).
+    def _read_ack_payload(self, payload: bytes) -> dict | None:
+        try:
+            message = decode(payload)
+        except ValueError:
+            return None
+        if not isinstance(message, ack.ApplicationAck):
+            return None
+        status = message.status
+        return {
+            "linkage_id": message.linkage_id,
+            "status": status,
+            "status_name": ack.STATUS_NAMES.get(status, f"reserved({status})"),
+            "reason_name": ack.REASON_NAMES.get(message.reason, "?"),
+            "accepted": status == ack.STATUS_ACKNOWLEDGED,
+        }
 
     # MASS가 돌려준 응용 ACK를 읽는다. 해석에 실패하면 label로 대신한다.
     def _read_ack(self, reply: Outbound) -> dict:
@@ -548,6 +633,12 @@ class Simulation:
             "t": round(now, 1),
             "link_up": self.link_up,
             "dropped": self.dropped,
+            "transport": {
+                "name": self.transport.name,
+                "detail": self.transport.detail,
+                "operational": self.transport.operational,
+                **self.transport.stats(),
+            },
             "mass": {
                 "mmsi": mass.mmsi,
                 "lat": round(state.latitude, 6),
@@ -712,9 +803,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="MASS/ROC 콘솔 GUI 서버")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--transport",
+        choices=("direct", "vdeter"),
+        default="direct",
+        help="direct=무선 계층 없이 직결(기본), vdeter=실 VDETER Service API 종단",
+    )
     args = parser.parse_args(argv)
 
-    simulation = Simulation()
+    simulation = Simulation(transport_kind=args.transport)
     ConsoleHandler.simulation = simulation
 
     server = ThreadingHTTPServer((args.host, args.port), ConsoleHandler)
@@ -722,6 +819,9 @@ def main(argv=None) -> int:
     simulation.start()
 
     base = f"http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}"
+    print(f"전송 경로: {simulation.transport.name} — {simulation.transport.detail}")
+    if simulation.transport_note:
+        print(f"  ⚠ vdeter를 쓸 수 없어 direct로 내려갔습니다: {simulation.transport_note}")
     print("MASS/ROC 콘솔이 떴습니다. 두 창을 나란히 여세요.")
     print(f"  ROC  콘솔  {base}/roc")
     print(f"  MASS 콘솔  {base}/mass")
