@@ -47,7 +47,7 @@ def main() -> int:
     if not preflight():
         return 0
 
-    print("=== VDETER 소프트웨어 무선 loopback — SC-VDE-006 원격 조종 (⚠ 시험용 opaque 포맷) ===\n")
+    print("=== VDETER 소프트웨어 무선 loopback — SC-VDE-006 원격 조종 ===\n")
     run_scenario(
         "SC-VDE-006 원격조종", _make_control(),
         lambda d: [
@@ -57,7 +57,7 @@ def main() -> int:
         ],
     )
     print("PASS: 원격조종 payload가 실 VDETER 스택을 종단 왕복하고 heading·fallback·SOG 복원")
-    print("주의: 운영 종단은 노선용 payload_format이 VDETER registry에 등록돼야 완성됨(링크 팀).")
+    print("주의: SC-VDE는 서명·replay 보호가 없는 TEST 전용이다. 실제 조타에 쓰지 않는다.")
     return 0
 
 

@@ -1,4 +1,7 @@
-"""노선·조종 loopback 공용 하네스 (opaque 포맷).
+"""노선·조종 loopback 공용 하네스.
+
+빌드에 SC-VDE codec이 있으면 운영 포맷(`sc_vde.route_control.command`)으로,
+없으면 시험용 opaque로 자동 전환한다.
 
 `route_loopback_demo.py`(노선)와 `control_loopback_demo.py`(조종)가 공유하는 부분:
 VDETER 소프트웨어 무선 그룹 조립, opaque 포맷 전송, 공식 `HandlerServiceEventSink`
