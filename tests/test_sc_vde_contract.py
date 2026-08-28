@@ -188,6 +188,81 @@ def test_data_type_mapping() -> None:
         print(f"  {data_type} → {expected} [OK]")
 
 
+def test_ack_status_reachability() -> None:
+    """명세에 공표한 ACK 값이 실제로 나오는지 — 예약값은 나오지 않는지.
+
+    문서가 광고하는 값을 코드가 못 만들면 이 형식을 읽는 사람이 오해한다.
+    반대로 예약이라 적어 둔 값이 나가도 계약 위반이다.
+    """
+    from MASS.mass_agent import MassAgent, ShipState
+
+    def issue(**kw):
+        """지시 하나를 보내고 돌아온 ACK의 (status, reason)."""
+        mass = MassAgent(state=ShipState(latitude=35.0, longitude=129.0, sog=12.0))
+        mass.authority_policy = kw.pop("policy", None)
+        source_id = kw.pop("source_id", 440_000_002)
+        mass.tick(0.0)
+        message = route.RouteInstruction(
+            linkage_id=9,
+            sender_classification=kw.pop("sender", route.SENDER_AUTHORITY),
+            route_type=kw.pop("route_type", route.ROUTE_TYPE_MANDATORY),
+            **kw,
+        )
+        replies = mass.receive(codec.encode(message), source_id=source_id, now=1.0)
+        answer = codec.decode(replies[0].payload)
+        return answer.status, answer.reason
+
+    far = [route.waypoint_from_degrees(129.5, 35.5), route.waypoint_from_degrees(129.6, 35.6)]
+    same = [route.waypoint_from_degrees(129.5, 35.5)] * 2
+
+    produced = {
+        issue(waypoints=far)[0],                                    # acknowledged
+        issue(waypoints=[])[0],                                     # incomplete
+        issue(waypoints=far, sender=5)[0],                          # errors (예약값)
+        issue(waypoints=same)[0],                                   # route issues
+        issue(waypoints=far, source_id=999, policy=lambda s, m: s == 440_000_002)[0],
+    }
+
+    expected = {
+        ack.STATUS_ACKNOWLEDGED,
+        ack.STATUS_INCOMPLETE,
+        ack.STATUS_ERRORS,
+        ack.STATUS_ROUTE_ISSUES,
+    }
+    missing = expected - produced
+    assert not missing, f"명세에 있으나 코드가 못 만드는 status: {sorted(missing)}"
+    assert ack.STATUS_RECEIVED not in produced, (
+        "STATUS_RECEIVED(0)은 예약값이라 송신하지 않아야 한다"
+    )
+    for name in sorted(ack.STATUS_NAMES[s] for s in produced):
+        print(f"  status {name} 도달 가능 [OK]")
+    print("  status received(0) 미송신 — 예약 유지 [OK]")
+
+    # Reason도 같은 방식으로 확인한다.
+    reasons = {
+        issue(waypoints=far)[1],
+        issue(waypoints=[])[1],
+        issue(waypoints=far, source_id=999, policy=lambda s, m: s == 440_000_002)[1],
+    }
+    for reason in (ack.REASON_NONE, ack.REASON_ROUTE_UNSUITABLE, ack.REASON_NOT_AUTHORIZED):
+        assert reason in reasons, f"reason {ack.REASON_NAMES[reason]}에 도달하지 못함"
+
+    # REASON_EXPIRED는 지시 응답이 아니라 만료 통지로 나온다.
+    mass = MassAgent(state=ShipState(latitude=35.0, longitude=129.0, sog=12.0))
+    mass.tick(0.0)
+    mass.receive(
+        codec.encode(route.RouteInstruction(
+            waypoints=far, linkage_id=42,
+            sender_classification=route.SENDER_AUTHORITY,
+            route_type=route.ROUTE_TYPE_MANDATORY, duration=1)),
+        source_id=440_000_002, now=1.0)
+    notices = [o for o in mass.tick(62.0) if o.label == "Route Expired"]
+    assert notices, "유효기간이 지났는데 만료 통지가 없다"
+    expired = codec.decode(notices[0].payload)
+    assert expired.reason == ack.REASON_EXPIRED, expired.reason
+    print("  reason none·route_unsuitable·not_authorized·expired 도달 가능 [OK]")
+
+
 def main() -> int:
     tests = [
         ("승인 참조 벡터 (노선·조종)", test_reference_vectors),
@@ -197,6 +272,7 @@ def main() -> int:
         ("길이 규칙", test_length_rules),
         ("broadcast 금지", test_broadcast_is_rejected),
         ("data_type 매핑", test_data_type_mapping),
+        ("ACK 값 도달 가능성", test_ack_status_reachability),
     ]
     for name, fn in tests:
         print(f"[{name}]")

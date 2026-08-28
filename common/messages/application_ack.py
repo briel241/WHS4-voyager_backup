@@ -43,7 +43,17 @@ REASON_BITS = 3
 BODY_BITS = LINKAGE_ID_BITS + STATUS_BITS + REASON_BITS
 
 # Status - S-421 routeInfoStatus 코드에 정렬한다.
-STATUS_RECEIVED = 0        # 본 프로젝트: 수신했으나 아직 처리 전 (S-421 외)
+#
+# STATUS_RECEIVED(0)은 S-421에 없는 본 프로젝트 예약값이며 **송신하지 않는다.**
+#
+#   "수신했다"는 링크 계층 ACK가 이미 답한다. 응용 ACK은 판정 결과만 나르는
+#   것이 SN.1/Circ.289가 두 층위를 구분한 취지다(모듈 상단 인용 참조).
+#   게다가 MassAgent는 receive() 안에서 검증·판정을 끝내므로 "접수했으나
+#   판정 전"이라는 구간 자체가 없다. 판정 전에는 아무것도 보내지 않고
+#   발신 측(RocAgent.unanswered)이 미응답으로 관리한다.
+#
+#   판정을 비동기로 바꾸게 되면 이 값을 쓴다. 그전까지 값만 정의해 둔다.
+STATUS_RECEIVED = 0        # 예약 - 현재 미사용 (S-421 외)
 STATUS_ACKNOWLEDGED = 4    # S-421 Acknowledged - 정상 수신·검증
 STATUS_ERRORS = 7          # S-421 Errors - 스키마/응용 검증 오류
 STATUS_INCOMPLETE = 8      # S-421 Incomplete - 필요한 필드 누락

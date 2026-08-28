@@ -76,14 +76,25 @@ ACK은 `sc_vde.route_control.ack` 키로 **따로 submit** 한다. 링크의 `ac
 만드는 전달 ACK과는 별개이며, 자동 생성되지 않는다. MASS는 명령을 해석한 뒤 업무 정책에
 따라 ACK 본문을 만들어 별도 `submit()`을 호출해야 한다.
 
-| 필드                 | bit | 값                                                              |
-| ------------------ |:---:| -------------------------------------------------------------- |
-| Message Linkage ID | 10  | 원 명령의 linkage_id                                               |
-| Status             | 4   | 4=Acknowledged,7=Errors,8=Incomplete,9=Route issues,0=received |
-| Reason             | 3   | 0=none,1=route_unsuitable,2=expired,3=not_authorized           |
+| 필드                 | bit | 값                                                                    |
+| ------------------ |:---:| -------------------------------------------------------------------- |
+| Message Linkage ID | 10  | 원 명령의 linkage_id                                                     |
+| Status             | 4   | 4=Acknowledged, 7=Errors, 8=Incomplete, 9=Route issues (0=예약, 아래 참고) |
+| Reason             | 3   | 0=none,1=route_unsuitable,2=expired,3=not_authorized                 |
 
 정상 수신(Linkage 7, Acknowledged, Reason None) 예시: `01 d0 00` — 여기에도 `ff 7f 03`을
 붙이지 않는다.
+
+**Status 4·7·8·9는 S-421 Ed.1.0.0의 `routeInfoStatus` 코드다.** Status `0`은 S-421에 없는
+본 프로젝트 예약값이며 **현재 송신하지 않는다.**
+
+"수신했다"는 링크 계층 ACK(`ack_required`)이 이미 답하고, 응용 ACK은 판정 결과만
+나른다 — IMO SN.1/Circ.289가 두 층위를 구분하라고 정한 대로다. 우리 MASS는 수신과
+동시에 검증·판정을 끝내므로 "접수했으나 판정 전"이라는 구간이 존재하지 않는다.
+판정 전에는 아무것도 보내지 않고, 발신 측이 미응답으로 관리한다.
+
+codec은 0을 유효 raw로 받아들이되(구조 검증), 응용이 이 값을 만들지는 않는다.
+나중에 판정을 비동기로 바꾸게 되면 이 자리를 쓴다.
 
 ## 남은 조건
 
