@@ -286,7 +286,7 @@ def _control_to_route_instruction(control: dict) -> route.RouteInstruction:
         ))
     return route.RouteInstruction(
         waypoints=waypoints,
-        heading_setpoint=round(control["headingSetPoint"] * route.HEADING_SETPOINT_SCALE),
+        heading_setpoint=route.heading_setpoint_from_degrees(control["headingSetPoint"]),
         fallback_state=_FALLBACK_CODE.get(control.get("fallbackState"), route.FALLBACK_NONE),
     )
 

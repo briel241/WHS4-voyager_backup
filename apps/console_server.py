@@ -79,6 +79,9 @@ START_LONGITUDE = 129.120
 START_HEADING = 60.0
 DEFAULT_SOG_KNOTS = 12.0
 
+# 콘솔 시연용 위치보고 주기(초). 표준 주기는 MassAgent 기본값(None)이 따른다.
+DEMO_REPORT_INTERVAL_SEC = 2.0
+
 # 항적·로그 보관 상한 (지시서 §7.2)
 TRACK_MAX_POINTS = 600
 LOG_MAX_ENTRIES = 200
@@ -124,7 +127,11 @@ class Simulation:
                 longitude=START_LONGITUDE,
                 heading=START_HEADING,
                 sog=DEFAULT_SOG_KNOTS,
-            )
+            ),
+            # 시연용 고정 주기. AIS 표준 주기(12노트면 10초)로 두면 화면의
+            # 항적이 뚝뚝 끊겨 보이므로 콘솔에서만 빠르게 둔다. 채널 부하를
+            # 재는 실험에서는 이 값을 None으로 두어 표준 주기를 써야 한다.
+            report_interval=DEMO_REPORT_INTERVAL_SEC,
         )
         self.roc = RocAgent()
         self.started = time.monotonic()
@@ -212,15 +219,21 @@ class Simulation:
         if not self.link_up:
             self.dropped += 1
             return
+        # tick()은 위치보고 외에 항로 만료 통지(응용 ACK)도 낼 수 있다.
+        # Outbound가 스스로 밝힌 분류를 쓰고, 없으면 위치보고로 본다.
+        data_type = outbound.data_type or DATA_TYPE_POSITION_REPORT
         ok, error = self.transport.send(
             outbound.payload,
             source_id=self.mass.mmsi,
             destination_id=self.roc.mmsi,
-            data_type=DATA_TYPE_POSITION_REPORT,
+            data_type=data_type,
         )
         if not ok:
             self.dropped += 1
-            self._log(now, "MASS", "ROC", "lost", f"위치보고 전송 거부: {error}")
+            self._log(now, "MASS", "ROC", "lost",
+                      f"{outbound.label or '위치보고'} 전송 거부: {error}")
+        elif outbound.label == "Route Expired":
+            self._log(now, "MASS", "ROC", "reject", "항로 유효기간 만료")
 
     # ROC(또는 누구든)→MASS. 명령이 MASS로 나가는 유일한 지점이다 (지시서 §8).
     # meta는 구동기가 표시·부수효과에 쓰는 정보이며 행위자에게는 가지 않는다.

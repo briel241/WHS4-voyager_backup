@@ -102,6 +102,16 @@ TURN_RADIUS_SCALE = 100
 PLANNED_SOG_NOT_AVAILABLE = 1023
 PLANNED_SOG_SCALE = 10
 
+# 유효 raw 상한·순환값. not available 센티널과의 충돌을 막는다.
+#
+# 반올림 결과가 센티널과 같아지면 유효한 지시가 "지시 없음"으로 둔갑한다.
+# 예: 침로 359.95도는 round(3599.5)=3600이 되어 HEADING_SETPOINT_NOT_AVAILABLE과
+# 구별되지 않는다. 침로는 순환값이므로 3600을 0으로 되돌리고(359.95 ≈ 360 = 0),
+# 선회반경·계획속력은 순환하지 않으므로 상한에 붙인다.
+HEADING_SETPOINT_MODULO = 3600   # 0..3599 (0.1도 단위)
+TURN_RADIUS_MAX = 1022           # 10.22 NM 이상
+PLANNED_SOG_MAX = 1022           # 102.2 knots 이상
+
 # Leg Geometry - S-421 routeWaypointLegGeometryType
 LEG_GEOMETRY_NONE = 0
 LEG_GEOMETRY_LEXODROME = 1   # 등각항로 (rhumb line)
@@ -182,6 +192,16 @@ class Waypoint:
         return LEG_GEOMETRY_NAMES.get(self.leg_geometry, f"reserved({self.leg_geometry})")
 
 
+# 목표 침로(도)를 raw로 바꾼다. None이면 not available이다.
+#
+# 침로는 순환값이므로 360도는 0도와 같다. 그대로 반올림하면 359.95도가
+# 3600(= not available)이 되어 "침로 지시 없음"으로 둔갑하므로 modulo를 쓴다.
+def heading_setpoint_from_degrees(degrees: float | None) -> int:
+    if degrees is None:
+        return HEADING_SETPOINT_NOT_AVAILABLE
+    return round(degrees * HEADING_SETPOINT_SCALE) % HEADING_SETPOINT_MODULO
+
+
 # 도 단위 좌표로 Waypoint를 만든다. 제어 필드는 실측값(NM·knot)으로 받는다.
 def waypoint_from_degrees(
     longitude_degrees: float,
@@ -195,11 +215,11 @@ def waypoint_from_degrees(
         latitude=coordinates.latitude_to_raw(latitude_degrees),
         turn_radius=(
             TURN_RADIUS_NOT_AVAILABLE if turn_radius_nm is None
-            else round(turn_radius_nm * TURN_RADIUS_SCALE)
+            else min(max(round(turn_radius_nm * TURN_RADIUS_SCALE), 0), TURN_RADIUS_MAX)
         ),
         planned_sog=(
             PLANNED_SOG_NOT_AVAILABLE if planned_sog_knots is None
-            else round(planned_sog_knots * PLANNED_SOG_SCALE)
+            else min(max(round(planned_sog_knots * PLANNED_SOG_SCALE), 0), PLANNED_SOG_MAX)
         ),
         leg_geometry=leg_geometry,
     )

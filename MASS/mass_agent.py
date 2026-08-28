@@ -28,7 +28,7 @@ from common.messages import application_ack as ack
 from common.messages import navigational_warning as warn
 from common.messages import position_report as pos
 from common.messages import route_instruction as route
-from common.outbound import BROADCAST_ID, Outbound
+from common.outbound import BROADCAST_ID, DATA_TYPE_ROUTE_CONTROL_ACK, Outbound
 
 # 한 waypoint에 이 거리 안으로 들어오면 통과한 것으로 본다.
 DEFAULT_ARRIVAL_RADIUS_NM = 0.05
@@ -81,15 +81,30 @@ class MassAgent:
     state: ShipState = field(
         default_factory=lambda: ShipState(latitude=35.0, longitude=129.0)
     )
-    report_interval: float = config.POSITION_REPORT_INTERVAL_SEC
+    # None이면 AIS Class A 표준 주기(속력·선회에 따라 가변)를 따른다.
+    # 고정 주기가 필요하면 초 단위 값을 준다.
+    report_interval: float | None = None
     max_turn_rate: float = DEFAULT_MAX_TURN_RATE
     arrival_radius: float = DEFAULT_ARRIVAL_RADIUS_NM
+
+    # 항로 지시를 받아들일 송신국 판정. 기본값 None은 "누구든 받는다"이며,
+    # 이는 VDE-TER 표준에 송신자 인증이 없다는 현재 상태를 그대로 재현한 것이다
+    # (그 부재가 이 프로젝트의 연구 대상이다).
+    #
+    # 방어 기법을 실험할 때 여기에 판정 함수를 넣으면 거부 경로가 살아난다.
+    #
+    #     mass.authority_policy = lambda source_id, message: source_id == ROC_MMSI
+    #
+    # 반환이 False면 STATUS_ERRORS / REASON_NOT_AUTHORIZED로 거절한다.
+    authority_policy: object = None
 
     def __post_init__(self) -> None:
         self._waypoints: list[route.Waypoint] = []
         self._waypoint_index = 0
         self._route_linkage_id = route.LINKAGE_ID_NOT_AVAILABLE
         self._route_expires_at: float | None = None
+        # 현재 항로를 발행한 국. 만료 통지를 보낼 곳이다.
+        self._route_issuer: int | None = None
         self._leg_origin: tuple[float, float] | None = None
         self._rate_of_turn: float | None = None
         self._last_report_at: float | None = None
@@ -123,6 +138,34 @@ class MassAgent:
     def remaining_waypoints(self) -> int:
         return max(len(self._waypoints) - self._waypoint_index, 0)
 
+    # 지금 상태에서 다음 위치보고까지의 간격(초).
+    #
+    # report_interval을 명시로 주면 그 값을 쓰고(시험·시연용 고정 주기),
+    # None이면 AIS Class A 표준 주기를 따른다.
+    def _report_interval(self) -> float:
+        if self.report_interval is not None:
+            return self.report_interval
+
+        sog = abs(self.state.sog)
+        turning = (
+            self._rate_of_turn is not None
+            and abs(self._rate_of_turn) > config.TURNING_RATE_THRESHOLD
+        )
+
+        if sog <= config.SPEED_ANCHORED_MAX and not turning:
+            return config.POSITION_REPORT_INTERVAL_ANCHORED
+        if sog <= config.SPEED_SLOW_MAX:
+            return (
+                config.POSITION_REPORT_INTERVAL_SLOW_TURNING if turning
+                else config.POSITION_REPORT_INTERVAL_SLOW
+            )
+        if sog <= config.SPEED_MEDIUM_MAX:
+            return (
+                config.POSITION_REPORT_INTERVAL_MEDIUM_TURNING if turning
+                else config.POSITION_REPORT_INTERVAL_MEDIUM
+            )
+        return config.POSITION_REPORT_INTERVAL_FAST
+
     # 현재 상태로 위치보고를 만든다.
     def position_report(self, now: float = 0.0) -> pos.PositionReport:
         return pos.from_measurements(
@@ -133,6 +176,10 @@ class MassAgent:
             heading_degrees=round(self.state.heading) % 360,
             navigation_status=self.state.navigation_status,
             rate_of_turn=navigation.rot_to_ais(self._rate_of_turn),
+            # AIS Timestamp는 보고를 만든 UTC 초(0-59)다. 이 행위자는 UTC를
+            # 읽지 않고 tick(now)로 주입받은 시뮬레이션 경과 초를 쓰므로,
+            # 값의 자릿수와 갱신 양상만 표준과 같고 절대 시각은 아니다.
+            # 실장비 연동에서 UTC를 다루게 되면 여기를 바꾼다.
             timestamp=int(now) % 60,
             autonomy_mode=self.state.autonomy_mode,
         )
@@ -145,20 +192,20 @@ class MassAgent:
             self._advance(now - self._last_tick_at)
         self._last_tick_at = now
 
-        self._expire_route(now)
+        outbound = self._expire_route(now)
         self._expire_warnings(now)
 
-        if self._last_report_at is None or now - self._last_report_at >= self.report_interval:
+        if self._last_report_at is None or now - self._last_report_at >= self._report_interval():
             self._last_report_at = now
-            return [
+            outbound.append(
                 Outbound(
                     payload=encode(self.position_report(now)),
                     destination_id=BROADCAST_ID,
                     ack_required=False,
                     label="Position Report",
                 )
-            ]
-        return []
+            )
+        return outbound
 
     # 항로를 따라 침로와 위치를 갱신한다.
     def _advance(self, elapsed: float) -> None:
@@ -232,9 +279,35 @@ class MassAgent:
         return abs(navigation.heading_difference(leg_course, to_waypoint)) > 90.0
 
     # 유효기간이 지난 항로를 버린다.
-    def _expire_route(self, now: float) -> None:
-        if self._route_expires_at is not None and now >= self._route_expires_at:
-            self._clear_route()
+    # 유효기간이 다한 항로를 버리고, 발행자에게 만료를 알린다.
+    #
+    # 통지가 없으면 ROC는 배가 아직 항로를 따라간다고 믿는다. 이는 배경지식
+    # 2.4.5가 지적한 상태 불일치와 같은 형태이므로 알려 준다. S-421 ACK을
+    # 재사용하되 원 지시의 linkage_id를 실어 상관할 수 있게 한다.
+    def _expire_route(self, now: float) -> list[Outbound]:
+        if self._route_expires_at is None or now < self._route_expires_at:
+            return []
+
+        linkage_id = self._route_linkage_id
+        issuer = self._route_issuer
+        self._clear_route()
+        if issuer is None:
+            return []
+        return [
+            Outbound(
+                payload=encode(
+                    ack.ApplicationAck(
+                        linkage_id=linkage_id,
+                        status=ack.STATUS_ROUTE_ISSUES,
+                        reason=ack.REASON_EXPIRED,
+                    )
+                ),
+                destination_id=issuer,
+                ack_required=False,
+                data_type=DATA_TYPE_ROUTE_CONTROL_ACK,
+                label="Route Expired",
+            )
+        ]
 
     # 유효기간이 지난 항행 경보를 버린다.
     def _expire_warnings(self, now: float) -> None:
@@ -386,13 +459,13 @@ class MassAgent:
     def _handle_route(
         self, message: route.RouteInstruction, source_id: int, now: float
     ) -> list[Outbound]:
-        decision = self._evaluate(message)
+        decision = self._evaluate(message, source_id)
 
         # 검증이 끝난 뒤에만 상태를 바꾼다.
         if decision.cancel:
             self._clear_route()
         elif decision.accept:
-            self._apply_route(message, now)
+            self._apply_route(message, now, source_id)
         else:
             self.rejected_count += 1
 
@@ -412,10 +485,37 @@ class MassAgent:
         ]
 
     # 항로 지시를 받아들일지 판정한다. 여기서는 상태를 바꾸지 않는다.
-    def _evaluate(self, message: route.RouteInstruction) -> RouteDecision:
+    def _evaluate(
+        self, message: route.RouteInstruction, source_id: int = 0
+    ) -> RouteDecision:
+        # ① 권한 — 정책이 설정된 경우에만 판정한다(기본값은 누구든 허용).
+        if self.authority_policy is not None and not self.authority_policy(
+            source_id, message
+        ):
+            return RouteDecision(
+                status=ack.STATUS_ERRORS, reason=ack.REASON_NOT_AUTHORIZED
+            )
+
         if message.is_cancellation:
             return RouteDecision(status=ack.STATUS_ACKNOWLEDGED, cancel=True)
 
+        # ② 스키마 — 예약값이 들어오면 해석할 수 없다. 누락이 아니라 위반이므로
+        #    INCOMPLETE가 아니라 ERRORS다.
+        if message.sender_classification not in route.SENDER_NAMES:
+            return RouteDecision(
+                status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
+            )
+        if message.fallback_state not in route.FALLBACK_NAMES:
+            return RouteDecision(
+                status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
+            )
+        for waypoint in message.waypoints:
+            if waypoint.leg_geometry not in route.LEG_GEOMETRY_NAMES:
+                return RouteDecision(
+                    status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
+                )
+
+        # ③ 누락 — 따라가는 데 필요한 것이 없다.
         if not message.waypoints:
             return RouteDecision(
                 status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
@@ -433,20 +533,36 @@ class MassAgent:
                     status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
                 )
 
+        # ④ 경로 문제 — 해석은 되지만 따라갈 수 없는 형상.
+        #    연속한 두 waypoint가 같은 지점이면 그 구간의 침로가 정의되지 않는다.
+        for previous, current in zip(message.waypoints, message.waypoints[1:]):
+            if (
+                previous.latitude == current.latitude
+                and previous.longitude == current.longitude
+            ):
+                return RouteDecision(
+                    status=ack.STATUS_ROUTE_ISSUES, reason=ack.REASON_ROUTE_UNSUITABLE
+                )
+
         return RouteDecision(status=ack.STATUS_ACKNOWLEDGED, accept=True)
 
     # 검증을 통과한 항로를 적용한다.
-    def _apply_route(self, message: route.RouteInstruction, now: float) -> None:
+    def _apply_route(
+        self, message: route.RouteInstruction, now: float, issuer: int | None = None
+    ) -> None:
         self._waypoints = list(message.waypoints)
         self._waypoint_index = 0
         self._route_linkage_id = message.linkage_id
+        self._route_issuer = issuer
         # 수직 통과 판정의 기준점은 항로를 받아들인 지점이다.
         self._leg_origin = (self.state.latitude, self.state.longitude)
 
         # Duration은 유효 종료까지의 분(分)이다. 시험에서는 수락 시각을 기준으로 센다.
         # 표준은 Start Date/Time을 기준으로 하지만, 여기서는 UTC 절대시각을
         # 다루지 않으므로 단순화한다.
-        if message.duration in (route.DURATION_NOT_AVAILABLE, route.DURATION_CANCEL):
+        # duration 0(DURATION_CANCEL)은 Table 13.2가 정한 취소 표현이라
+        # _evaluate가 이미 취소로 처리했다. not available이면 무기한이다.
+        if message.duration == route.DURATION_NOT_AVAILABLE:
             self._route_expires_at = None
         else:
             self._route_expires_at = now + message.duration * 60.0
@@ -458,4 +574,5 @@ class MassAgent:
         self._waypoint_index = 0
         self._route_linkage_id = route.LINKAGE_ID_NOT_AVAILABLE
         self._route_expires_at = None
+        self._route_issuer = None
         self._leg_origin = None

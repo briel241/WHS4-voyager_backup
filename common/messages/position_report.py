@@ -67,6 +67,19 @@ TIMESTAMP_NOT_AVAILABLE = 60
 SOG_SCALE = 10
 COG_SCALE = 10
 
+# 유효 raw 상한. not available 값 바로 아래다.
+#
+# 이 상한이 필요한 이유: 반올림 결과가 not available 센티널과 같아지면 유효한
+# 측정값이 "측정 불가"로 둔갑한다. 예를 들어 침로 359.95도는 round(3599.5)=3600이
+# 되어 COG_NOT_AVAILABLE과 구별되지 않는다.
+#
+#   - COG는 순환값이므로 3600을 0으로 되돌린다(359.95도 ≈ 360도 = 0도).
+#   - SOG는 순환하지 않으므로 상한에 붙인다. AIS도 1022를
+#     "102.2 knots or higher"로 정의하므로 의미가 맞는다.
+COG_MODULO = 3600          # 0..3599
+SOG_MAX = 1022             # 102.2 knots or higher
+TRUE_HEADING_MODULO = 360  # 0..359
+
 # Autonomy Mode - 본 프로젝트 정의. 표준 근거 없음.
 # 값은 docs/mass_roc_background.md 2.5의 상태 모델과 맞춘다.
 AUTONOMY_UNKNOWN = 0
@@ -142,10 +155,17 @@ def from_measurements(
     return PositionReport(
         longitude=coordinates.longitude_to_raw(longitude_degrees),
         latitude=coordinates.latitude_to_raw(latitude_degrees),
-        sog=SOG_NOT_AVAILABLE if sog_knots is None else round(sog_knots * SOG_SCALE),
-        cog=COG_NOT_AVAILABLE if cog_degrees is None else round(cog_degrees * COG_SCALE),
+        sog=(
+            SOG_NOT_AVAILABLE if sog_knots is None
+            else min(max(round(sog_knots * SOG_SCALE), 0), SOG_MAX)
+        ),
+        cog=(
+            COG_NOT_AVAILABLE if cog_degrees is None
+            else round(cog_degrees * COG_SCALE) % COG_MODULO
+        ),
         true_heading=(
-            TRUE_HEADING_NOT_AVAILABLE if heading_degrees is None else int(heading_degrees)
+            TRUE_HEADING_NOT_AVAILABLE if heading_degrees is None
+            else int(heading_degrees) % TRUE_HEADING_MODULO
         ),
         navigation_status=navigation_status,
         rate_of_turn=rate_of_turn,

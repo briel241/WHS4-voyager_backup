@@ -66,7 +66,7 @@ def _control_message():
                 129.10, 35.133, turn_radius_nm=0.3, planned_sog_knots=4.0,
                 leg_geometry=route.LEG_GEOMETRY_LEXODROME),
         ],
-        heading_setpoint=round(92.5 * route.HEADING_SETPOINT_SCALE),
+        heading_setpoint=route.heading_setpoint_from_degrees(92.5),
         fallback_state=route.FALLBACK_ANCHORING,
         linkage_id=7,
         sender_classification=route.SENDER_AUTHORITY,

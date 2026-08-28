@@ -74,6 +74,8 @@ class RocAgent:
         self.commands: dict[int, PendingCommand] = {}
         self._next_linkage_id = _LINKAGE_ID_MIN
         self.ignored_count = 0
+        # 명령 수신자가 아닌 국에서 온 ACK 수. 오귀속·위조 관찰용.
+        self.mismatched_ack_count = 0
         self._lost: set[int] = set()
 
     # ------------------------------------------------------------ 수신 처리
@@ -90,7 +92,7 @@ class RocAgent:
         if isinstance(message, pos.PositionReport):
             self._update_track(message, source_id, now)
         elif isinstance(message, ack.ApplicationAck):
-            self._resolve_command(message, now)
+            self._resolve_command(message, source_id, now)
 
         return []
 
@@ -102,11 +104,23 @@ class RocAgent:
         )
         self._lost.discard(source_id)
 
-    def _resolve_command(self, message: ack.ApplicationAck, now: float) -> None:
+    # 응용 ACK을 원 명령에 결속한다.
+    #
+    # Linkage ID만으로 찾으면 안 된다. 명령을 보낸 상대가 아닌 국이 같은 ID로
+    # 답해도 결속되어, 배가 수락하지 않은 항로를 수락한 것으로 기록된다.
+    # 선박이 둘 이상이면 공격이 없어도 오귀속이 일어난다. 그래서 ACK을 보낸
+    # 국이 그 명령의 수신자였는지 함께 본다.
+    def _resolve_command(
+        self, message: ack.ApplicationAck, source_id: int, now: float
+    ) -> None:
         command = self.commands.get(message.linkage_id)
         if command is None:
             # 우리가 내보내지 않은 Linkage ID에 대한 응답이다.
             self.ignored_count += 1
+            return
+        if command.destination_id != source_id:
+            # 명령을 받은 국이 아닌 곳에서 온 ACK다.
+            self.mismatched_ack_count += 1
             return
         command.status = message.status
         command.reason = message.reason
@@ -136,10 +150,7 @@ class RocAgent:
             sender_classification=route.SENDER_AUTHORITY,
             route_type=route_type,
             duration=duration,
-            heading_setpoint=(
-                route.HEADING_SETPOINT_NOT_AVAILABLE if heading_setpoint is None
-                else round(heading_setpoint * route.HEADING_SETPOINT_SCALE)
-            ),
+            heading_setpoint=route.heading_setpoint_from_degrees(heading_setpoint),
             fallback_state=fallback_state,
         )
         return self._send(instruction, destination_id, now, "Route Instruction")

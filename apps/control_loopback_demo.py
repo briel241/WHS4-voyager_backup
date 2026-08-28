@@ -38,7 +38,7 @@ def _make_control():
     ]
     return route.RouteInstruction(
         waypoints=waypoints,
-        heading_setpoint=round(92.5 * route.HEADING_SETPOINT_SCALE),
+        heading_setpoint=route.heading_setpoint_from_degrees(92.5),
         fallback_state=route.FALLBACK_ANCHORING,
     )
 
