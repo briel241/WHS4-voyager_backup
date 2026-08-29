@@ -1146,6 +1146,59 @@ def main(argv=None) -> int:
             return result_state
 
         _MC._on_dependency_failed = _odf_recover
+
+        # F-release (svc-run-b 실측: 유예 해제 트리거가 ClockAdvanced/타이머
+        # 뿐인데 ROC 펌프 회전이 0.5~2.1s로 성겨서, 유예 intent의 직행
+        # 대역 [floor 100ms, horizon−슬롯 ≈680ms]를 "이번 해제 땐 이르고
+        # 다음 해제 땐 이미 지남"으로 건너뛰는 livelock — 4/4 조각 전패.
+        # 모든 MAC 이벤트 핸들러 뒤에 release를 편승시켜 트리거를 이벤트
+        # 밀도(실측 ~25/s)로 촘촘하게 만든다. 핸들러의 commands 리스트에
+        # 그대로 편입되므로 frozen 등록·배치 배관을 그대로 탄다. 오류는
+        # frozen _on_clock_advanced와 동일하게 _finish로 마무리한다.)
+        import vdeter.mac.coordinator as _cmod_r
+
+        _CoordPlan = _cmod_r.CoordinatorPlan
+        _LcInitial = _cmod_r.EndpointLifecycle.INITIAL
+        _orig_handlers = dict(_MC._EVENT_HANDLERS)
+
+        def _with_release(orig_h):
+            def _h(self_c, state, envelope, commands):
+                out = orig_h(self_c, state, envelope, commands)
+                try:
+                    if (
+                        isinstance(out, _CoordPlan)
+                        or not getattr(out, "tx_intents", None)
+                        or out.lifecycle is _LcInitial
+                    ):
+                        return out
+                    n_before = len(commands)
+                    _err_r: list = []
+                    out2 = self_c._release_due_tx_intents(
+                        out, envelope.event_id, commands, _err_r
+                    )
+                    if len(commands) > n_before or _err_r:
+                        print(
+                            f"[launcher] evt-release emit="
+                            f"{len(commands) - n_before} err={len(_err_r)} "
+                            f"by={type(envelope.payload).__name__}",
+                            file=sys.stderr, flush=True,
+                        )
+                    if _err_r:
+                        return self_c._finish(
+                            out2, commands, envelope.event_id, _err_r[0]
+                        )
+                    return out2
+                except Exception:  # noqa: BLE001 - 실패 시 원 결과 유지
+                    return out
+            return _h
+
+        _MC._EVENT_HANDLERS = {
+            evt: (
+                handler if evt.__name__ == "ClockAdvancedEvent"
+                else _with_release(handler)
+            )
+            for evt, handler in _orig_handlers.items()
+        }
         # 세션 조각 수용 판정의 경계 스냅 (svc-data-10 실측 + 정밀 분석:
         # PHY 역산이 램프 128샘플(416.67µs)을 무조건 빼므로, 탐지 지점이
         # 창 앞머리에 붙으면 received_at이 슬롯 경계 앞으로 넘어가 tdma
