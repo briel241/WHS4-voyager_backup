@@ -1004,10 +1004,25 @@ class Stage7PiOperations:
                     expected_judged = len(step["scheduled_host_raw_ns"]) - int(
                         entry.get("warmup_count", 0)
                     )
+                    # v0.9.12: 고립 광대역 과도가 decode를 깨지 않고 metrics만
+                    # 위반하는 슬롯은 no-decode와 같은 고립 규칙(개수 상한·
+                    # 인접 불허)으로 허용한다 — 같은 물리 현상에 decode 결손
+                    # (≤tolerance)보다 엄격한 잣대를 대던 비일관 해소.
+                    # overload(clipping)·수용 오염 0·readback 요건은 불변.
+                    metrics_tolerance = int(
+                        entry.get("reval_max_metrics_transient", 0)
+                    )
+                    metrics_ordinals = [
+                        int(d["ordinal"])
+                        for d in summary_step.get("metrics_fail_detail") or ()
+                        if "ordinal" in d
+                    ]
                     passed = (
                         not overload and readback_ok
                         and int(summary_step.get("captured", 0)) == expected_judged
-                        and int(summary_step.get("metrics_fail", 0)) == 0
+                        and evaluate_reval_window(
+                            metrics_ordinals, 0, metrics_tolerance,
+                        )
                         and evaluate_reval_window(
                             summary_step.get("decode_fail_ordinals") or (),
                             0, tolerance,

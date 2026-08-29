@@ -1381,6 +1381,8 @@ def _run_rf_qualification(
                 "warmup_count": reval_warmup,
                 "deadline_host_raw_ns": gain_deadline_ns,
                 "reval_max_no_decode": REVAL_MAX_NO_DECODE,
+                # v0.9.12: decode 무결·비인접 고립 metrics 과도 허용 상한.
+                "reval_max_metrics_transient": 2,
                 "scheduled_host_raw_ns": [
                     reval_start + k * burst_spacing_ns
                     for k in range(100 + reval_warmup)
