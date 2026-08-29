@@ -815,13 +815,12 @@ def main(argv=None) -> int:
                 # 빌드 파이프라인 지연을 못 버티고 어댑터 마감(RADIO_LATE_
                 # REQUEST)·UHD late에서 사산. 판별(사살 여부)은 완화 하한,
                 # 재배치는 여유 있는 슬롯으로.
-                # 판별 460ms/재배치 620ms (svc-data-16 실측: worker 도달
-                # lead 100~205ms 버스트가 파이프라인 지연 185-246ms에
-                # 잠식돼 FPGA 무음 폐기 — 방사 ~14발 대비 수신 2발).
                 state = _rescue_stale_builds(
                     self_c, state,
-                    460_000_000,
-                    target_min_ns=620_000_000,
+                    relaxed.transmit_lead_nanoseconds,
+                    target_min_ns=(
+                        original_profile.transmit_lead_nanoseconds + 160_000_000
+                    ),
                 )
             except Exception as error:  # noqa: BLE001 - 구조 실패 시 원 경로
                 print(f"[launcher] build-rescue 오류: {error}",
@@ -870,28 +869,6 @@ def main(argv=None) -> int:
             return result_state
 
         _MC_rel._release_due_tx_intents = _release_relaxed
-        # 세션 배치의 즉시 방출 차단: 계획 순간만 지평선을 좁혀 6조각
-        # 전부를 보류→이월 기계(순서 보존·620ms 재배치)로 통과시킨다.
-        # 즉시 방출분은 worker 도달 lead가 100ms대로 낮아 폐기 위험
-        # (svc-data-16 실측). 프로파일 스왑은 _rel_lock으로 직렬화.
-        _orig_advance = _MC_rel._advance_data_sessions
-
-        def _advance_defer_all(self_c, state, causation_event_id, commands,
-                               errors):
-            with _rel_lock:
-                original_profile = self_c._profile
-                shrunk = _dc_rel.replace(
-                    original_profile, schedule_horizon_nanoseconds=1
-                )
-                self_c._profile = shrunk
-                try:
-                    return _orig_advance(
-                        self_c, state, causation_event_id, commands, errors
-                    )
-                finally:
-                    self_c._profile = original_profile
-
-        _MC_rel._advance_data_sessions = _advance_defer_all
         # 데이터 세션 채널 기본값 교정 (실측 + 소스 확정:
         # coordinator 3873/5838의 resolve_data_session_plan 호출이 lower/upper
         # 인자 누락 → frozen 기본값 25_TEST → wideband 지도(100_TEST 전용)에
