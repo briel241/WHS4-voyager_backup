@@ -178,6 +178,7 @@ REFERENCED = [
     "docs/scenarios/SC-VDE-005-route-guidance.md",
     "docs/scenarios/SC-VDE-006-remote-control.md",
     "docs/archive/README.md",
+    "docs/vdeter_interim_report_technical_summary.md",
 ]
 for path in REFERENCED:
     check(path, os.path.exists(os.path.join(ROOT, path)))
