@@ -549,6 +549,37 @@ def main(argv=None) -> int:
                 return out
 
             _DMC._arm_horizon_entry = _diag_arm
+
+            # 정밀: TX 의도 '생성' 순간 실측 — 어느 계획기가 몇 ms 여유의
+            # 슬롯을 만드는가 (과거 슬롯 생성자의 특정).
+            _diag_orig_doe = _DMC._defer_or_emit
+
+            def _diag_doe(self_c, state, *, intent, causation_event_id,
+                          commands, errors):
+                try:
+                    import traceback as _dtb2
+                    now_c = self_c._now_utc_nanoseconds()
+                    delta = (intent.transmit_at_nanoseconds - now_c) / 1e6
+                    stack = _dtb2.extract_stack(limit=4)
+                    chain = "<-".join(
+                        f"{f.name}:{f.lineno}" for f in stack[:-1][-2:]
+                    )
+                    print(
+                        f"[diag] intent-new kind={intent.kind} "
+                        f"delta_ms={delta:.0f} xfer="
+                        f"{intent.correlation_transfer_id is not None} "
+                        f"by={chain}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_doe(
+                    self_c, state, intent=intent,
+                    causation_event_id=causation_event_id,
+                    commands=commands, errors=errors,
+                )
+
+            _DMC._defer_or_emit = _diag_doe
             print("[diag] STAGE7_DIAG 계측 활성", file=sys.stderr, flush=True)
         except Exception as error:  # noqa: BLE001
             print(f"[diag] 계측 장착 실패: {error}", file=sys.stderr, flush=True)
