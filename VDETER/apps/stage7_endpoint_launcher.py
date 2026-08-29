@@ -649,11 +649,46 @@ def main(argv=None) -> int:
                     pass
             self_c._profile = relaxed
             try:
-                return _orig_release(
+                result_state = _orig_release(
                     self_c, state, causation_event_id, commands, errors
                 )
             finally:
                 self_c._profile = original_profile
+            # horizon 알람 재장전 (svc-data-5 실측 근거: 단일 horizon 알람이
+            # 앞 의도들 발화로 소진된 뒤 남은 보류 의도의 알람을 아무도 재
+            # 무장하지 않아, 방출이 프레임 이벤트(2.4s) 주기로 퇴화 → 740ms
+            # 방출창이 통째로 빠진 조각이 SLOT_MISSED 폐기. frozen 자체의
+            # _arm_horizon_entry로 남은 최조기 진입 알람을 재장전한다 —
+            # 동일 진입은 frozen이 중복 제거하므로 멱등).
+            try:
+                from vdeter.mac.tdma import (
+                    HEXSLOT_NANOSECONDS as _REARM_SLOT_NS,
+                )
+                now_rearm = self_c._now_utc_nanoseconds()
+                horizon_ns = original_profile.schedule_horizon_nanoseconds
+                deferred_entries = [
+                    intent.transmit_at_nanoseconds + _REARM_SLOT_NS - horizon_ns
+                    for intent in result_state.tx_intents
+                    if intent.transmit_at_nanoseconds + _REARM_SLOT_NS
+                    > now_rearm + horizon_ns
+                ]
+                if deferred_entries:
+                    entry = min(deferred_entries)
+                    if entry > now_rearm:
+                        result_state, _rearmed = self_c._arm_horizon_entry(
+                            result_state,
+                            entry_utc_nanoseconds=entry,
+                            causation_event_id=causation_event_id,
+                            commands=commands,
+                            errors=errors,
+                        )
+                        if not _rearmed and errors:
+                            # 재장전 실패는 원 경로(이벤트 구동)로 무해히
+                            # 회귀 — 배치 오류로 승격시키지 않는다.
+                            errors.pop()
+            except Exception:  # noqa: BLE001 - 재장전 실패는 기존 경로 유지
+                pass
+            return result_state
 
         _MC_rel._release_due_tx_intents = _release_relaxed
         # 데이터 세션 채널 기본값 교정 (실측 + 소스 확정:
