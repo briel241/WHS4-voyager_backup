@@ -1127,6 +1127,15 @@ class Stage7B210RadioAdapter:
 
     def _consume_async_locked(self, event: dict):
         outcome = event.get("outcome")
+        if os.environ.get("STAGE7_DIAG", "0") == "1":
+            import sys as _sys
+            n = self._diag_async_n = getattr(self, "_diag_async_n", 0) + 1
+            if outcome != "BURST_ACK" or n <= 30 or n % 20 == 0:
+                print(
+                    f"[diag-radio] async #{n} {outcome} "
+                    f"hw={event.get('hardware_time_ns')}",
+                    file=_sys.stderr, flush=True,
+                )
         event_time = event.get("hardware_time_ns")
         if outcome == "BURST_ACK":
             for parent in self._tx_parents.values():
@@ -1391,6 +1400,15 @@ class Stage7B210RadioAdapter:
         self._rx_children.pop(child.key, None)
         self._terminal_keys.add(child.key)
         if not clean:
+            if os.environ.get("STAGE7_DIAG", "0") == "1":
+                import sys as _sys
+                print(
+                    f"[diag-radio] unclean lane={child.lane_index} "
+                    f"req_utc={child.request.start_at.total_nanoseconds()} "
+                    f"got={total}/{child.expected_sample_count} "
+                    f"segs={len(segments)}",
+                    file=_sys.stderr, flush=True,
+                )
             code = (
                 ErrorCode.RADIO_RX_OVERFLOW if overflow else ErrorCode.RADIO_RX_WINDOW_INCOMPLETE
             )
