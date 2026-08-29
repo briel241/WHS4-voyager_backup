@@ -1130,7 +1130,10 @@ class Stage7B210RadioAdapter:
         import os as _os
         if _os.environ.get("STAGE7_DIAG", "0") == "1":
             import sys as _sys
-            n = self._diag_async_n = getattr(self, "_diag_async_n", 0) + 1
+            # __slots__ 클래스라 인스턴스 속성 대입 불가 — 함수 속성 사용
+            # (svc-run-d 실측: AttributeError가 펌프 회전을 통째로 중단시킴)
+            f = Stage7B210RadioAdapter._consume_async_locked.__dict__
+            n = f["_n"] = f.get("_n", 0) + 1
             if outcome != "BURST_ACK" or n <= 30 or n % 20 == 0:
                 print(
                     f"[diag-radio] async #{n} {outcome} "

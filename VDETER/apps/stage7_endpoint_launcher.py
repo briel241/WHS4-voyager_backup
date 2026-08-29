@@ -663,6 +663,65 @@ def main(argv=None) -> int:
 
             _DVE._deliver_recovered = _diag_delrec
 
+            # C8: 수신 상류 무음 소실 관측 (svc-run-d: 함정이 [90,4] 할당
+            # 공지를 상태에 반영하지 못했는데 소실 지점이 로그에 없었다).
+            _diag_orig_rie = _DVE._report_internal_error
+
+            def _diag_rie(self_e, error, *a, **k):
+                try:
+                    n = _diag_rie.__dict__["_n"] = (
+                        _diag_rie.__dict__.get("_n", 0) + 1
+                    )
+                    if n <= 40 or n % 20 == 0:
+                        print(
+                            f"[diag] internal-err #{n} {str(error)[:160]}",
+                            file=sys.stderr, flush=True,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_rie(self_e, error, *a, **k)
+
+            _DVE._report_internal_error = _diag_rie
+            _diag_orig_rec = _DVE._record
+
+            def _diag_rec(self_e, event_type, *a, **k):
+                try:
+                    if getattr(event_type, "name", "") == (
+                        "PACKET_DECODE_REQUESTED"
+                    ):
+                        action = k.get("payload") or (a[1] if len(a) > 1 else None)
+                        if action is not None and not getattr(
+                            action, "accepted", True
+                        ):
+                            print(
+                                "[diag] decode-unaccepted "
+                                f"link={getattr(getattr(action, 'packet', None), 'link_id', '?')}",
+                                file=sys.stderr, flush=True,
+                            )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_rec(self_e, event_type, *a, **k)
+
+            _DVE._record = _diag_rec
+            _diag_orig_t4 = _DMC._receive_type4
+
+            def _diag_t4(self_c, state, *a, **k):
+                out_state = _diag_orig_t4(self_c, state, *a, **k)
+                try:
+                    before_n = len(getattr(state, "lc_allocations", ()) or ())
+                    after_n = len(
+                        getattr(out_state, "lc_allocations", ()) or ()
+                    )
+                    print(
+                        f"[diag] type4-rx allocs {before_n}->{after_n}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return out_state
+
+            _DMC._receive_type4 = _diag_t4
+
             # C4: 재조립기 내부
             from vdeter.link.data_session.reassembly import (
                 DataSessionReassembler as _DRA2,
@@ -1190,33 +1249,60 @@ def main(argv=None) -> int:
         _LcInitial = _cmod_r.EndpointLifecycle.INITIAL
         _orig_handlers = dict(_MC._EVENT_HANDLERS)
 
+        _TPurpose = _cmod_r.TimerPurpose
+        _LcRunning = getattr(_cmod_r.EndpointLifecycle, "RUNNING", None)
+
         def _with_release(orig_h):
             def _h(self_c, state, envelope, commands):
                 out = orig_h(self_c, state, envelope, commands)
                 try:
                     if (
                         isinstance(out, _CoordPlan)
-                        or not getattr(out, "tx_intents", None)
+                        or not hasattr(out, "tx_intents")
                         or out.lifecycle is _LcInitial
                     ):
                         return out
-                    n_before = len(commands)
-                    _err_r: list = []
-                    out2 = self_c._release_due_tx_intents(
-                        out, envelope.event_id, commands, _err_r
-                    )
-                    if len(commands) > n_before or _err_r:
+                    if getattr(out, "tx_intents", None):
+                        n_before = len(commands)
+                        _err_r: list = []
+                        out2 = self_c._release_due_tx_intents(
+                            out, envelope.event_id, commands, _err_r
+                        )
+                        if len(commands) > n_before or _err_r:
+                            print(
+                                f"[launcher] evt-release emit="
+                                f"{len(commands) - n_before} err={len(_err_r)} "
+                                f"by={type(envelope.payload).__name__}",
+                                file=sys.stderr, flush=True,
+                            )
+                        if _err_r:
+                            return self_c._finish(
+                                out2, commands, envelope.event_id, _err_r[0]
+                            )
+                        out = out2
+                    # F-boundary-watchdog (svc-run-d 실측: quota 롤백이
+                    # 다음 경계 타이머 무장을 배치째 버리면, 경계는 자기
+                    # 자신만이 재장전하는 체인이라 영구 절단 — ACK
+                    # 타임아웃·FIFO 승격 전체 사망. 경계 타이머 부재를
+                    # 감지하면 frozen 스케줄러로 재점화한다. 중복은
+                    # frozen이 timer_id로 자체 방지.)
+                    if (
+                        _LcRunning is not None
+                        and out.lifecycle is _LcRunning
+                        and not any(
+                            t.purpose is _TPurpose.FRAME_BOUNDARY
+                            for t in (getattr(out, "timers", ()) or ())
+                        )
+                    ):
+                        out = self_c._schedule_frame_boundary(
+                            out, envelope.event_id, commands
+                        )
                         print(
-                            f"[launcher] evt-release emit="
-                            f"{len(commands) - n_before} err={len(_err_r)} "
+                            "[launcher] boundary-rearm "
                             f"by={type(envelope.payload).__name__}",
                             file=sys.stderr, flush=True,
                         )
-                    if _err_r:
-                        return self_c._finish(
-                            out2, commands, envelope.event_id, _err_r[0]
-                        )
-                    return out2
+                    return out
                 except Exception:  # noqa: BLE001 - 실패 시 원 결과 유지
                     return out
             return _h
@@ -1228,6 +1314,63 @@ def main(argv=None) -> int:
             )
             for evt, handler in _orig_handlers.items()
         }
+
+        # F-window-shed (svc-run-d 실측: 40ms 박동이 창 계획을 매 사이클
+        # 쏟아내 pending RX quota(68)를 넘기면 frozen _register_pending
+        # 실패 → plan() 전체 롤백 → 계획 표식·경계 타이머까지 증발하는
+        # 폭풍(2,945건). 창 계획을 시험 리스트로 먼저 굴려 quota 여유를
+        # 산정하고, 넘칠 것 같으면 이번 사이클만 연기한다 — 창 계획은
+        # 매 사이클 다시 오므로 안전하고, 배치가 등록 가능 크기로
+        # 유지되어 롤백 자체가 사라진다.)
+        from vdeter.mac.execution import command_class_of as _ccls_of
+        from vdeter.mac.models import (
+            PendingCommandClass as _PCC,
+            Stage4Limits as _S4L,
+        )
+
+        _orig_pfw = _MC.plan_frame_windows
+        _SHED_MARGIN = 4
+
+        def _pfw_shed(self_c, state, causation_event_id, commands, errors):
+            try:
+                trial_cmds: list = []
+                trial_errs: list = []
+                out = _orig_pfw(
+                    self_c, state, causation_event_id, trial_cmds, trial_errs
+                )
+                if not trial_cmds:
+                    errors.extend(trial_errs)
+                    return out
+                rx_total = state.pending_count(_PCC.RX) + sum(
+                    1 for c in list(commands) + trial_cmds
+                    if _ccls_of(c) is _PCC.RX
+                )
+                all_total = (
+                    state.pending_count(_PCC.RX)
+                    + state.pending_count(_PCC.NON_CLEANUP_NON_RX)
+                    + state.pending_count(_PCC.CLEANUP)
+                    + len(commands) + len(trial_cmds)
+                )
+                if (
+                    rx_total > _S4L.PENDING_DEPENDENCY_RX - _SHED_MARGIN
+                    or all_total > _S4L.PENDING_DEPENDENCY_TOTAL - _SHED_MARGIN
+                ):
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(
+                            f"[diag] window-shed rx={rx_total} "
+                            f"all={all_total} defer={len(trial_cmds)}",
+                            file=sys.stderr, flush=True,
+                        )
+                    return state
+                commands.extend(trial_cmds)
+                errors.extend(trial_errs)
+                return out
+            except Exception:  # noqa: BLE001 - 실패 시 원 경로
+                return _orig_pfw(
+                    self_c, state, causation_event_id, commands, errors
+                )
+
+        _MC.plan_frame_windows = _pfw_shed
         # 세션 조각 수용 판정의 경계 스냅 (svc-data-10 실측 + 정밀 분석:
         # PHY 역산이 램프 128샘플(416.67µs)을 무조건 빼므로, 탐지 지점이
         # 창 앞머리에 붙으면 received_at이 슬롯 경계 앞으로 넘어가 tdma
