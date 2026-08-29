@@ -222,6 +222,12 @@ class Stage7FakeMediumWorker:
     def start(self):
         pass
 
+    def start_rx_continuous(self, start_hardware_time_ns=None):
+        """Mirror the B210 worker's service-mode continuous RX contract."""
+
+        self.rx_continuous = True
+        return True
+
     def hardware_time_ns(self):
         return int(self.medium.host_raw_clock()) - WORKER_T0_NS[self.serial]
 
@@ -252,6 +258,16 @@ class Stage7FakeMediumWorker:
         self.rx_windows[lane].append(
             {"start_ns": hardware_time_ns, "count": sample_count, "consumed": False}
         )
+
+    def register_rx_window_lane(self, lane, hardware_time_ns, sample_count):
+        self.submit_rx_lane(lane, hardware_time_ns, sample_count)
+        return True
+
+    def unregister_rx_lane(self, lane, hardware_time_ns=None):
+        for window in self.rx_windows[lane]:
+            if hardware_time_ns is None or window["start_ns"] == hardware_time_ns:
+                window["consumed"] = True
+        return True
 
     def read_rx_cf32_lane(self, lane, sample_count, allow_partial=False, expected_hardware_time_ns=None):
         now = self.hardware_time_ns()

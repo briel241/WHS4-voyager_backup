@@ -18,8 +18,9 @@ from vdeter.stage7.configuration import (
 TEST_MANIFEST_SHA = hashlib.sha256(b"stage7-test-deployment-manifest").hexdigest()
 TEST_ENV_SHA = hashlib.sha256(b"stage7-test-environment-manifest").hexdigest()
 
-DATA_PROFILE_17 = 'data_link_id = 17\n'
-DATA_PROFILE_19 = 'data_link_id = 19\n'
+DATA_PROFILE_17 = 'data_link_id = 17\ndata_session_enabled = true\n'
+DATA_PROFILE_19 = 'data_link_id = 19\ndata_session_enabled = true\n'
+DATA_PROFILE_17_DISABLED = 'data_link_id = 17\ndata_session_enabled = false\n'
 
 
 def build_source(
@@ -212,18 +213,33 @@ class TC_STAGE7_DATA_PROFILE(unittest.TestCase):
         self.assertEqual(load_data_profile(DATA_PROFILE_19).value, 19)
 
     def test_link_11_rejected(self):
-        result = load_data_profile("data_link_id = 11\n")
+        result = load_data_profile(
+            "data_link_id = 11\ndata_session_enabled = false\n"
+        )
         self.assertTrue(result.is_err)
         self.assertEqual(result.error.code, ErrorCode.CONFIG_SEMANTIC_INVALID)
 
     def test_unknown_key_rejected(self):
-        result = load_data_profile("data_link_id = 17\nfallback = true\n")
+        result = load_data_profile(
+            "data_link_id = 17\ndata_session_enabled = false\nfallback = true\n"
+        )
         self.assertTrue(result.is_err)
         self.assertEqual(result.error.code, ErrorCode.CONFIG_UNKNOWN_FIELD)
 
     def test_bool_rejected(self):
-        result = load_data_profile("data_link_id = true\n")
+        result = load_data_profile(
+            "data_link_id = true\ndata_session_enabled = false\n"
+        )
         self.assertTrue(result.is_err)
+
+    def test_data_session_capability_is_required_and_boolean(self):
+        missing = load_data_profile("data_link_id = 17\n")
+        self.assertTrue(missing.is_err)
+        non_boolean = load_data_profile(
+            'data_link_id = 17\ndata_session_enabled = "false"\n'
+        )
+        self.assertTrue(non_boolean.is_err)
+        self.assertEqual(non_boolean.error.code, ErrorCode.CONFIG_SEMANTIC_INVALID)
 
 
 class TC_STAGE7_LOADER_POSITIVE(unittest.TestCase):
@@ -244,6 +260,7 @@ class TC_STAGE7_LOADER_POSITIVE(unittest.TestCase):
         self.assertEqual(resolved.endpoint_id, "MASS-A")
         self.assertEqual(resolved.b210_serial, "34D03DD")
         self.assertEqual(resolved.data_link_id, 17)
+        self.assertTrue(resolved.data_session_enabled)
         self.assertEqual(resolved.endpoint.mac.data_link_id.value, 17)
         self.assertEqual(resolved.radio.adapter_kind, "b210-stage7-affine")
         self.assertEqual(resolved.endpoint_common_rx_gain_db, 0)
@@ -307,6 +324,15 @@ class TC_STAGE7_LOADER_POSITIVE(unittest.TestCase):
         first = self._load(build_source(), data_profile=DATA_PROFILE_17).value
         second = self._load(build_source(), data_profile=DATA_PROFILE_19).value
         self.assertNotEqual(first.resolved_sha256, second.resolved_sha256)
+
+    def test_resolved_sha_binds_data_session_capability(self):
+        enabled = self._load(build_source(), data_profile=DATA_PROFILE_17).value
+        disabled = self._load(
+            build_source(), data_profile=DATA_PROFILE_17_DISABLED
+        ).value
+        self.assertTrue(enabled.data_session_enabled)
+        self.assertFalse(disabled.data_session_enabled)
+        self.assertNotEqual(enabled.resolved_sha256, disabled.resolved_sha256)
 
     def test_common_table_projection_matches_v3_loader(self):
         """공통 table을 frozen v3 loader가 읽은 결과와 field-by-field 비교한다."""

@@ -18,6 +18,7 @@ from ..common.contracts.service import (
     SubmitTransferRequest,
     TransferStatusRequest,
 )
+from ..common.addressing import AddressKind
 from ..common.errors import (
     Correlation,
     Details,
@@ -650,6 +651,47 @@ class Stage7Endpoint(Stage5Endpoint):
         if rejected is not None:
             return rejected
         return Stage5Endpoint.submit(self, request)
+
+    def _route_admission_check_locked(
+        self, destination, ack_required: bool, encoded_length: int
+    ):
+        """Disable only Stage 7 Data Session admission at the Service boundary.
+
+        The frozen Stage 5 implementation remains intact.  The current Stage 7
+        hardware profile permits Link 11 Short Data only; a future certificate
+        profile can reopen the already implemented Data Session path by setting
+        its immutable capability to true.
+        """
+
+        rejected = Stage5Endpoint._route_admission_check_locked(
+            self, destination, ack_required, encoded_length
+        )
+        if rejected is not None:
+            return rejected
+        resolved = self._stage7_resolved
+        if resolved is None or resolved.data_session_enabled:
+            return None
+        if destination.kind is AddressKind.BROADCAST:
+            return None
+        message_type = 92 if ack_required else 93
+        segment_size = 4 + encoded_length
+        link11_short_data_eligible = any(
+            profile.link_id.value == 11
+            and dict(profile.message_payload_capacities).get(message_type, 0)
+            >= segment_size
+            for profile in self._dependencies.registries.link_profile.entries()
+        )
+        if link11_short_data_eligible:
+            return None
+        return self._reject(
+            ErrorCode.UNSUPPORTED_REQUEST,
+            ErrorCategory.UNSUPPORTED,
+            "Stage 7 Data Session capability is disabled for this profile",
+            reason="stage7_data_session_disabled",
+            required_procedure="DATA_SESSION",
+            data_link_id=resolved.data_link_id,
+            encoded_size=encoded_length,
+        )
 
     def cancel(self, request: CancelTransferRequest):
         if not isinstance(request, CancelTransferRequest):

@@ -3,3 +3,4 @@
 # Link 17 run과 Link 19 run을 별도 resolved run으로 생성한다.
 
 data_link_id = 17
+data_session_enabled = false
