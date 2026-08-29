@@ -1364,6 +1364,20 @@ def main(argv=None) -> int:
             Stage4Limits as _S4L,
         )
 
+        # D-19: pending quota 상향 (svc-run-j 실측: 에너지 게이트 후에도
+        # 장부 수위가 ~65에 상시 고착 — 처리 지연이 아니라 계획 선행분
+        # (미래 창 ~2프레임 × 창 수)의 구조적 점유. 원 한도 68은 이 바닥
+        # 대비 여유가 3뿐이라 shed가 창 계획을 상습 연기 → 청취 확률화
+        # (run F 1/6, H 0/6, J 0/6). 바닥+프레임 배치(~30)+여유로 상향.
+        # shed·마진은 폭주 안전판으로 유지. 런타임 클래스 패치(svcdbg66
+        # 전례), frozen 파일 0수정.
+        _S4L.PENDING_DEPENDENCY_RX = 128
+        _S4L.PENDING_DEPENDENCY_TOTAL = 160
+        print(
+            "[launcher] pending-quota RX=128 TOTAL=160 (D-19)",
+            file=sys.stderr, flush=True,
+        )
+
         _orig_pfw = _MC.plan_frame_windows
         _SHED_MARGIN = 4
 
