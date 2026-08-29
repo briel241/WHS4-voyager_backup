@@ -63,13 +63,19 @@ ROWS = [
      "→MASS 재조립·검증→Type 13 ACK→ROC 전송완료",
      "ROC Type 92(addressed, ACK 요구)→MASS CRC·Dest 검사"
      "→검증 후 항로 반영→Type 13 ACK→MASS 추종",
-     "ROC Type 92(addressed, ACK 요구)→MASS CRC·Dest 검사"
-     "→검증 후 조종 반영(침로·Fallback·속력)→Type 13 ACK"
-     "→MASS 조타 개시→응용 ACK(MF 3)→ROC 상관"),
+     "ROC Type 92(addressed, ACK 요구)→MASS CRC·Dest 검사→검증 후 반영"
+     "[제어권 MON→RC · 목표침로 · Fallback · 속력]→Type 13 ACK"
+     "→MASS 조타 개시→응용 ACK(MF 3, Type 93)→ROC 상관"),
     ("채널 조건",
      "동축 루프백 · 패킷 손실 없음 · Link ID 17",
      "동축 루프백 · Link ID 11 또는 17",
      "동축 루프백 · Link ID 11 또는 17\n(조종 단독 13 B · WP 2개 32 B, WP 3개 42 B부터 Data Session)"),
+    ("상태 정의",
+     "신뢰저장소 반영 여부 (검증 통과/거부)",
+     "제어권 = MON(감독 자율) 유지\n항행상태 0(under way using engine)",
+     "제어권 Autonomy Mode 3bit — 1=RC · 2=MON · 3=AUT (프로젝트 정의)\n"
+     "Fallback State 3bit — 0=none · 1=Anchoring · 2=DP · 3=Drifting (S-421)\n"
+     "Navigation Status 4bit — 0=항행 · 1=at anchor · 2=not under command (AIS)"),
     ("예상 결과",
      "MASS가 검증 통과분만 신뢰저장소에 반영 · 위조본 거부",
      "MASS가 항로 수락(acknowledged) 후 waypoint 추종",
@@ -95,6 +101,10 @@ NOTES = [
     "VDE Type은 addressed/broadcast가 아니라 ack_required가 가른다 — "
     "92=Short data with ACK(Table 40), 93=Short data without ACK(Table 41). "
     "위치보고는 addressed지만 no-ACK이므로 Type 93이다.",
+    "상태는 세 가지가 따로다 — Autonomy Mode(누가 제어하나, 프로젝트 정의), "
+    "Fallback State(어떤 안전 상태로 가나, S-421), "
+    "Navigation Status(지금 무엇을 하나, AIS M.1371 Table 45). "
+    "조종 명령 하나가 셋을 함께 바꾼다.",
     "sc_vde 두 형식은 서명·replay 보호가 없는 TEST 전용이다. 실제 조타에 쓰지 않는다.",
     "참여자 MMSI는 구현 config 기준(MASS 440000001 / ROC 440000002).",
 ]
@@ -137,8 +147,8 @@ for i, (label, b, c, d) in enumerate(ROWS):
 
     if label in ("메시지 흐름", "채널 조건"):
         ws.row_dimensions[r].height = 58
-    elif label == "payload_format":
-        ws.row_dimensions[r].height = 48
+    elif label in ("payload_format", "상태 정의"):
+        ws.row_dimensions[r].height = 52
     elif "\n" in (b + c + d):
         ws.row_dimensions[r].height = 34
 
