@@ -1358,15 +1358,46 @@ def main(argv=None) -> int:
                 if not trial_cmds:
                     errors.extend(trial_errs)
                     return out
+                # 창 다이어트 (svc-run-f 실측: 완료 처리 수요가 용량의
+                # ~2.5배라 장부 포화가 구조적 — 시나리오 재현에 불요한
+                # 청취 창을 계획에서 제외해 디코드 부하 자체를 줄인다.
+                # 유지: 제어 tdma0 전체(TBB/ASC/RAC 관제), DSCH(ACK),
+                # DC 중 LC15/LC3(세션 데이터·반환). 제외: 그 외 DC 레인.)
+                def _window_keep(cmd):
+                    if _ccls_of(cmd) is not _PCC.RX:
+                        return True
+                    try:
+                        req = cmd.payload.request
+                        start = req.start_at.total_nanoseconds()
+                        pos_w = _spr_pos(start)
+                        if pos_w.tdma_channel == 0:
+                            return True
+                        slot_w = self_c.active_slot_map(state).slot_at(
+                            req.channel, pos_w.tdma_channel,
+                            pos_w.slot_in_frame,
+                        )
+                        fn = getattr(
+                            getattr(slot_w, "function", None), "name", ""
+                        )
+                        if fn == "DSCH":
+                            return True
+                        return fn == "DC" and getattr(
+                            slot_w, "logical_channel", None
+                        ) in (15, 3)
+                    except Exception:  # noqa: BLE001 - 판별 불가면 유지
+                        return True
+
+                kept = [c for c in trial_cmds if _window_keep(c)]
+                dropped = len(trial_cmds) - len(kept)
                 rx_total = state.pending_count(_PCC.RX) + sum(
-                    1 for c in list(commands) + trial_cmds
+                    1 for c in list(commands) + kept
                     if _ccls_of(c) is _PCC.RX
                 )
                 all_total = (
                     state.pending_count(_PCC.RX)
                     + state.pending_count(_PCC.NON_CLEANUP_NON_RX)
                     + state.pending_count(_PCC.CLEANUP)
-                    + len(commands) + len(trial_cmds)
+                    + len(commands) + len(kept)
                 )
                 if (
                     rx_total > _S4L.PENDING_DEPENDENCY_RX - _SHED_MARGIN
@@ -1375,11 +1406,17 @@ def main(argv=None) -> int:
                     if os.environ.get("STAGE7_DIAG", "0") == "1":
                         print(
                             f"[diag] window-shed rx={rx_total} "
-                            f"all={all_total} defer={len(trial_cmds)}",
+                            f"all={all_total} defer={len(kept)}",
                             file=sys.stderr, flush=True,
                         )
                     return state
-                commands.extend(trial_cmds)
+                if dropped and os.environ.get("STAGE7_DIAG", "0") == "1":
+                    print(
+                        f"[diag] window-diet kept={len(kept)} "
+                        f"dropped={dropped}",
+                        file=sys.stderr, flush=True,
+                    )
+                commands.extend(kept)
                 errors.extend(trial_errs)
                 return out
             except Exception:  # noqa: BLE001 - 실패 시 원 경로
