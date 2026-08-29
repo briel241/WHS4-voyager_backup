@@ -659,7 +659,7 @@ def main(argv=None) -> int:
         # 원본으로 오인 복원될 수 있다 — 직렬화로 차단.
         _rel_lock = _thr_rel.RLock()
 
-        def _rescue_stale_builds(self_c, state, floor_ns):
+        def _rescue_stale_builds(self_c, state, floor_ns, target_min_ns=None):
             """마감(now+floor)을 놓친 BUILD 의도를 폐기 대신 다음 유효 DC
             슬롯으로 재정박한다 (svc-data-5/7 실측: 보류 조각이 단일 알람
             소진+스위프 기아로 한 프레임 방치 후 SLOT_MISSED — frozen의
@@ -671,6 +671,8 @@ def main(argv=None) -> int:
             import vdeter.mac.coordinator as _comod
 
             now0 = self_c._now_utc_nanoseconds()
+            if target_min_ns is None:
+                target_min_ns = floor_ns
             stale = [
                 i for i in state.tx_intents
                 if i.kind == "BUILD"
@@ -706,7 +708,7 @@ def main(argv=None) -> int:
                     ):
                         if (
                             item.logical_channel == context.logical_channel_tx
-                            and item.start_nanoseconds >= now0 + floor_ns
+                            and item.start_nanoseconds >= now0 + target_min_ns
                             and item.start_nanoseconds not in taken
                         ):
                             new_at = item.start_nanoseconds
@@ -768,8 +770,17 @@ def main(argv=None) -> int:
                 except Exception:  # noqa: BLE001
                     pass
             try:
+                # 이월 목적지는 완화 하한(100ms)이 아니라 본 계획 lead +
+                # 1슬롯 여유를 요구한다 — svc-data-8 실측: +107~347ms 이월이
+                # 빌드 파이프라인 지연을 못 버티고 어댑터 마감(RADIO_LATE_
+                # REQUEST)·UHD late에서 사산. 판별(사살 여부)은 완화 하한,
+                # 재배치는 여유 있는 슬롯으로.
                 state = _rescue_stale_builds(
-                    self_c, state, relaxed.transmit_lead_nanoseconds
+                    self_c, state,
+                    relaxed.transmit_lead_nanoseconds,
+                    target_min_ns=(
+                        original_profile.transmit_lead_nanoseconds + 160_000_000
+                    ),
                 )
             except Exception as error:  # noqa: BLE001 - 구조 실패 시 원 경로
                 print(f"[launcher] build-rescue 오류: {error}",
