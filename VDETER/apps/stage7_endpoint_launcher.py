@@ -658,6 +658,10 @@ def main(argv=None) -> int:
         # 프로파일 스왑은 인스턴스 전역이라 재진입/동시 진입 시 완화값이
         # 원본으로 오인 복원될 수 있다 — 직렬화로 차단.
         _rel_lock = _thr_rel.RLock()
+        # 이월 배정 이력 (svc-data-9 실측: 앞서 이월된 조각이 즉시 방출되어
+        # 대기 목록을 떠나면 다음 이월이 같은 슬롯을 재배정 → 공중 충돌
+        # 유실. 최근 배정 슬롯을 영속 기록해 재사용을 막는다.)
+        _rescued_slots = {}
 
         def _rescue_stale_builds(self_c, state, floor_ns, target_min_ns=None):
             """마감(now+floor)을 놓친 BUILD 의도를 폐기 대신 다음 유효 DC
@@ -682,7 +686,11 @@ def main(argv=None) -> int:
             if not stale:
                 return state
             smap = self_c.active_slot_map(state)
+            # 지난 배정 이력 정리(과거 슬롯은 재사용 무해) 후 taken에 합산.
+            for slot_ns in [s for s in _rescued_slots if s < now0]:
+                _rescued_slots.pop(slot_ns, None)
             taken = {i.transmit_at_nanoseconds for i in state.tx_intents}
+            taken.update(_rescued_slots)
             cur_frame = _comod.frame_ordinal_at_nanoseconds(now0)
             for intent in stale:
                 context = state.transfer_by_value(intent.correlation_transfer_id)
@@ -731,6 +739,7 @@ def main(argv=None) -> int:
                     moved
                 )
                 taken.add(new_at)
+                _rescued_slots[new_at] = True
                 print(
                     f"[launcher] build-rescue "
                     f"old_delta_ms={(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
