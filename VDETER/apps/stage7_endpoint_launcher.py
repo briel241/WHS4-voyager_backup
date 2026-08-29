@@ -295,8 +295,16 @@ def main(argv=None) -> int:
                     last_mac_cycle = now_mono
                     cycle_started = _time.monotonic()
                     support.advance_clock()
+                    fired_n = 0
                     while support.has_due_timer():
                         support.fire_due_timers()
+                        fired_n += 1
+                    if fired_n and os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(
+                            f"[diag] timers-fired n={fired_n} "
+                            f"t={_time.monotonic():.3f}",
+                            file=sys.stderr, flush=True,
+                        )
                     support.pump()
                     cycle_ms = (_time.monotonic() - cycle_started) * 1e3
                     # 펌프 적체는 비정상 신호일 때만 로그로 남긴다.
@@ -514,6 +522,33 @@ def main(argv=None) -> int:
                 return _diag_orig_sme(procedure)
 
             _dtr.slot_missed_error = _diag_sme
+
+            # 정밀: horizon 진입 타이머의 무장/발화 실측 (release 기아의
+            # 원인 특정 — 스위프가 프레임 주기로만 도는 이유).
+            _diag_orig_arm = _DMC._arm_horizon_entry
+
+            def _diag_arm(self_c, state, *, entry_utc_nanoseconds,
+                          causation_event_id, commands, errors):
+                out = _diag_orig_arm(
+                    self_c, state,
+                    entry_utc_nanoseconds=entry_utc_nanoseconds,
+                    causation_event_id=causation_event_id,
+                    commands=commands, errors=errors,
+                )
+                try:
+                    armed = out[1] if isinstance(out, tuple) else "?"
+                    now_u = self_c._now_utc_nanoseconds()
+                    print(
+                        f"[diag] arm entry_in_ms="
+                        f"{(entry_utc_nanoseconds - now_u) / 1e6:.0f} "
+                        f"armed={armed} timers={len(getattr(state, 'timers', ()))}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return out
+
+            _DMC._arm_horizon_entry = _diag_arm
             print("[diag] STAGE7_DIAG 계측 활성", file=sys.stderr, flush=True)
         except Exception as error:  # noqa: BLE001
             print(f"[diag] 계측 장착 실패: {error}", file=sys.stderr, flush=True)
