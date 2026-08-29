@@ -170,6 +170,16 @@ class Stage7LaneRxDispatcher:
                 return native_request
             if state["med"] <= 0.0 or power >= state["med"] * 8.0:
                 state["passed"] += 1
+                # 통과 이벤트 관측 (svc-run-l2 부검: ROC lane0의 유일
+                # 버스트(ACK)가 무음 소실 — 창 미무장/게이트/디코드 3분기
+                # 판별용. 통과가 드문 레인에서 특히 유효.)
+                if state["passed"] <= 30 or state["passed"] % 200 == 1:
+                    print(
+                        f"[launcher] rx-gate pass lane={lane_index} "
+                        f"n={state['passed']} power={power:.3e} "
+                        f"thr={state['med'] * 8.0:.3e}",
+                        file=_sys.stderr, flush=True,
+                    )
                 return native_request
             state["gated"] += 1
             if state["gated"] % 1000 == 1:
