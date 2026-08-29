@@ -213,13 +213,23 @@ def main(argv=None) -> int:
     open(os.path.join(gate_dir, "started_ok"), "w").close()
 
     def transfer(step_id, sender, dest_relpath, expect_receiver, payload_sha,
-                 timeout_s=180.0, expect_fail=False):
+                 timeout_s=180.0, expect_fail=False, max_attempts=3,
+                 gating=True):
         # 한정 재시도 ≤2회 (기준선 v0.9.8, 사용자 승인 2026-08-29): 시도별
-        # timeout 불변, 전 시도 기록(attempts/retries 계수), 3시도 전패 시
-        # FAIL 유지. 무선 per-attempt 확률성 인정 — 하위 계층 예산과 정합.
+        # timeout 불변, 전 시도 기록(attempts/retries 계수), 전패 시 FAIL
+        # 유지. 무선 per-attempt 확률성 인정 — 하위 계층 예산과 정합.
+        # gating=False (v0.9.13): 유실 허용 반복(주기 보고 재현) — 실패를
+        # LOSS로 기록하되 세트 판정에 관여하지 않는다 (전 시도 기록 불변).
+        # v0.9.13: soak가 동일 payload를 재사용하므로 수신 hit은 제출 전
+        # 스냅샷 대비 증분으로 판정한다 (이전 cycle 배달의 허위 중복/허위
+        # 수신 방지).
         attempts = []
         outcome = None
-        for attempt in range(3):
+        before_hits = (
+            len(_received(events.records, expect_receiver, payload_sha))
+            if expect_receiver is not None else 0
+        )
+        for attempt in range(max_attempts):
             before_terminals = len(_terminal_states(events.records, sender))
             ok, body = invoke(sender, "SUBMIT", dest_relpath, step_id)
             if not ok:
@@ -246,7 +256,7 @@ def main(argv=None) -> int:
                     return None
                 if expect_receiver is not None:
                     got = _received(records, expect_receiver, payload_sha)
-                    if not got:
+                    if len(got) <= before_hits:
                         return None
                 return done
 
@@ -259,16 +269,22 @@ def main(argv=None) -> int:
                 break
             counters["retries"] += 1
         if outcome is None:
-            record(step_id, "FAIL", reason="timeout 대기 초과 (3시도 전패)",
+            if not gating:
+                record(step_id, "LOSS", gating=False,
+                       reason="유실 허용 반복 — 미배달", attempts=attempts)
+                return False
+            record(step_id, "FAIL",
+                   reason=f"timeout 대기 초과 ({max_attempts}시도 전패)",
                    attempts=attempts)
             return False
-        # wrong destination / duplicate 검사
+        # wrong destination / duplicate 검사 (증분 기준 — payload 재사용 대응)
         wrong = 0
         for endpoint_id in ENDPOINT_IDS:
             hits = _received(events.records, endpoint_id, payload_sha)
             if endpoint_id == expect_receiver:
-                if len(hits) > 1:
-                    counters["duplicates"] += len(hits) - 1
+                delta = len(hits) - before_hits
+                if delta > 1:
+                    counters["duplicates"] += delta - 1
             elif hits:
                 wrong += len(hits)
         counters["wrong_destination"] += wrong
@@ -328,25 +344,38 @@ def main(argv=None) -> int:
     else:  # soak
         soak_deadline = time.monotonic() + arguments.soak_seconds
         cycle = 0
-        # v0.9.9: soak 순환 = 실증 기능군(Short 양방향).
-        soak_plan = (
-            ("short-roc-to-a", "ROC", "MASS-A"),
-            ("short-b-to-roc-noack", "MASS-B", "ROC"),
-        )
+        # v0.9.13 soak 재정의 (재현 프레임 정합, 사용자 승인 2026-08-29):
+        # 판정 대상 = 관제→함정 반복(≥min_transfers, v0.9.8 재시도 준거).
+        # 함정→관제는 응용 의미(주기 위치보고 — 유실 허용, 주기 도착=생존
+        # 판정, AIS 계열 설계)에 맞춰 1시도·60s 반복으로 성공률을 실측
+        # 기록한다(판정 비관여, 전 시도 기록 — 은폐 없음).
+        counters["roc_to_ship_completed"] = 0
+        counters["ship_report_attempts"] = 0
+        counters["ship_report_delivered"] = 0
         while time.monotonic() < soak_deadline:
-            name, sender, receiver = soak_plan[cycle % len(soak_plan)]
             ok = transfer(
-                f"soak-{cycle}-{name}", sender, f"submit-{name}.json",
-                receiver, shas[name], timeout_s=180.0,
+                f"soak-{cycle}-short-roc-to-a", "ROC",
+                "submit-short-roc-to-a.json", "MASS-A",
+                shas["short-roc-to-a"], timeout_s=180.0,
             )
             overall_ok = overall_ok and ok
-            # fail-fast 제거 (2026-08-29): 실패해도 나머지 시나리오를 계속
-            # 실행해 회차당 전 항목 실측을 확보한다. 세트 판정은 불변
-            # (모든 단계 기록·overall은 전 항목 기준).
+            if ok:
+                counters["roc_to_ship_completed"] += 1
+            if time.monotonic() >= soak_deadline:
+                break
+            counters["ship_report_attempts"] += 1
+            delivered = transfer(
+                f"soak-{cycle}-ship-report", "MASS-B",
+                "submit-short-b-to-roc-noack.json", "ROC",
+                shas["short-b-to-roc-noack"], timeout_s=60.0,
+                max_attempts=1, gating=False,
+            )
+            if delivered:
+                counters["ship_report_delivered"] += 1
             cycle += 1
-        if counters["transfers_completed"] < arguments.min_transfers:
+        if counters["roc_to_ship_completed"] < arguments.min_transfers:
             record("soak-min-transfers", "FAIL",
-                   completed=counters["transfers_completed"],
+                   completed=counters["roc_to_ship_completed"],
                    required=arguments.min_transfers)
             overall_ok = False
 
@@ -363,7 +392,12 @@ def main(argv=None) -> int:
 
     # v0.9.9 게이트 정합: 오목적지 0 불변; duplicates <= retries
     # (재시도 지연 완료 산물); 전 단계 PASS 시 오류 이벤트는 residual.
-    steps_all_pass = all(item.get("status") == "PASS" for item in steps)
+    # v0.9.13: 유실 허용 반복(gating=False, LOSS)은 세트 판정에서 제외 —
+    # 성공률은 counters(ship_report_*)와 steps 기록으로 전량 보존된다.
+    steps_all_pass = all(
+        item.get("status") == "PASS"
+        for item in steps if item.get("gating", True)
+    )
     counters["residual_error_events"] = counters["unexpected_errors"]
     overall_ok = (overall_ok
                   and counters["wrong_destination"] == 0
@@ -371,7 +405,7 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.10",
+        "baseline_revision": "0.9.13",
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],

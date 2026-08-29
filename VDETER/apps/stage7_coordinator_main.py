@@ -908,9 +908,16 @@ def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
             soak_seconds=600, min_transfers=10, phase_marks=marks,
         )
         counters = scenario.get("counters") or {}
+        # v0.9.13: 판정 계수 = 관제→함정 반복 완료 수. 함정→관제 주기
+        # 보고는 성공률 기록(ship_report_*)으로 evidence에 남는다.
+        gate_completed = int(
+            counters.get(
+                "roc_to_ship_completed", counters.get("transfers_completed", 0)
+            )
+        )
         status = "PASS" if (
             scenario.get("status") == "PASS" and rc == 0
-            and int(counters.get("transfers_completed", 0)) >= 10
+            and gate_completed >= 10
         ) else "FAIL"
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
