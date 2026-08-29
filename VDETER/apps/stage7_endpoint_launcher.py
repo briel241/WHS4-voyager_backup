@@ -933,6 +933,58 @@ def main(argv=None) -> int:
             return plan
 
         _MC.handle_event = _he_guarded
+        # 세션 조각 수용 판정의 경계 스냅 (svc-data-10 실측 + 정밀 분석:
+        # PHY 역산이 램프 128샘플(416.67µs)을 무조건 빼므로, 탐지 지점이
+        # 창 앞머리에 붙으면 received_at이 슬롯 경계 앞으로 넘어가 tdma
+        # 채널 분류가 한 칸 밀림 — DC 조각이 관제채널로 오분류·거부.
+        # 창=슬롯 정의상, 경계보다 램프 이내로 앞선 시각은 그 경계의 슬롯
+        # 소속이다. 수용 판정 입력만 보정하며 다른 관측 계약 무접촉.
+        import dataclasses as _dc_rdf
+
+        from vdeter.mac.tdma import (
+            CHANNEL_OFFSETS_NANOSECONDS as _RDF_OFFSETS,
+            HEXSLOT_NANOSECONDS as _RDF_HEX,
+            frame_ordinal_at_nanoseconds as _rdf_frame,
+            frame_ordinal_start_nanoseconds as _rdf_fstart,
+            position_at_nanoseconds as _rdf_pos,
+        )
+
+        _RDF_RAMP_NS = 416_667  # 128 samples @307.2kHz
+
+        _orig_rdf_snap = _MC._receive_data_fragment
+
+        def _rdf_boundary_snapped(self_c, state, **kwargs):
+            try:
+                decoded = kwargs.get("decoded")
+                received = decoded.received_at.total_nanoseconds()
+                ahead = received + _RDF_RAMP_NS
+                p0 = _rdf_pos(received)
+                p1 = _rdf_pos(ahead)
+                if (p0.tdma_channel, p0.slot_in_frame) != (
+                    p1.tdma_channel, p1.slot_in_frame
+                ):
+                    slot_start = (
+                        _rdf_fstart(_rdf_frame(ahead))
+                        + p1.slot_in_frame * _RDF_HEX
+                        + _RDF_OFFSETS[p1.tdma_channel]
+                    )
+                    delta = slot_start - received
+                    if 0 < delta <= _RDF_RAMP_NS:
+                        kwargs = dict(kwargs)
+                        kwargs["decoded"] = _dc_rdf.replace(
+                            decoded,
+                            received_at=decoded.received_at.shifted(delta),
+                        )
+                        print(
+                            f"[launcher] frag-snap +{delta / 1e3:.0f}us "
+                            f"tdma{p0.tdma_channel}->{p1.tdma_channel}",
+                            file=sys.stderr, flush=True,
+                        )
+            except Exception:  # noqa: BLE001 - 보정 실패 시 원 판정 경로
+                pass
+            return _orig_rdf_snap(self_c, state, **kwargs)
+
+        _MC._receive_data_fragment = _rdf_boundary_snapped
         # dispatcher 직렬화 락 (svcdbg52 실측: 배송을 adapter 락 밖으로 빼자
         # 창 등록(MAC 스레드)과 샘플 관측(monitor 스레드)이 frozen ledger
         # dict 위에서 경쟁 — 'dictionary changed size'). adapter 락과 분리해
