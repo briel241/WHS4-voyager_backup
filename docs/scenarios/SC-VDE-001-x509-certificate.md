@@ -9,7 +9,8 @@
 | 목적 | ROC가 MASS에 X.509 공개키 인증서를 전달한다 |
 | 분류 | 대용량 · 일방적 · 지정 수신자 |
 | `data_type` | `X509_CERTIFICATE` |
-| 상태 | 링크 계층의 data session 기능 대기 |
+| `payload_format` | `x509.certificate_report` (VPFI 0 / MF 1, **운영 scope**) |
+| 상태 | ✅ **운영 종단 완료** — 실 VDE-TER codec으로 왕복, 정상 검증·저장, 위조 거부 확인 |
 
 ---
 
@@ -256,6 +257,14 @@ provisioning 절차가 모두 비어 있다.**
 - 동축 루프백
 - 패킷 손실 없음 (기준선 측정)
 - Link ID 17 고정
+- `payload_format` **`x509.certificate_report`** (VPFI 0 · Message Format 1 · 운영 scope)
+
+**크기 실측** — 인증서 1건을 담은 Certificate Report 본문은 **354 byte**다
+(`apps/cert_loopback_demo.py` 출력). 노선·조종과 달리 carrier가 시험용 `ff 7f`가
+아니라 **IALA R1027이 정식 배정한 VPFI 0**이며, 그래서 이 시나리오만 운영 scope다.
+
+> 우리가 `submit(payload=...)`에 넣는 것은 Certificate Report **본문**이다. VPFI와
+> Message Format은 VDE-TER Presentation codec이 붙인다(`../vdeter_mass_roc_api_guide.md` §8.2).
 
 ---
 
@@ -305,5 +314,9 @@ provisioning 절차가 모두 비어 있다.**
 - ITU-R M.2092-2 §A4-4.2.5(short data message), §A4-4.9(메시지 정의),
   §A4-4.15(디지털 서명), §A4-4.29(segmentation), Table 8(Link ID), Table 38(ACK/NACK),
   Table 49~51(fragment), Table 54~55(segment)
-- `docs/vdeter_mass_roc_api_guide.md` §3.1.2, §5, §6
-- `docs/mass_roc_background.md` §6.4
+- [`../vdeter_mass_roc_api_guide.md`](../vdeter_mass_roc_api_guide.md) §3.1.2, §5, §6, §8.2
+- [`../mass_roc_background.md`](../mass_roc_background.md) §6.4
+- 구현: `common/security/`, `common/messages/certificate_report.py`, `common/vdeter_bridge.py`
+- 시험: `tests/test_certificate.py`, `test_certificate_report.py`, `test_cert_vdeter_integration.py`
+- 실행: `python3 apps/scenario_runner.py run SC-VDE-001` ·
+  `.venv-crypto/bin/python apps/cert_loopback_demo.py` (무선 종단, 정상/위조)

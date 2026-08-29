@@ -26,14 +26,14 @@
 
 | 참여자 | 식별자 | 하는 일 |
 | --- | --- | --- |
-| MASS | MMSI `440000001` | 2초마다 위치를 브로드캐스트한다. 항로 지시를 받으면 검증하고 응답한 뒤 그 항로를 따라간다 |
+| MASS | MMSI `440000001` | AIS 표준 주기로 ROC에 위치를 보고한다. 항로 지시를 받으면 검증하고 응답한 뒤 그 항로를 따라간다 |
 | ROC | MMSI `440000002` | 위치보고를 받아 항적을 갱신한다. 항로를 지시하고 응답을 기다린다. 보고가 끊기면 통신 두절로 판정한다 |
-| 다른 MASS | (선택) | 위치보고 브로드캐스트를 함께 수신한다 |
+| 다른 MASS | — | 현재 위치보고가 addressed라 함께 듣지 못한다 (§3 주석) |
 | 공격자 | — | §6에서만 등장 |
 
 시간 순으로 쓰면 다음과 같다.
 
-- **MASS가** 2초마다 위치·침로·속력·자율모드를 **브로드캐스트한다**.
+- **MASS가** AIS 표준 주기로 위치·침로·속력·자율모드를 **ROC에 보고한다**.
 - **ROC가** 그것을 받아 **항적을 갱신한다**.
 - **ROC가** waypoint 목록으로 **항로를 지시한다**(지정 수신, 응답 요구).
 - **MASS가** 지시를 **검증한다**. 통과한 경우에만 항로를 적용한다.
@@ -53,22 +53,28 @@
 | TBB 동기화 | 불필요 (제어국 서비스 영역 밖 직접 통신 가정) |
 | 시간 동기화 | 필요 (TDMA slot 정렬) |
 | 채널 조건 | 동축 루프백 · 손실 없음 (기준선) |
-| 위치보고 주기 | **2.0 s** |
-| 통신 두절 판정 | **10.0 s** 미수신 |
-| VPFI | `0xFF01` (시험용 임의값) |
+| 위치보고 주기 | **AIS Class A 표준** (12노트 10 s · 선회 중 3⅓ s · 정박 3분) |
+| ROC 통신 두절 판정 | **10.0 s** 미수신 |
+| VPFI | **`ff 7f`** (R1027 Table 3 Level 2 시험용, logical 16383) — VDE-TER이 붙인다 |
+| payload_format | 항로·ACK `sc_vde.route_control.command` / `.ack` · 위치보고 `sc_vde.position_report` |
 
 Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 제어 필드 확장 후).
+
+> **위치보고가 브로드캐스트가 아니다.** VDE-TER이 MASS-originated broadcast를 지원하지
+> 않아 `DR-PAYLOAD-016`으로 **addressed(MASS→ROC)·no-ACK 전용**으로 승인됐다. AIS는
+> 브로드캐스트이므로 이 점은 실제 운용과 다르며, 주변 선박이 함께 듣는 상황은 재현되지
+> 않는다. 실험 해석 시 감안해야 한다.
 
 ---
 
 ## 4. 송수신 데이터
 
-### 4.1 Position Report (MASS → 브로드캐스트)
+### 4.1 Position Report (MASS → ROC, addressed)
 
 | 항목 | 내용 |
 | --- | --- |
 | 형식 | AIS Message 1/2/3 Common Navigation Block 차용 |
-| 크기 | **17 byte** (고정) |
+| 크기 | application **14 byte** 고정 · wire **17 byte** (VPFI/MF 3 B 포함) |
 | 내용 | 항행상태 · 선회율 · SOG · 위치정확도 · 경도 · 위도 · COG · 선수방위 · 시각 · 기동지시자 · RAIM · **자율모드** |
 | 표준 근거 | ITU-R M.1371 (108 bit) |
 | 프로젝트 정의 | **Autonomy Mode 3 bit** — 표준에 자율운항을 나타내는 값이 없다 |
@@ -78,7 +84,7 @@ Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 
 | 항목 | 내용 |
 | --- | --- |
 | 형식 | IFM DAC=001/FI=28 차용 + S-421 조작 데이터 제어 필드(heading·fallback·turn radius·SOG·leg) |
-| 크기 | **23 byte~** (waypoint 수에 따라 가변, §5.3) |
+| 크기 | application **10 byte~** (waypoint 수에 따라 가변, §5.3) · wire = application + 3 B |
 | 내용 | Linkage ID · 발신자 분류 · 항로 종류 · 시작 시각 · **유효기간** · waypoint 목록 |
 | 표준 근거 | IMO SN.1/Circ.289 Table 13.2 / 13.3 |
 
@@ -93,7 +99,7 @@ Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 
 | 항목 | 내용 |
 | --- | --- |
 | 형식 | IFM FI=5 개념 차용 |
-| 크기 | **6 byte** |
+| 크기 | application **3 byte** 고정 · wire **6 byte** |
 | 내용 | Linkage ID · 상태(S-421 routeInfoStatus: acknowledged/errors/incomplete/route issues) · 사유 |
 | 프로젝트 정의 | 상태·사유 값 — FI=5의 비트 구조는 ITU-R M.1371 Annex 5 소관이며 미확보 |
 
@@ -106,25 +112,29 @@ Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 
 
 ### 5.1 전송 경로
 
-| 메시지 | 방향 | VDE Type | 근거 |
-| --- | --- | :-: | --- |
-| Position Report | MASS → 전체 | **93** | ACK 불요 · 브로드캐스트 가능 |
-| Route Instruction | ROC → MASS | **92** | ACK 요구 · 지정 수신자 (broadcast 금지) |
-| Application ACK | MASS → ROC | **93** | ACK 불요 |
+| 메시지 | 방향 | payload_format (MF) | 링크 ACK |
+| --- | --- | --- | :-: |
+| Position Report | MASS → ROC (addressed) | `sc_vde.position_report` (1) | 불요 |
+| Route Instruction | ROC → MASS (addressed) | `sc_vde.route_control.command` (2) | 요구 |
+| Application ACK | MASS → ROC (addressed) | `sc_vde.route_control.ack` (3) | 불요 |
+
+셋 다 addressed 전용이고 carrier는 `ff 7f`를 공유한다. VDE Type 번호 대응은 링크
+계층이 정하며, 위치보고가 addressed가 되면서 예전 표기(Type 93 브로드캐스트)는 더
+이상 맞지 않는다 — 링크 팀 확인 대상이다.
 
 ### 5.2 흐름
 
 ```text
 MASS                                                    ROC
  │                                                       │
- │──[1] Position Report  Type 93  17 B ────────────────▶ │  항적 갱신
- │      (2초마다 반복)                                     │
+ │──[1] Position Report  MF 1  14 B ───────────────────▶ │  항적 갱신
+ │      (AIS 표준 주기 · 12노트면 10초)                      │
  │                                                       │
- │◀─[2] Route Instruction  Type 92  55 B ─────────────── │  waypoint 3개 (Link ID 17)
+ │◀─[2] Route Instruction  MF 2  39 B ────────────────── │  waypoint 3개 (Link ID 17)
  │                                                       │
  │      검증 → 통과한 경우에만 항로 적용                       │
  │                                                       │
- │──[3] Application ACK  Type 93  6 B ─────────────────▶ │  acknowledged
+ │──[3] Application ACK  MF 3  3 B ────────────────────▶ │  acknowledged
  │                                                       │
  │      침로 변경 · waypoint 추종                           │
  │                                                       │
@@ -133,22 +143,30 @@ MASS                                                    ROC
 
 ### 5.3 크기 실측
 
-payload → Type 92/93 → Temporary Burst 순이다.
+application bytes → (VDE-TER이 VPFI/MF 3 B를 붙임) wire → 링크 메시지 → Temporary Burst 순이다.
 
-> ⚠️ 크기 갱신: 항로 지시가 S-421 조작 데이터 형식으로 확장됐다(heading setpoint·
-> fallback·waypoint별 turn radius·계획 SOG·leg geometry 추가).
-> 상세 형식은 [`../mass_roc_control_and_ack_message_format.md`](../mass_roc_control_and_ack_message_format.md).
-> 아래는 확장 후 실측값이다.
+> 우리가 `submit(payload=...)`에 넣는 것은 **application bytes**이고, `ff 7f | MF`
+> 3 byte는 VDE-TER Presentation codec이 붙인다. 직접 붙이면 거부된다
+> (`../vdeter_mass_roc_api_guide.md` §8.2).
 
-| 메시지 | payload | 링크 메시지 | Burst |
-| --- | ---: | ---: | ---: |
-| Position Report | 17 B | 29 B | **33 B** |
-| Route Instruction (WP 1) | 23 B | 36 B | 40 B |
-| Route Instruction (WP 2) | 32 B | 45 B | 49 B |
-| Route Instruction (WP 3) | 42 B | 55 B | **59 B** |
-| Route Instruction (WP 4) | 51 B | 64 B | 68 B |
-| Route Instruction (WP 16) | 167 B | 180 B | 184 B |
-| Application ACK | 5 B | 17 B | **21 B** |
+| 메시지 | application | wire | 링크 메시지 | Burst |
+| --- | ---: | ---: | ---: | ---: |
+| Position Report | 14 B | 17 B | 29 B | **33 B** |
+| Route Instruction (조종 단독, WP 0) | 10 B | 13 B | — | — |
+| Route Instruction (WP 1) | 20 B | 23 B | 36 B | 40 B |
+| Route Instruction (WP 2) | 29 B | 32 B | 45 B | 49 B |
+| Route Instruction (WP 3) | 39 B | 42 B | 55 B | **59 B** |
+| Route Instruction (WP 4) | 48 B | 51 B | 64 B | 68 B |
+| Route Instruction (WP 16) | 164 B | 167 B | 180 B | 184 B |
+| Application ACK | 3 B | 6 B | 재측정 필요 | 재측정 필요 |
+
+> **링크 메시지·Burst 열은 이전 프레이밍에서 잰 값이다.** wire 크기는 그때의 payload
+> 값과 같으므로(우리 옛 봉투와 VDE-TER 헤더가 둘 다 3 byte) 그대로 유효하다. 다만
+> **ACK만 당시 5 B로 잡혀 있었고 실제는 6 B**여서, 그 행의 링크·Burst는 링크 팀이
+> 다시 재야 한다.
+
+> 전송 방식은 크기가 가른다. wire 32 B(WP 2개)까지는 `ack_required`와 무관하게 Short
+> Data이고, **42 B(WP 3개)부터 addressed Data Session**이 선택된다(가이드 §8.3).
 
 Link ID별 waypoint 수용 한계.
 
@@ -208,7 +226,7 @@ Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 
 관찰 도구(`common/observe/`)로 확인 가능한 형태로 쓴다.
 
-- ROC의 항적이 **2초 간격으로 갱신**된다
+- ROC의 항적이 **AIS 표준 주기로 갱신**된다 (12노트면 10초 간격)
 - 항로 지시 후 **5초 안에** `accepted` 응답이 돌아온다
 - 지시 이후 **COG가 변한다** — 시계열 그래프에서 보인다
 - waypoint를 **순서대로 통과**한다. 남은 개수가 3 → 2 → 1 → 0으로 줄어든다
@@ -245,7 +263,7 @@ Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 | 취소 지시 (Type 31 / Duration 0) | `acknowledged` | — | 해제 |
 | 유효기간 경과 | — | — | 자동 해제 |
 | 다른 응용의 payload | 응답 없음 (무시) | — | **유지** |
-| VPFI 불일치 · 형식 손상 | 응답 없음 (무시) | — | **유지** |
+| VPFI/MF 불일치 · 형식 손상 | 응답 없음 (무시) | — | **유지** |
 
 ### 8.1 검증 순서가 구조로 보장된다
 
@@ -290,11 +308,13 @@ duration = 1분 지시
 
 ### 9.1 미해결 사항
 
-| # | 항목 | 영향 |
+| # | 항목 | 상태 |
 | :-: | --- | --- |
-| 1 | **`data_type` 미배정** | API 계약의 네 분류(TBB·AIS 인증값·전자해도·인증서)에 운항 메시지가 없다. 실제 Service로 보낼 수 없다 — **API 소유자 결정 필요** |
-| 2 | 검증 결과 전달 경로 | 링크 계층이 서명을 검증해도 그 결과가 응용에 오지 않는다. `ReceivedMessage`에 상태 필드가 필요하다 |
-| 3 | Type 92 링크 ACK 미구현 | 지금은 응용 ACK만 있다. 링크 ACK·재전송은 링크 계층 몫 |
+| 1 | ~~`data_type` 미배정~~ | ✅ **해결** — `sc_vde.route_control.command` / `.ack` / `sc_vde.position_report`이 VDE-TER registry에 등록됐다(TEST scope). 응용은 `DATA_TYPE_ROUTE_CONTROL_COMMAND` 등으로 보낸다 |
+| 2 | 검증 결과 전달 경로 | 미해결 — 링크 계층이 서명을 검증해도 그 결과가 응용에 오지 않는다. 다만 현재 SC-VDE 형식은 unsigned Segment Type 0이라 검증할 서명 자체가 없다 |
+| 3 | 링크 ACK 미구현 | 지금은 응용 ACK만 있다. 링크 ACK·재전송은 링크 계층 몫 |
+| 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 |
+| 5 | **Type 번호 대응** | 위치보고가 addressed가 되면서 예전 Type 93 표기가 맞지 않는다. 링크 팀 확인 필요 |
 
 ---
 
@@ -306,3 +326,6 @@ duration = 1분 지시
 - 구현: `MASS/mass_agent.py`, `ROC/roc_agent.py`, `common/messages/route_instruction.py`
 - 시험: `tests/test_mass_roc_agents.py`, `test_mass_roc_link_integration.py`
 - 실행: `python3 apps/scenario_runner.py run SC-VDE-005`
+- 전선 형식: [`../전선형식_노선_SC-VDE-005.md`](../전선형식_노선_SC-VDE-005.md)
+- 하위 시나리오: [`SC-VDE-006-remote-control.md`](SC-VDE-006-remote-control.md)
+- Service API 계약: [`../vdeter_mass_roc_api_guide.md`](../vdeter_mass_roc_api_guide.md)
