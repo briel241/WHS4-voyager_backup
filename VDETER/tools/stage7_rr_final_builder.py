@@ -23,16 +23,25 @@ REQUIRED_TCS = (
     "TC-STAGE7-RR-004", "TC-STAGE7-RR-005",
     "TC-STAGE7-RR-007",
 )
-# RR-008은 v0.9.10에서 Link 17 단일 artifact.
-REQUIRED_SOAK = ("TC-STAGE7-RR-008-link17",)
+# v0.9.14: soak 전체가 후속 이관 — 판정 필수 soak 없음.
+REQUIRED_SOAK = ()
 # v0.9.10: Link 19 자격(RR-006, RR-008-link19)은 판정 제외·후속 이관.
-# artifact가 있으면 기록하되 판정에 넣지 않는다.
-DEFERRED_TCS = ("TC-STAGE7-RR-006", "TC-STAGE7-RR-008-link19")
+# v0.9.14: RR-008-link17(soak)도 이관 — 단발 재현 시연에 지속 반복 요구
+# 부재(실측 조사 기록은 전량 보존). artifact가 있으면 기록하되 판정에
+# 넣지 않는다.
+DEFERRED_TCS = (
+    "TC-STAGE7-RR-006", "TC-STAGE7-RR-008-link19", "TC-STAGE7-RR-008-link17",
+)
 # 각 phase는 실행 시점의 승인 개정으로 결속된다. 아래 사슬 밖 버전이 하나라도
 # 있으면 불일치로 본다(사슬 내 진행은 개정 이력이 문서 헤더에 전량 보존됨).
 APPROVED_REVISION_CHAIN = (
     "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7",
-    "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13",
+    "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14",
+)
+# v0.9.14: 시나리오 계열 TC는 v0.9.8의 기록된 한정 재시도가 정당하다.
+SCENARIO_TCS_WITH_SANCTIONED_RETRY = (
+    "TC-STAGE7-RR-005", "TC-STAGE7-RR-006",
+    "TC-STAGE7-RR-008-link17", "TC-STAGE7-RR-008-link19",
 )
 
 
@@ -69,7 +78,8 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     baseline_shas = {c["payload"].get("baseline_sha256") for c in judged.values()}
     retries = [
         int((c["payload"].get("counters") or {}).get("retries", 0))
-        for c in judged.values()
+        for name, c in judged.items()
+        if name not in SCENARIO_TCS_WITH_SANCTIONED_RETRY
     ]
     hardware_maps = {
         json.dumps(c["payload"].get("hardware"), sort_keys=True)
