@@ -282,30 +282,59 @@ def main(argv=None) -> int:
         # 양자에 못 들어가는 최소 간격(2 양자)까지 내려 서비스 RX 창 발행
         # 지연을 줄인다 — svcdbg36 실측: 160ms 주기에서 ACK 청취 창이
         # +117µs 지각 시작(OFFGRID) 또는 통째로 빈 창(스트림 명령 미발화).
-        last_mac_cycle = 0.0
+        main._last_mac_cycle = 0.0
+
+        # MAC 미니사이클 (svc-run-c 실측 근거): drain 항목 1개 처리(수신
+        # 디코드)가 ~140ms라, 256개 한도의 일괄 drain 동안 MAC 박동이
+        # 0.7~2s 정지한다 — 유예 해제·인코드→PHY 체인·수신 창 발행이
+        # 전부 이 배치 간격에 묶여 지각하는 공통 뿌리. 사이클을 헬퍼로
+        # 빼서 drain 항목 사이에도 끼워 넣는다 (40ms 게이트라 저부하
+        # 때는 공짜). 같은 펌프 스레드에서만 호출되므로 MAC 단일 스레드
+        # 규율은 그대로다.
+        def _mac_cycle():
+            support_c = endpoint.stage4
+            if support_c is None:
+                return
+            now_c = _time.monotonic()
+            last_c = getattr(main, "_last_mac_cycle", 0.0)
+            if now_c - last_c < 0.04:
+                return
+            if (
+                last_c and now_c - last_c > 0.5
+                and os.environ.get("STAGE7_DIAG", "0") == "1"
+            ):
+                print(
+                    f"[diag] mac-gap {(now_c - last_c) * 1e3:.0f}ms "
+                    f"t={now_c:.3f}",
+                    file=sys.stderr, flush=True,
+                )
+            main._last_mac_cycle = now_c
+            support_c.advance_clock()
+            fired_n = 0
+            while support_c.has_due_timer():
+                support_c.fire_due_timers()
+                fired_n += 1
+            if fired_n and os.environ.get("STAGE7_DIAG", "0") == "1":
+                print(
+                    f"[diag] timers-fired n={fired_n} "
+                    f"t={_time.monotonic():.3f}",
+                    file=sys.stderr, flush=True,
+                )
+            support_c.pump()
+
+        main._mac_cycle = _mac_cycle
+
         while not _pump_stop.is_set():
             try:
                 endpoint.dependencies.radio.poll_once()
+                _mac_cycle()
                 drain = getattr(main, "_drain_dispatch_queue", None)
                 if drain is not None:
                     drain()
-                now_mono = _time.monotonic()
                 support = endpoint.stage4
-                if support is not None and now_mono - last_mac_cycle >= 0.04:
-                    last_mac_cycle = now_mono
+                if support is not None:
                     cycle_started = _time.monotonic()
-                    support.advance_clock()
-                    fired_n = 0
-                    while support.has_due_timer():
-                        support.fire_due_timers()
-                        fired_n += 1
-                    if fired_n and os.environ.get("STAGE7_DIAG", "0") == "1":
-                        print(
-                            f"[diag] timers-fired n={fired_n} "
-                            f"t={_time.monotonic():.3f}",
-                            file=sys.stderr, flush=True,
-                        )
-                    support.pump()
+                    _mac_cycle()
                     cycle_ms = (_time.monotonic() - cycle_started) * 1e3
                     # 펌프 적체는 비정상 신호일 때만 로그로 남긴다.
                     try:
@@ -319,7 +348,7 @@ def main(argv=None) -> int:
                                 or getattr(endpoint, "_lane_dispatcher", None)
                             dwin = len(getattr(dispatcher_ref, "_windows", {}) or {})
                             print(
-                                f"[launcher] pump t={now_mono:.3f} "
+                                f"[launcher] pump t={cycle_started:.3f} "
                                 f"cycle_ms={cycle_ms:.0f} depth={depth} held={held} "
                                 f"rxcmd={rxcmd} dwin={dwin}",
                                 file=sys.stderr, flush=True,
@@ -1282,6 +1311,10 @@ def main(argv=None) -> int:
             )
 
         def _drain_dispatch_queue():
+            # 항목당 처리(수신 디코드)가 ~140ms라 일괄 drain이 MAC 박동을
+            # 초 단위로 멎게 한다 (svc-run-c 실측) — 항목 사이에 MAC
+            # 미니사이클(40ms 게이트)을 끼워 박동을 보장한다.
+            mac_cycle = getattr(main, "_mac_cycle", None)
             for _ in range(256):
                 try:
                     item = _dispatch_queue.popleft()
@@ -1298,6 +1331,11 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[launcher] dispatch-drain 오류: {error}",
                           file=sys.stderr, flush=True)
+                if mac_cycle is not None:
+                    try:
+                        mac_cycle()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         main._drain_dispatch_queue = _drain_dispatch_queue
         _orig_completed = _D7.on_lane_window_completed
