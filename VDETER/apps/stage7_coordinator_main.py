@@ -868,7 +868,10 @@ def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
     tc_id = f"TC-STAGE7-RR-008-link{link_id}"
     # deadline 예산: OPERATIONAL 기동 사다리 ~28분 + soak 10분 + 정지 여유.
     # (35분은 rr-p3-soak-17-20260829d 실측에서 기동 직후 만료 — 구조적 부족)
-    guard = PhaseGuard(f"RR-P3-soak-{link_id}", deadline_s=50 * 60)
+    # stall 300s: soak 순환은 전송 간 조용한 대기(다음 슬롯 배정 등)가
+    # 120s를 넘을 수 있다 — rr-p3-soak-17-20260829f 실측: soak-0 성공 후
+    # 정상 대기 중 120s 오탐 정지. 무한대기 금지는 deadline이 계속 보증.
+    guard = PhaseGuard(f"RR-P3-soak-{link_id}", deadline_s=50 * 60, stall_s=300.0)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)
     started = _utc_now()
