@@ -692,8 +692,31 @@ def main(argv=None) -> int:
             taken = {i.transmit_at_nanoseconds for i in state.tx_intents}
             taken.update(_rescued_slots)
             cur_frame = _comod.frame_ordinal_at_nanoseconds(now0)
-            for intent in stale:
-                context = state.transfer_by_value(intent.correlation_transfer_id)
+            # 순서 보존 이월 (svc-data-15 실측: link 조각화 문맥은 위치
+            # 순서대로만 조립 — 개별 이월이 순서를 깨면
+            # LINK_FRAGMENT_NUMBER_INVALID로 후속 전부 거부). 전송 단위로
+            # 묶어, 최초 stale 위치부터의 "꼬리 전체"를 위치 순서 = 시간
+            # 순서가 되도록 연속 미래 DC 슬롯에 재배열한다.
+            stale_ids = {i.intent_id for i in stale}
+            by_transfer = {}
+            for i in state.tx_intents:
+                if i.kind == "BUILD" and i.correlation_transfer_id is not None:
+                    by_transfer.setdefault(
+                        i.correlation_transfer_id, []
+                    ).append(i)
+            for transfer_value, intents in by_transfer.items():
+                if not any(i.intent_id in stale_ids for i in intents):
+                    continue
+                intents.sort(key=lambda i: (
+                    i.build_request.session_frame_index,
+                    i.build_request.fragment_position_in_frame,
+                ))
+                first_bad = min(
+                    k for k, i in enumerate(intents)
+                    if i.intent_id in stale_ids
+                )
+                tail = intents[first_bad:]
+                context = state.transfer_by_value(transfer_value)
                 if context is None or context.logical_channel_tx is None:
                     continue
                 allocation = _comod.resource_module.find_allocation_for_tx(
@@ -702,10 +725,12 @@ def main(argv=None) -> int:
                 if allocation is None:
                     continue
                 channel = _comod.PhysicalChannel(context.physical_channel_name)
-                new_at = None
+                slots = []
                 frame = cur_frame
-                last = min(allocation.last_valid_frame_ordinal, cur_frame + 2)
-                while frame <= last and new_at is None:
+                while (
+                    frame <= allocation.last_valid_frame_ordinal
+                    and len(slots) < len(tail)
+                ):
                     fs = _comod.frame_ordinal_start_nanoseconds(frame)
                     for item in _comod.enumerate_function_slots(
                         slot_map=smap, function=_comod.SlotFunction.DC,
@@ -719,35 +744,39 @@ def main(argv=None) -> int:
                             and item.start_nanoseconds >= now0 + target_min_ns
                             and item.start_nanoseconds not in taken
                         ):
-                            new_at = item.start_nanoseconds
-                            break
+                            slots.append(item.start_nanoseconds)
+                            if len(slots) >= len(tail):
+                                break
                     frame += 1
-                if new_at is None:
+                if len(slots) < len(tail):
+                    # 후보 부족 — 손대지 않고 frozen 폐기 규칙에 맡긴다.
                     continue
-                new_plan = _dcr.replace(
-                    intent.build_request.plan, transmit_at=self_c._utc(new_at)
-                )
-                new_request = _dcr.replace(
-                    intent.build_request, plan=new_plan
-                )
-                moved = _dcr.replace(
-                    intent,
-                    transmit_at_nanoseconds=new_at,
-                    build_request=new_request,
-                )
-                state = state.without_tx_intent(intent.intent_id).with_tx_intent(
-                    moved
-                )
-                taken.add(new_at)
-                _rescued_slots[new_at] = True
-                print(
-                    f"[launcher] build-rescue "
-                    f"old_delta_ms={(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
-                    f"new_delta_ms={(new_at - now0) / 1e6:.0f} "
-                    f"new_at={new_at} tdma={getattr(item, 'tdma_channel', '?')} "
-                    f"slot={getattr(item, 'slot_in_frame', '?')}",
-                    file=sys.stderr, flush=True,
-                )
+                for intent, new_at in zip(tail, slots):
+                    new_plan = _dcr.replace(
+                        intent.build_request.plan,
+                        transmit_at=self_c._utc(new_at),
+                    )
+                    new_request = _dcr.replace(
+                        intent.build_request, plan=new_plan
+                    )
+                    moved = _dcr.replace(
+                        intent,
+                        transmit_at_nanoseconds=new_at,
+                        build_request=new_request,
+                    )
+                    state = state.without_tx_intent(
+                        intent.intent_id
+                    ).with_tx_intent(moved)
+                    taken.add(new_at)
+                    _rescued_slots[new_at] = True
+                    print(
+                        f"[launcher] build-rescue pos="
+                        f"{intent.build_request.fragment_position_in_frame} "
+                        f"old_delta_ms="
+                        f"{(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
+                        f"new_delta_ms={(new_at - now0) / 1e6:.0f}",
+                        file=sys.stderr, flush=True,
+                    )
             return state
 
         def _release_relaxed(self_c, state, causation_event_id, commands, errors):
