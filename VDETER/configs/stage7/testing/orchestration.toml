@@ -1,0 +1,8 @@
+# Stage 7 TEST harness 입력 (`stage7_b210_system_baseline.md` §15).
+# TEST-only Scenario Controller 전용이며 endpoint config가 아니다.
+
+[controller]
+controller_protocol = "vdeter.stage7.scenario-controller.v1"
+controller_body_schema = "STAGE7_SCENARIO_BODY_V1"
+scenario_horizon_ns = 14400000000000
+evidence_root_relpath = "results/runs"

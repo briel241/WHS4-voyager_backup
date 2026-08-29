@@ -1,0 +1,6 @@
+# Stage 7 단일 data profile (`stage7_b210_system_baseline.md` §11).
+# 필수 `data_link_id`는 17 또는 19만 허용한다. TEST-only Stage7TestPlanLoader가
+# Link 17 run과 Link 19 run을 별도 resolved run으로 생성한다.
+
+data_link_id = 17
+data_session_enabled = false

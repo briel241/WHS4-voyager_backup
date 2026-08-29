@@ -46,6 +46,70 @@
         "bytes": 84,
         "sha256": "095d988bff18222e77415f0cfe516d66025cdca20d296096d67076c031779780"
       }
+    },
+    "GV-PAYLOAD-SCVDE-REMOTE-001": {
+      "payload_format": "sc_vde.route_control.command",
+      "scope": "TEST",
+      "source": "docs/payload/payload_extension_baseline.md §6.4.6 CALC-SC-VDE-001 (원격조종 command, n=2); APPROVED 0.4.6",
+      "note": "production codec과 독립인 승인 hex에서 materialize했다. TEST wire VPFI ff 7f는 R1027 Table 3 시험 전용 값이며 공식 SC-VDE 적합성 vector가 아니다.",
+      "application": {
+        "file": "sc_vde_route_control.remote_command_n2.application.bin",
+        "bytes": 29,
+        "sha256": "fa9a5de2a93353714280d0d383ea75c11ae10906138cdea5f5867340f296d940"
+      },
+      "wire": {
+        "file": "sc_vde_route_control.remote_command_n2.wire.bin",
+        "bytes": 32,
+        "sha256": "3e134c9e3a8462ad854b66e56a1b51c40759fd44eaab15701d7ecf2565cf86e1"
+      }
+    },
+    "GV-PAYLOAD-SCVDE-ROUTE-001": {
+      "payload_format": "sc_vde.route_control.command",
+      "scope": "TEST",
+      "source": "docs/payload/payload_extension_baseline.md §6.4.6 CALC-SC-VDE-001 (노선 command, n=2); APPROVED 0.4.6",
+      "note": "production codec과 독립인 승인 hex에서 materialize했다. TEST wire VPFI ff 7f는 R1027 Table 3 시험 전용 값이며 공식 SC-VDE 적합성 vector가 아니다.",
+      "application": {
+        "file": "sc_vde_route_control.route_command_n2.application.bin",
+        "bytes": 29,
+        "sha256": "cf3cf064041b8a77ee4a5937bd28e22f6589f08f199c781cb7748affe765826d"
+      },
+      "wire": {
+        "file": "sc_vde_route_control.route_command_n2.wire.bin",
+        "bytes": 32,
+        "sha256": "09dac8e5270e49e2a1a5f66bde4cbf4ed64dcf90844cd564064bb7f5421e770d"
+      }
+    },
+    "GV-PAYLOAD-SCVDE-POSREP-001": {
+      "payload_format": "sc_vde.position_report",
+      "scope": "TEST",
+      "source": "docs/payload/payload_extension_baseline.md §6.5.6 (MF 1 position report); APPROVED 0.5.0",
+      "note": "production codec과 독립인 승인 hex에서 materialize했다. AIS-derived TEST/PROJECT profile이며 M.1371 적합성 vector가 아니다. TEST wire VPFI ff 7f는 R1027 Table 3 시험 전용 값이다.",
+      "application": {
+        "file": "sc_vde_position_report.application.bin",
+        "bytes": 14,
+        "sha256": "ecf52787bf8a14f02abd22e682f2af0ef885e07b71dcd15174e0b687a52465bb"
+      },
+      "wire": {
+        "file": "sc_vde_position_report.wire.bin",
+        "bytes": 17,
+        "sha256": "7ee1b782bb200755d5755b10039a19f564d17b6f7459d72796f3d3bc8545e25d"
+      }
+    },
+    "GV-PAYLOAD-SCVDE-ACK-001": {
+      "payload_format": "sc_vde.route_control.ack",
+      "scope": "TEST",
+      "source": "docs/payload/payload_extension_baseline.md §6.4.6 CALC-SC-VDE-001 (ACK); APPROVED 0.4.6",
+      "note": "production codec과 독립인 승인 hex에서 materialize했다. TEST wire VPFI ff 7f는 R1027 Table 3 시험 전용 값이며 공식 SC-VDE 적합성 vector가 아니다.",
+      "application": {
+        "file": "sc_vde_route_control.ack.application.bin",
+        "bytes": 3,
+        "sha256": "ffdea84918ceb8e9294250db3f8a1cab7b2c83cfcc5c5b03e7c6d66fba183d12"
+      },
+      "wire": {
+        "file": "sc_vde_route_control.ack.wire.bin",
+        "bytes": 6,
+        "sha256": "d0ea43bcf24e54e71d52fda9a563b54bbf5f3b742b10fa3e781b08fac10b801a"
+      }
     }
   }
 }
