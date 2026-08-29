@@ -739,6 +739,63 @@ def main(argv=None) -> int:
 
             _DMC._receive_type4 = _diag_t4
 
+            # C9: ACK(Type13) 수신 매칭 관측 (svc-run-l2: ROC가 ACK를
+            # 받고도 무음 무시했는지/미도달인지 로그로 구분 불가했다 —
+            # _receive_type13/_apply_session_ack 전 경로가 무프린트).
+            _diag_orig_t13 = _DMC._receive_type13
+
+            def _diag_t13(self_c, state, body, **kwargs):
+                try:
+                    masks = getattr(body, "ack_nack_masks", None)
+                    print(
+                        f"[diag] type13-rx src={getattr(body.source_id, 'value', '?')} "
+                        f"dst={getattr(getattr(body.destination, 'station_id', None), 'value', '?')} "
+                        f"masks={masks}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                out_state = _diag_orig_t13(self_c, state, body, **kwargs)
+                try:
+                    changed = out_state is not state
+                    print(
+                        f"[diag] type13-post state_changed={changed}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return out_state
+
+            _DMC._receive_type13 = _diag_t13
+            _diag_orig_asa = _DMC._apply_session_ack
+
+            def _diag_asa(self_c, state, context, body, *a, **k):
+                try:
+                    ledger = tuple(context.frame_ledger)
+                    eligible_n = sum(
+                        1 for entry in ledger
+                        if not any(
+                            pid in context.pending_packet_ids
+                            for pid in entry.packet_ids
+                        )
+                        and not any(
+                            fi == entry.session_frame_index
+                            for fi, _p in context.retry_fragment_keys
+                        )
+                    )
+                    print(
+                        f"[diag] ack-apply xfer={context.transfer_id.value[:8]} "
+                        f"ledger={len(ledger)} eligible={eligible_n} "
+                        f"sfi={[e.session_frame_index for e in ledger]} "
+                        f"conf={[list(e.confirmed_positions) for e in ledger]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_asa(self_c, state, context, body, *a, **k)
+
+            _DMC._apply_session_ack = _diag_asa
+
             # C4: 재조립기 내부
             from vdeter.link.data_session.reassembly import (
                 DataSessionReassembler as _DRA2,
