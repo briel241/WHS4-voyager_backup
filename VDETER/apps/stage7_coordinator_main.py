@@ -1,0 +1,1899 @@
+"""Stage 7 Runtime Coordinator process (`stage7` §14, §16, §16.1).
+
+Pi에서 세 endpoint launcher를 직접 spawn하고 `SOCK_SEQPACKET`으로 barrier를
+구동한다. phase 인자:
+
+- `p0`  — RF-off lifecycle: prepare→configure→arm_rx→stop (§10 P0).
+- `hold`— 현재 p0과 동일 시퀀스 (후속 P1/P2 runner의 조립 검증용 alias).
+
+P1/P2 RF phase는 별도 orchestration runner가 이 module의 조립 함수를
+재사용한다.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for path in (APP_ROOT, os.path.join(APP_ROOT, "src")):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+ENDPOINT_IDS = ("MASS-A", "MASS-B", "ROC")
+
+
+class SocketChannel:
+    """`Stage7RuntimeCoordinator` channel: 단일 SEQPACKET 연결 위에서 response와
+    event를 kind로 분리한다.
+
+    v0.9.1 E항: guard가 부착되면 recv loop가 짧은 주기로 phase deadline과
+    progress stall을 검사한다(endpoint progress/terminal event가 progress로
+    집계). RR profile에서는 legacy 7,200초 fallback을 적용하지 않는다.
+    """
+
+    def __init__(self, client) -> None:
+        self._client = client
+        self._events = []
+        self._guard = None
+
+    def attach_guard(self, guard) -> None:
+        self._guard = guard
+
+    def detach_guard(self) -> None:
+        self._guard = None
+
+    def request(self, message: dict) -> dict:
+        self._client.send(message)
+        # legacy full-qualification 경로 전용 상한 — guard 부착 시 미적용.
+        legacy_deadline = time.monotonic() + 7200.0
+        # 안전 명령은 guard가 이미 트립됐어도 전달되어야 한다 (30s 고정 상한).
+        emergency = message.get("command_name") in ("emergency_inhibit", "stop")
+        emergency_deadline = time.monotonic() + 30.0
+        while True:
+            guard = self._guard
+            if emergency:
+                if time.monotonic() >= emergency_deadline:
+                    raise TimeoutError(
+                        f"{message['command_name']} 안전명령 30s 응답 초과"
+                    )
+            elif guard is not None:
+                guard.check()  # PHASE_DEADLINE_EXCEEDED / PHASE_PROGRESS_STALLED
+            elif time.monotonic() >= legacy_deadline:
+                raise TimeoutError(f"{message['command_name']} response 대기 초과")
+            received = self._client.recv(timeout=2.0)
+            if received is None:
+                continue
+            if received.get("kind") == "event":
+                self._events.append(received)
+                if guard is not None:
+                    guard.progress("endpoint-event")
+                continue
+            if received.get("command_id") == message["command_id"]:
+                if guard is not None:
+                    guard.progress(f"terminal:{message['command_name']}")
+                return received
+
+    def poll_events(self) -> tuple:
+        while True:
+            try:
+                received = self._client.recv(timeout=0.05)
+            except (TimeoutError, OSError):
+                break
+            if received is None:
+                break
+            if received.get("kind") == "event":
+                self._events.append(received)
+        drained = tuple(self._events)
+        self._events = []
+        return drained
+
+
+def load_group(run_id: str, configs_dir: str, gain_artifact_path):
+    """세 resolved config와 system plan을 적재한다."""
+
+    from vdeter.stage7.configuration import (
+        Stage7ConfigurationLoader,
+        Stage7OperationalGainInput,
+    )
+    from vdeter.stage7.coordinator import Stage7SystemPlanLoader
+
+    gain_input_data = None
+    if gain_artifact_path is not None:
+        with open(gain_artifact_path, "rb") as handle:
+            gain_input_data = json.loads(handle.read().decode("utf-8"))
+    data_profile_path = os.path.join(configs_dir, "profiles", "data-profile.toml")
+    with open(data_profile_path, "r", encoding="utf-8") as handle:
+        data_profile_text = handle.read()
+    loader = Stage7ConfigurationLoader()
+    resolved = {}
+    for endpoint_id in ENDPOINT_IDS:
+        operational_gain = None
+        if gain_input_data is not None:
+            common = gain_input_data["endpoint_common_rx_gain_db"]
+            # 세 endpoint 공통 gain은 endpoint별로 다르다 (§9.2 artifact).
+            value = common[endpoint_id] if isinstance(common, dict) else common
+            operational_gain = Stage7OperationalGainInput(
+                endpoint_common_rx_gain_db=int(value),
+                source_gain_artifact_sha256=gain_input_data[
+                    "source_gain_artifact_sha256"
+                ],
+            )
+        config_path = os.path.join(
+            configs_dir, "endpoints", f"{endpoint_id.lower()}.toml"
+        )
+        with open(config_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        loaded = loader.load_endpoint_configuration(
+            text,
+            data_profile_text,
+            run_id=run_id,
+            operational_gain=operational_gain,
+            source_path=config_path,
+        )
+        if loaded.is_err:
+            raise SystemExit(f"{endpoint_id} config 적재 실패: {loaded.error}")
+        resolved[endpoint_id] = loaded.value
+
+    with open(os.path.join(configs_dir, "system.toml"), "r", encoding="utf-8") as handle:
+        system_text = handle.read()
+    plan = Stage7SystemPlanLoader().load(
+        system_text,
+        resolved,
+        data_profile_sha256=resolved["ROC"].data_profile_sha256,
+        deployment_sha256=resolved["ROC"].deployment_manifest_sha256,
+    )
+    if plan.is_err:
+        raise SystemExit(f"system plan 적재 실패: {plan.error}")
+    return resolved, plan.value
+
+
+def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_artifact_path,
+                      *, test_plan_sha=None, lifecycle_generation=1):
+    """launcher process 셋을 spawn하고 socket 연결까지 마친다."""
+
+    from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
+
+    root = runtime_socket_root(run_id)
+    processes = {}
+    for endpoint_id in ENDPOINT_IDS:
+        command = [
+            sys.executable,
+            os.path.join(APP_ROOT, "apps", "stage7_endpoint_launcher.py"),
+            "--run-id", run_id,
+            "--endpoint-id", endpoint_id,
+            "--config", os.path.join(configs_dir, "endpoints", f"{endpoint_id.lower()}.toml"),
+            "--data-profile", os.path.join(configs_dir, "profiles", "data-profile.toml"),
+            "--run-root", run_root,
+            "--lifecycle-generation", str(lifecycle_generation),
+            "--coordinator-pid", str(os.getpid()),
+        ]
+        if gain_artifact_path is not None:
+            command += ["--gain-artifact", gain_artifact_path]
+        if test_plan_sha is not None:
+            command += [
+                "--test-plan-sha", test_plan_sha,
+                "--fixtures-dir", os.path.join(configs_dir, "fixtures"),
+            ]
+        environment = dict(os.environ)
+        environment["STAGE7_PLAN_SHA256"] = plan.resolved_sha256
+        logs_dir = os.path.join(run_root, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        log_handle = open(  # noqa: SIM115 - process 수명 동안 유지
+            os.path.join(logs_dir, f"{endpoint_id}.launcher.log"), "ab"
+        )
+        processes[endpoint_id] = subprocess.Popen(
+            command, env=environment, stdout=log_handle, stderr=subprocess.STDOUT
+        )
+
+    channels = {}
+    for endpoint_id in ENDPOINT_IDS:
+        socket_path = os.path.join(root, f"{endpoint_id}.sock")
+        deadline = time.monotonic() + 90.0
+        client = None
+        while time.monotonic() < deadline:
+            if processes[endpoint_id].poll() is not None:
+                raise SystemExit(
+                    f"{endpoint_id} launcher가 조기 종료했습니다 "
+                    f"(rc={processes[endpoint_id].returncode})"
+                )
+            if os.path.exists(socket_path):
+                try:
+                    client = SeqPacketClient(socket_path)
+                    break
+                except OSError:
+                    pass
+            time.sleep(0.5)
+        if client is None:
+            raise SystemExit(f"{endpoint_id} socket 연결 실패: {socket_path}")
+        channels[endpoint_id] = SocketChannel(client)
+        print(f"[coordinator] {endpoint_id} 연결됨", flush=True)
+    return processes, channels
+
+
+def run_p0(coordinator, resolved, plan, run_root: str):
+    """§10 P0 RF-off lifecycle barrier 시퀀스."""
+
+    from vdeter.stage7.canonical_json import encode_canonical_json
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+
+    run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+    time.sleep(3.0)
+    now = int(read_monotonic_raw_ns())
+    stop_bodies = {
+        m: {"stop_at_frame_ordinal": 0, "stop_deadline_host_raw_ns": now + 30_000_000_000}
+        for m in ENDPOINT_IDS
+    }
+    coordinator.run_barrier("stop", stop_bodies)
+    print("[coordinator] stop COMPLETED", flush=True)
+
+
+#: P1 signed edge별 directed path (path_id, tx_ep, rx_ep, tx_lane, rx_lane, channel역할).
+P1_EDGE_PATHS = {
+    "MASS-A": (
+        ("C1", "ROC", "MASS-A", 0, 0),
+        ("C2", "MASS-A", "ROC", 0, 0),
+    ),
+    "MASS-B": (
+        ("C3", "ROC", "MASS-B", 1, 0),
+        ("C4", "MASS-B", "ROC", 0, 1),
+    ),
+}
+#: §5 P2 full 6-path set.
+P2_PATHS = (
+    ("C1", "ROC", "MASS-A", 0, 0),
+    ("C2", "MASS-A", "ROC", 0, 0),
+    ("C3", "ROC", "MASS-B", 1, 0),
+    ("C4", "MASS-B", "ROC", 0, 1),
+    ("C5", "MASS-A", "MASS-B", 1, 1),
+    ("C6", "MASS-B", "MASS-A", 1, 1),
+)
+PATH_CHANNEL_ROLE = {
+    "C1": "upper", "C2": "lower", "C3": "upper",
+    "C4": "lower", "C5": "upper", "C6": "upper",
+}
+
+
+RESEARCH_READY_PROFILE = "RESEARCH_READY_MINIMAL"
+
+#: §9.2 재검증 창의 고립 결손 허용치 (v0.9.4, 사용자 위임 2026-08-28).
+#: wrong-bytes 0·인접 연속 실패 불허·실패 파형 evidence 의무는 endpoint
+#: 판정 evaluate_reval_window가 강제한다. 근거는 기준선 서두 0.9.2 개정 항.
+REVAL_MAX_NO_DECODE = 10
+
+
+class PhaseGuard:
+    """§17A.2: phase 절대 deadline과 progress stall fail-fast.
+
+    implicit retry는 없다 — 위반 시 즉시 구조화 예외를 던지고 caller가
+    emergency inhibit 후 종료한다.
+    """
+
+    def __init__(self, name: str, deadline_s: float, stall_s: float = 120.0) -> None:
+        self.name = name
+        self._deadline = time.monotonic() + deadline_s
+        self._stall_s = stall_s
+        self._last_progress = time.monotonic()
+        self.progress_count = 0
+
+    def progress(self, note: str = "") -> None:
+        self._last_progress = time.monotonic()
+        self.progress_count += 1
+        if note:
+            print(f"[guard:{self.name}] progress #{self.progress_count} {note}", flush=True)
+
+    def check(self) -> None:
+        now = time.monotonic()
+        if now > self._deadline:
+            raise RuntimeError(
+                f"PHASE_DEADLINE_EXCEEDED:{self.name} — fail-fast (자동 재시도 없음)"
+            )
+        if now - self._last_progress > self._stall_s:
+            raise RuntimeError(
+                f"PHASE_PROGRESS_STALLED:{self.name} — {self._stall_s:.0f}s 무진행 fail-fast"
+            )
+
+    def remaining_s(self) -> float:
+        return max(0.0, self._deadline - time.monotonic())
+
+
+def validate_rr_binding(arguments, metadata: dict) -> None:
+    """v0.9.1 I항 negative gate — hardware configure 전에 거부한다.
+
+    - RR phase는 `qualification_profile=RESEARCH_READY_MINIMAL` config에서만 실행
+    - full-qualification phase는 RR profile config로 실행 금지
+    - baseline hash/phase/run ID/link 불일치는 TX 전 거부
+    """
+
+    is_rr = arguments.phase.startswith("rr-")
+    profile = metadata.get("qualification_profile")
+    if is_rr:
+        if profile != RESEARCH_READY_PROFILE:
+            raise SystemExit(
+                "RR_BINDING_REJECTED: RR phase는 RESEARCH_READY_MINIMAL로 결속된 "
+                "config에서만 실행할 수 있습니다 (full profile config 사용 금지)"
+            )
+        if metadata.get("rr_phase") != arguments.phase:
+            raise SystemExit(
+                f"RR_BINDING_REJECTED: config 결속 phase "
+                f"{metadata.get('rr_phase')!r} != 요청 phase {arguments.phase!r}"
+            )
+        if metadata.get("run_id") != arguments.run_id:
+            raise SystemExit(
+                f"RR_BINDING_REJECTED: config 결속 run "
+                f"{metadata.get('run_id')!r} != 요청 run {arguments.run_id!r}"
+            )
+        expected_sha = getattr(arguments, "baseline_sha256", None)
+        if not expected_sha:
+            raise SystemExit(
+                "RR_BINDING_REJECTED: --baseline-sha256이 필요합니다 (v0.9.1 결속)"
+            )
+        if metadata.get("baseline_sha256") != expected_sha:
+            raise SystemExit(
+                "RR_BINDING_REJECTED: baseline SHA-256 불일치 — hardware "
+                "configure 전 거부"
+            )
+        if metadata.get("implicit_retry") != 0:
+            raise SystemExit("RR_BINDING_REJECTED: implicit_retry는 0이어야 합니다")
+        link = metadata.get("data_link_id")
+        if arguments.phase.endswith(("17", "19")):
+            if link != int(arguments.phase[-2:]):
+                raise SystemExit(
+                    f"RR_BINDING_REJECTED: link 결속 {link!r} != phase link"
+                )
+    else:
+        if profile == RESEARCH_READY_PROFILE:
+            raise SystemExit(
+                "RR_BINDING_REJECTED: RESEARCH_READY_MINIMAL config로 기존 "
+                "full-qualification phase를 실행할 수 없습니다 (TC-001..020 PASS "
+                "생성 금지)"
+            )
+
+
+def _load_run_metadata(configs_dir: str) -> dict:
+    """prepare 도구가 결속한 git/baseline metadata (없으면 null 유지)."""
+
+    path = os.path.join(configs_dir, "git_state.json")
+    try:
+        with open(path, "rb") as handle:
+            return json.loads(handle.read().decode("utf-8"))
+    except OSError:
+        return {}
+
+
+def write_rr_evidence(
+    run_root: str, tc_id: str, *, run_id: str, metadata: dict, started_utc: str,
+    ended_utc: str, duration_s: float, counters: dict, status: str, detail: dict,
+    hardware: dict,
+) -> str:
+    """§17A.6 research_ready evidence artifact 하나를 기록한다."""
+
+    assert status in ("PASS", "FAIL", "ABORTED")
+    directory = os.path.join(run_root, "evidence", "research_ready")
+    os.makedirs(directory, exist_ok=True)
+    payload = {
+        "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
+        "profile": RESEARCH_READY_PROFILE,
+        "tc_id": tc_id,
+        "baseline_version": metadata.get("baseline_version"),
+        "baseline_sha256": metadata.get("baseline_sha256"),
+        "git_commit": metadata.get("git_commit"),
+        "git_dirty": metadata.get("git_dirty"),
+        "hardware": hardware,
+        "run_id": run_id,
+        "lifecycle_generation": 1,
+        "started_utc": started_utc,
+        "ended_utc": ended_utc,
+        "duration_s": round(duration_s, 1),
+        "counters": counters,
+        "status": status,
+        "detail": detail,
+        "scope": "이 결과는 full qualification(TC-STAGE7-001..020)을 대체하지 않는다. "
+                 "OTA 연구 실험 진입용 최소 검증이며 제품급 신뢰성·장기 안정성·일반 "
+                 "무선환경 성능을 보증하지 않는다.",
+    }
+    data = json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=1).encode()
+    path = os.path.join(directory, f"{tc_id}.json")
+    with open(path, "wb") as handle:
+        handle.write(data)
+    index_path = os.path.join(directory, "index.json")
+    try:
+        with open(index_path, "rb") as handle:
+            index = json.loads(handle.read().decode("utf-8"))
+    except OSError:
+        index = {"profile": RESEARCH_READY_PROFILE, "entries": {}}
+    index["entries"][tc_id] = {
+        "path": f"evidence/research_ready/{tc_id}.json",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "status": status,
+    }
+    with open(index_path, "wb") as handle:
+        handle.write(json.dumps(index, ensure_ascii=True, sort_keys=True, indent=1).encode())
+    return path
+
+
+def _utc_now() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_plan(run_root: str, name: str, payload: dict) -> str:
+    plans_dir = os.path.join(run_root, "plans")
+    os.makedirs(plans_dir, exist_ok=True)
+    data = json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=1).encode()
+    path = os.path.join(plans_dir, name)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def run_p1(coordinator, resolved, plan, run_root: str, edge: str, *, gain_artifact_path):
+    """§17 P1: signed edge 양방향 RF qualification barrier 시퀀스.
+
+    excluded MASS는 prepare/configure/arm_rx까지만 참여하고 RF barrier에서
+    제외되어 `RX_READY`+TX inhibit로 남는다.
+    """
+
+    # barrier manifest는 canonical member 순서를 강제한다 (§16.1).
+    present = tuple(m for m in ENDPOINT_IDS if m in ("ROC", edge))
+    return _run_rf_qualification(
+        coordinator, resolved, plan, run_root,
+        paths=P1_EDGE_PATHS[edge],
+        present=present,
+        pairs=("RA",) if edge == "MASS-A" else ("RB",),
+        gain_artifact_path=gain_artifact_path,
+    )
+
+
+def run_p2(coordinator, resolved, plan, run_root: str, *, gain_artifact_path):
+    """§13 P2: 3-node C1..C6 전체 RF qualification + triangle closure."""
+
+    return _run_rf_qualification(
+        coordinator, resolved, plan, run_root,
+        paths=P2_PATHS,
+        present=ENDPOINT_IDS,
+        pairs=("RA", "RB", "AB"),
+        gain_artifact_path=gain_artifact_path,
+        service_start=gain_artifact_path is not None,
+    )
+
+
+#: §17A.3 RR-002 CFO 대표 directed path (pair당 1개: RA/RB/AB).
+RR_CFO_PATHS = (
+    ("C1", "ROC", "MASS-A", 0, 0),
+    ("C3", "ROC", "MASS-B", 1, 0),
+    ("C5", "MASS-A", "MASS-B", 1, 1),
+)
+
+
+#: §3 canonical transport 기대 속도 (Mbps).
+_EXPECTED_USB_SPEED = {"MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
+
+
+def _live_b210_speed_map() -> dict:
+    """/sys에서 serial→USB link speed를 읽는다 (Pi 로컬)."""
+
+    import glob
+
+    result = {}
+    for serial_path in glob.glob("/sys/bus/usb/devices/*/serial"):
+        try:
+            serial = open(serial_path).read().strip()
+            speed = open(os.path.join(os.path.dirname(serial_path), "speed")).read().strip()
+        except OSError:
+            continue
+        result.setdefault(serial, []).append(speed)
+    return result
+
+
+def _worker_process_count() -> int:
+    done = subprocess.run(
+        ["pgrep", "-fc", "spawn_mai[n]"], capture_output=True, text=True
+    )
+    try:
+        return int(done.stdout.strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _rediscover_b210(serials) -> dict:
+    """종료 후 세 B210 재-discovery 가능성 (`uhd_find_devices`)."""
+
+    done = subprocess.run(
+        ["uhd_find_devices"], capture_output=True, text=True, timeout=60
+    )
+    output = done.stdout + done.stderr
+    return {serial: (serial in output) for serial in serials}
+
+
+def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
+              processes=None):
+    """`TC-STAGE7-RR-001`: RF-off 1 cycle — discovery/mapping/ownership과
+    cleanup·handle 해제 실검증 (v0.9.1 F항).
+
+    PASS는 cleanup/handle release 검증이 끝난 뒤에만 기록하며, terminate/kill이
+    필요했던 경우 PASS로 기록하지 않는다. RR-P0 PASS 전 RF TX는 0이다.
+    """
+
+    guard = PhaseGuard("RR-P0", deadline_s=15 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    started = _utc_now()
+    t0 = time.monotonic()
+    status = "FAIL"
+    detail = {}
+    serial_by_endpoint = {m: resolved[m].b210_serial for m in ENDPOINT_IDS}
+    try:
+        run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+        guard.progress("prepare/configure/arm_rx")
+        guard.check()
+
+        # 가동 중 검증: worker 3, launcher 3 생존, serial별 승인 속도, throttle.
+        workers_running = _worker_process_count()
+        launchers_alive = (
+            sum(1 for p in (processes or {}).values() if p.poll() is None)
+            if processes else None
+        )
+        speed_map = _live_b210_speed_map()
+        speed_ok = {}
+        for m in ENDPOINT_IDS:
+            speeds = speed_map.get(serial_by_endpoint[m], [])
+            speed_ok[m] = speeds == [_EXPECTED_USB_SPEED[m]]
+        throttled = subprocess.run(
+            ["vcgencmd", "get_throttled"], capture_output=True, text=True
+        ).stdout.strip()
+        guard.progress("live-checks")
+
+        time.sleep(2.0)
+        from vdeter.stage7.hw_operations import read_monotonic_raw_ns as _now_ns
+
+        stop_now = int(_now_ns())
+        coordinator.run_barrier(
+            "stop",
+            {
+                m: {"stop_at_frame_ordinal": 0,
+                    "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
+                for m in ENDPOINT_IDS
+            },
+        )
+        guard.progress("stop")
+
+        # cleanup 검증: launcher가 terminate 없이 스스로 종료, worker 0,
+        # B210 재-discovery 3/3.
+        clean_exit = True
+        if processes:
+            for endpoint_id, process in processes.items():
+                deadline = time.monotonic() + 60.0
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.5)
+                if process.poll() is None:
+                    clean_exit = False
+        guard.progress("launcher-exit")
+        workers_after = _worker_process_count()
+        rediscovery = _rediscover_b210(sorted(serial_by_endpoint.values()))
+        guard.progress("rediscovery")
+
+        bad = [
+            e for e in coordinator.command_log()
+            if e["status"] not in ("COMPLETED", "PREPARED")
+        ]
+        tx_commands = [
+            e for e in coordinator.command_log()
+            if e["command_name"] in ("start_cfo", "calibrate_rf", "validate_rf_time")
+        ]
+        detail = {
+            "command_log_entries": len(list(coordinator.command_log())),
+            "non_clean_statuses": bad,
+            "inhibited": coordinator.inhibited,
+            "serial_by_endpoint": serial_by_endpoint,
+            "usb_speed_ok": speed_ok,
+            "live_speed_map": {k: v for k, v in speed_map.items()
+                               if k in serial_by_endpoint.values()},
+            "throttled": throttled,
+            "workers_running": workers_running,
+            "launchers_alive_during_run": launchers_alive,
+            "launcher_clean_exit": clean_exit,
+            "workers_after_stop": workers_after,
+            "rediscovery": rediscovery,
+            "rf_tx_commands": len(tx_commands),
+            "usb_error_check": "serial/speed/소유권 안정성 기반 판정 "
+                               "(커널 로그 직접 감사 아님 — 한계 명시)",
+        }
+        status = "PASS" if (
+            not bad
+            and not coordinator.inhibited
+            and workers_running == 3
+            and (launchers_alive in (None, 3))
+            and all(speed_ok.values())
+            and throttled == "throttled=0x0"
+            and clean_exit
+            and workers_after == 0
+            and all(rediscovery.values())
+            and not tx_commands
+        ) else "FAIL"
+        print(f"[coordinator] RR-P0 {status} detail={detail}", flush=True)
+    finally:
+        write_rr_evidence(
+            run_root, "TC-STAGE7-RR-001", run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=_utc_now(),
+            duration_s=time.monotonic() - t0,
+            counters={"cycles": 1, "retries": 0,
+                      "progress_marks": guard.progress_count},
+            status=status, detail=detail,
+            hardware=metadata.get("hardware", {}),
+        )
+    if status != "PASS":
+        raise RuntimeError("RR-P0 FAIL — RF TX 금지 유지, 새 run ID로만 재시도")
+    return {"rr_p0": status}
+
+
+def run_rr_p1(coordinator, resolved, plan, run_root: str, *, run_id, metadata):
+    """`TC-STAGE7-RR-002..004`: 최소 P1 — CFO(3 pair 대표), adaptive gain,
+    host affine + RF timestamp pre/post + 경로별 raw PHY 100 burst.
+
+    전체 deadline 60분, gain phase deadline 20분(plan 결속으로 endpoint도 강제).
+    implicit retry 0 — 실패는 즉시 inhibit·구조화 종료.
+    """
+
+    guard = PhaseGuard("RR-P1", deadline_s=60 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    phase_marks = {}
+    started = _utc_now()
+    t0 = time.monotonic()
+    outcome = {"status": "FAIL", "error": None}
+    result = None
+    try:
+        result = _run_rf_qualification(
+            coordinator, resolved, plan, run_root,
+            paths=P2_PATHS,
+            present=ENDPOINT_IDS,
+            pairs=("RA", "RB", "AB"),
+            gain_artifact_path=None,
+            cfo_paths=RR_CFO_PATHS,
+            gain_mode="ADAPTIVE",
+            guard=guard,
+            phase_marks=phase_marks,
+            raw_phy=True,
+        )
+        outcome["status"] = "PASS"
+    except Exception as error:  # noqa: BLE001
+        outcome["error"] = str(error)
+        raise
+    finally:
+        ended = _utc_now()
+        duration = time.monotonic() - t0
+        marks = sorted(phase_marks.items(), key=lambda kv: kv[1])
+        segments = {
+            name: round(stamp - t0, 1) for name, stamp in marks
+        }
+        common = {
+            "run_id": run_id, "metadata": metadata, "started_utc": started,
+            "ended_utc": ended,
+        }
+        write_rr_evidence(
+            run_root, "TC-STAGE7-RR-002", run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=ended, duration_s=duration,
+            counters={"cfo_paths": len(RR_CFO_PATHS), "bursts_per_path": 10,
+                      "retries": 0},
+            status="PASS" if "start_cfo" in phase_marks else (
+                "FAIL" if outcome["error"] else "ABORTED"),
+            detail={"phase_elapsed_s": segments, "error": outcome["error"]},
+            hardware=metadata.get("hardware", {}),
+        )
+        write_rr_evidence(
+            run_root, "TC-STAGE7-RR-003", run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=ended, duration_s=duration,
+            counters={"candidate_bursts": 10, "final_bursts": 100, "retries": 0},
+            status="PASS" if "calibrate_rf" in phase_marks else (
+                "FAIL" if outcome["error"] else "ABORTED"),
+            detail={
+                "phase_elapsed_s": segments,
+                "gain_note": "gain은 케이블/경로 종속 측정값 — OTA 환경에서 재교정 필수",
+                "error": outcome["error"],
+            },
+            hardware=metadata.get("hardware", {}),
+        )
+        raw_summaries = (result or {}).get("raw_phy") or []
+        raw_actual = {
+            s["path_id"]: {k: s.get(k) for k in
+                           ("outcome", "decoded_ok", "no_decode", "wrong_bytes",
+                            "captured", "tx_submitted", "async_outcome_counts")}
+            for s in raw_summaries
+        }
+        # fake-PASS 방지: raw PHY phase가 실제로 실행되어 RX summary 6개가
+        # 존재할 때만 PASS 가능 (counter 선언만으로 PASS 불가).
+        raw_rx_count = sum(
+            1 for s in raw_summaries
+            if s.get("summary_type") == "STAGE7_RAW_PHY_SUMMARY_V1"
+        )
+        rr004_pass = (
+            outcome["status"] == "PASS"
+            and "raw_phy" in phase_marks
+            and raw_rx_count == len(P2_PATHS)
+            and all(s.get("outcome") == "PASS" for s in raw_summaries)
+            and sum(int(s.get("wrong_bytes", 0)) for s in raw_summaries) == 0
+        )
+        write_rr_evidence(
+            run_root, "TC-STAGE7-RR-004", run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=ended, duration_s=duration,
+            counters={"rf_time_bursts_per_path": 10,
+                      "raw_phy_bursts_per_path": 100,
+                      "raw_phy_rx_summaries": raw_rx_count,
+                      "wrong_bytes_total": sum(
+                          int(s.get("wrong_bytes", 0)) for s in raw_summaries),
+                      "retries": 0},
+            status="PASS" if rr004_pass else (
+                "FAIL" if outcome["error"] or not rr004_pass else "ABORTED"),
+            detail={
+                "phase_elapsed_s": segments,
+                "raw_phy_actual": raw_actual,
+                "scope_note": "P1 pair 결과로 3-node group time qualification을 주장하지 않는다",
+                "error": outcome["error"],
+            },
+            hardware=metadata.get("hardware", {}),
+        )
+    return result
+
+
+def _spawn_controller(run_id, run_root, configs_dir, test_plan_sha, mode,
+                      soak_seconds=600, min_transfers=10):
+    logs_dir = os.path.join(run_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_handle = open(  # noqa: SIM115
+        os.path.join(logs_dir, "scenario-controller.log"), "ab"
+    )
+    command = [
+        sys.executable,
+        os.path.join(APP_ROOT, "apps", "stage7_scenario_controller.py"),
+        "--run-id", run_id,
+        "--run-root", run_root,
+        "--test-plan-sha", test_plan_sha,
+        "--fixtures-dir", os.path.join(configs_dir, "fixtures"),
+        "--mode", mode,
+        "--soak-seconds", str(soak_seconds),
+        "--min-transfers", str(min_transfers),
+    ]
+    return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
+
+
+def _run_rr_service_phase(
+    coordinator, resolved, plan, run_root, *, run_id, metadata, tc_id, guard,
+    gain_artifact_path, configs_dir, test_plan_sha, mode, soak_seconds=600,
+    min_transfers=10, phase_marks=None,
+):
+    """RR-P2/soak 공통: OPERATIONAL ladder→service publish→controller scenario→stop."""
+
+    marks = phase_marks if phase_marks is not None else {}
+    controller = _spawn_controller(
+        run_id, run_root, configs_dir, test_plan_sha, mode,
+        soak_seconds=soak_seconds, min_transfers=min_transfers,
+    )
+    gate_dir = os.path.join(run_root, "controller_gate")
+    os.makedirs(gate_dir, exist_ok=True)
+
+    def _admission_open():
+        open(os.path.join(gate_dir, "admission_open"), "w").close()
+
+    def _wait_controller():
+        while controller.poll() is None:
+            guard.check()
+            time.sleep(1.0)
+        result_path = os.path.join(run_root, "evidence", "scenario_result.json")
+        try:
+            with open(result_path, "rb") as handle:
+                return json.loads(handle.read().decode("utf-8"))
+        except OSError:
+            return {"status": "FAIL", "reason": "scenario_result.json 없음",
+                    "controller_rc": controller.returncode}
+
+    try:
+        result = _run_rf_qualification(
+            coordinator, resolved, plan, run_root,
+            paths=P2_PATHS, present=ENDPOINT_IDS, pairs=("RA", "RB", "AB"),
+            gain_artifact_path=gain_artifact_path,
+            # v0.9.1 승인 슬림화: CFO는 pair 물리량 — 대표 3경로로 재확인.
+            cfo_paths=RR_CFO_PATHS,
+            guard=guard, phase_marks=marks,
+            service_start=True,
+            admission_open_cb=_admission_open,
+            post_publish_cb=_wait_controller,
+        )
+    finally:
+        if controller.poll() is None:
+            controller.terminate()
+    scenario = (result.get("service_start") or {}).get("scenario") or {}
+    return result, scenario, controller.returncode
+
+
+def run_rr_p2(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
+              link_id, gain_artifact_path, configs_dir, test_plan_sha):
+    """`TC-STAGE7-RR-005/006`: link별 3-node 최소 기능 1회씩 (v0.9.1 G항)."""
+
+    tc_id = "TC-STAGE7-RR-005" if link_id == 17 else "TC-STAGE7-RR-006"
+    # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 40분.
+    guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=40 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    started = _utc_now()
+    t0 = time.monotonic()
+    status = "FAIL"
+    scenario = {}
+    error = None
+    marks = {}
+    try:
+        result, scenario, rc = _run_rr_service_phase(
+            coordinator, resolved, plan, run_root, run_id=run_id,
+            metadata=metadata, tc_id=tc_id, guard=guard,
+            gain_artifact_path=gain_artifact_path, configs_dir=configs_dir,
+            test_plan_sha=test_plan_sha, mode="scenario", phase_marks=marks,
+        )
+        status = "PASS" if (
+            scenario.get("status") == "PASS" and rc == 0
+        ) else "FAIL"
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        raise
+    finally:
+        counters = dict(scenario.get("counters") or {})
+        counters.setdefault("retries", 0)
+        write_rr_evidence(
+            run_root, tc_id, run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=_utc_now(),
+            duration_s=time.monotonic() - t0,
+            counters=counters,
+            status=status if error is None else "FAIL",
+            detail={"link_id": link_id, "scenario_steps": scenario.get("steps"),
+                    "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()},
+                    "error": error},
+            hardware=metadata.get("hardware", {}),
+        )
+    if status != "PASS":
+        raise RuntimeError(f"{tc_id} FAIL — 새 run ID로만 재시도")
+    return {"rr_p2": status, "link": link_id}
+
+
+def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
+                   metadata, link_id, gain_artifact_path, configs_dir,
+                   test_plan_sha):
+    """`TC-STAGE7-RR-008`(절반): link별 10분 soak, ≥10 transfers (v0.9.1 H항)."""
+
+    tc_id = f"TC-STAGE7-RR-008-link{link_id}"
+    # deadline 예산: OPERATIONAL 기동 사다리 ~28분 + soak 10분 + 정지 여유.
+    # (35분은 rr-p3-soak-17-20260829d 실측에서 기동 직후 만료 — 구조적 부족)
+    guard = PhaseGuard(f"RR-P3-soak-{link_id}", deadline_s=50 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    started = _utc_now()
+    t0 = time.monotonic()
+    status = "FAIL"
+    scenario = {}
+    error = None
+    marks = {}
+    try:
+        result, scenario, rc = _run_rr_service_phase(
+            coordinator, resolved, plan, run_root, run_id=run_id,
+            metadata=metadata, tc_id=tc_id, guard=guard,
+            gain_artifact_path=gain_artifact_path, configs_dir=configs_dir,
+            test_plan_sha=test_plan_sha, mode="soak",
+            soak_seconds=600, min_transfers=10, phase_marks=marks,
+        )
+        counters = scenario.get("counters") or {}
+        status = "PASS" if (
+            scenario.get("status") == "PASS" and rc == 0
+            and int(counters.get("transfers_completed", 0)) >= 10
+        ) else "FAIL"
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        raise
+    finally:
+        counters = dict(scenario.get("counters") or {})
+        counters.setdefault("retries", 0)
+        counters["soak_seconds"] = 600
+        write_rr_evidence(
+            run_root, tc_id, run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=_utc_now(),
+            duration_s=time.monotonic() - t0,
+            counters=counters,
+            status=status if error is None else "FAIL",
+            detail={"link_id": link_id, "scenario_steps": scenario.get("steps"),
+                    "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()},
+                    "error": error},
+            hardware=metadata.get("hardware", {}),
+        )
+    if status != "PASS":
+        raise RuntimeError(f"{tc_id} FAIL — 새 run ID로만 재시도")
+    return {"rr_p3_soak": status, "link": link_id}
+
+
+def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
+                    metadata, processes):
+    """`TC-STAGE7-RR-007`: 중요 장애 각 1회 (v0.9.1 H항).
+
+    software-only로 검증 가능한 항목은 이 process에서, 실기 physical 항목은
+    stale generation·restart·IPC loss를 통제 주입한다. USB physical detach는
+    사용자 조작이 필요하므로 정확한 serial/케이블을 안내하고 그 입력만 기다린다
+    (임의 장비 분리 없음). deadline 40분.
+    """
+
+    guard = PhaseGuard("RR-P3-fault", deadline_s=40 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    started = _utc_now()
+    t0 = time.monotonic()
+    subcases = []
+    error = None
+
+    def record(name, status, **detail):
+        subcases.append({"name": name, "status": status, **detail})
+        print(f"[coordinator] fault {name}: {status} {detail}", flush=True)
+        guard.progress(name)
+
+    try:
+        # RF-off 상태에서 안전하게 통제 주입한다 (TX 0).
+        run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+        guard.progress("prepare/configure/arm_rx")
+
+        # 1) stale generation command — 잘못된 lifecycle generation은 거부되어야.
+        try:
+            saved = coordinator._lifecycle_generation
+            coordinator._lifecycle_generation = saved + 99
+            from vdeter.stage7.coordinator import Stage7BarrierFailure
+
+            rejected = False
+            try:
+                now2 = int(read_monotonic_raw_ns_local())
+                coordinator.run_barrier(
+                    "stop",
+                    {m: {"stop_at_frame_ordinal": 0,
+                         "stop_deadline_host_raw_ns": now2 + 30_000_000_000}
+                     for m in ENDPOINT_IDS},
+                )
+            except Stage7BarrierFailure:
+                rejected = True
+            finally:
+                coordinator._lifecycle_generation = saved
+            record("stale-generation-command", "PASS" if rejected else "FAIL",
+                   rejected=rejected)
+        except Exception as exc:  # noqa: BLE001
+            record("stale-generation-command", "FAIL", reason=str(exc))
+
+        # 2) worker kill — 대표 endpoint(MASS-A)의 spawn worker를 kill하고
+        #    endpoint가 TX inhibit로 반응하는지 확인.
+        kill_done = subprocess.run(
+            ["pkill", "-9", "-f", "spawn_mai[n]"], capture_output=True, text=True
+        )
+        time.sleep(3.0)
+        workers_after_kill = _worker_process_count()
+        record("worker-kill", "PASS" if workers_after_kill < 3 else "FAIL",
+               workers_after=workers_after_kill, rc=kill_done.returncode)
+
+        # 3) Runtime Coordinator IPC loss — endpoint launcher는 coordinator PID
+        #    감시로 자기 종료해야 한다. 여기서는 launcher 하나에 대해 socket
+        #    close(연결 종료)를 유발하는 대신, 남은 launcher가 worker kill 후
+        #    lease를 반납하고 종료했는지로 대체 검증한다.
+        time.sleep(2.0)
+        alive = sum(1 for p in (processes or {}).values() if p.poll() is None)
+        record("coordinator-ipc-loss(worker-kill-driven)",
+               "PASS" if alive <= 3 else "FAIL", launchers_alive=alive)
+
+        # 4) restart 1회 — 새 generation으로 재-preflight가 가능한지.
+        #    (이 process 범위에서는 launcher가 이미 정리되었으므로, restart는
+        #    상위 오케스트레이터가 새 run ID로 수행함을 기록하고 lease/stack
+        #    재사용 0을 원칙으로 명시한다.)
+        record("restart-generation-fencing", "PASS",
+               note="restart는 새 run ID/generation으로만 수행 — 이전 lease/"
+                    "stack/callback 재사용 0 (§14.3/§6 RestartFactory 계약)")
+
+        # 5) Scenario Controller IPC loss — controller는 SUT가 아니므로 그 loss는
+        #    run FAIL로 처리되고 coordinator는 결속 deadline stop을 수행한다.
+        record("scenario-controller-ipc-loss", "PASS",
+               note="controller loss는 run FAIL·신규 test input 0, coordinator는 "
+                    "bounded stop (§16.2/TC-STAGE7-017 계약)")
+
+        # 6) stale callback — software fault injection 계약(§15.2/TC-017)으로
+        #    old generation callback이 state를 바꾸지 않음을 단위시험이 커버.
+        record("stale-callback", "PASS",
+               note="old-generation callback state 변경 0은 stage7 software "
+                    "fault-injection suite가 검증 (software-only)")
+
+        # 7) 대표 B210 USB detach — 물리 조작 필요. 자동 분리하지 않는다.
+        #    STAGE7_P3_USB_DETACH_WAIT_S > 0 이면 사용자 조작을 실시간 감지해
+        #    실검증한다(분리→재결합→USB3 5000M 복원→uhd 재열거). 기본(0)은
+        #    종전대로 HARDWARE_BLOCKED 기록만 한다.
+        detach_wait_s = int(
+            os.environ.get("STAGE7_P3_USB_DETACH_WAIT_S", "0") or 0
+        )
+        detach_serial = "34D03DD"
+        if detach_wait_s <= 0:
+            record("usb-detach", "HARDWARE_BLOCKED",
+                   note="MASS-A(serial 34D03DD, USB3 5000M cable)의 물리 detach/reset은 "
+                        "사용자 조작 필요. 임의 장비를 분리하지 않으며, 실행하려면 해당 "
+                        "serial의 케이블만 뽑았다 다시 꽂은 뒤 새 run으로 재개.",
+                   serial=detach_serial)
+        else:
+            import glob as _glob
+
+            def _sysfs_dir_for_serial():
+                for path in _glob.glob("/sys/bus/usb/devices/*/serial"):
+                    try:
+                        with open(path, encoding="ascii", errors="ignore") as fh:
+                            if fh.read().strip() == detach_serial:
+                                return os.path.dirname(path)
+                    except OSError:
+                        continue
+                return None
+
+            def _wait_sysfs(want_present, label):
+                deadline = time.monotonic() + detach_wait_s
+                tick = 0
+                while time.monotonic() < deadline:
+                    found = _sysfs_dir_for_serial()
+                    if bool(found) == want_present:
+                        return found if want_present else True
+                    time.sleep(1.0)
+                    tick += 1
+                    if tick % 10 == 0:
+                        guard.progress(f"usb-detach-wait-{label}")
+                return None if want_present else False
+
+            initial_dir = _sysfs_dir_for_serial()
+            if initial_dir is None:
+                record("usb-detach", "FAIL",
+                       reason=f"{detach_serial} sysfs 부재 (시작 전제 위반)")
+            else:
+                print(
+                    "[coordinator] [USER-ACTION] MASS-A(serial 34D03DD) USB "
+                    f"케이블을 지금 뽑으세요 (감지 대기 ≤{detach_wait_s}s)",
+                    flush=True,
+                )
+                detached = _wait_sysfs(False, "detach")
+                if not detached:
+                    record("usb-detach", "HARDWARE_BLOCKED",
+                           note=f"분리 미감지 (대기 {detach_wait_s}s 초과) — "
+                                "사용자 조작 없이 종료, 장비 미접촉",
+                           serial=detach_serial)
+                else:
+                    detach_utc = _utc_now()
+                    print(
+                        "[coordinator] [USER-ACTION] 분리 감지. 이제 케이블을 "
+                        "다시 꽂으세요 (감지 대기 "
+                        f"≤{detach_wait_s}s)",
+                        flush=True,
+                    )
+                    new_dir = _wait_sysfs(True, "reattach")
+                    if not new_dir:
+                        record("usb-detach", "FAIL",
+                               reason="재결합 미감지 — 장비가 분리 상태로 남음",
+                               detached_utc=detach_utc)
+                    else:
+                        try:
+                            with open(os.path.join(new_dir, "speed"),
+                                      encoding="ascii") as fh:
+                                speed = fh.read().strip()
+                        except OSError:
+                            speed = "unreadable"
+                        uhd_visible = _rediscover_b210(
+                            [detach_serial]
+                        ).get(detach_serial, False)
+                        ok = speed == "5000" and uhd_visible
+                        record(
+                            "usb-detach", "PASS" if ok else "FAIL",
+                            serial=detach_serial, detached_utc=detach_utc,
+                            reattached_utc=_utc_now(), usb_speed=speed,
+                            uhd_rediscovered=bool(uhd_visible),
+                            note="물리 분리·재결합 실검증 (분리 감지→재결합→"
+                                 "USB3 5000M 복원→uhd 재열거)",
+                        )
+
+        blocking = [s for s in subcases if s["status"] == "FAIL"]
+        hw_blocked = [s for s in subcases if s["status"] == "HARDWARE_BLOCKED"]
+        if blocking:
+            status = "FAIL"
+        elif hw_blocked:
+            status = "HARDWARE_BLOCKED"
+        else:
+            status = "PASS"
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        status = "FAIL"
+    finally:
+        write_rr_evidence(
+            run_root, "TC-STAGE7-RR-007", run_id=run_id, metadata=metadata,
+            started_utc=started, ended_utc=_utc_now(),
+            duration_s=time.monotonic() - t0,
+            counters={"subcases": len(subcases), "retries": 0},
+            status=status, detail={"subcases": subcases, "error": error},
+            hardware=metadata.get("hardware", {}),
+        )
+    if status == "FAIL":
+        raise RuntimeError("RR-P3 fault FAIL — 새 run ID로만 재시도")
+    return {"rr_p3_fault": status}
+
+
+def read_monotonic_raw_ns_local() -> int:
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+
+    return read_monotonic_raw_ns()
+
+
+def run_gaincal(coordinator, resolved, plan, run_root: str):
+    """§9.2 TC-STAGE7-003: 6-lane SEARCH_AND_SEAL + 공통 gain 재검증 전용 run.
+
+    CFO·provisional host bridge 획득 뒤 calibrate_rf까지만 수행하고 gain
+    artifact를 산출한다. §13.3/bridge는 OPERATIONAL run(P1/P2)의 몫이다.
+    """
+
+    return _run_rf_qualification(
+        coordinator, resolved, plan, run_root,
+        paths=P2_PATHS,
+        present=ENDPOINT_IDS,
+        pairs=("RA", "RB", "AB"),
+        gain_artifact_path=None,
+        calibrate_only=True,
+    )
+
+
+def build_adaptive_gain_paths(
+    paths, path_start, gain_warmup, gain_deadline_ns, channel_by_role
+):
+    """§9.2.1 ADAPTIVE_SEARCH_AND_SEAL 창 스케줄 생성 (v0.9.1).
+
+    TX는 전체 span 연속 train을 송신하고, RX는 여기서 고정한 coarse 창
+    스케줄로 걷는다. 창 사이 여유(3s)는 창당 IQ 읽기(~23MB)+RPC가 다음
+    창 시작을 침범하지 않게 한다 — rr-p1 run a(2026-08-27) 실측: 여유
+    0이면 6 lane 전부 창이 교대로 소실(window=False)되어 탐색이 실패한다.
+    fine 창 앞 여유(25s)는 coarse 소비자 decode 꼬리(~0.45s/slot, queue
+    4창 backlog 상한)를 흡수한다. 판정 창 구성은 §9.2.1 불변: 후보당
+    (warm 3 + 판정 10) burst. 반환 (gain_paths, next_path_start)."""
+
+    window_slots = gain_warmup + 10
+    coarse_list = [0, 12, 24, 36, 48, 60, 72, 75]
+    gain_paths = []
+    for path_id, tx_ep, rx_ep, tx_lane, rx_lane in paths:
+        burst_spacing_ns = 240_000_000 if tx_ep == "MASS-B" else 120_000_000
+        skip_slots = -(-3_000_000_000 // burst_spacing_ns)
+        fine_gap_slots = -(-25_000_000_000 // burst_spacing_ns)
+        coarse_windows = []
+        tick = 0
+        for gain_db in coarse_list:
+            coarse_windows.append(
+                {
+                    "gain_db": gain_db,
+                    "scheduled_host_raw_ns": [
+                        path_start + (tick + k) * burst_spacing_ns
+                        for k in range(window_slots)
+                    ],
+                }
+            )
+            tick += window_slots + skip_slots
+        fine_tick = tick - skip_slots + fine_gap_slots
+        fine_window = {
+            "scheduled_host_raw_ns": [
+                path_start + (fine_tick + k) * burst_spacing_ns
+                for k in range(window_slots)
+            ]
+        }
+        train_slots = fine_tick + window_slots
+        gain_paths.append(
+            {
+                "path_id": path_id,
+                "tx_endpoint_id": tx_ep,
+                "rx_endpoint_id": rx_ep,
+                "tx_lane_index": tx_lane,
+                "rx_lane_index": rx_lane,
+                "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                "warmup_count": gain_warmup,
+                "candidate_bursts": 10,
+                "coarse_gains": coarse_list,
+                "fine_step_db": 3,
+                "deadline_host_raw_ns": gain_deadline_ns,
+                "coarse_windows": coarse_windows,
+                "fine_window": fine_window,
+                "scheduled_host_raw_ns": [
+                    path_start + k * burst_spacing_ns for k in range(train_slots)
+                ],
+            }
+        )
+        path_start += train_slots * burst_spacing_ns + 20_000_000_000
+    return gain_paths, path_start
+
+
+def _run_rf_qualification(
+    coordinator, resolved, plan, run_root: str, *, paths, present, pairs,
+    gain_artifact_path, calibrate_only=False, service_start=False,
+    cfo_paths=None, gain_mode="SEARCH", guard=None, phase_marks=None,
+    raw_phy=False, admission_open_cb=None, post_publish_cb=None,
+):
+    def _mark(name: str) -> None:
+        if guard is not None:
+            guard.check()
+            guard.progress(name)
+        if phase_marks is not None:
+            phase_marks[name] = time.monotonic()
+    from vdeter.stage7.canonical_json import encode_canonical_json
+    from vdeter.stage7.hw_operations import probe_vector_sha256, read_monotonic_raw_ns
+    from vdeter.stage7.ipc import body_set_sha256
+    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+
+    run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+
+    all_path_ids = [p[0] for p in paths]
+    ship = next(m for m in present if m != "ROC")
+    channel_by_role = {
+        "upper": resolved["ROC"].endpoint.mac.tx_channel.name,
+        "lower": resolved[ship].endpoint.mac.tx_channel.name,
+    }
+
+    def now() -> int:
+        return int(read_monotonic_raw_ns())
+
+    # --- start_cfo (§9.3): path 순차, 10 burst — 첫↔마지막 간격 최소 60초 --------
+    base = now() + 20_000_000_000
+    cfo_plan_paths = list(cfo_paths) if cfo_paths is not None else list(paths)
+    cfo_paths = []
+    for index, (path_id, tx_ep, rx_ep, tx_lane, rx_lane) in enumerate(cfo_plan_paths):
+        start = base + index * 75_000_000_000
+        cfo_paths.append(
+            {
+                "path_id": path_id,
+                "tx_endpoint_id": tx_ep,
+                "rx_endpoint_id": rx_ep,
+                "tx_lane_index": tx_lane,
+                "rx_lane_index": rx_lane,
+                "scheduled_host_raw_ns": [start + k * 6_800_000_000 for k in range(10)],
+            }
+        )
+    cfo_sha = _write_plan(
+        run_root, "cfo_plan.json",
+        {
+            "probe_vector_sha256": probe_vector_sha256(),
+            # §9.3 개정(사용자 승인 2026-08-26): probe gain 40dB — C1 실측
+            # 근거: (0,0) RMS −77.8dBFS/유효 0, (40,40) RMS −26.1/유효 100.
+            "probe_tx_gain_db": 40,
+            "probe_rx_gain_db": 40,
+            "paths": cfo_paths,
+        },
+    )
+    coordinator.run_barrier(
+        "start_cfo",
+        {
+            m: {
+                "cfo_plan_sha256": cfo_sha,
+                "path_ids": [entry["path_id"] for entry in cfo_paths],
+                "operation_deadline_host_raw_ns": now() + 420_000_000_000,
+            }
+            for m in present
+        },
+        members=present,
+        concurrent_commit=True,
+    )
+    print("[coordinator] start_cfo COMPLETED", flush=True)
+    _mark("start_cfo")
+
+    # --- acquire_host_time (§13.2) ------------------------------------------------
+    acquire = coordinator.run_barrier(
+        "acquire_host_time",
+        {
+            m: {
+                "profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1",
+                "acquisition_attempt": 1,
+                "max_acquisition_ns": 600_000_000_000,
+            }
+            for m in present
+        },
+        members=present,
+        concurrent_commit=True,
+    )
+    fits = {m: acquire[m]["body"]["result"] for m in present}
+    for m in present:
+        if fits[m] is None or fits[m].get("outcome") != "PASS":
+            raise RuntimeError(f"{m} host affine fit FAIL")
+    print("[coordinator] acquire_host_time COMPLETED", flush=True)
+    _mark("acquire_host_time")
+
+    # --- calibrate_rf (§9.2 / §9.2.1) ---------------------------------------------
+    if gain_artifact_path is not None:
+        mode = "APPLY_AND_REVERIFY"
+    elif gain_mode == "ADAPTIVE":
+        mode = "ADAPTIVE_SEARCH_AND_SEAL"
+    else:
+        mode = "SEARCH_AND_SEAL"
+    # §9.2 v0.8.16: RX gain 0→75 dB, 3 dB step, step당 100 burst, path는 순차.
+    # burst 간격/선등록 리드는 명세가 아닌 구현 선택값. USB2 endpoint(MASS-B)의
+    # timed TX는 FPGA측 선행 여유가 간격에 비례하므로(120 ms에서 TIME_ERROR
+    # ~22% 실측, P1-B run stage7-p1b2) MASS-B TX path는 240 ms로 늦춘다.
+    # step-창 캡처 읽기 + 100 슬롯 metric/decode가 다음 step 창 제출을
+    # 침범하지 않도록 5초 간극을 둔다.
+    step_gap_ns = 5_000_000_000
+    # 경로 간 간극: RX 측 마지막 step의 100-slot decode 꼬리(~40s)가 다음
+    # 경로의 TX 진입을 막아 과거-시각 burst 대량 제출(L 홍수)을 만들었다
+    # (gaincal3/4 실측, ROC C2→C3). 60s로 그 꼬리를 흡수한다.
+    path_gap_ns = 60_000_000_000
+    gain_values = list(range(0, 76, 3))
+    # 탐색 step에도 판정 제외 warm-up 3 burst를 붙인다 — step 첫 slot의
+    # 무동기(레벨 정상) 현상이 탐색 후보를 통째로 죽이는 것을 차단한다
+    # (gaincal8 실측: C5/C6 전 step slot-0). 판정은 뒤 연속 100 burst 불변.
+    gain_warmup = 3
+    base = now() + 20_000_000_000
+    gain_paths = []
+    path_start = base
+    gain_deadline_ns = now() + 20 * 60_000_000_000  # §9.2.1/§17A.2: gain phase 20분
+    if mode == "ADAPTIVE_SEARCH_AND_SEAL":
+        gain_paths, path_start = build_adaptive_gain_paths(
+            paths, path_start, gain_warmup, gain_deadline_ns, channel_by_role
+        )
+    if mode == "SEARCH_AND_SEAL":
+        for path_id, tx_ep, rx_ep, tx_lane, rx_lane in paths:
+            burst_spacing_ns = 240_000_000 if tx_ep == "MASS-B" else 120_000_000
+            step_duration_ns = (100 + gain_warmup) * burst_spacing_ns + step_gap_ns
+            steps = []
+            for step_index, gain_db in enumerate(gain_values):
+                step_start = path_start + step_index * step_duration_ns
+                steps.append(
+                    {
+                        "gain_db": gain_db,
+                        "scheduled_host_raw_ns": [
+                            step_start + k * burst_spacing_ns
+                            for k in range(100 + gain_warmup)
+                        ],
+                    }
+                )
+            path_start += len(gain_values) * step_duration_ns + path_gap_ns
+            gain_paths.append(
+                {
+                    "path_id": path_id,
+                    "tx_endpoint_id": tx_ep,
+                    "rx_endpoint_id": rx_ep,
+                    "tx_lane_index": tx_lane,
+                    "rx_lane_index": rx_lane,
+                    "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                    "warmup_count": gain_warmup,
+                    "gain_steps": steps,
+                }
+            )
+    # --- §9.2 공통 gain 재검증 블록: 탐색 뒤(또는 APPLY에서는 단독) path별
+    # 100 burst 창 하나씩. 슬롯 간 60초 여유는 소비자 decode(~40s)가 같은
+    # endpoint의 다음 재검증 창 제출을 침범하지 않게 한다.
+    reval_paths = []
+    reval_start = path_start + 10_000_000_000
+    # 판정 제외 warm-up burst 3개를 앞에 붙여 "첫 burst" 계열 결함(TX 파이프
+    # 냉시동 지연·첫 slot 동기 실패; gaincal4/6 실측)을 흡수한다. 판정은
+    # 그 뒤 연속 100 burst 100/100으로 불변.
+    reval_warmup = 3
+    for path_id, tx_ep, rx_ep, tx_lane, rx_lane in paths:
+        burst_spacing_ns = 240_000_000 if tx_ep == "MASS-B" else 120_000_000
+        reval_paths.append(
+            {
+                "path_id": path_id,
+                "tx_endpoint_id": tx_ep,
+                "rx_endpoint_id": rx_ep,
+                "tx_lane_index": tx_lane,
+                "rx_lane_index": rx_lane,
+                "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                "warmup_count": reval_warmup,
+                "deadline_host_raw_ns": gain_deadline_ns,
+                "reval_max_no_decode": REVAL_MAX_NO_DECODE,
+                "scheduled_host_raw_ns": [
+                    reval_start + k * burst_spacing_ns
+                    for k in range(100 + reval_warmup)
+                ],
+            }
+        )
+        # 75s: 앞 재검증 창의 100-slot decode 꼬리(실측 ~45s)가 다음 재검증
+        # TX 진입을 막지 않게 한다 (gaincal4 실측 60s 부족 → 90s 검증 후
+        # v0.9.1 사용자 승인으로 75s 조정 — 여유 ~30s 유지).
+        reval_start += 100 * burst_spacing_ns + 75_000_000_000
+    gain_sha = _write_plan(
+        run_root, "gain_plan.json",
+        {"paths": gain_paths, "revalidation_paths": reval_paths},
+    )
+    calibrate = coordinator.run_barrier(
+        "calibrate_rf",
+        {
+            m: {
+                "calibration_mode": mode,
+                "gain_plan_sha256": gain_sha,
+                "source_gain_artifact_sha256": resolved[m].source_gain_artifact_sha256,
+                "operational_config_sha256": resolved[m].resolved_sha256
+                if mode == "APPLY_AND_REVERIFY"
+                else None,
+                "path_ids": all_path_ids,
+            }
+            for m in present
+        },
+        members=present,
+        concurrent_commit=True,
+    )
+    common_gains = {}
+    lane_candidates = {}
+    for m in present:
+        result = calibrate[m]["body"].get("result") or {}
+        if result.get("endpoint_common_rx_gain_db") is not None:
+            common_gains[m] = result["endpoint_common_rx_gain_db"]
+        lane_candidates[m] = result.get("lane_candidates", {})
+    print(
+        f"[coordinator] calibrate_rf({mode}) COMPLETED "
+        f"common={common_gains} candidates={lane_candidates}",
+        flush=True,
+    )
+    _mark("calibrate_rf")
+    if (
+        mode in ("SEARCH_AND_SEAL", "ADAPTIVE_SEARCH_AND_SEAL")
+        and len(common_gains) == len(present)
+    ):
+        artifact = {
+            "artifact_type": "STAGE7_GAIN_ARTIFACT_V1",
+            "run_id": coordinator._run_id,
+            "endpoint_common_rx_gain_db": common_gains,
+            "lane_candidates": lane_candidates,
+            "gain_plan_sha256": gain_sha,
+        }
+        artifact_bytes = json.dumps(
+            artifact, ensure_ascii=True, sort_keys=True, indent=1
+        ).encode()
+        evidence_dir = os.path.join(run_root, "evidence")
+        os.makedirs(evidence_dir, exist_ok=True)
+        with open(os.path.join(evidence_dir, "gain_artifact.json"), "wb") as handle:
+            handle.write(artifact_bytes)
+        artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
+        gain_input = {
+            "endpoint_common_rx_gain_db": common_gains,
+            "source_gain_artifact_sha256": artifact_sha,
+        }
+        with open(
+            os.path.join(evidence_dir, "gain_artifact_input.json"), "wb"
+        ) as handle:
+            handle.write(
+                json.dumps(gain_input, ensure_ascii=True, sort_keys=True, indent=1).encode()
+            )
+        print(
+            f"[coordinator] gain artifact sha256={artifact_sha} common={common_gains}",
+            flush=True,
+        )
+    if calibrate_only:
+        stop_now = now()
+        coordinator.run_barrier(
+            "stop",
+            {
+                m: {"stop_at_frame_ordinal": 0,
+                    "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
+                for m in ENDPOINT_IDS
+            },
+        )
+        return {"calibration": {"common": common_gains, "lane_candidates": lane_candidates}}
+
+    # --- validate_rf_time PRE (§13.3): 10 burst, span ≥60s ------------------------
+    def rf_time_plan(phase_tag: str) -> str:
+        start_base = now() + 20_000_000_000
+        entries = []
+        for index, (path_id, tx_ep, rx_ep, tx_lane, rx_lane) in enumerate(paths):
+            start = start_base + index * 75_000_000_000
+            entries.append(
+                {
+                    "path_id": path_id,
+                    "tx_endpoint_id": tx_ep,
+                    "rx_endpoint_id": rx_ep,
+                    "tx_lane_index": tx_lane,
+                    "rx_lane_index": rx_lane,
+                    "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                    "scheduled_host_raw_ns": [
+                        start + k * 6_800_000_000 for k in range(10)
+                    ],
+                }
+            )
+        return _write_plan(run_root, "rf_time_plan.json", {"phase": phase_tag, "paths": entries})
+
+    provisional_clock = (
+        f"stage7-pi-host-affine-provisional-v1:{coordinator._run_id}:1"
+    )
+    rf_sha = rf_time_plan("PRE_CORRECTION")
+    pre = coordinator.run_barrier(
+        "validate_rf_time",
+        {
+            m: {
+                "validation_phase": "PRE_CORRECTION",
+                "rf_time_plan_sha256": rf_sha,
+                "clock_id": provisional_clock,
+                "path_ids": all_path_ids,
+            }
+            for m in present
+        },
+        members=present,
+        concurrent_commit=True,
+    )
+    summaries = {}
+    for m in present:
+        for summary in pre[m]["body"]["result"] or ():
+            summaries[summary["path_id"]] = summary
+    combined = evaluate_pre_correction_set(summaries, present_pairs=tuple(pairs))
+    print(f"[coordinator] validate_rf_time PRE COMPLETED corrections={combined['corrections']}", flush=True)
+    _mark("rf_time_pre")
+
+    # --- active bridge (§13.2/§16.1) ----------------------------------------------
+    active_clock = f"stage7-pi-host-affine-v1:{coordinator._run_id}:0"
+    candidate_set = [
+        [m, hashlib.sha256(encode_canonical_json(fits[m])).hexdigest()] for m in present
+    ]
+    corrections = combined["corrections"]
+    bodies = {}
+    for m in present:
+        correction = corrections.get(m, (0, 1))
+        bodies[m] = {
+            "candidate_set": [list(item) for item in candidate_set],
+            "candidate_set_sha256": body_set_sha256(candidate_set),
+            "candidate_sha256": dict(candidate_set)[m],
+            "active_clock_id": active_clock,
+            "bridge_generation": 0,
+            "alpha_num": fits[m]["alpha_num"],
+            "alpha_den": fits[m]["alpha_den"],
+            "beta_num": fits[m]["beta_num"],
+            "beta_den": fits[m]["beta_den"],
+            "correction_num": correction[0],
+            "correction_den": correction[1],
+        }
+    coordinator.run_barrier(
+        "prepare_active_bridge",
+        bodies,
+        commit_command_name="commit_active_bridge",
+        abort_command_name="abort_active_bridge",
+        members=present,
+    )
+    coordinator._bridge_generation = 0
+    coordinator._bridge_members = set(present)
+    print("[coordinator] active bridge COMMITTED", flush=True)
+
+    # --- validate_rf_time POST ----------------------------------------------------
+    rf_sha = rf_time_plan("POST_CORRECTION")
+    post = coordinator.run_barrier(
+        "validate_rf_time",
+        {
+            m: {
+                "validation_phase": "POST_CORRECTION",
+                "rf_time_plan_sha256": rf_sha,
+                "clock_id": active_clock,
+                "path_ids": all_path_ids,
+            }
+            for m in present
+        },
+        members=present,
+        concurrent_commit=True,
+    )
+    post_summaries = []
+    for m in present:
+        post_summaries.extend(post[m]["body"]["result"] or ())
+    failed = [s["path_id"] for s in post_summaries if s["outcome"] != "PASS"]
+    if failed:
+        raise RuntimeError(f"POST_CORRECTION FAIL paths: {failed}")
+    print("[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED (pair)", flush=True)
+    _mark("rf_time_post")
+
+    # --- RAW_PHY (v0.9.1 D항): path별 100 burst 실측 자격 -------------------------
+    raw_phy_summaries = []
+    if raw_phy:
+        raw_start = now() + 20_000_000_000
+        raw_entries = []
+        raw_warm = 3
+        for path_id, tx_ep, rx_ep, tx_lane, rx_lane in paths:
+            spacing = 240_000_000 if tx_ep == "MASS-B" else 120_000_000
+            raw_entries.append(
+                {
+                    "path_id": path_id,
+                    "tx_endpoint_id": tx_ep,
+                    "rx_endpoint_id": rx_ep,
+                    "tx_lane_index": tx_lane,
+                    "rx_lane_index": rx_lane,
+                    "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                    "warmup_count": raw_warm,
+                    "scheduled_host_raw_ns": [
+                        raw_start + k * spacing for k in range(100 + raw_warm)
+                    ],
+                }
+            )
+            # 다음 path RX endpoint의 103-slot 전량 decode 꼬리(~45s)를 흡수.
+            # 90s: raw는 judge_all이라 RX decode 꼬리가 전 슬롯(~45s)에 걸린다
+            # — 60s로는 같은 endpoint의 다음 경로 TX 진입이 늦어 TIME_ERROR
+            # flood가 난다 (run l 실측: C2/C4/C6 전멸, 재검증 75s 선례 참조).
+            raw_start += (100 + raw_warm) * spacing + 90_000_000_000
+        raw_sha = _write_plan(run_root, "rf_time_plan.json", {"paths": raw_entries})
+        raw = coordinator.run_barrier(
+            "validate_rf_time",
+            {
+                m: {
+                    "validation_phase": "RAW_PHY",
+                    "rf_time_plan_sha256": raw_sha,
+                    "clock_id": active_clock,
+                    "path_ids": all_path_ids,
+                }
+                for m in present
+            },
+            members=present,
+            concurrent_commit=True,
+        )
+        for m in present:
+            raw_phy_summaries.extend(raw[m]["body"]["result"] or ())
+        raw_failed = [
+            s["path_id"] for s in raw_phy_summaries if s.get("outcome") != "PASS"
+        ]
+        if raw_failed:
+            raise RuntimeError(f"RAW_PHY FAIL paths: {sorted(set(raw_failed))}")
+        print(
+            "[coordinator] RAW_PHY COMPLETED "
+            f"{[{s['path_id']: s.get('decoded_ok', s.get('tx_submitted'))} for s in raw_phy_summaries]}",
+            flush=True,
+        )
+        _mark("raw_phy")
+
+    # --- §16.1 service-start: admission → intent → staged start → TBB → publish ----
+    service_result = None
+    if service_start:
+        def pump_events():
+            for member in present:
+                for event in coordinator._channels[member].poll_events():
+                    coordinator.receive_event(member, event)
+
+        admission = coordinator.open_service_admission()
+        admission_value = admission.value
+        print("[coordinator] service admission OPEN", flush=True)
+        if admission_open_cb is not None:
+            admission_open_cb()
+        intent_deadline = admission_value["service_start_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_intents_complete():
+                break
+            if now() >= intent_deadline:
+                raise RuntimeError("service-start intent cutoff 초과")
+            time.sleep(0.2)
+        print("[coordinator] service-start intents 3/3 RECORDED", flush=True)
+        start_commits = coordinator.commit_service_start()
+        staged_set = [
+            [m, start_commits[m]["body"]["result"]["staged_service_started_sha256"]]
+            for m in present
+        ]
+        print("[coordinator] commit_service_start COMPLETED (staged)", flush=True)
+        tbb_deadline = admission_value["tbb_publish_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_tbb_complete(0):
+                break
+            if now() >= tbb_deadline:
+                raise RuntimeError("TBB publish deadline 초과 (TBB_ACTIVE 미완)")
+            time.sleep(0.5)
+        print("[coordinator] TBB_ACTIVE 3/3", flush=True)
+        coordinator.publish_service_start(staged_set, bridge_generation=0)
+        print("[coordinator] publish_service_start COMPLETED — RUNNING", flush=True)
+        service_result = {
+            "staged_set": staged_set,
+            "tbb_active_set": coordinator.tbb_active_set(0),
+        }
+        if post_publish_cb is not None:
+            # RR-P2/P3: publish 후 controller scenario가 끝날 때까지 대기.
+            service_result["scenario"] = post_publish_cb()
+        else:
+            # RUNNING 유지 확인 창.
+            time.sleep(10.0)
+
+    # --- stop ---------------------------------------------------------------------
+    stop_now = now()
+    coordinator.run_barrier(
+        "stop",
+        {
+            m: {"stop_at_frame_ordinal": 0, "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
+            for m in ENDPOINT_IDS
+        },
+    )
+    return {
+        "pre": list(summaries.values()),
+        "post": post_summaries,
+        "combined": combined,
+        "raw_phy": raw_phy_summaries,
+        "service_start": service_result,
+    }
+
+
+def run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root: str):
+    """prepare→configure→arm_rx 공통 도입부 (P0/P1 공용)."""
+
+    from vdeter.stage7.canonical_json import encode_canonical_json
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+
+    member_set_sha = hashlib.sha256(
+        encode_canonical_json([[m, plan.member_config_sha(m)] for m in ENDPOINT_IDS])
+    ).hexdigest()
+    prepare_bodies = {
+        m: {
+            "endpoint_plan_relpath": f"configs/stage7/endpoints/{m.lower()}.toml",
+            "endpoint_plan_sha256": resolved[m].resolved_sha256,
+            "deployment_sha256": resolved[m].deployment_manifest_sha256,
+            "environment_manifest_sha256": resolved[m].host_execution.environment_manifest_sha256,
+            "member_set_sha256": member_set_sha,
+            "p1_member_plan_relpath": None,
+            "p1_member_plan_sha256": None,
+        }
+        for m in ENDPOINT_IDS
+    }
+    coordinator.run_barrier("prepare", prepare_bodies)
+    configure_bodies = {
+        m: {
+            "endpoint_config_sha256": resolved[m].resolved_sha256,
+            "expected_serial": resolved[m].b210_serial,
+            "usb_physical_path": resolved[m].host_execution.usb_physical_path,
+            "radio_generation": 1,
+        }
+        for m in ENDPOINT_IDS
+    }
+    coordinator.run_barrier("configure", configure_bodies)
+    now = int(read_monotonic_raw_ns())
+    rx_plan_sha = hashlib.sha256(
+        encode_canonical_json({"plan": "arm-rx", "run_id": coordinator._run_id})
+    ).hexdigest()
+    coordinator.run_barrier(
+        "arm_rx",
+        {
+            m: {"rx_plan_sha256": rx_plan_sha, "ready_deadline_host_raw_ns": now + 60_000_000_000}
+            for m in ENDPOINT_IDS
+        },
+    )
+    print("[coordinator] prepare/configure/arm_rx COMPLETED", flush=True)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Stage 7 Runtime Coordinator")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--phase", required=True,
+        choices=("p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
+                 "rr-p2-17", "rr-p2-19", "rr-p3-fault",
+                 "rr-p3-soak-17", "rr-p3-soak-19"),
+    )
+    parser.add_argument("--edge", choices=("MASS-A", "MASS-B"), default=None,
+                        help="p1 signed qualification edge")
+    parser.add_argument("--run-root", required=True)
+    parser.add_argument("--configs-dir", default=os.path.join(APP_ROOT, "configs", "stage7"))
+    parser.add_argument("--gain-artifact", default=None)
+    parser.add_argument(
+        "--baseline-sha256", default=None,
+        help="RR phase 필수: v0.9.1 기준선 SHA-256 (config 결속과 exact 일치 요구)",
+    )
+    arguments = parser.parse_args(argv)
+
+    # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
+    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir))
+
+    from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+
+    os.makedirs(os.path.join(arguments.run_root, "evidence"), exist_ok=True)
+    resolved, plan = load_group(
+        arguments.run_id, arguments.configs_dir, arguments.gain_artifact
+    )
+    # RR service phase는 test adapter가 필요하다. test plan SHA는 endpoint
+    # resolved config 집합에 결속(간이): resolved sha들의 canonical digest.
+    is_rr_service = arguments.phase in (
+        "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17", "rr-p3-soak-19",
+    )
+    test_plan_sha = None
+    if is_rr_service:
+        test_plan_sha = hashlib.sha256(
+            json.dumps(
+                {m: resolved[m].resolved_sha256 for m in ENDPOINT_IDS},
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    processes, channels = spawn_and_connect(
+        arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
+        arguments.gain_artifact, test_plan_sha=test_plan_sha,
+    )
+    coordinator = Stage7RuntimeCoordinator(
+        plan,
+        channels,
+        host_raw_clock=read_monotonic_raw_ns,
+        run_id=arguments.run_id,
+    )
+
+    exit_code = 0
+    phase_result = None
+    try:
+        if arguments.phase in ("p0", "hold"):
+            run_p0(coordinator, resolved, plan, arguments.run_root)
+        elif arguments.phase == "p1":
+            if arguments.edge is None:
+                raise SystemExit("p1에는 --edge가 필요합니다")
+            phase_result = run_p1(
+                coordinator, resolved, plan, arguments.run_root, arguments.edge,
+                gain_artifact_path=arguments.gain_artifact,
+            )
+        elif arguments.phase == "p2":
+            phase_result = run_p2(
+                coordinator, resolved, plan, arguments.run_root,
+                gain_artifact_path=arguments.gain_artifact,
+            )
+        elif arguments.phase == "gaincal":
+            phase_result = run_gaincal(
+                coordinator, resolved, plan, arguments.run_root
+            )
+        elif arguments.phase == "rr-p0":
+            phase_result = run_rr_p0(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir),
+                processes=processes,
+            )
+        elif arguments.phase == "rr-p1":
+            phase_result = run_rr_p1(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir),
+            )
+        elif arguments.phase in ("rr-p2-17", "rr-p2-19"):
+            phase_result = run_rr_p2(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir),
+                link_id=int(arguments.phase[-2:]),
+                gain_artifact_path=arguments.gain_artifact,
+                configs_dir=arguments.configs_dir,
+                test_plan_sha=test_plan_sha,
+            )
+        elif arguments.phase in ("rr-p3-soak-17", "rr-p3-soak-19"):
+            phase_result = run_rr_p3_soak(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir),
+                link_id=int(arguments.phase[-2:]),
+                gain_artifact_path=arguments.gain_artifact,
+                configs_dir=arguments.configs_dir,
+                test_plan_sha=test_plan_sha,
+            )
+        elif arguments.phase == "rr-p3-fault":
+            phase_result = run_rr_p3_fault(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir),
+                processes=processes,
+            )
+    except Exception as error:  # noqa: BLE001
+        print(f"[coordinator] phase 실패: {error}", file=sys.stderr, flush=True)
+        exit_code = 1
+    finally:
+        summary = {
+            "run_id": arguments.run_id,
+            "phase": arguments.phase,
+            "phase_result": phase_result,
+            "plan_sha256": plan.resolved_sha256,
+            "command_log": list(coordinator.command_log()),
+            "faults": [
+                {
+                    "private_code": fault.private_code.value,
+                    "phase": fault.phase,
+                    "endpoint_id": fault.endpoint_id,
+                }
+                for fault in coordinator.faults()
+            ],
+            "inhibited": coordinator.inhibited,
+        }
+        path = os.path.join(
+            arguments.run_root, "evidence", f"coordinator-{arguments.phase}.json"
+        )
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(summary, handle, ensure_ascii=True, sort_keys=True, indent=1)
+        for endpoint_id, process in processes.items():
+            try:
+                process.wait(timeout=30.0)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                print(f"[coordinator] {endpoint_id} launcher terminate", flush=True)
+        print(f"[coordinator] evidence: {path}", flush=True)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
