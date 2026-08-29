@@ -112,29 +112,39 @@ Link ID 11로도 동작하나 **waypoint가 2개로 제한**된다(§5.3, S-421 
 
 ### 5.1 전송 경로
 
-| 메시지 | 방향 | payload_format (MF) | 링크 ACK |
-| --- | --- | --- | :-: |
-| Position Report | MASS → ROC (addressed) | `sc_vde.position_report` (1) | 불요 |
-| Route Instruction | ROC → MASS (addressed) | `sc_vde.route_control.command` (2) | 요구 |
-| Application ACK | MASS → ROC (addressed) | `sc_vde.route_control.ack` (3) | 불요 |
+| 메시지 | 방향 | payload_format (MF) | 링크 ACK | VDE Type |
+| --- | --- | --- | :-: | :-: |
+| Position Report | MASS → ROC (addressed) | `sc_vde.position_report` (1) | 불요 | **93** |
+| Route Instruction | ROC → MASS (addressed) | `sc_vde.route_control.command` (2) | 요구 | **92** |
+| Application ACK | MASS → ROC (addressed) | `sc_vde.route_control.ack` (3) | 불요 | **93** |
 
-셋 다 addressed 전용이고 carrier는 `ff 7f`를 공유한다. VDE Type 번호 대응은 링크
-계층이 정하며, 위치보고가 addressed가 되면서 예전 표기(Type 93 브로드캐스트)는 더
-이상 맞지 않는다 — 링크 팀 확인 대상이다.
+셋 다 addressed 전용이고 carrier는 `ff 7f`를 공유한다.
+
+**Type을 가르는 것은 addressed/broadcast가 아니라 `ack_required`다.**
+
+```text
+92 = Short data with ACK     (Table 40)  ← ack_required=True
+93 = Short data without ACK  (Table 41)  ← ack_required=False
+```
+
+Type 92 본문은 목적지를 broadcast로 둘 수 없어 구조적으로 addressed 전용이고, Type 93은
+addressed·broadcast 둘 다 가능하다. 그래서 **위치보고가 addressed가 되어도 no-ACK이므로
+여전히 Type 93**이다. 근거는 `VDETER/src/vdeter/profiles/messages.py`의 등록표와
+`link/short_data/codec.py`의 분기다.
 
 ### 5.2 흐름
 
 ```text
 MASS                                                    ROC
  │                                                       │
- │──[1] Position Report  MF 1  14 B ───────────────────▶ │  항적 갱신
+ │──[1] Position Report  Type 93 · MF 1  14 B ─────────▶ │  항적 갱신
  │      (AIS 표준 주기 · 12노트면 10초)                      │
  │                                                       │
- │◀─[2] Route Instruction  MF 2  39 B ────────────────── │  waypoint 3개 (Link ID 17)
+ │◀─[2] Route Instruction  Type 92 · MF 2  39 B ──────── │  waypoint 3개 (Link ID 17)
  │                                                       │
  │      검증 → 통과한 경우에만 항로 적용                       │
  │                                                       │
- │──[3] Application ACK  MF 3  3 B ────────────────────▶ │  acknowledged
+ │──[3] Application ACK  Type 93 · MF 3  3 B ──────────▶ │  acknowledged
  │                                                       │
  │      침로 변경 · waypoint 추종                           │
  │                                                       │
@@ -314,7 +324,6 @@ duration = 1분 지시
 | 2 | 검증 결과 전달 경로 | 미해결 — 링크 계층이 서명을 검증해도 그 결과가 응용에 오지 않는다. 다만 현재 SC-VDE 형식은 unsigned Segment Type 0이라 검증할 서명 자체가 없다 |
 | 3 | 링크 ACK 미구현 | 지금은 응용 ACK만 있다. 링크 ACK·재전송은 링크 계층 몫 |
 | 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 |
-| 5 | **Type 번호 대응** | 위치보고가 addressed가 되면서 예전 Type 93 표기가 맞지 않는다. 링크 팀 확인 필요 |
 
 ---
 

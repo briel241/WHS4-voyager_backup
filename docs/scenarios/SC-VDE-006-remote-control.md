@@ -96,25 +96,28 @@
 
 ### 5.1 전송 경로
 
-| 메시지 | 방향 | payload_format | ACK |
-| --- | --- | --- | --- |
-| 위치보고 | MASS → ROC | `sc_vde.position_report` (MF 1) | 불요 (addressed) |
-| 조종 명령 | ROC → MASS | `sc_vde.route_control.command` (MF 2) | 요구 |
-| 응용 ACK | MASS → ROC | `sc_vde.route_control.ack` (MF 3) | 불요 |
+| 메시지 | 방향 | payload_format | 링크 ACK | VDE Type |
+| --- | --- | --- | :-: | :-: |
+| 위치보고 | MASS → ROC (addressed) | `sc_vde.position_report` (MF 1) | 불요 | **93** |
+| 조종 명령 | ROC → MASS (addressed) | `sc_vde.route_control.command` (MF 2) | 요구 | **92** |
+| 응용 ACK | MASS → ROC (addressed) | `sc_vde.route_control.ack` (MF 3) | 불요 | **93** |
+
+Type은 `ack_required`가 가른다 — 92 = Short data with ACK, 93 = Short data without ACK.
+자세한 근거는 [`SC-VDE-005-route-guidance.md`](SC-VDE-005-route-guidance.md) §5.1.
 
 ### 5.2 흐름
 
 ```text
 MASS                                                    ROC
  │                                                       │
- │──[1] Position Report  MF 1  14 B ───────────────────▶ │  항적 갱신
+ │──[1] Position Report  Type 93 · MF 1  14 B ─────────▶ │  항적 갱신
  │                                                       │
- │◀─[2] Control Command  MF 2  10 B ──────────────────── │  침로 92.5° · 투묘
+ │◀─[2] Control Command  Type 92 · MF 2  10 B ────────── │  침로 92.5° · 투묘
  │                                                       │
  │      검증 → 통과한 경우에만 조타 반영                        │
  │      운항 모드 MON → RC (제어권 이전)                      │
  │                                                       │
- │──[3] Application ACK  MF 3  3 B ────────────────────▶ │  acknowledged
+ │──[3] Application ACK  Type 93 · MF 3  3 B ──────────▶ │  acknowledged
  │                                                       │
  │      지시 침로로 선회 (선회율 상한 20°/분)                   │
  │                                                       │
