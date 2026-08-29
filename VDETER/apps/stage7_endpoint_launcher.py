@@ -597,6 +597,21 @@ def main(argv=None) -> int:
                     100_000_000,
                 ),
             )
+            if os.environ.get("STAGE7_DIAG", "0") == "1" and state.tx_intents:
+                try:
+                    now_d = self_c._now_utc_nanoseconds()
+                    deltas = sorted(
+                        round((i.transmit_at_nanoseconds - now_d) / 1e6)
+                        for i in state.tx_intents
+                    )[:8]
+                    print(
+                        f"[diag] release n={len(state.tx_intents)} "
+                        f"delta_ms={deltas} "
+                        f"floor_ms={relaxed.transmit_lead_nanoseconds / 1e6:.0f}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             self_c._profile = relaxed
             try:
                 return _orig_release(
