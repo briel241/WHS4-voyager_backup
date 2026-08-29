@@ -1127,7 +1127,8 @@ class Stage7B210RadioAdapter:
 
     def _consume_async_locked(self, event: dict):
         outcome = event.get("outcome")
-        if os.environ.get("STAGE7_DIAG", "0") == "1":
+        import os as _os
+        if _os.environ.get("STAGE7_DIAG", "0") == "1":
             import sys as _sys
             n = self._diag_async_n = getattr(self, "_diag_async_n", 0) + 1
             if outcome != "BURST_ACK" or n <= 30 or n % 20 == 0:
@@ -1400,7 +1401,8 @@ class Stage7B210RadioAdapter:
         self._rx_children.pop(child.key, None)
         self._terminal_keys.add(child.key)
         if not clean:
-            if os.environ.get("STAGE7_DIAG", "0") == "1":
+            import os as _os
+            if _os.environ.get("STAGE7_DIAG", "0") == "1":
                 import sys as _sys
                 print(
                     f"[diag-radio] unclean lane={child.lane_index} "
