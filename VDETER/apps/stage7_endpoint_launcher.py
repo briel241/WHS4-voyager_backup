@@ -357,6 +357,92 @@ def main(argv=None) -> int:
     notifier_slot["notifier"] = client.make_intent_notifier()
     progress_client_slot["client"] = client
 
+    # STAGE7_DIAG=1: 조사 세션 전용 진단 계측 (기본 off — 정식 run 무접촉).
+    # ① §15 사영 이전의 내부 오류코드 ② RX 창 등록/거부 ③ 수신 미결 계수
+    # 주기 덤프 (누적 열화·세션 수신 실패의 공통 뿌리 가설 측정).
+    _DIAG = os.environ.get("STAGE7_DIAG", "0") == "1"
+    if _DIAG:
+        try:
+            from vdeter.runtime import projection as _dproj
+
+            _diag_orig_tse = _dproj.to_service_error
+
+            def _diag_tse(error):
+                try:
+                    print(
+                        f"[diag] svc-err {getattr(error, 'code', '?')}: "
+                        f"{str(getattr(error, 'message', ''))[:110]} "
+                        f"det={str(getattr(error, 'details', ''))[:200]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_tse(error)
+
+            _dproj.to_service_error = _diag_tse
+            for _dmod_name in ("vdeter.runtime.endpoint", "vdeter.runtime.stage5"):
+                import importlib as _dimp
+                _dmod = _dimp.import_module(_dmod_name)
+                if getattr(_dmod, "to_service_error", None) is _diag_orig_tse:
+                    _dmod.to_service_error = _diag_tse
+
+            from vdeter.stage7.radio_adapter import (
+                Stage7B210RadioAdapter as _DRA,
+            )
+
+            _diag_orig_rx = _DRA.request_rx
+
+            def _diag_rx(self_r, request):
+                res = _diag_orig_rx(self_r, request)
+                try:
+                    n = main._diag_rx_n = getattr(main, "_diag_rx_n", 0) + 1
+                    # 오류는 전건, 정상은 스로틀 (펌프 타이밍 왜곡 방지).
+                    if res.is_err or n <= 40 or n % 25 == 0:
+                        out = "OK" if not res.is_err else (
+                            f"ERR {getattr(res.error, 'code', '?')} "
+                            f"{str(getattr(res.error, 'message', ''))[:60]}"
+                        )
+                        start = getattr(request, "start_at", None)
+                        print(
+                            f"[diag] rx-req #{n} "
+                            f"ch={getattr(request, 'channel', None)} "
+                            f"start={getattr(start, 'total_nanoseconds', lambda: '?')()} "
+                            f"-> {out}",
+                            file=sys.stderr, flush=True,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                return res
+
+            _DRA.request_rx = _diag_rx
+
+            def _diag_pending_census():
+                try:
+                    state = endpoint.stage4.mac.state
+                    pend = getattr(state, "delivery_pending", ()) or ()
+                    deps = getattr(state, "pending_dependencies", None)
+                    dep_n = len(deps) if deps is not None else "?"
+                    ledger = getattr(state, "delivery_ledger", ()) or ()
+                    print(
+                        f"[diag] census t={_time.monotonic():.1f} "
+                        f"delivery_pending={len(pend)} pending_deps={dep_n} "
+                        f"ledger={len(ledger)}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    print(f"[diag] census 오류: {error}",
+                          file=sys.stderr, flush=True)
+
+            def _diag_census_loop():
+                while not _pump_stop.is_set():
+                    _diag_pending_census()
+                    _pump_stop.wait(10.0)
+
+            _threading.Thread(target=_diag_census_loop, daemon=True).start()
+            print("[diag] STAGE7_DIAG 계측 활성", file=sys.stderr, flush=True)
+        except Exception as error:  # noqa: BLE001
+            print(f"[diag] 계측 장착 실패: {error}", file=sys.stderr, flush=True)
+
     # 계측(rr-p2 기동 거부 내부사유 추적): frozen MAC begin_running의 내부
     # 오류는 §15 투영으로 지워진다 — 반환 직전에 원문을 stderr로 남긴다.
     # frozen 파일은 건드리지 않고 인스턴스 래핑만 한다 (실패해도 무해).
