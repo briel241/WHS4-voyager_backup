@@ -743,7 +743,9 @@ def main(argv=None) -> int:
                 print(
                     f"[launcher] build-rescue "
                     f"old_delta_ms={(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
-                    f"new_delta_ms={(new_at - now0) / 1e6:.0f}",
+                    f"new_delta_ms={(new_at - now0) / 1e6:.0f} "
+                    f"new_at={new_at} tdma={getattr(item, 'tdma_channel', '?')} "
+                    f"slot={getattr(item, 'slot_in_frame', '?')}",
                     file=sys.stderr, flush=True,
                 )
             return state
