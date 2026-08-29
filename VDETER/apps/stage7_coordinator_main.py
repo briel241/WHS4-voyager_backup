@@ -783,7 +783,26 @@ def _run_rr_service_phase(
         open(os.path.join(gate_dir, "admission_open"), "w").close()
 
     def _wait_controller():
+        # soak/scenario 대기 중 coordinator IPC는 정상적으로 조용하다 —
+        # 서비스 이벤트 수신·컨트롤러 기록이 실제 활동이므로 그 파일
+        # 성장을 guard 진행으로 급식한다 (rr-p3-soak-17-20260829f/g 실측:
+        # soak-1이 정상 진행·성공 중인데 IPC 침묵만 보고 stall 오탐 정지).
+        # 파일이 전부 멈추면 진짜 정지 — stall 감시가 그대로 작동한다.
+        import glob as _glob
+        watch = [os.path.join(run_root, "logs", "scenario-controller.log")]
+        last_total = -1
         while controller.poll() is None:
+            total = 0
+            for path in watch + _glob.glob(
+                os.path.join(run_root, "evidence", "service_events", "*.jsonl")
+            ):
+                try:
+                    total += os.path.getsize(path)
+                except OSError:
+                    pass
+            if total != last_total:
+                last_total = total
+                guard.progress()
             guard.check()
             time.sleep(1.0)
         result_path = os.path.join(run_root, "evidence", "scenario_result.json")
