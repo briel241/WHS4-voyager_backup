@@ -431,10 +431,20 @@ def main(argv=None) -> int:
                     deps = getattr(state, "pending_dependencies", None)
                     dep_n = len(deps) if deps is not None else "?"
                     ledger = getattr(state, "delivery_ledger", ()) or ()
+                    # C6: 수신 세션 잔류 감시 (감사③ — 회수 부재로 영구
+                    # 잔류하면 해당 LC가 블랙홀化).
+                    sessions = [
+                        (
+                            getattr(s, "logical_channel_rx", "?"),
+                            getattr(s, "opened", "?"),
+                            len(getattr(s, "seen_fragment_keys", ()) or ()),
+                        )
+                        for s in (getattr(state, "rx_sessions", ()) or ())
+                    ]
                     print(
                         f"[diag] census t={_time.monotonic():.1f} "
                         f"delivery_pending={len(pend)} pending_deps={dep_n} "
-                        f"ledger={len(ledger)}",
+                        f"ledger={len(ledger)} rx_sessions={sessions}",
                         file=sys.stderr, flush=True,
                     )
                 except Exception as error:  # noqa: BLE001
@@ -460,6 +470,8 @@ def main(argv=None) -> int:
             _diag_orig_rdf = _DMC._receive_data_fragment
 
             def _diag_rdf(self_c, state, **kwargs):
+                _pre_cmd = len(kwargs.get("commands") or ())
+                _pre_err = len(kwargs.get("errors") or ())
                 try:
                     decoded = kwargs.get("decoded")
                     channel = kwargs.get("channel")
@@ -468,6 +480,17 @@ def main(argv=None) -> int:
                     smap = self_c.active_slot_map(state)
                     slot = smap.slot_at(
                         channel, pos.tdma_channel, pos.slot_in_frame
+                    )
+                    _sess = None
+                    if slot is not None:
+                        _sess = state.rx_session_for_channel(
+                            slot.logical_channel
+                        )
+                    print(
+                        f"[diag] frag-pre body={type(kwargs.get('body')).__name__} "
+                        f"gfn={getattr(kwargs.get('body'), 'global_fragment_number', '?')} "
+                        f"sess={'None' if _sess is None else f'opened={_sess.opened},seen={len(getattr(_sess, 'seen_fragment_keys', ()) or ())}'}",
+                        file=sys.stderr, flush=True,
                     )
                     from vdeter.mac.access import enumerate_function_slots as _d_enum
                     frame = _d_frame(received)
@@ -499,7 +522,17 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[diag] frag-rx probe 오류: {error}",
                           file=sys.stderr, flush=True)
-                return _diag_orig_rdf(self_c, state, **kwargs)
+                result_state = _diag_orig_rdf(self_c, state, **kwargs)
+                try:
+                    print(
+                        f"[diag] frag-post dCmd="
+                        f"{len(kwargs.get('commands') or ()) - _pre_cmd} "
+                        f"dErr={len(kwargs.get('errors') or ()) - _pre_err}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return result_state
 
             _DMC._receive_data_fragment = _diag_rdf
 
@@ -522,6 +555,149 @@ def main(argv=None) -> int:
                 return _diag_orig_sme(procedure)
 
             _dtr.slot_missed_error = _diag_sme
+
+            # C1/C2: link 실행·무음 실패 싱크 개봉 (감사③ S1/S2 —
+            # reassembly 명령의 실패는 correlation.transfer_id 부재로 전
+            # 계층 무음이었다).
+            from vdeter.runtime.endpoint import Stage4Support as _DS4
+
+            _diag_orig_fail = _DS4._fail
+
+            def _diag_fail(self_s, command, error):
+                try:
+                    payload = getattr(command, "payload", None)
+                    req = getattr(payload, "request", None)
+                    print(
+                        f"[diag] dep-FAIL cmd={type(payload).__name__} "
+                        f"req={type(req).__name__} code={getattr(error,'code','?')} "
+                        f"det={str(getattr(error,'details',''))[:120]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_fail(self_s, command, error)
+
+            _DS4._fail = _diag_fail
+
+            _diag_orig_xlink = _DS4._execute_link
+
+            def _diag_xlink(self_s, command, payload):
+                result = _diag_orig_xlink(self_s, command, payload)
+                try:
+                    req = getattr(payload, "request", payload)
+                    rt = type(req).__name__
+                    if "Reassembly" in rt or "Fragment" in rt:
+                        if getattr(result, "is_err", False):
+                            out = f"ERR {getattr(result.error,'code','?')}"
+                        else:
+                            v = getattr(result, "value", None)
+                            out = (
+                                f"OK status={getattr(getattr(v,'status',None),'value',None)} "
+                                f"kind={getattr(getattr(v,'kind',None),'value',None)}"
+                            )
+                        print(
+                            f"[diag] link-exec {rt} "
+                            f"sh={getattr(getattr(req,'session_handle',None),'value','?')} "
+                            f"-> {out}",
+                            file=sys.stderr, flush=True,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                return result
+
+            _DS4._execute_link = _diag_xlink
+
+            # C5: 펌프-배송 경합 계수 (H1 판별 — 두 조각 배송 사이 pump 0회면
+            # 경합 확정).
+            _diag_orig_pump = _DS4.pump
+
+            def _diag_pump(self_s, *a, **k):
+                main._diag_pump_n = getattr(main, "_diag_pump_n", 0) + 1
+                return _diag_orig_pump(self_s, *a, **k)
+
+            _DS4.pump = _diag_pump
+
+            from vdeter.runtime.endpoint import VdeTerEndpoint as _DVE
+
+            _diag_orig_delrec = _DVE._deliver_recovered
+
+            def _diag_delrec(self_e, *a, **k):
+                try:
+                    print(
+                        f"[diag] deliver-recovered t={_time.monotonic():.3f} "
+                        f"pump_n={getattr(main, '_diag_pump_n', 0)}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_delrec(self_e, *a, **k)
+
+            _DVE._deliver_recovered = _diag_delrec
+
+            # C4: 재조립기 내부
+            from vdeter.link.data_session.reassembly import (
+                DataSessionReassembler as _DRA2,
+            )
+
+            for _mname in ("control", "process"):
+                _orig_m = getattr(_DRA2, _mname)
+
+                def _mk(_orig_m=_orig_m, _mname=_mname):
+                    def _w(self_r, request):
+                        result = _orig_m(self_r, request)
+                        try:
+                            if getattr(result, "is_err", False):
+                                out = f"ERR {getattr(result.error,'code','?')}"
+                            else:
+                                v = getattr(result, "value", None)
+                                out = (
+                                    f"OK {getattr(getattr(v,'status',None),'value',None) or getattr(getattr(v,'kind',None),'value',None)}"
+                                )
+                            print(
+                                f"[diag] reasm-{_mname} "
+                                f"sh={getattr(getattr(request,'session_handle',None),'value','?')} "
+                                f"-> {out}",
+                                file=sys.stderr, flush=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return result
+                    return _w
+
+                setattr(_DRA2, _mname, _mk())
+
+            # C7: 준무음 경로
+            _diag_orig_ree = _DS4._record_endpoint_error
+
+            def _diag_ree(self_s, error, *a, **k):
+                try:
+                    print(
+                        f"[diag] ep-err {getattr(error,'code','?')} "
+                        f"{str(getattr(error,'message',''))[:80]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_ree(self_s, error, *a, **k)
+
+            _DS4._record_endpoint_error = _diag_ree
+
+            _diag_orig_odf = _DMC._on_dependency_failed
+
+            def _diag_odf(self_c, state, envelope, *a, **k):
+                try:
+                    p = getattr(envelope, "payload", None)
+                    print(
+                        f"[diag] dep-failed-evt "
+                        f"code={getattr(getattr(p,'error',None),'code','?')} "
+                        f"xfer={getattr(getattr(envelope,'correlation',None),'transfer_id',None) is not None}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_odf(self_c, state, envelope, *a, **k)
+
+            _DMC._on_dependency_failed = _diag_odf
 
             # 정밀: horizon 진입 타이머의 무장/발화 실측 (release 기아의
             # 원인 특정 — 스위프가 프레임 주기로만 도는 이유).
