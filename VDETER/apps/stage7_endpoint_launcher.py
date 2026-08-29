@@ -326,11 +326,36 @@ def main(argv=None) -> int:
 
         while not _pump_stop.is_set():
             try:
+                # 지연 해부 (svc-run-n 이후: 게이트 후에도 완료 처리
+                # 지연 ~15-19s 잔존, mac-gap ~1s × 171 — 어느 구간이
+                # 먹는지 구간별 실측. DIAG 게이트, 300ms 초과만 출력.)
+                _t0 = _time.monotonic()
                 endpoint.dependencies.radio.poll_once()
+                _t1 = _time.monotonic()
                 _mac_cycle()
+                _t2 = _time.monotonic()
                 drain = getattr(main, "_drain_dispatch_queue", None)
                 if drain is not None:
                     drain()
+                _t3 = _time.monotonic()
+                if (
+                    _t3 - _t0 > 0.3
+                    and os.environ.get("STAGE7_DIAG", "0") == "1"
+                ):
+                    try:
+                        ingress = getattr(endpoint.stage4, "ingress", None)
+                        depth = len(getattr(ingress, "_events", ()) or ())
+                        dq = getattr(main, "_dispatch_queue_ref", None)
+                        print(
+                            f"[diag] pump-slow poll={(_t1 - _t0) * 1e3:.0f} "
+                            f"mac1={(_t2 - _t1) * 1e3:.0f} "
+                            f"drain={(_t3 - _t2) * 1e3:.0f}ms "
+                            f"qlen={'?' if dq is None else len(dq)} "
+                            f"ingress={depth} t={_t3:.3f}",
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 support = endpoint.stage4
                 if support is not None:
                     cycle_started = _time.monotonic()
@@ -1696,6 +1721,7 @@ def main(argv=None) -> int:
                         pass
 
         main._drain_dispatch_queue = _drain_dispatch_queue
+        main._dispatch_queue_ref = _dispatch_queue
         _orig_completed = _D7.on_lane_window_completed
 
         def _completed_locked(self_d, lane_generation, lane_index, child_key, completion):
