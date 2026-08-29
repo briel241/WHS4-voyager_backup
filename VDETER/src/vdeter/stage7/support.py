@@ -102,7 +102,10 @@ class _LogicalWindow:
 class Stage7LaneRxDispatcher:
     """adapter private child event를 lane stack에 결속하고 merge를 소유한다."""
 
-    __slots__ = ("_support", "_stacks", "_lock", "_windows", "_stale_events", "_lane_generation")
+    __slots__ = (
+        "_support", "_stacks", "_lock", "_windows", "_stale_events",
+        "_lane_generation", "_gate_state",
+    )
 
     def __init__(self, support, stacks, *, lane_generation: int) -> None:
         self._support = support
@@ -111,6 +114,70 @@ class Stage7LaneRxDispatcher:
         self._windows = {}
         self._stale_events = []
         self._lane_generation = lane_generation
+        self._gate_state = {}
+
+    def _energy_gate(self, lane_index, native_request):
+        """잡음 바닥 창의 샘플을 0으로 치환해 frozen 조기 탈출로 보낸다.
+
+        Pi 실측: 무음(zeros) 창 디코드 4.9ms, 잡음 창은 레벨 무관
+        ~106ms(상관 풀 탐색) — 창 완료 수요가 처리 용량을 넘어 pending
+        장부 상시 포화(svc-run-f), 청취 창 기아의 뿌리. 문턱은 lane별
+        잡음 전력 중앙값 ×8(+9dB): 워밍업 300창은 무조건 디코드하며
+        통계만 수집, 이상·실패 시 원 요청 그대로(fail-open). 치환은
+        디코드 입력 사본에만 적용되고 관측 계약(진단 싱크·ingress·
+        결과 타입)은 frozen 경로 그대로다. STAGE7_RX_ENERGY_GATE=0
+        으로 비활성.
+        """
+        import os as _os
+
+        if _os.environ.get("STAGE7_RX_ENERGY_GATE", "1") != "1":
+            return native_request
+        try:
+            import dataclasses as _dc
+            import sys as _sys
+
+            import numpy as _np
+
+            samples = native_request.samples
+            if not samples.data:
+                return native_request
+            arr = _np.frombuffer(samples.data, dtype=_np.complex64)
+            if arr.size == 0:
+                return native_request
+            power = float(_np.vdot(arr, arr).real) / arr.size
+            state = self._gate_state.setdefault(
+                lane_index,
+                {"warm": [], "med": None, "gated": 0, "passed": 0},
+            )
+            if state["med"] is None:
+                if power > 0.0:
+                    state["warm"].append(power)
+                if len(state["warm"]) >= 300:
+                    warm = sorted(state["warm"])
+                    state["med"] = warm[len(warm) // 2]
+                    state["warm"] = []
+                    print(
+                        f"[launcher] rx-gate armed lane={lane_index} "
+                        f"noise_med={state['med']:.3e}",
+                        file=_sys.stderr, flush=True,
+                    )
+                return native_request
+            if state["med"] <= 0.0 or power >= state["med"] * 8.0:
+                state["passed"] += 1
+                return native_request
+            state["gated"] += 1
+            if state["gated"] % 1000 == 1:
+                print(
+                    f"[launcher] rx-gate lane={lane_index} "
+                    f"gated={state['gated']} passed={state['passed']}",
+                    file=_sys.stderr, flush=True,
+                )
+            zero_block = _dc.replace(
+                samples, data=b"\x00" * len(samples.data)
+            )
+            return _dc.replace(native_request, samples=zero_block)
+        except Exception:  # noqa: BLE001 - 게이트 실패 시 원 요청으로 디코드
+            return native_request
 
     @property
     def stacks(self) -> tuple:
@@ -228,6 +295,7 @@ class Stage7LaneRxDispatcher:
             return
         segment, epoch_id = promoted.value
         t0 = stack.ingress.epoch_t0_hardware_ns(epoch_id)
+        native_request = self._energy_gate(lane_index, native_request)
         stack.facade.diagnostic_sink.begin_window(rx_window_key, epoch_id, t0)
         try:
             decoded = stack.facade.decode_samples(native_request)
