@@ -653,8 +653,97 @@ def main(argv=None) -> int:
         from vdeter.mac.coordinator import MacCoordinator as _MC_rel
 
         _orig_release = _MC_rel._release_due_tx_intents
+        import threading as _thr_rel
+
+        # 프로파일 스왑은 인스턴스 전역이라 재진입/동시 진입 시 완화값이
+        # 원본으로 오인 복원될 수 있다 — 직렬화로 차단.
+        _rel_lock = _thr_rel.RLock()
+
+        def _rescue_stale_builds(self_c, state, floor_ns):
+            """마감(now+floor)을 놓친 BUILD 의도를 폐기 대신 다음 유효 DC
+            슬롯으로 재정박한다 (svc-data-5/7 실측: 보류 조각이 단일 알람
+            소진+스위프 기아로 한 프레임 방치 후 SLOT_MISSED — frozen의
+            폐기 규칙은 존중하되, 죽기 전에 같은 LC의 미래 슬롯으로 이월.
+            후보가 없으면 손대지 않아 frozen SLOT_MISSED가 정상 작동)."""
+
+            import dataclasses as _dcr
+
+            import vdeter.mac.coordinator as _comod
+
+            now0 = self_c._now_utc_nanoseconds()
+            stale = [
+                i for i in state.tx_intents
+                if i.kind == "BUILD"
+                and i.transmit_at_nanoseconds < now0 + floor_ns
+                and i.correlation_transfer_id is not None
+            ]
+            if not stale:
+                return state
+            smap = self_c.active_slot_map(state)
+            taken = {i.transmit_at_nanoseconds for i in state.tx_intents}
+            cur_frame = _comod.frame_ordinal_at_nanoseconds(now0)
+            for intent in stale:
+                context = state.transfer_by_value(intent.correlation_transfer_id)
+                if context is None or context.logical_channel_tx is None:
+                    continue
+                allocation = _comod.resource_module.find_allocation_for_tx(
+                    state.lc_allocations, context.logical_channel_tx, cur_frame
+                )
+                if allocation is None:
+                    continue
+                channel = _comod.PhysicalChannel(context.physical_channel_name)
+                new_at = None
+                frame = cur_frame
+                last = min(allocation.last_valid_frame_ordinal, cur_frame + 2)
+                while frame <= last and new_at is None:
+                    fs = _comod.frame_ordinal_start_nanoseconds(frame)
+                    for item in _comod.enumerate_function_slots(
+                        slot_map=smap, function=_comod.SlotFunction.DC,
+                        physical_channel=channel,
+                        from_utc_nanoseconds=fs,
+                        until_utc_nanoseconds=fs + _comod.FRAME_NANOSECONDS,
+                        transmit=True,
+                    ):
+                        if (
+                            item.logical_channel == context.logical_channel_tx
+                            and item.start_nanoseconds >= now0 + floor_ns
+                            and item.start_nanoseconds not in taken
+                        ):
+                            new_at = item.start_nanoseconds
+                            break
+                    frame += 1
+                if new_at is None:
+                    continue
+                new_plan = _dcr.replace(
+                    intent.build_request.plan, transmit_at=self_c._utc(new_at)
+                )
+                new_request = _dcr.replace(
+                    intent.build_request, plan=new_plan
+                )
+                moved = _dcr.replace(
+                    intent,
+                    transmit_at_nanoseconds=new_at,
+                    build_request=new_request,
+                )
+                state = state.without_tx_intent(intent.intent_id).with_tx_intent(
+                    moved
+                )
+                taken.add(new_at)
+                print(
+                    f"[launcher] build-rescue "
+                    f"old_delta_ms={(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
+                    f"new_delta_ms={(new_at - now0) / 1e6:.0f}",
+                    file=sys.stderr, flush=True,
+                )
+            return state
 
         def _release_relaxed(self_c, state, causation_event_id, commands, errors):
+            with _rel_lock:
+                return _release_relaxed_locked(
+                    self_c, state, causation_event_id, commands, errors
+                )
+
+        def _release_relaxed_locked(self_c, state, causation_event_id, commands, errors):
             original_profile = self_c._profile
             relaxed = _dc_rel.replace(
                 original_profile,
@@ -678,6 +767,13 @@ def main(argv=None) -> int:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+            try:
+                state = _rescue_stale_builds(
+                    self_c, state, relaxed.transmit_lead_nanoseconds
+                )
+            except Exception as error:  # noqa: BLE001 - 구조 실패 시 원 경로
+                print(f"[launcher] build-rescue 오류: {error}",
+                      file=sys.stderr, flush=True)
             self_c._profile = relaxed
             try:
                 result_state = _orig_release(
