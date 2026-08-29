@@ -12,7 +12,7 @@
 | 시나리오 ID | `SC-VDE-005` |
 | 목적 | ROC가 지시한 항로를 MASS가 검증·수락하고 실제로 따라간다 |
 | 분류 | 소용량 · 양방향 (주기적 보고 + 단발 명령) |
-| `data_type` | **미배정** — API 계약에 운항 메시지 분류가 없다(§9) |
+| `data_type` | `ROUTE_CONTROL_COMMAND` / `ROUTE_CONTROL_ACK` / `POSITION_REPORT` |
 | 위험 등급 | **최상 · 직접** |
 | 상태 | **구현됨** (`common/`·`MASS/`·`ROC/`, 시험 276항목 통과) |
 

@@ -251,7 +251,7 @@ fragment 하나만 유실돼도 인증이 실패하며, 수신 선박마다 불�
 
 | #   | 항목                             | 영향                            | 결정 주체   |
 |:---:| ------------------------------ | ----------------------------- | ------- |
-| 1   | 노선·조종용 운영 payload_format 부재     | 노선(005)·조종(006)을 운영 VDETER로 보낼 format이 registry에 없음 (지금은 시험용 opaque) | 링크 계층 |
+| 1   | ~~노선·조종용 payload_format 부재~~     | ✅ **해결** — `sc_vde.route_control.command`/`.ack`·`sc_vde.position_report` 등록 완료(TEST scope) | — |
 | 2   | 신뢰 앵커 provisioning 방식          | 부트스트랩 설계 (SC-VDE-001)          | 프로젝트    |
 | 3   | Route Plan 기밀성 → 암호화 범위        | S-421 기밀성 상(표적화). 인증 외 **암호화 포함 여부** — SECOM 후보 | 프로젝트 |
 | 4   | 실 하드웨어 RF 벤치                   | 감쇠기 없음 → Faraday Cage 대기       | 프로젝트·링크 |
@@ -263,7 +263,7 @@ fragment 하나만 유실돼도 인증이 실패하며, 수신 선박마다 불�
 확정 3개 시나리오(**SC-VDE-001 인증서 · 005 노선 · 006 원격 조종**)는 응용 계층 구현·단위
 시험·소프트웨어 무선 loopback 종단까지 완료됐다(`scenarios/scenario_list.md` §0,
 [`../사용법.md`](../사용법.md)). 인증서는 실 VDETER codec으로 **운영 종단**까지 확인됐고,
-노선·조종은 운영 payload_format이 없어 **시험용 opaque**로 종단을 확인했다.
+노선·조종·위치보고 모두 등록된 `sc_vde.*` 포맷으로 종단을 확인했다(TEST scope).
 
 남은 것은 전부 외부 의존이다.
 
