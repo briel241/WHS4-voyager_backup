@@ -658,126 +658,6 @@ def main(argv=None) -> int:
         # 프로파일 스왑은 인스턴스 전역이라 재진입/동시 진입 시 완화값이
         # 원본으로 오인 복원될 수 있다 — 직렬화로 차단.
         _rel_lock = _thr_rel.RLock()
-        # 이월 배정 이력 (svc-data-9 실측: 앞서 이월된 조각이 즉시 방출되어
-        # 대기 목록을 떠나면 다음 이월이 같은 슬롯을 재배정 → 공중 충돌
-        # 유실. 최근 배정 슬롯을 영속 기록해 재사용을 막는다.)
-        _rescued_slots = {}
-
-        def _rescue_stale_builds(self_c, state, floor_ns, target_min_ns=None):
-            """마감(now+floor)을 놓친 BUILD 의도를 폐기 대신 다음 유효 DC
-            슬롯으로 재정박한다 (svc-data-5/7 실측: 보류 조각이 단일 알람
-            소진+스위프 기아로 한 프레임 방치 후 SLOT_MISSED — frozen의
-            폐기 규칙은 존중하되, 죽기 전에 같은 LC의 미래 슬롯으로 이월.
-            후보가 없으면 손대지 않아 frozen SLOT_MISSED가 정상 작동)."""
-
-            import dataclasses as _dcr
-
-            import vdeter.mac.coordinator as _comod
-
-            now0 = self_c._now_utc_nanoseconds()
-            if target_min_ns is None:
-                target_min_ns = floor_ns
-            stale = [
-                i for i in state.tx_intents
-                if i.kind == "BUILD"
-                and i.transmit_at_nanoseconds < now0 + floor_ns
-                and i.correlation_transfer_id is not None
-            ]
-            if not stale:
-                return state
-            smap = self_c.active_slot_map(state)
-            # 지난 배정 이력 정리(과거 슬롯은 재사용 무해) 후 taken에 합산.
-            for slot_ns in [s for s in _rescued_slots if s < now0]:
-                _rescued_slots.pop(slot_ns, None)
-            taken = {i.transmit_at_nanoseconds for i in state.tx_intents}
-            taken.update(_rescued_slots)
-            cur_frame = _comod.frame_ordinal_at_nanoseconds(now0)
-            # 순서 보존 이월 (svc-data-15 실측: link 조각화 문맥은 위치
-            # 순서대로만 조립 — 개별 이월이 순서를 깨면
-            # LINK_FRAGMENT_NUMBER_INVALID로 후속 전부 거부). 전송 단위로
-            # 묶어, 최초 stale 위치부터의 "꼬리 전체"를 위치 순서 = 시간
-            # 순서가 되도록 연속 미래 DC 슬롯에 재배열한다.
-            stale_ids = {i.intent_id for i in stale}
-            by_transfer = {}
-            for i in state.tx_intents:
-                if i.kind == "BUILD" and i.correlation_transfer_id is not None:
-                    by_transfer.setdefault(
-                        i.correlation_transfer_id, []
-                    ).append(i)
-            for transfer_value, intents in by_transfer.items():
-                if not any(i.intent_id in stale_ids for i in intents):
-                    continue
-                intents.sort(key=lambda i: (
-                    i.build_request.session_frame_index,
-                    i.build_request.fragment_position_in_frame,
-                ))
-                first_bad = min(
-                    k for k, i in enumerate(intents)
-                    if i.intent_id in stale_ids
-                )
-                tail = intents[first_bad:]
-                context = state.transfer_by_value(transfer_value)
-                if context is None or context.logical_channel_tx is None:
-                    continue
-                allocation = _comod.resource_module.find_allocation_for_tx(
-                    state.lc_allocations, context.logical_channel_tx, cur_frame
-                )
-                if allocation is None:
-                    continue
-                channel = _comod.PhysicalChannel(context.physical_channel_name)
-                slots = []
-                frame = cur_frame
-                while (
-                    frame <= allocation.last_valid_frame_ordinal
-                    and len(slots) < len(tail)
-                ):
-                    fs = _comod.frame_ordinal_start_nanoseconds(frame)
-                    for item in _comod.enumerate_function_slots(
-                        slot_map=smap, function=_comod.SlotFunction.DC,
-                        physical_channel=channel,
-                        from_utc_nanoseconds=fs,
-                        until_utc_nanoseconds=fs + _comod.FRAME_NANOSECONDS,
-                        transmit=True,
-                    ):
-                        if (
-                            item.logical_channel == context.logical_channel_tx
-                            and item.start_nanoseconds >= now0 + target_min_ns
-                            and item.start_nanoseconds not in taken
-                        ):
-                            slots.append(item.start_nanoseconds)
-                            if len(slots) >= len(tail):
-                                break
-                    frame += 1
-                if len(slots) < len(tail):
-                    # 후보 부족 — 손대지 않고 frozen 폐기 규칙에 맡긴다.
-                    continue
-                for intent, new_at in zip(tail, slots):
-                    new_plan = _dcr.replace(
-                        intent.build_request.plan,
-                        transmit_at=self_c._utc(new_at),
-                    )
-                    new_request = _dcr.replace(
-                        intent.build_request, plan=new_plan
-                    )
-                    moved = _dcr.replace(
-                        intent,
-                        transmit_at_nanoseconds=new_at,
-                        build_request=new_request,
-                    )
-                    state = state.without_tx_intent(
-                        intent.intent_id
-                    ).with_tx_intent(moved)
-                    taken.add(new_at)
-                    _rescued_slots[new_at] = True
-                    print(
-                        f"[launcher] build-rescue pos="
-                        f"{intent.build_request.fragment_position_in_frame} "
-                        f"old_delta_ms="
-                        f"{(intent.transmit_at_nanoseconds - now0) / 1e6:.0f} "
-                        f"new_delta_ms={(new_at - now0) / 1e6:.0f}",
-                        file=sys.stderr, flush=True,
-                    )
-            return state
 
         def _release_relaxed(self_c, state, causation_event_id, commands, errors):
             with _rel_lock:
@@ -809,22 +689,6 @@ def main(argv=None) -> int:
                     )
                 except Exception:  # noqa: BLE001
                     pass
-            try:
-                # 이월 목적지는 완화 하한(100ms)이 아니라 본 계획 lead +
-                # 1슬롯 여유를 요구한다 — svc-data-8 실측: +107~347ms 이월이
-                # 빌드 파이프라인 지연을 못 버티고 어댑터 마감(RADIO_LATE_
-                # REQUEST)·UHD late에서 사산. 판별(사살 여부)은 완화 하한,
-                # 재배치는 여유 있는 슬롯으로.
-                state = _rescue_stale_builds(
-                    self_c, state,
-                    relaxed.transmit_lead_nanoseconds,
-                    target_min_ns=(
-                        original_profile.transmit_lead_nanoseconds + 160_000_000
-                    ),
-                )
-            except Exception as error:  # noqa: BLE001 - 구조 실패 시 원 경로
-                print(f"[launcher] build-rescue 오류: {error}",
-                      file=sys.stderr, flush=True)
             self_c._profile = relaxed
             try:
                 result_state = _orig_release(
@@ -832,40 +696,6 @@ def main(argv=None) -> int:
                 )
             finally:
                 self_c._profile = original_profile
-            # horizon 알람 재장전 (svc-data-5 실측 근거: 단일 horizon 알람이
-            # 앞 의도들 발화로 소진된 뒤 남은 보류 의도의 알람을 아무도 재
-            # 무장하지 않아, 방출이 프레임 이벤트(2.4s) 주기로 퇴화 → 740ms
-            # 방출창이 통째로 빠진 조각이 SLOT_MISSED 폐기. frozen 자체의
-            # _arm_horizon_entry로 남은 최조기 진입 알람을 재장전한다 —
-            # 동일 진입은 frozen이 중복 제거하므로 멱등).
-            try:
-                from vdeter.mac.tdma import (
-                    HEXSLOT_NANOSECONDS as _REARM_SLOT_NS,
-                )
-                now_rearm = self_c._now_utc_nanoseconds()
-                horizon_ns = original_profile.schedule_horizon_nanoseconds
-                deferred_entries = [
-                    intent.transmit_at_nanoseconds + _REARM_SLOT_NS - horizon_ns
-                    for intent in result_state.tx_intents
-                    if intent.transmit_at_nanoseconds + _REARM_SLOT_NS
-                    > now_rearm + horizon_ns
-                ]
-                if deferred_entries:
-                    entry = min(deferred_entries)
-                    if entry > now_rearm:
-                        result_state, _rearmed = self_c._arm_horizon_entry(
-                            result_state,
-                            entry_utc_nanoseconds=entry,
-                            causation_event_id=causation_event_id,
-                            commands=commands,
-                            errors=errors,
-                        )
-                        if not _rearmed and errors:
-                            # 재장전 실패는 원 경로(이벤트 구동)로 무해히
-                            # 회귀 — 배치 오류로 승격시키지 않는다.
-                            errors.pop()
-            except Exception:  # noqa: BLE001 - 재장전 실패는 기존 경로 유지
-                pass
             return result_state
 
         _MC_rel._release_due_tx_intents = _release_relaxed
