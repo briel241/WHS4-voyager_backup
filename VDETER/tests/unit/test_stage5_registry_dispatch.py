@@ -346,6 +346,40 @@ class Stage5RegistryLifecycleTest(unittest.TestCase):
         with patch("vdeter.presentation.adapter._CODEC_DECLARATIONS", extended):
             return build_presentation_adapter(registry)
 
+    def test_TC_STAGE5_008_codecs_without_policy_metadata_keep_default_behaviour(self):
+        # `payload_extension_baseline.md` §8.1·§13.1: 정책 metadata를 선언하지 않은
+        # 기존 codec은 broadcast와 `ack_required` 양 값을 모두 허용하는 기본값으로
+        # 해석된다 (기존 동작 보존).
+        from vdeter.presentation.adapter import _allowed_ack_required, _is_addressed_only
+        from vdeter.presentation.codecs.ais_scheme1 import AisAuthenticationScheme1Codec
+        from vdeter.presentation.codecs.certificate_report import CertificateReportCodec
+        from vdeter.presentation.codecs.opaque import OpaqueTestCodec
+        from vdeter.presentation.codecs.sc_vde_route_control import (
+            ScVdeRouteControlAckCodec,
+            ScVdeRouteControlCommandCodec,
+        )
+
+        for codec in (
+            OpaqueTestCodec(),
+            CertificateReportCodec(),
+            AisAuthenticationScheme1Codec(),
+        ):
+            with self.subTest(codec=type(codec).__name__):
+                self.assertFalse(hasattr(codec, "addressed_only"))
+                self.assertFalse(hasattr(codec, "allowed_ack_required"))
+                self.assertFalse(_is_addressed_only(codec))
+                self.assertEqual(
+                    frozenset({False, True}), _allowed_ack_required(codec)
+                )
+        # MF 2/3은 addressed_only만 선언하고 ACK 정책은 기본값(양 값 허용)이다.
+        for codec in (ScVdeRouteControlCommandCodec(), ScVdeRouteControlAckCodec()):
+            with self.subTest(codec=type(codec).__name__):
+                self.assertIs(True, codec.addressed_only)
+                self.assertFalse(hasattr(codec, "allowed_ack_required"))
+                self.assertEqual(
+                    frozenset({False, True}), _allowed_ack_required(codec)
+                )
+
     def test_TC_STAGE5_008_non_bool_addressed_only_rejects_adapter_build(self):
         # `payload_extension_baseline.md` §8.1 검사 7.
         class _BadAddressedOnly:
@@ -512,10 +546,14 @@ class Stage5PrefixFirstDispatchTest(unittest.TestCase):
         # reserved-neighbour `ff 7e`, source 임시 `ff 01`, logical 16383의 정수 직렬화
         # `3f ff`는 모두 supported alias/fallback이 아니다 (`DR-PAYLOAD-003`).
         body = self.SC_VDE_COMMAND_WIRE[3:]
+        position_body = self.SC_VDE_POSITION_REPORT_WIRE[3:]
         cases = (
+            b"\xff\x7e\x01" + position_body,
             b"\xff\x7e\x02" + body,
+            b"\xff\x01\x01" + position_body,
             b"\xff\x01\x02" + body,
             b"\xff\x01\x03" + self.SC_VDE_ACK_WIRE[3:],
+            b"\x3f\xff\x01" + position_body,
             b"\x3f\xff\x02" + body,
             b"\x3f\xff\x03" + self.SC_VDE_ACK_WIRE[3:],
         )
