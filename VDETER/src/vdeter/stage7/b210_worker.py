@@ -177,6 +177,23 @@ class Stage7DualLaneFlowgraphBackend:
                             return 0
                         source_self._current = source_self._queue.popleft()
                         source_self._index = 0
+                        import os as _os
+                        if _os.environ.get("STAGE7_DIAG", "0") == "1":
+                            try:
+                                import sys as _sys
+                                delay_ms = (
+                                    time.monotonic() - source_self._current[2]
+                                ) * 1e3
+                                print(
+                                    f"[diag-worker] tx-pickup lane"
+                                    f"{source_self._lane} "
+                                    f"t_ns={source_self._current[1]} "
+                                    f"delay_ms={delay_ms:.1f} "
+                                    f"qlen={len(source_self._queue)}",
+                                    file=_sys.stderr, flush=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
                     samples, hardware_time_ns = source_self._current[:2]
                     remaining = len(samples) - source_self._index
                     produced = min(len(output), remaining)
@@ -558,6 +575,15 @@ class Stage7DualLaneFlowgraphBackend:
             raise ValueError("group burst는 길이와 first-sample 시각이 같아야 합니다")
         length = lengths.pop()
         time_ns = times.pop()
+        import os as _os
+        if _os.environ.get("STAGE7_DIAG", "0") == "1":
+            import sys as _sys
+            lead_ms = (time_ns - int(self.hardware_time_ns())) / 1e6
+            print(
+                f"[diag-worker] tx-submit lanes={sorted(by_lane)} "
+                f"t_ns={time_ns} lead_ms={lead_ms:.1f}",
+                file=_sys.stderr, flush=True,
+            )
         for lane in range(LANE_COUNT):
             if lane in by_lane:
                 data, hardware_time_ns = by_lane[lane]
