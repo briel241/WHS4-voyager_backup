@@ -244,6 +244,11 @@ class ForbiddenImportTest(unittest.TestCase):
             module_name = _module_name(path)
             if module_name.startswith("vdeter.runtime"):
                 continue
+            # 검사 대상은 6개 layer뿐이다 (자매 시험과 동일 스코프). stage7 등
+            # runtime-오케스트레이션 additive 모듈은 설계상 runtime을 사용한다
+            # (stage7 기준선 §4.1) — 2026-08-27 사용자 승인 스코프 정정.
+            if _layer_of(module_name) not in LAYER_PACKAGES:
+                continue
             for imported in _imported_modules(path):
                 self.assertFalse(
                     imported.startswith("vdeter.runtime"),
