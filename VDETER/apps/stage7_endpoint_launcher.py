@@ -962,6 +962,38 @@ def main(argv=None) -> int:
             return plan
 
         _MC.handle_event = _he_guarded
+        # 단문→세션 승격 (svc-real-1 실측: link 계층은 "타 링크(19)의 단문
+        # 용량 685B" 근거로 38~685B를 단문 후보로 내는데, frozen MAC 단문
+        # 경로는 Link 11(37B) 고정이라 실을 수 없어 즉사 — 실물 인증서
+        # 353B가 정확히 이 사각지대. 스펙(인증서=데이터 세션 90→4→74/75/76)
+        # 대로, Link 11이 실제로 싣지 못하는 단문 후보는 세션으로 승격한다.
+        _orig_submit_short = _MC._submit_short_data
+
+        def _submit_short_or_session(self_c, state, requirement,
+                                     causation_event_id):
+            try:
+                link11 = next(
+                    (p for p in requirement.profiles
+                     if getattr(p.link_id, "value", None) == 11),
+                    None,
+                )
+                if link11 is None or not link11.short_data_eligible:
+                    print(
+                        "[launcher] short->session 승격 "
+                        f"(link11 미적합, size="
+                        f"{requirement.presentation_size})",
+                        file=sys.stderr, flush=True,
+                    )
+                    return self_c._submit_data_session(
+                        state, requirement, causation_event_id
+                    )
+            except Exception:  # noqa: BLE001 - 승격 실패 시 원 경로
+                pass
+            return _orig_submit_short(
+                self_c, state, requirement, causation_event_id
+            )
+
+        _MC._submit_short_data = _submit_short_or_session
         # 세션 조각 수용 판정의 경계 스냅 (svc-data-10 실측 + 정밀 분석:
         # PHY 역산이 램프 128샘플(416.67µs)을 무조건 빼므로, 탐지 지점이
         # 창 앞머리에 붙으면 received_at이 슬롯 경계 앞으로 넘어가 tdma
