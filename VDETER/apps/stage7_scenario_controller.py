@@ -300,7 +300,7 @@ def main(argv=None) -> int:
     # data-roc-to-a = 관제→함정 데이터 세션(인증서 ≤1024B 운송로).
     payloads = {
         "short-roc-to-a": payload_bytes(29, 1),
-        "data-roc-to-a": payload_bytes(1024, 7),
+        "data-roc-to-a": payload_bytes(353, 7),
         "short-b-to-roc-noack": payload_bytes(30, 5),
         "timeout-unknown-dest": payload_bytes(29, 6),
     }

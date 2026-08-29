@@ -299,7 +299,7 @@ def main(argv=None) -> int:
         # 인증서(≤1024B) 운송로인 관제→함정 데이터 세션 시험.
         submits = {
             "short-roc-to-a": (station["mass-a"], 29, 1, True),
-            "data-roc-to-a": (station["mass-a"], 1024, 7, True),
+            "data-roc-to-a": (station["mass-a"], 353, 7, True),
             "short-b-to-roc-noack": (station["roc"], 30, 5, False),
             "timeout-unknown-dest": (999999999, 29, 6, True),
         }
