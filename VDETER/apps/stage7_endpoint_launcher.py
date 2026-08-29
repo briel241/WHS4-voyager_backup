@@ -1485,6 +1485,11 @@ def main(argv=None) -> int:
                 from vdeter.mac import resources as _res_rdf
 
                 decoded2 = kwargs.get("decoded")
+                # 연장 폭 +6프레임(14.4s): frozen 헬퍼의 상한(+3, 7.2s)은
+                # 함정 처리 지연 실측(~10s, svc-run-g에서 74 통과 후 같은
+                # frame의 76 도착 전에 prune 발생)보다 짧다. 조각이 창
+                # 안에 실수신된 할당만 대상이라 부활·오연장 없음.
+                _RENEW_FRAMES = 6
                 if decoded2 is not None:
                     f_rx = _rdf_frame(decoded2.received_at.total_nanoseconds())
                     for item in (getattr(state, "lc_allocations", ()) or ()):
@@ -1494,19 +1499,24 @@ def main(argv=None) -> int:
                                 "name", "",
                             ) == "ACTIVE"
                             and item.last_valid_frame_ordinal
-                            < f_rx + _res_rdf.LC_LEASE_FRAMES
+                            < f_rx + _RENEW_FRAMES
                         ):
                             state = state.evolve(
                                 lc_allocations=_res_rdf.upsert_allocation(
                                     state.lc_allocations,
-                                    _res_rdf.renewed_allocation(item, f_rx),
+                                    _dc_rdf.replace(
+                                        item,
+                                        last_valid_frame_ordinal=(
+                                            f_rx + _RENEW_FRAMES
+                                        ),
+                                    ),
                                 )
                             )
                             print(
                                 "[launcher] rx-lease-renew "
                                 f"lc={item.logical_channel_tx} f={f_rx} "
                                 f"last+{item.last_valid_frame_ordinal - f_rx}"
-                                f"->+{_res_rdf.LC_LEASE_FRAMES}",
+                                f"->+{_RENEW_FRAMES}",
                                 file=sys.stderr, flush=True,
                             )
             except Exception:  # noqa: BLE001 - 실패 시 원 상태로 판정
