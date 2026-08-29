@@ -439,6 +439,81 @@ def main(argv=None) -> int:
                     _pump_stop.wait(10.0)
 
             _threading.Thread(target=_diag_census_loop, daemon=True).start()
+
+            # 정밀: 세션 조각 수신의 slot 판정 입력/출력 실측 (frozen
+            # _receive_data_fragment는 self-호출이라 class-attr 래핑 유효).
+            from vdeter.mac.coordinator import MacCoordinator as _DMC
+            from vdeter.mac.tdma import (
+                frame_ordinal_at_nanoseconds as _d_frame,
+                position_at_nanoseconds as _d_pos,
+            )
+            from vdeter.mac.tbb import SlotFunction as _DSF
+
+            _diag_orig_rdf = _DMC._receive_data_fragment
+
+            def _diag_rdf(self_c, state, **kwargs):
+                try:
+                    decoded = kwargs.get("decoded")
+                    channel = kwargs.get("channel")
+                    received = decoded.received_at.total_nanoseconds()
+                    pos = _d_pos(received)
+                    smap = self_c.active_slot_map(state)
+                    slot = smap.slot_at(
+                        channel, pos.tdma_channel, pos.slot_in_frame
+                    )
+                    from vdeter.mac.access import enumerate_function_slots as _d_enum
+                    frame = _d_frame(received)
+                    from vdeter.mac.tdma import (
+                        frame_ordinal_start_nanoseconds as _d_fstart,
+                        FRAME_NANOSECONDS as _d_fns,
+                    )
+                    fs = _d_fstart(frame)
+                    dcs = [
+                        (item.tdma_channel, item.slot_in_frame,
+                         getattr(item, 'logical_channel', '?'))
+                        for item in _d_enum(
+                            slot_map=smap, function=_DSF.DC,
+                            physical_channel=channel,
+                            from_utc_nanoseconds=fs,
+                            until_utc_nanoseconds=fs + _d_fns,
+                            transmit=False,
+                        )
+                    ][:8]
+                    print(
+                        f"[diag] frag-rx ch={getattr(channel,'name','?')} "
+                        f"recv_ns={received} tdma={pos.tdma_channel} "
+                        f"slot={pos.slot_in_frame} -> "
+                        f"slot_fn={getattr(getattr(slot,'function',None),'name',None)} "
+                        f"lc={getattr(slot,'logical_channel',None)} "
+                        f"map_dc(frame)={dcs}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    print(f"[diag] frag-rx probe 오류: {error}",
+                          file=sys.stderr, flush=True)
+                return _diag_orig_rdf(self_c, state, **kwargs)
+
+            _DMC._receive_data_fragment = _diag_rdf
+
+            # 정밀: SLOT_MISSED 발생 순간의 산술 (procedure·의도시각·now·lead).
+            import vdeter.mac.transfers as _dtr
+
+            _diag_orig_sme = _dtr.slot_missed_error
+
+            def _diag_sme(procedure):
+                try:
+                    import traceback as _dtb
+                    caller = _dtb.extract_stack(limit=3)[0]
+                    print(
+                        f"[diag] slot-missed proc={procedure} "
+                        f"at={caller.name}:{caller.lineno}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_sme(procedure)
+
+            _dtr.slot_missed_error = _diag_sme
             print("[diag] STAGE7_DIAG 계측 활성", file=sys.stderr, flush=True)
         except Exception as error:  # noqa: BLE001
             print(f"[diag] 계측 장착 실패: {error}", file=sys.stderr, flush=True)
