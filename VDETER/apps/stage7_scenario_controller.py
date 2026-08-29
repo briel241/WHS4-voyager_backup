@@ -408,7 +408,7 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.16",
+        "baseline_revision": "0.9.17",
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],
