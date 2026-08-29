@@ -363,15 +363,18 @@ def main(argv=None) -> int:
                 counters["roc_to_ship_completed"] += 1
             if time.monotonic() >= soak_deadline:
                 break
-            counters["ship_report_attempts"] += 1
-            delivered = transfer(
-                f"soak-{cycle}-ship-report", "MASS-B",
-                "submit-short-b-to-roc-noack.json", "ROC",
-                shas["short-b-to-roc-noack"], timeout_s=60.0,
-                max_attempts=1, gating=False,
-            )
-            if delivered:
-                counters["ship_report_delivered"] += 1
+            # 주기 보고는 격사이클(~2분 간격) — 판정 반복(관제→함정)의
+            # 페이스를 보장하면서 주기성 재현을 유지한다.
+            if cycle % 2 == 1:
+                counters["ship_report_attempts"] += 1
+                delivered = transfer(
+                    f"soak-{cycle}-ship-report", "MASS-B",
+                    "submit-short-b-to-roc-noack.json", "ROC",
+                    shas["short-b-to-roc-noack"], timeout_s=60.0,
+                    max_attempts=1, gating=False,
+                )
+                if delivered:
+                    counters["ship_report_delivered"] += 1
             cycle += 1
         if counters["roc_to_ship_completed"] < arguments.min_transfers:
             record("soak-min-transfers", "FAIL",
