@@ -965,6 +965,38 @@ def main(argv=None) -> int:
                         )
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                # F4-lite: 잔류 수신 세션 GC (svc-real-2 실측: idle 회수
+                # 기제 부재로 이전 시도의 세션이 opened 여부와 무관하게
+                # 영구 잔류 → 그 LC의 후속 조각 전량 무음 폐기). 계획된
+                # 프레임 최대치를 현재 프레임의 대리치로 써서, 3프레임
+                # (7.2s) 이상 무활동 세션을 상태에서 제거한다 — 다음
+                # Start 조각이 새 OPEN으로 재개설한다.
+                ns_g = getattr(plan, "next_state", None)
+                sess_g = getattr(ns_g, "rx_sessions", ()) or ()
+                planned_g = getattr(ns_g, "planned_frame_ordinals", ()) or ()
+                if sess_g and planned_g:
+                    cur_f = max(planned_g)
+                    stale = [
+                        s for s in sess_g
+                        if getattr(s, "last_frame_ordinal", 0) < cur_f - 3
+                    ]
+                    for s in stale:
+                        ns_g = ns_g.without_rx_session(
+                            getattr(s.session_handle, "value",
+                                    s.session_handle)
+                        )
+                        print(
+                            "[launcher] rx-session-gc lc="
+                            f"{getattr(s, 'logical_channel_rx', '?')} "
+                            f"idle_frames={cur_f - s.last_frame_ordinal}",
+                            file=sys.stderr, flush=True,
+                        )
+                    if stale:
+                        import dataclasses as _dc3
+                        plan = _dc3.replace(plan, next_state=ns_g)
+            except Exception:  # noqa: BLE001
+                pass
             return plan
 
         _MC.handle_event = _he_guarded
@@ -1000,6 +1032,120 @@ def main(argv=None) -> int:
             )
 
         _MC._submit_short_data = _submit_short_or_session
+        # F-spread (svc-run-a 실측: 76이 OPEN 왕복 완료 전 도착 → frozen
+        # 3079가 무오류 폐기 — H1 확정. 수신측 명령 적체 하에서 OPEN에
+        # 시간을 주기 위해, 세션의 '마지막 조각'만 +800ms(5슬롯) 뒤 같은
+        # LC의 DC 슬롯으로 이동한다. 마지막 조각만 미루므로 위치 순서는
+        # 구조적으로 보존, 수신측 로직 무접촉).
+        from vdeter.mac.tdma import (
+            HEXSLOT_NANOSECONDS as _SPR_HEX,
+            frame_ordinal_at_nanoseconds as _spr_frame,
+            position_at_nanoseconds as _spr_pos,
+        )
+
+        _orig_doe_func = _MC._defer_or_emit
+
+        def _doe_spread(self_c, state, *, intent, causation_event_id,
+                        commands, errors):
+            try:
+                if (
+                    intent.kind == "BUILD"
+                    and intent.correlation_transfer_id is not None
+                ):
+                    request = intent.build_request
+                    count = getattr(request, "frame_fragment_count", 1)
+                    position = getattr(
+                        request, "fragment_position_in_frame", 1
+                    )
+                    if count >= 2 and position == count:
+                        import dataclasses as _dcs
+
+                        base = intent.transmit_at_nanoseconds
+                        smap2 = self_c.active_slot_map(state)
+                        channel2 = None
+                        plan2 = getattr(request, "plan", None)
+                        channel2 = getattr(plan2, "channel", None)
+                        pos0 = _spr_pos(base) if channel2 is not None else None
+                        want_lc = None
+                        if pos0 is not None:
+                            slot0 = smap2.slot_at(
+                                channel2, pos0.tdma_channel, pos0.slot_in_frame
+                            )
+                            want_lc = getattr(slot0, "logical_channel", None)
+                        new_at = None
+                        for k_step in range(5, 12):
+                            cand = base + k_step * _SPR_HEX
+                            posc = _spr_pos(cand)
+                            slotc = smap2.slot_at(
+                                channel2, posc.tdma_channel, posc.slot_in_frame
+                            )
+                            if (
+                                slotc is not None
+                                and getattr(slotc, "function", None) is not None
+                                and getattr(slotc.function, "name", "") == "DC"
+                                and (want_lc is None
+                                     or slotc.logical_channel == want_lc)
+                            ):
+                                new_at = cand
+                                break
+                        if new_at is not None:
+                            new_plan2 = _dcs.replace(
+                                plan2, transmit_at=self_c._utc(new_at)
+                            )
+                            new_req2 = _dcs.replace(request, plan=new_plan2)
+                            intent = _dcs.replace(
+                                intent,
+                                transmit_at_nanoseconds=new_at,
+                                build_request=new_req2,
+                            )
+                            print(
+                                f"[launcher] frag-spread pos={position}/{count} "
+                                f"+{(new_at - base) / 1e6:.0f}ms",
+                                file=sys.stderr, flush=True,
+                            )
+            except Exception:  # noqa: BLE001 - 실패 시 원 시각 유지
+                pass
+            return _orig_doe_func(
+                self_c, state, intent=intent,
+                causation_event_id=causation_event_id,
+                commands=commands, errors=errors,
+            )
+
+        _MC._defer_or_emit = _doe_spread
+
+        # F2-lite: reassembly 명령 실패(무음 싱크) 시 해당 수신 세션 회수 —
+        # 다음 Start 조각이 새 OPEN을 발행할 수 있게 한다 (블랙홀 방지).
+        _orig_odf_func = _MC._on_dependency_failed
+
+        def _odf_recover(self_c, state, envelope, *a, **k):
+            result_state = _orig_odf_func(self_c, state, envelope, *a, **k)
+            try:
+                corr = getattr(envelope, "correlation", None)
+                sh = getattr(corr, "session_handle", None)
+                sh_val = getattr(sh, "value", sh)
+                if (
+                    sh_val is not None
+                    and getattr(corr, "transfer_id", None) is None
+                ):
+                    sessions = getattr(result_state, "rx_sessions", ()) or ()
+                    match = next(
+                        (s for s in sessions
+                         if getattr(s.session_handle, "value",
+                                    s.session_handle) == sh_val),
+                        None,
+                    )
+                    if match is not None:
+                        result_state = result_state.without_rx_session(sh_val)
+                        print(
+                            "[launcher] rx-session-recover (open 실패 회수) "
+                            f"lc={getattr(match, 'logical_channel_rx', '?')}",
+                            file=sys.stderr, flush=True,
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+            return result_state
+
+        _MC._on_dependency_failed = _odf_recover
         # 세션 조각 수용 판정의 경계 스냅 (svc-data-10 실측 + 정밀 분석:
         # PHY 역산이 램프 128샘플(416.67µs)을 무조건 빼므로, 탐지 지점이
         # 창 앞머리에 붙으면 received_at이 슬롯 경계 앞으로 넘어가 tdma
