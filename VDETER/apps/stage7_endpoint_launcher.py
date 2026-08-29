@@ -548,6 +548,23 @@ def main(argv=None) -> int:
                         f"map_dc(frame)={dcs}",
                         file=sys.stderr, flush=True,
                     )
+                    # svc-run-e 76 거절 미스터리: 거절 순간의 할당 장부
+                    # 전체를 찍는다 (조건별 판별 가능하게 전 필드).
+                    allocs = [
+                        (a.logical_channel_tx, a.logical_channel_rx,
+                         a.tdma_channel,
+                         getattr(a.state, 'name', a.state),
+                         a.activation_frame_ordinal - frame,
+                         a.last_valid_frame_ordinal - frame,
+                         a.owner_station_id_value,
+                         a.peer_station_id_value)
+                        for a in (getattr(state, 'lc_allocations', ()) or ())
+                    ]
+                    print(
+                        f"[diag] frag-allocs frame={frame} "
+                        f"n={len(allocs)} {allocs}",
+                        file=sys.stderr, flush=True,
+                    )
                 except Exception as error:  # noqa: BLE001
                     print(f"[diag] frag-rx probe 오류: {error}",
                           file=sys.stderr, flush=True)
@@ -1420,6 +1437,43 @@ def main(argv=None) -> int:
                         )
             except Exception:  # noqa: BLE001 - 보정 실패 시 원 판정 경로
                 pass
+            # 수신 조각 기반 임대 갱신 (svc-run-e 부검: frozen은 "수신
+            # 시각 frame으로 판정, 처리 시각 frame으로 prune"이라 처리
+            # 지연이 임대 말미와 겹치면 창 안에 도착한 조각의 할당이
+            # 검사 직전 prune으로 소멸 — 76 거절의 TOCTOU. resources
+            # docstring의 트래픽 기반 renewal 중 frozen이 Start/OPEN
+            # 경로에서 빠뜨린 수신측 절반을 보충한다: 조각의 수신 frame
+            # 에서 ACTIVE인 할당의 임대를 frozen 헬퍼로 3프레임 연장.)
+            try:
+                from vdeter.mac import resources as _res_rdf
+
+                decoded2 = kwargs.get("decoded")
+                if decoded2 is not None:
+                    f_rx = _rdf_frame(decoded2.received_at.total_nanoseconds())
+                    for item in (getattr(state, "lc_allocations", ()) or ()):
+                        if (
+                            getattr(
+                                _res_rdf.allocation_state_at(item, f_rx),
+                                "name", "",
+                            ) == "ACTIVE"
+                            and item.last_valid_frame_ordinal
+                            < f_rx + _res_rdf.LC_LEASE_FRAMES
+                        ):
+                            state = state.evolve(
+                                lc_allocations=_res_rdf.upsert_allocation(
+                                    state.lc_allocations,
+                                    _res_rdf.renewed_allocation(item, f_rx),
+                                )
+                            )
+                            print(
+                                "[launcher] rx-lease-renew "
+                                f"lc={item.logical_channel_tx} f={f_rx} "
+                                f"last+{item.last_valid_frame_ordinal - f_rx}"
+                                f"->+{_res_rdf.LC_LEASE_FRAMES}",
+                                file=sys.stderr, flush=True,
+                            )
+            except Exception:  # noqa: BLE001 - 실패 시 원 상태로 판정
+                pass
             return _orig_rdf_snap(self_c, state, **kwargs)
 
         _MC._receive_data_fragment = _rdf_boundary_snapped
@@ -1457,12 +1511,33 @@ def main(argv=None) -> int:
             # 항목당 처리(수신 디코드)가 ~140ms라 일괄 drain이 MAC 박동을
             # 초 단위로 멎게 한다 (svc-run-c 실측) — 항목 사이에 MAC
             # 미니사이클(40ms 게이트)을 끼워 박동을 보장한다.
+            # svc-run-e 실측: 창 완료("c")가 타 창의 무거운 표본 디코드
+            # 뒤에 줄서면 pending RX 장부가 상시 포화(65~74/68)돼 shed가
+            # 청취 창을 굶긴다 — 같은 창의 표본이 이번 배치에 없는 완료
+            # 항목만 앞으로 빼서 장부를 즉시 비운다 (같은 창의 표본→완료
+            # 순서는 보존).
             mac_cycle = getattr(main, "_mac_cycle", None)
+            batch = []
             for _ in range(256):
                 try:
-                    item = _dispatch_queue.popleft()
+                    batch.append(_dispatch_queue.popleft())
                 except IndexError:
-                    return
+                    break
+            if not batch:
+                return
+            sample_keys = {
+                tuple(item[1:4]) for item in batch if item[0] == "s"
+            }
+            ordered = [
+                item for item in batch
+                if item[0] == "c" and tuple(item[1:4]) not in sample_keys
+            ]
+            promoted = len(ordered)
+            ordered += [
+                item for item in batch
+                if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
+            ]
+            for item in ordered:
                 kind = item[0]
                 try:
                     if kind == "s":
@@ -1474,6 +1549,9 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[launcher] dispatch-drain 오류: {error}",
                           file=sys.stderr, flush=True)
+                if promoted > 0:
+                    promoted -= 1
+                    continue  # 앞줄 완료 항목은 싸서 미니사이클 생략
                 if mac_cycle is not None:
                     try:
                         mac_cycle()
