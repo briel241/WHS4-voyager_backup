@@ -154,11 +154,17 @@ class Stage7LaneRxDispatcher:
                     state["warm"].append(power)
                 if len(state["warm"]) >= 300:
                     warm = sorted(state["warm"])
-                    state["med"] = warm[len(warm) // 2]
+                    # 잡음 추정 = 10분위수 (svc-run-k 실측: 버스트 빈번
+                    # 레인(ROC 하부 — 함정 TBB·DSCH ACK)에서 중앙값이
+                    # 신호 전력으로 오염 → 문턱이 버스트×8로 치솟아
+                    # ACK까지 전면 차단, passed 3/3000. 하위 10%는
+                    # 버스트가 절반 섞여도 잡음 바닥을 유지한다.)
+                    state["med"] = warm[len(warm) // 10]
                     state["warm"] = []
                     print(
                         f"[launcher] rx-gate armed lane={lane_index} "
-                        f"noise_med={state['med']:.3e}",
+                        f"noise_p10={state['med']:.3e} "
+                        f"p50={warm[len(warm) // 2]:.3e}",
                         file=_sys.stderr, flush=True,
                     )
                 return native_request
