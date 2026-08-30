@@ -313,11 +313,14 @@ def main(argv=None) -> int:
         # 본 동결 미보증. 디버그는 STAGE7_SCENARIO_FILTER로 6종 실행 가능.
         # v0.9.18 (2026-08-30): 데이터 세션 재현 실증(svc-run-o 완주,
         # 1시도·재시도 0)으로 data-roc-to-a를 판정 세트에 편입 — 4종.
+        # v0.9.19 예정: data를 1순위로 — 실측상 귀(수신 창)는 서비스
+        # 시작 직후의 신선한 창에서 가장 신뢰됨(svcdbg O·q 성공 조건).
+        # 세트 판정은 순서 무관.
         judged_plan = (
+            ("data-roc-to-a", "ROC", "MASS-A", False),
             ("short-roc-to-a", "ROC", "MASS-A", False),
             ("short-b-to-roc-noack", "MASS-B", "ROC", False),
             ("timeout-unknown-dest", "MASS-A", None, True),
-            ("data-roc-to-a", "ROC", "MASS-A", False),
         )
         candidate_plan = ()
         plan = (
@@ -329,13 +332,6 @@ def main(argv=None) -> int:
             allowed = {x.strip() for x in scenario_filter.split(",") if x.strip()}
             plan = tuple(p for p in plan if p[0] in allowed)
             print(f"[controller] scenario filter: {sorted(allowed)}", flush=True)
-        # 안정화 지연 (rr-g/h 실측: 서비스 시작 직후는 창 계획 램프로
-        # 배송 큐가 가장 혼잡한 순간 — 시나리오를 바로 쏘면 조각·ACK
-        # 처리 지연의 꼬리가 길어진다. 램프가 가라앉은 뒤 시작한다.)
-        settle_s = float(os.environ.get("STAGE7_SCENARIO_SETTLE_S", "60"))
-        if settle_s > 0:
-            print(f"[controller] settle {settle_s:.0f}s", flush=True)
-            time.sleep(settle_s)
         for name, sender, receiver, expect_fail in plan:
             ok = transfer(
                 name, sender, f"submit-{name}.json", receiver, shas[name],
