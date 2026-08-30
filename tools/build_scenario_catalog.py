@@ -3,10 +3,19 @@
 기존 `docs/시나리오_목록.xlsx`와 같은 열=시나리오 구조를 유지한다. 표를 손으로
 고치지 않고 이 스크립트를 고쳐 다시 만든다 — 수치가 코드와 어긋나지 않게 하려는 것이다.
 
-    .venv-crypto/bin/python tools/build_scenario_catalog.py
+    python tools/build_scenario_catalog.py
 
 openpyxl이 필요하다 (`pip install openpyxl`).
 """
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -89,9 +98,10 @@ ROWS = [
      "발행·ACK 상관 · 항적(계획 대 실제)",
      "제어권 전환(MON↔RC) · 침로 추종 · Fallback 전환 · 링크 두절"),
     ("구현 상태",
-     "✅ 운영 종단 (실 VDETER codec)",
-     "✅ 운영 종단 (TEST scope)",
-     "✅ 운영 종단 (TEST scope)"),
+     "⛔ 현재 미지원 — 응용 코드·코덱·단위시험 보존,\n"
+     "실제 VDE-TER Data Session 미완성(data_session_enabled=false)",
+     "✅ 소프트웨어 무선 종단 (TEST scope · 서명/replay 보호 없음)",
+     "✅ 소프트웨어 무선 종단 (TEST scope · 서명/replay 보호 없음)"),
 ]
 
 NOTES = [
@@ -107,6 +117,8 @@ NOTES = [
     "조종 명령 하나가 셋을 함께 바꾼다.",
     "sc_vde 두 형식은 서명·replay 보호가 없는 TEST 전용이다. 실제 조타에 쓰지 않는다.",
     "참여자 MMSI는 구현 config 기준(MASS 440000001 / ROC 440000002).",
+    "005·006의 '소프트웨어 무선 종단'은 Software Radio 기준이다. "
+    "B210 실물(3노드 ROC/MASS-A/MASS-B) 시험은 별개이며 아직 수행되지 않았다.",
 ]
 
 wb = Workbook()

@@ -1,13 +1,13 @@
 # MASS·ROC·Presentation Interface 배경지식
 
 > MASS와 ROC 간 데이터 송수신 구현에 앞서, 응용 계층(Application)과 Presentation Interface(PI)의
-> 표준 근거를 정리한 문서입니다. VDE-TER 링크·물리 계층은 `VDETER_Link/`의 팀 문서를 참조합니다.
+> 표준 근거를 정리한 문서입니다. VDE-TER 링크·물리 계층은 `VDETER/`(팀원 담당)를 참조합니다.
 
 | 항목    | 내용                                                     |
 | ----- | ------------------------------------------------------ |
 | 문서 목적 | 응용 계층 구현에 필요한 표준 배경 정리 및 설계 제약 도출                      |
 | 담당 범위 | MASS/ROC 행위자 구현, 응용 메시지 포맷, PI 어댑터                     |
-| 인접 범위 | VDE-TER Link/Physical Layer (별도 팀원 담당, `VDETER_Link/`) |
+| 인접 범위 | VDE-TER Link/Physical Layer (별도 팀원 담당, `VDETER/`) |
 | 1차 근거 | ITU-R M.2092-2, IALA G1117 Ed 4.0 (로컬 PDF 보유)          |
 | 2차 근거 | IMO MASS Code, IEC 61162 계열, IALA R1027 (웹 조사)         |
 
@@ -278,7 +278,7 @@ ROC 관련 문헌(§참고문헌 "외부 참조 — ROC")이 공통으로 지적
 > **출처 구분 (중요)**
 > 아래 표는 **표준에서 그대로 인용한 것이 아니라, 세 층위의 근거를 조합해 본 프로젝트가 구성한
 > 설계안**이다. 각 열의 근거 강도가 다르므로 구분해 읽어야 한다.
-> 
+>
 > | 열               | 근거 강도             | 출처                               |
 > | --------------- | ----------------- | -------------------------------- |
 > | **내용(항목)**      | 강 — 표준 문장 존재      | IEC 61162-1 문장 정의 (§5.2, §3.3)   |
@@ -904,8 +904,8 @@ CITesting의 상태별 반복 검증으로 **모든 제어권 상태에서 막�
 
 ### 팀 문서
 
-- `VDETER_Link/no_error_correction/docs/requirements.md` — 링크 계층 2단계 구현 명세
-- `VDETER_Link/no_error_correction/docs/implementation_plan.md` — 후속 단계 계획 (§9.9 보안 범위)
+- (구) `VDETER_Link/no_error_correction/docs/requirements.md` — 초기 링크 계층 명세 (현재는 `VDETER/`로 대체)
+- (구) `VDETER_Link/no_error_correction/docs/implementation_plan.md` — 초기 후속 계획 (현재는 `VDETER/`로 대체)
 
 ### 외부 참조 — MASS / IMO
 

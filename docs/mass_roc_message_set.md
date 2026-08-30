@@ -531,4 +531,4 @@ MASS                                              ROC
 ### 관련 문서
 
 - `docs/mass_roc_background.md` — 계층 구조, PI, 위협 모델, 상태 모델
-- `VDETER_Link/no_error_correction/docs/requirements.md` — 링크 계층 구현 명세
+- (구) `VDETER_Link/no_error_correction/docs/requirements.md` — 초기 링크 계층 명세 (현재는 `VDETER/`로 대체)

@@ -6,7 +6,7 @@
 | 항목   | 내용                                                         |
 | ---- | ---------------------------------------------------------- |
 | 대상   | MASS/ROC 응용 계층 및 PI                                        |
-| 인접   | VDE-TER 링크·물리 계층 (팀원, `VDETER_Link/`)                      |
+| 인접   | VDE-TER 링크·물리 계층 (팀원, `VDETER/`)                          |
 | 계약   | `docs/vdeter_mass_roc_api_guide.md`                            |
 | 시나리오 | [`scenarios/scenario_list.md`](scenarios/scenario_list.md) |
 

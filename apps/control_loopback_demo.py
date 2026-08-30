@@ -6,8 +6,9 @@
 스택 전체**를 지나 반대편에 byte 그대로 도착하고, 압축 코덱을 왕복해도 heading·
 fallback·SOG가 보존되는지 본다.
 
-⚠ 운영 포맷이 아니라 **시험 전용 `test.stage0.opaque`(통과 포맷)** 로 나른다. 노선/조종용
-   운영 payload_format은 아직 VDETER registry에 없다(링크 팀 등록 대기).
+조종용 SC-VDE format(`sc_vde.route_control.command`, TEST scope)이 VDETER registry에
+등록되어 있어 그 포맷으로 나른다. format이 없는 옛 빌드에서만 시험용
+`test.stage0.opaque`로 자동 전환한다. SC-VDE는 서명·replay 보호가 없는 TEST 전용이다.
 
 전제: in-repo `VDETER/` + `cryptography`(소프트웨어 그룹 조립에 필요). 없으면 SKIP.
 실행: python3 apps/control_loopback_demo.py
@@ -21,6 +22,10 @@ import sys
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from apps._loopback_opaque import preflight, run_scenario
 from common.messages import route_instruction as route
