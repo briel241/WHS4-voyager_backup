@@ -11,6 +11,8 @@ private key 내용은 어떤 log/evidence에도 기록하지 않는다.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -75,6 +77,70 @@ def _load_trust(root: str, *, is_control: bool):
         LinkCryptoDependencies(tbb_signer=signer, tbb_trust_store=store),
         fingerprint.value,
     )
+
+
+def service_event_record(event, *, mono_clock=time.monotonic) -> dict:
+    """public ServiceEvent 하나를 event JSONL record(dict)로 만든다.
+
+    기존 필드(t_mono·event_type·transfer_id·transfer_state·error_*·
+    payload_sha256·payload_len·source)는 그대로 유지해 기존 RR controller가
+    계속 동작한다. DATA_RECEIVED에는 응용 판정에 필요한 public 필드를
+    보탠다: payload_base64(원문 application bytes)·payload_format·
+    original_source·original_destination·received_at_ns.
+
+    - `source`는 예전에 `received.source`를 조회해 사실상 항상 누락됐다.
+      실제 public DTO 필드는 `received.original_source`다 — 그것으로 채운다.
+    - application bytes만 기록한다. RF frame·Link/MAC/PHY 내부 객체는
+      여기 오지 않는다(ReceivedApplicationData가 이미 응용 계층 DTO다).
+    - private key는 어떤 경로로도 기록하지 않는다.
+    """
+
+    record = {
+        "t_mono": round(mono_clock(), 3),
+        "event_type": getattr(
+            getattr(event, "event_type", None), "value",
+            str(getattr(event, "event_type", None)),
+        ),
+        "transfer_id": getattr(
+            getattr(event, "transfer_id", None), "value", None
+        ),
+        "transfer_state": getattr(
+            getattr(event, "transfer_state", None), "value", None
+        ),
+        "error_code": getattr(getattr(event, "error", None), "code", None),
+    }
+    error_object = getattr(event, "error", None)
+    if error_object is not None:
+        record["error_message"] = str(getattr(error_object, "message", ""))[:200]
+        error_details = getattr(error_object, "details", None)
+        if error_details is not None:
+            record["error_details"] = str(error_details)[:300]
+    received = getattr(event, "received_data", None)
+    if received is not None:
+        payload = getattr(received, "payload", b"") or b""
+        record["payload_sha256"] = hashlib.sha256(payload).hexdigest()
+        record["payload_len"] = len(payload)
+        record["payload_base64"] = base64.b64encode(payload).decode("ascii")
+        record["payload_format"] = getattr(
+            getattr(received, "payload_format", None), "value", None
+        )
+        source = getattr(received, "original_source", None)
+        record["source"] = getattr(source, "value", None)
+        record["original_source"] = record["source"]
+        destination = getattr(received, "original_destination", None)
+        if destination is not None and getattr(destination, "is_broadcast", False):
+            record["original_destination"] = "BROADCAST"
+        else:
+            record["original_destination"] = getattr(
+                getattr(destination, "station_id", None), "value", None
+            )
+        received_at = getattr(received, "received_at", None)
+        if received_at is not None:
+            try:
+                record["received_at_ns"] = int(received_at.total_nanoseconds())
+            except Exception:  # noqa: BLE001 - 시각 부재는 기록 생략
+                pass
+    return record
 
 
 def main(argv=None) -> int:
@@ -1945,43 +2011,7 @@ def main(argv=None) -> int:
                 if len(events) > seen:
                     with open(path, "a", encoding="utf-8") as handle:
                         for event in events[seen:]:
-                            record = {
-                                "t_mono": round(time.monotonic(), 3),
-                                "event_type": getattr(
-                                    getattr(event, "event_type", None), "value",
-                                    str(getattr(event, "event_type", None)),
-                                ),
-                                "transfer_id": getattr(
-                                    getattr(event, "transfer_id", None), "value",
-                                    None,
-                                ),
-                                "transfer_state": getattr(
-                                    getattr(event, "transfer_state", None), "value",
-                                    None,
-                                ),
-                                "error_code": getattr(
-                                    getattr(event, "error", None), "code", None
-                                ),
-                            }
-                            error_object = getattr(event, "error", None)
-                            if error_object is not None:
-                                record["error_message"] = str(
-                                    getattr(error_object, "message", "")
-                                )[:200]
-                                error_details = getattr(error_object, "details", None)
-                                if error_details is not None:
-                                    record["error_details"] = str(error_details)[:300]
-                            received = getattr(event, "received_data", None)
-                            if received is not None:
-                                payload = getattr(received, "payload", b"") or b""
-                                record["payload_sha256"] = (
-                                    _hashlib.sha256(payload).hexdigest()
-                                )
-                                record["payload_len"] = len(payload)
-                                source = getattr(received, "source", None)
-                                record["source"] = getattr(
-                                    getattr(source, "station_id", None), "value", None
-                                )
+                            record = service_event_record(event)
                             handle.write(_json_local.dumps(record, ensure_ascii=True))
                             handle.write("\n")
                     seen = len(events)
