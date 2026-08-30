@@ -100,18 +100,40 @@ def position_report() -> bytes:
 
 
 def certificate_report() -> bytes:
-    """SC-VDE-001 인증서 — X.509 v3 DER 한 건을 담은 Certificate Report 본문."""
+    """SC-VDE-001 인증서 — X.509 v3 DER 한 건을 담은 Certificate Report 본문.
+
+    **`apps/scenario_runner.py`의 SC-VDE-001과 같은 구성**이어야 한다. 확장 필드
+    하나가 25~28 byte라, 빼먹으면 실장비에서 실제보다 작은 payload로 시험하게 된다.
+    이 시나리오는 400 byte 경계에 걸려 있어(≈413 B) 그 차이가 Data Session 필요
+    여부를 가른다.
+
+        ROC-CA가 발급한 **선박 인증서** · 확장 mass_id · roc_id · mmsi · imo
+    """
     from common.security import certificate as cert
     from common.security import default_backend, fingerprint_for_public_key
 
     backend = default_backend()
-    private_key, public_key = cert.generate_key_pair()
+    day = 86_400.0
+    now = 1_767_225_600.0  # 2026-01-01 UTC 고정 — fixture를 재현 가능하게
+
+    # ROC의 CA
+    ca_key, ca_public = cert.generate_key_pair()
+    cert.build_certificate(
+        subject="ROC-CA", issuer="ROC-CA",
+        subject_public_key=ca_public, issuer_private_key=ca_key,
+        serial_number=1, not_before=now - day, not_after=now + 365 * day,
+        roc_id="ROC-01", is_ca=True)
+
+    # CA가 발급하는 선박 인증서 (scenario_runner와 같은 확장 구성)
+    _, vessel_public = cert.generate_key_pair()
     der = cert.build_certificate(
-        "CN=ROC-TEST", "CN=ROC-TEST", public_key, private_key,
-        serial_number=1, not_before=0.0, not_after=4_102_444_800.0,
-        mmsi=STATION["ROC"],
-    )
-    fingerprint = fingerprint_for_public_key(backend.public_bytes(public_key))
+        subject=f"MASS-{STATION['MASS-A']}", issuer="ROC-CA",
+        subject_public_key=vessel_public, issuer_private_key=ca_key,
+        serial_number=2, not_before=now - day, not_after=now + 30 * day,
+        mass_id="MASS-01", roc_id="ROC-01",
+        mmsi=str(STATION["MASS-A"]), imo="9074729")
+
+    fingerprint = fingerprint_for_public_key(backend.public_bytes(vessel_public))
     return certrep.build_single(der, fingerprint)
 
 

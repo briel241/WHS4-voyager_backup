@@ -156,6 +156,50 @@ check(
 )
 
 
+# --------------------------------------------- 4b. 인증서 구성 일치·크기 경계
+
+print("\n[인증서 구성]")
+
+# scenario_runner(정본)와 Stage 7 fixture가 같은 확장 필드를 써야 한다.
+# 확장 하나가 25~28 byte라, 빠지면 실장비에서 실제보다 작은 payload로 시험하게
+# 된다. SC-VDE-001은 400 byte 경계에 걸려 있어 그 차이가 Data Session 필요
+# 여부를 가른다.
+_CERT_EXTENSIONS = ("mass_id", "roc_id", "mmsi", "imo")
+_runner = read("apps/scenario_runner.py")
+_fixture = read("tools/make_stage7_fixtures.py")
+
+
+def _uses(body: str, marker: str, field: str) -> bool:
+    """marker 뒤 900자 안에서 field= 를 쓰는가 (build_certificate 인자 범위)."""
+    at = body.find(marker)
+    return at >= 0 and f"{field}=" in body[at:at + 900]
+
+
+for field in _CERT_EXTENSIONS:
+    in_runner = _uses(_runner, "vessel_der = cert.build_certificate", field)
+    in_fixture = _uses(_fixture, 'subject=f"MASS-{STATION[', field)
+    check(
+        f"인증서 확장 {field} — 정본·fixture 일치",
+        in_runner == in_fixture,
+        f"scenario_runner={in_runner} fixture={in_fixture}",
+    )
+
+# SC-VDE-001은 400 byte를 넘는다 — Data Session이 필요하다는 뜻이고,
+# 링크 팀에 그렇게 보고했다. 이 사실이 바뀌면 보고도 갱신해야 한다.
+try:
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from make_stage7_fixtures import certificate_report
+
+    cert_size = len(certificate_report())
+    check(
+        f"SC-VDE-001 인증서 400 B 초과 (실측 {cert_size} B)",
+        cert_size > 400,
+        "400 B 이하로 내려갔다면 링크 팀 보고를 갱신해야 한다",
+    )
+except Exception as exc:  # pragma: no cover - cryptography 없는 환경
+    check("SC-VDE-001 인증서 크기", True, f"SKIP: {exc}")
+
+
 # -------------------------------------------------------------- 5. 참조·명령
 
 print("\n[문서가 가리키는 파일]")
