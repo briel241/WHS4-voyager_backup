@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""SC-VDE-001 인증서 — VDETER 소프트웨어 무선 loopback 종단 시연.
+"""SC-VDE-001 인증서 — VDETER 소프트웨어 무선 loopback 시연 (운영 미지원 참고).
 
-우리 인증서 payload가 **실제 VDETER 스택 전체**(Presentation → Link → PHY →
-소프트웨어 무선 매체 → 수신 복원)를 지나 반대편 endpoint에 byte 그대로 도착하고,
+⚠ 이것은 **소프트웨어 무선 loopback**이다. SC-VDE-001의 실제 운영 경로인
+  인증서 **Data Session은 링크 계층에서 미완성**(data_session_enabled=false)이라
+  현재 미지원이며, 이 데모의 통과를 Data Session 종단 완료로 읽으면 안 된다.
+  응용 코드·코덱 검증용 참고 시연으로 보존한다.
+
+우리 인증서 payload가 실제 VDETER 소프트웨어 스택(Presentation → Link → PHY →
+소프트웨어 무선 매체 → 수신 복원)을 지나 반대편 endpoint에 byte 그대로 도착하고,
 우리 응용이 그것을 파싱·검증·신뢰저장소 반영까지 하는 것을 보인다. 하드웨어도,
 팀원 launcher도 필요 없다 — VDETER가 제공하는 소프트웨어 무선 그룹
 (`build_stage5_software_group`, tests/support)을 그대로 쓴다.
@@ -35,6 +40,10 @@ for _p in (os.path.join(_REPO, "VDETER", "src"),
            _REPO):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from common.security import certificate as cert
 
@@ -201,7 +210,8 @@ def main() -> int:
     assert bad["verify_results"][0][2] == "bad-signature"
     assert bad["trust_size"] == 0, "위조 인증서가 신뢰저장소에 남으면 안 됨"
 
-    print("PASS: 인증서가 실 VDETER 스택을 종단 왕복하고, 응용 검증이 정상/위조를 가름")
+    print("PASS: 인증서가 소프트웨어 무선 스택을 왕복하고, 응용 검증이 정상/위조를 가름")
+    print("주의: 소프트웨어 loopback 결과다. 인증서 Data Session(운영 경로)은 미완성·미지원이다.")
     return 0
 
 
