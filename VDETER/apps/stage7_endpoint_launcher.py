@@ -342,6 +342,15 @@ def main(argv=None) -> int:
     # TBB 방송·RX 창 전무의 근본 원인). 여기서 50ms 주기로 구동한다.
     _pump_stop = _threading.Event()
 
+    #: 실시간 펌프를 돌리는 endpoint 상태 (§16.1 서비스 구간).
+    #: 그 앞의 RF qualification 구간(CONFIGURED·RX_READY·CFO_*·HOST_TIME_*·
+    #: RF_GAIN_*)에서는 Stage7PiOperations가 radio를 독점해야 한다.
+    _PUMP_ACTIVE_STATES = (
+        "SERVICE_ADMISSION_READY",
+        "SERVICE_START_STAGED",
+        "RUNNING",
+    )
+
     def _pump_loop():
         # MAC 주기 40ms: 시계 20ms 양자화(_AnchoredSystemTimeSource)가
         # wakeup 교체 id 충돌(run p)을 근원 해결했으므로, 연속 주기가 같은
@@ -391,6 +400,21 @@ def main(argv=None) -> int:
         main._mac_cycle = _mac_cycle
 
         while not _pump_stop.is_set():
+            # 서비스 phase 한정 (rr-p1 회귀 봉합, 2026-08-31 실측 근거):
+            # 이 펌프는 rr-p2 서비스 구간(svc-run-*)에서 frozen 런타임의
+            # radio.poll_once/MAC 박동을 대신 돌리려고 도입됐다. 그런데
+            # RF qualification 사다리(CFO·adaptive gain·rf_time)는 같은
+            # B210을 Stage7PiOperations가 직접 시분할로 몰아 쓰는 구간이라,
+            # 50ms 주기의 poll_once가 그 위에 겹치면 revalidate 버스트가
+            # 송신 시한을 넘겨 통째로 스킵된다 (mass-roc-rr-p1-20260831a/b
+            # 실측: skipped_past_due C2=19·6, C4=3, C6=1 → REVALIDATE 불합격.
+            # 펌프 도입 전 11개 rr-p1 run은 전부 skipped_past_due=0).
+            # 서비스 admission 이후에만 돌려 두 구간을 분리한다 — rr-p2
+            # 서비스 경로의 동작은 그대로다.
+            client_ref = progress_client_slot["client"]
+            if client_ref is None or client_ref.state not in _PUMP_ACTIVE_STATES:
+                _pump_stop.wait(0.05)
+                continue
             try:
                 # 지연 해부 (svc-run-n 이후: 게이트 후에도 완료 처리
                 # 지연 ~15-19s 잔존, mac-gap ~1s × 171 — 어느 구간이
