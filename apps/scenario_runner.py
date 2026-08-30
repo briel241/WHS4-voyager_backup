@@ -40,7 +40,10 @@ from common.messages import route_json_bridge as bridge
 from common.observe.scenario_analysis import analyze, to_json, to_text
 from common.observe.scenario_log import ScenarioRun
 from common.security import certificate as cert
-from common.security.cert_flow import mass_receive_certificate, roc_issue_certificate
+from common.security.cert_flow import (
+    mass_receive_certificate_report,
+    roc_issue_certificate_report,
+)
 from common.security.trust_store import TrustStore
 
 RESULTS_DIR = os.path.join(
@@ -58,11 +61,23 @@ ROC_ID = 1
 def run_certificate_scenario(now: float) -> tuple[ScenarioRun, dict]:
     """[보존된 모의 — 운영 미지원] 인증서 발급·검증·저장 흐름의 응용 계층 모의.
 
-    ⚠ 여기의 링크 분할·ACK은 크기로 흉내낸 것일 뿐, 실제 VDE-TER Data Session이
-      아니다. 인증서 Data Session은 링크 계층에서 미완성이라
-      (data_session_enabled=false) 운영 실행 경로에서는 이 시나리오를
-      **미지원**으로 처리한다 — `UNSUPPORTED_SCENARIOS` 참조. 응용 코드·코덱
-      검증용 참고 모의로만 보존한다.
+    ⚠ 인증서 Data Session은 링크 계층에서 미완성이라(data_session_enabled=false)
+      운영 실행 경로에서는 이 시나리오를 **미지원**으로 처리한다
+      — `UNSUPPORTED_SCENARIOS` 참조. 응용 코드·코덱 검증용 참고 모의로만
+      보존한다.
+
+    **모의하지 않는 것 — 링크 분할·재조립.** 예전에는 payload를 128 byte씩
+    잘라 fragment 번호와 ACK을 로그에 남기고 그 개수를 판정 항목으로 썼다.
+    그 숫자는 어떤 링크 규격에서도 나오지 않는 값이라, 실제 Data Session이
+    무엇을 하는지 오해하게 만든다. 분할·재조립·전송 ACK은 전부 VDE-TER
+    Service 내부 일이므로(가이드 §4.2) 여기서는 흉내내지 않고, 응용이 실제로
+    책임지는 것 — **어떤 bytes를 넘겼고, 받아서 검증·저장이 규칙대로 됐는가** —
+    만 기록한다.
+
+    **payload는 전선 형식과 같다.** 응용이 넘기는 것은 bare DER이 아니라 R1027
+    Certificate Report 본문이다(`payload_format=x509.certificate_report`).
+    `tools/make_stage7_fixtures.py`가 실장비에 넣는 것과 같은 구성이라야 여기서
+    보는 크기가 링크 팀에 보고한 크기와 일치한다.
     """
     run = ScenarioRun(scenario_id="SC-VDE-001", started=now)
 
@@ -83,70 +98,64 @@ def run_certificate_scenario(now: float) -> tuple[ScenarioRun, dict]:
 
     backend_note = "표준 ECDSA P-256" if cert.is_standard_backend() \
         else "대체 HMAC 백엔드 — 실제 공개키 암호 아님"
-    run.record(now, "ROC->MASS", "note",
-               f"인증서 준비 완료 ({len(vessel_der)} byte, {backend_note})")
 
-    outbound = roc_issue_certificate(vessel_der, mass_id=MASS_ID)
-
-    # --- 링크 분할 모의 -----------------------------------------------------
-    # 실제 분할·재조립은 VDE-TER Service 내부 일이다(지시서 4.2). 여기서는
-    # 로그에 fragment 번호를 남기기 위해 크기만으로 나눠 흉내낸다.
-    fragment_size = 128
+    # 전선에 실리는 것은 bare DER이 아니라 Certificate Report 본문이다.
+    outbound = roc_issue_certificate_report(vessel_der, mass_id=MASS_ID)
     payload = outbound.payload
-    fragments = [payload[i:i + fragment_size]
-                 for i in range(0, len(payload), fragment_size)]
-    total = len(fragments)
 
-    clock = now
-    for index, chunk in enumerate(fragments, start=1):
-        clock += 0.4
-        run.record(clock, "ROC->MASS", "send",
-                   f"X509 cert frag {index}/{total}",
-                   corr=f"frag-{index}", source_id=ROC_ID, destination_id=MASS_ID,
-                   fragment=index, fragment_total=total, bytes=len(chunk),
-                   data_type=outbound.data_type)
-        clock += 0.25
-        run.record(clock, "MASS->ROC", "ack",
-                   f"frag {index} ACK",
-                   corr=f"frag-{index}", source_id=MASS_ID, destination_id=ROC_ID,
-                   status=4)
+    run.record(now, "ROC->MASS", "note",
+               f"인증서 준비 완료 — DER {len(vessel_der)} byte, "
+               f"Certificate Report 본문 {len(payload)} byte ({backend_note})")
 
-    reassembled = b"".join(fragments)
-    clock += 0.1
-    run.record(clock, "MASS->ROC", "recv", "인증서 재조립 완료",
-               source_id=MASS_ID, fragment_total=total,
-               payload_sha256=hashlib.sha256(reassembled).hexdigest())
+    # --- 응용이 넘기는 것 ---------------------------------------------------
+    # 분할·재조립·전송 ACK은 링크(Data Session) 소관이라 여기서 흉내내지 않는다.
+    # 응용은 payload 한 덩어리를 넘기고, 반대편에서 같은 bytes를 받는다.
+    digest = hashlib.sha256(payload).hexdigest()
+    clock = now + 0.4
+    run.record(clock, "ROC->MASS", "send",
+               f"Certificate Report 본문 {len(payload)} byte 전달",
+               corr="cert-1", source_id=ROC_ID, destination_id=MASS_ID,
+               bytes=len(payload), data_type=outbound.data_type,
+               payload_sha256=digest)
+
+    clock += 0.3
+    run.record(clock, "MASS->ROC", "recv", "본문 수신 (분할·재조립은 링크 소관)",
+               corr="cert-1", source_id=MASS_ID, payload_sha256=digest)
 
     # --- MASS: 검증 후에만 저장 --------------------------------------------
     trust = TrustStore()
     clock += 0.2
-    ok, reason = mass_receive_certificate(reassembled, trust, ca_der, now)
-    fingerprint = cert.fingerprint_of(reassembled)
+    results = mass_receive_certificate_report(payload, trust, ca_der, now)
+    ok, reason = results[0][1], results[0][2]
+    fingerprint = cert.fingerprint_of(vessel_der)
     run.record(clock, "MASS->ROC", "verify", f"인증서 검증: {reason}",
                ok=ok, reason=reason, stored=ok,
                fingerprint=fingerprint.hex(),
-               payload_sha256=hashlib.sha256(reassembled).hexdigest(),
+               payload_sha256=digest,
                trust_store_size=len(trust))
 
     # 같은 인증서 재수신 → 멱등이어야 한다 (저장소 크기 불변)
     clock += 0.2
-    ok_again, reason_again = mass_receive_certificate(reassembled, trust, ca_der, now)
+    again = mass_receive_certificate_report(payload, trust, ca_der, now)
     run.record(clock, "MASS->ROC", "verify", "동일 인증서 재수신 (멱등 확인)",
-               ok=ok_again, reason=reason_again,
+               ok=again[0][1], reason=again[0][2],
                stored=False, trust_store_size=len(trust))
+
+    clock += 0.2
+    run.record(clock, "MASS->ROC", "ack", "응용 수락 (Acknowledged)",
+               corr="cert-1", source_id=MASS_ID, destination_id=ROC_ID, status=4)
 
     clock += 0.2
     run.record(clock, "MASS->ROC", "note",
                f"신뢰 저장소 {len(trust)}건 (재수신 후에도 불변)")
     run.finish(clock)
 
+    # fragments·all_fragments_acked는 더 이상 판정하지 않는다. 링크가 무엇을
+    # 하는지 모르는 채로 개수를 세면 판정이 아니라 자작한 숫자를 확인하는 것이다.
     expected = {
         "scenario_id": "SC-VDE-001",
         "signature_verified": True,
-        "payload_sha256": hashlib.sha256(payload).hexdigest(),
-        "fragments": total,
-        "all_fragments_acked": True,
-        "max_retransmissions": 0,
+        "payload_sha256": digest,
         "ack_status": 4,
         "max_latency_seconds": 2.0,
         "no_duplicate_store": True,

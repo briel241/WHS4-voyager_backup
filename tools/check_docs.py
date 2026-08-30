@@ -222,8 +222,35 @@ try:
         cert_size > 400,
         "400 B 이하로 내려갔다면 링크 팀 보고를 갱신해야 한다",
     )
+
+    # 정본 시나리오와 fixture가 **같은 형식**을 내야 한다. 예전에 정본이 bare
+    # DER을 쓰는 바람에 링크 팀에 보고한 크기와 다른 숫자가 나왔다.
+    from common.messages import certificate_report as certrep
+    from apps.scenario_runner import run_certificate_scenario
+
+    scenario_run, _ = run_certificate_scenario(1_767_225_600.0)
+    note = scenario_run.ordered()[0].message
+    entries = certrep.parse_report(certificate_report())
+    check(
+        "정본 시나리오가 Certificate Report 본문을 쓴다",
+        "Certificate Report 본문" in note,
+        f"첫 note: {note}",
+    )
+    check(
+        "fixture 본문이 항목 1개짜리 Certificate Report",
+        len(entries) == 1 and entries[0].certificate_type == certrep.CERT_TYPE_X509,
+    )
+    # ECDSA 서명 DER 길이가 실행마다 ±3 B 흔들리므로 범위로 비교한다.
+    scenario_size = int(note.split("Certificate Report 본문 ")[1].split(" byte")[0])
+    check(
+        f"정본({scenario_size} B)과 fixture({cert_size} B)가 같은 크기대",
+        abs(scenario_size - cert_size) <= 6,
+        "형식이 갈라졌다면 링크 팀 보고와도 어긋난다",
+    )
 except Exception as exc:  # pragma: no cover - cryptography 없는 환경
-    check("SC-VDE-001 인증서 크기", True, f"SKIP: {exc}")
+    # 통과가 아니라 **건너뛴 것**임이 출력에 드러나야 한다. 대체 백엔드에서는
+    # 인증서 크기가 실제와 달라 크기 검사가 성립하지 않는다.
+    check(f"SC-VDE-001 인증서 크기 — SKIP ({type(exc).__name__})", True)
 
 
 # -------------------------------------------------------------- 5. 참조·명령
