@@ -13,6 +13,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common.messages import route_json_bridge as bridge
 
 #: 1/10,000 분을 십진도로 환산한 허용 오차

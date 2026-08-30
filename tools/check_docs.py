@@ -25,6 +25,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 failures: list[str] = []
 checked = 0
 
