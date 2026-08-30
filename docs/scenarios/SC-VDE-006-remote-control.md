@@ -242,9 +242,9 @@ RC 상태에서 제어국 무응답 30 s
 ## 10. 실행
 
 ```bash
-python3 apps/scenario_runner.py run SC-VDE-006          # 규격 판정
-.venv-crypto/bin/python apps/control_loopback_demo.py   # VDETER 무선 종단
-python3 apps/console_server.py                          # 콘솔에서 조종 (원격 조종 탭)
+python apps/scenario_runner.py run SC-VDE-006          # 규격 판정
+python apps/control_loopback_demo.py                   # VDETER 소프트웨어 무선 종단 (cryptography 필요)
+python apps/console_server.py --transport software     # 콘솔에서 조종 (원격 조종 탭)
 ```
 
 ## 11. 참고

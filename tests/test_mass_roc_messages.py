@@ -14,6 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common import codec, config, coordinates
 from common.bitfield import BitReader, BitWriter
 from common.messages import application_ack as ack

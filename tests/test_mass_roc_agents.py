@@ -18,6 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common import codec, navigation
 from MASS import MassAgent, ShipState
 from ROC import RocAgent

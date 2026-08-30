@@ -123,8 +123,10 @@
       </div>
 
       <div class="tab-pane" data-pane="certificate">
-        <p class="hint">ROC가 CA로 서명한 X.509 인증서를 보냅니다. 본선은 검증에 통과한 것만
-          신뢰저장소에 넣습니다. 위조본은 서명 바이트를 훼손해 보냅니다.</p>
+        <p class="hint">ROC가 CA로 서명한 X.509 인증서를 발급하고 본선이 검증에 통과한 것만
+          신뢰저장소에 넣습니다. 위조본은 서명 바이트를 훼손해 보냅니다.
+          ⚠ 응용 계층 검증 시연입니다 — 실제 VDE-TER 인증서 전송(Data Session)은
+          링크 계층 미완성으로 현재 미지원입니다.</p>
         <div class="actions">
           <button class="btn" id="btn-cert">정상 인증서 발급</button>
           <button class="btn danger" id="btn-cert-forged">위조 인증서 발급</button>

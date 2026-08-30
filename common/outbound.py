@@ -3,7 +3,7 @@
 
 행위자는 VDE 링크 계층을 직접 알지 못한다. 대신 "이 payload를 누구에게,
 ACK를 요구하며 보내라"는 요청만 만들고, 링크 연결은 어댑터가 맡는다.
-이렇게 두면 mass_roc 패키지가 VDETER_Link에 의존하지 않는다.
+이렇게 두면 mass_roc 패키지가 링크 계층 구현에 의존하지 않는다.
 
 실제 링크 연동은 `common/vdeter_bridge.py`가 이 `Outbound`를 VDETER의
 `SubmitTransferRequest`로 바꿔서 한다(가이드: `docs/vdeter_mass_roc_api_guide.md`).

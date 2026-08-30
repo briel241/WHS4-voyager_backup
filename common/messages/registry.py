@@ -1,7 +1,6 @@
 """
 Message ID와 Type별 모듈을 잇는 매핑
 
-링크 계층 vdeter_link/messages/registry.py와 같은 방식이다.
 새 메시지를 추가할 때는 모듈을 만들고 아래 dictionary에 등록한 뒤
 codec.py의 ApplicationMessage Union에 dataclass를 더한다.
 """

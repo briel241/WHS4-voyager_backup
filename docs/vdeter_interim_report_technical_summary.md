@@ -89,9 +89,9 @@ Service API는 application payload와 목적지 같은 업무 수준 입력만 �
 | Payload Format Registry | 지원 | Presentation | OPERATIONAL/TEST scope 분리 | 구현 명세 §6.2, §7.2 | canonical content identity 사용 |
 | Certificate Report | 제한 지원 | Presentation | VPFI 0, X.509 v3 DER/CRL 구조 | PRES-REQ-03; R1027 Table 1 | trust chain과 인증 효력은 판정하지 않음 |
 | AIS Authentication Scheme 1 | 제한 지원 | Presentation | VPFI 7 MF1 구조와 bytes 운반 | PRES-REQ-04/06; R1027 Table 21 | AIS 원문 matching·서명 판정 미지원 |
-| SC-VDE 위치보고 MF1 | Payload 구현 완료, Core 미통합 | Presentation/Service | MASS→ROC addressed, no-ACK | Payload §6.5, DR-PAYLOAD-015~017 | TEST VPFI `FF 7F` |
-| SC-VDE 노선·원격조종 MF2 | Payload 구현 완료, Core 미통합 | Presentation | addressed command codec | Payload §6.4, §16 | 실제 actuator와 분리 |
-| SC-VDE ACK MF3 | Payload 구현 완료, Core 미통합 | Presentation | addressed application ACK codec | Payload §6.4, §16 | Link ACK를 대체하지 않음 |
+| SC-VDE 위치보고 MF1 | 지원 — Core 통합됨(2026-08-30 main 병합) | Presentation/Service | MASS→ROC addressed, no-ACK | Payload §6.5, DR-PAYLOAD-015~017 | TEST VPFI `FF 7F` |
+| SC-VDE 노선·원격조종 MF2 | 지원 — Core 통합됨(2026-08-30 main 병합) | Presentation | addressed command codec | Payload §6.4, §16 | 실제 actuator와 분리 |
+| SC-VDE ACK MF3 | 지원 — Core 통합됨(2026-08-30 main 병합) | Presentation | addressed application ACK codec | Payload §6.4, §16 | Link ACK를 대체하지 않음 |
 | opaque binary | TEST 범위 지원 | Presentation | 승인된 TEST registry entry | 구현 명세 §4.1.7; Stage 5 | 미지원 운영 payload의 우회 수단이 아님 |
 | 장애 주입·회귀·증적 생성 | 지원 | Radio/Test | software fault, Stage runner, structured evidence | Stage 3·5·6; Stage 7 §20 | 시험 profile별 주장 범위 적용 |
 

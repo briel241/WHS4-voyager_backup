@@ -11,6 +11,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common.security import certificate as cert
 from common.security.cert_flow import mass_receive_certificate, roc_issue_certificate
 from common.security.trust_store import TrustStore

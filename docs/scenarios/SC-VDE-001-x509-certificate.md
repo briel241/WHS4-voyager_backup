@@ -10,7 +10,7 @@
 | 분류 | 대용량 · 일방적 · 지정 수신자 |
 | `data_type` | `X509_CERTIFICATE` |
 | `payload_format` | `x509.certificate_report` (VPFI 0 / MF 1, **운영 scope**) |
-| 상태 | ✅ **운영 종단 완료** — 실 VDE-TER codec으로 왕복, 정상 검증·저장, 위조 거부 확인 |
+| 상태 | ⛔ **현재 미지원** — 응용 코드·코덱·단위시험 보존. 실제 VDE-TER **Data Session이 링크 계층에서 미완성**(`data_session_enabled=false`)이라 운영 실행을 차단. 소프트웨어 loopback으로 응용 검증(정상 저장/위조 거부)만 참고 확인 |
 
 ---
 
@@ -318,5 +318,6 @@ provisioning 절차가 모두 비어 있다.**
 - [`../mass_roc_background.md`](../mass_roc_background.md) §6.4
 - 구현: `common/security/`, `common/messages/certificate_report.py`, `common/vdeter_bridge.py`
 - 시험: `tests/test_certificate.py`, `test_certificate_report.py`, `test_cert_vdeter_integration.py`
-- 실행: `python3 apps/scenario_runner.py run SC-VDE-001` ·
-  `.venv-crypto/bin/python apps/cert_loopback_demo.py` (무선 종단, 정상/위조)
+- 실행: `python apps/scenario_runner.py run SC-VDE-001` — **미지원 안내가 나온다**
+  (Data Session 완성 전까지 운영 실행 차단). 응용 계층 참고 시연:
+  `python apps/cert_loopback_demo.py` (소프트웨어 loopback, 정상/위조 — cryptography 필요)

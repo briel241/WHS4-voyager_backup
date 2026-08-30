@@ -1,16 +1,29 @@
-"""콘솔 GUI의 전송 경로 — 직결(direct) 또는 VDETER 무선.
+"""콘솔 GUI의 전송 경로 — direct(직결) / software(소프트웨어 무선) / stage7(외부 주입).
 
-두 경로가 같은 인터페이스를 쓴다. 구동기(console_server)는 어느 쪽인지 모르고
+세 경로가 같은 인터페이스를 쓴다. 구동기(console_server)는 어느 쪽인지 모르고
 `send()`로 내보내고 `pump()`로 도착한 것을 받는다.
 
-    direct  : payload를 그대로 상대에게 넘긴다. 무선 계층 없음. 시연 안정성 우선.
-    vdeter  : 실 VDETER Service API(submit/status/HandlerServiceEventSink)를 탄다.
-              지금은 소프트웨어 무선 그룹이고, 링크 팀 Stage 7 B210 launcher가
-              나오면 `_build_group()`만 바꾸면 실장비로 간다. 응용 코드는 그대로다.
+    direct   : payload를 그대로 상대에게 넘긴다. 무선 계층 없음. 순수 응용 로직 확인용.
+    software : Software Radio 기반 실 VDETER Service API
+               (submit/status/HandlerServiceEventSink). 자동 회귀시험·시연용.
+    stage7   : 외부(launcher/integration)가 조립한 Stage 7 VDE-TER Service를
+               주입받는다. MASS/ROC는 B210·Radio·PHY·MAC·Link를 직접 알지 않는다.
 
-전송이 즉시 끝나지 않는 것이 정상이다. VDETER 경로는 시계를 진행시켜야 도착하므로
-`send()`는 "접수됨"만 뜻하고 실제 도착은 이후 `pump()`에서 나온다. 직결 경로도
-같은 모양을 따르게 해서 구동기 코드가 갈라지지 않게 했다.
+software와 stage7은 같은 공개 Service API 계약(`_ServiceApiTransport`)을 공유한다 —
+다른 것은 Service 객체를 어디서 얻는가(직접 조립 vs 주입)와 시계 진행 방식뿐이다.
+
+Stage 7 주입 seam
+    VDETER 공개 API의 공식 연결점은 in-process 조립뿐이다:
+    `vdeter.stage7.wiring.build_stage7_b210_endpoint(..., application_sink=...)`가
+    반환하는 endpoint가 곧 `VdeService`다. 응용 쪽 연결은
+    `ExternalServiceTransport.event_handler_for(mmsi)`를 `HandlerServiceEventSink`로
+    감싸 application_sink로 넘기고, 조립된 endpoint를 `attach_service()`로 주입한다.
+    별도 프로세스의 launcher에 접속하는 응용용 RPC는 공개 API에 없다(가이드 §15).
+    임의 RPC를 만들지 않고 이 seam까지만 제공한다.
+
+전송이 즉시 끝나지 않는 것이 정상이다. Service API 경로에서 `send()`는 "접수됨"만
+뜻하고 실제 도착은 이후 `pump()`에서 나온다. 직결 경로도 같은 모양을 따르게 해서
+구동기 코드가 갈라지지 않게 했다.
 """
 
 from __future__ import annotations
@@ -23,12 +36,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from common import codec  # noqa: E402
 from common import vdeter_bridge as bridge  # noqa: E402
-from common.outbound import (  # noqa: E402
-    DATA_TYPE_ROUTE_CONTROL_ACK,
-    DATA_TYPE_ROUTE_CONTROL_COMMAND,
-)
+from common.outbound import Outbound  # noqa: E402
 
 #: 한 스텝에 진행시킬 VDETER 시계 스텝 수. 구동기 루프가 10Hz이므로 이 값이
 #: 클수록 전송이 빨리 끝난다. 너무 크면 한 스텝이 오래 걸려 화면이 끊긴다.
@@ -103,124 +112,72 @@ class DirectTransport:
 
 
 class VdeterUnavailable(RuntimeError):
-    """VDETER 소프트웨어 무선 그룹을 조립할 수 없다."""
+    """요청한 VDETER 전송 경로를 조립할 수 없다."""
 
 
-class VdeterTransport:
-    """실 VDETER Service API를 타는 전송 경로.
+class _ServiceApiTransport:
+    """공개 Service API만 쓰는 send/pump 공통 구현.
 
-    구조는 loopback 데모(`apps/_loopback_opaque.py`)와 같다 — 공식
-    `HandlerServiceEventSink`로 endpoint에 붙고, `submit()`으로 내보내고,
-    `status()`로 완료를 본다. 다른 점은 **그룹을 하나만 만들어 계속 쓴다**는
-    것이다(데모는 전송마다 새로 만든다). 연속 전송이 되는 것은 확인했다.
+    소프트웨어 무선(software)과 외부 주입(stage7)이 공유한다. 하위 클래스는
+    Service 확보(`_service_by_mmsi` 채우기)와 시계 진행(`_advance`)만 다르다.
+    송신은 `common.vdeter_bridge.to_submit_request`로 DTO를 만들고, 수신은
+    `bridge.handle_service_event`로 DATA_RECEIVED를 받는다 — 링크 내부
+    (Link ID·MAC·PHY·Radio)는 어디서도 만지지 않는다.
     """
 
-    name = "vdeter"
-    detail = "VDETER 소프트웨어 무선 (Service API 종단)"
+    name = "service"
+    detail = "VDETER Service API"
     operational = True
 
-    def __init__(self, mass_mmsi: int, roc_mmsi: int,
-                 intruder_mmsi: int | None = None) -> None:
-        self._mass_mmsi = mass_mmsi
-        self._roc_mmsi = roc_mmsi
-        # 비인가 송신국은 실제로 **또 하나의 무선국**이다. 응용에서 만들어낸
-        # 가상의 송신자가 아니라 같은 채널에 있는 제3국이라야 "송신자 인증이
-        # 없다"는 사실이 그대로 재현된다. Stage 5 그룹의 MASS-B를 쓴다.
-        self._intruder_mmsi = intruder_mmsi
+    def __init__(self, station_by_mmsi: dict[int, int]) -> None:
+        #: 응용 MMSI → VDETER station 번호. 주소 번역은 이 경계에서만 한다.
+        self._station_by_mmsi = dict(station_by_mmsi)
+        self._service_by_mmsi: dict[int, object] = {}
         self._arrivals: list[Arrival] = []
         self._inflight: list[dict] = []
         self.completed = 0
         self.failed = 0
-        self._build_group()
+        self._import_service_api()
 
-    # -------------------------------------------------------------- 조립
-
-    # 링크 팀 Stage 7 B210 launcher가 나오면 이 메서드만 바꾼다.
-    # 나머지(send/pump)는 Service API만 쓰므로 그대로 동작한다.
-    def _build_group(self) -> None:
+    def _import_service_api(self) -> None:
         try:
-            sys.path.insert(0, os.path.join(_ROOT, "VDETER"))
-            from tests.support.stage5 import (
-                MASS_A_STATION_ID,
-                MASS_B_STATION_ID,
-                ROC_STATION_ID,
-                STATION_ENDPOINT_IDS,
-                build_stage5_software_group,
-                drive_stage5_group,
-                start_stage5_group,
-            )
-            from vdeter.common.addressing import Addressed
-            from vdeter.common.contracts.service import (
-                SubmitTransferRequest,
+            from vdeter.common.contracts.service import (  # noqa: F401
                 TransferState,
                 TransferStatusRequest,
             )
-            from vdeter.common.events import ServiceEventType
-            from vdeter.common.identifiers import PayloadFormat
-            from vdeter.service import HandlerServiceEventSink
-        except ImportError as exc:  # pragma: no cover
+        except ImportError as exc:
             raise VdeterUnavailable(f"VDETER를 불러올 수 없습니다: {exc}") from exc
-
-        self._Addressed = Addressed
-        self._SubmitTransferRequest = SubmitTransferRequest
         self._TransferState = TransferState
         self._TransferStatusRequest = TransferStatusRequest
-        self._PayloadFormat = PayloadFormat
-        self._drive = drive_stage5_group
 
-        # 우리 MMSI ↔ VDETER station
-        self._station_by_mmsi = {
-            self._mass_mmsi: MASS_A_STATION_ID,
-            self._roc_mmsi: ROC_STATION_ID,
-        }
-        endpoint_of = {
-            self._mass_mmsi: STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value],
-            self._roc_mmsi: STATION_ENDPOINT_IDS[ROC_STATION_ID.value],
-        }
-        if self._intruder_mmsi is not None:
-            self._station_by_mmsi[self._intruder_mmsi] = MASS_B_STATION_ID
-            endpoint_of[self._intruder_mmsi] = STATION_ENDPOINT_IDS[
-                MASS_B_STATION_ID.value
-            ]
-        mmsi_by_endpoint = {v: k for k, v in endpoint_of.items()}
+    # ------------------------------------------------------------ 수신 연결
 
-        def sink_factory(endpoint_id):
-            owner = mmsi_by_endpoint.get(endpoint_id)
+    def event_handler_for(self, owner_mmsi: int):
+        """owner 국의 ServiceEvent 처리 callable을 만든다.
 
-            def handle(event) -> None:
-                if event.event_type is not ServiceEventType.DATA_RECEIVED:
-                    return
-                received = event.received_data
-                if received is None or owner is None:
-                    return
-                inbound = bridge.inbound_from_received(received)
-                message_id = bridge.message_id_for_payload_format(inbound.payload_format)
-                if message_id is None:
-                    return
-                # 행위자는 봉투가 붙은 payload를 기대하므로 도로 붙여 준다.
-                self._arrivals.append(
-                    Arrival(
-                        payload=add_envelope(inbound.payload, message_id),
-                        source_id=self._mmsi_for_station(inbound.source_id),
-                        destination_id=owner,
-                    )
-                )
+        조립자(소프트웨어 그룹 또는 Stage 7 launcher/integration)가 이것을
+        `HandlerServiceEventSink`로 감싸 endpoint에 연결한다.
+        """
 
-            return HandlerServiceEventSink(handle)
-
-        try:
-            self._clock, self._group = build_stage5_software_group(
-                service_sink_factory=sink_factory
+        def handle(event) -> None:
+            bridge.handle_service_event(
+                event, on_data=lambda inbound: self._on_inbound(owner_mmsi, inbound)
             )
-            start_stage5_group(self._clock, self._group)
-        except Exception as exc:  # pragma: no cover - cryptography 등 조립 실패
-            raise VdeterUnavailable(f"소프트웨어 무선 그룹 조립 실패: {exc}") from exc
 
-        by_station = self._group.by_station()
-        self._service_by_mmsi = {
-            mmsi: by_station[station.value]
-            for mmsi, station in self._station_by_mmsi.items()
-        }
+        return handle
+
+    def _on_inbound(self, owner_mmsi: int, inbound) -> None:
+        message_id = bridge.message_id_for_payload_format(inbound.payload_format)
+        if message_id is None:
+            return
+        # 행위자는 봉투가 붙은 payload를 기대하므로 도로 붙여 준다.
+        self._arrivals.append(
+            Arrival(
+                payload=add_envelope(inbound.payload, message_id),
+                source_id=self._mmsi_for_station(inbound.source_id),
+                destination_id=owner_mmsi,
+            )
+        )
 
     # -------------------------------------------------------------- 송신
 
@@ -230,28 +187,30 @@ class VdeterTransport:
         if service is None or station is None:
             return False, f"VDETER에 없는 station (from {source_id} to {destination_id})"
 
-        # data_type이 없으면 보낼 수 없다. 위치보고 등은 아직 등록된 포맷이 없다.
-        fmt = self._payload_format_for(data_type)
+        # data_type이 없으면 보낼 수 없다. 등록된 payload_format이 있어야 한다.
+        fmt = bridge.PAYLOAD_FORMAT_BY_DATA_TYPE.get(data_type) if data_type else None
         if fmt is None:
             return False, f"등록된 payload_format이 없는 data_type: {data_type!r}"
-
-        # 행위자 payload에는 우리 봉투가 붙어 있다. VDETER에는 본문만 준다.
-        try:
-            application, _ = strip_envelope(payload)
-            bridge.check_sc_vde_payload(fmt, application)
-        except ValueError as exc:
-            return False, str(exc)
 
         # 위치보고는 no-ACK 전용이다(DR-PAYLOAD-016). ack_required=True로 내면
         # INVALID_REQUEST로 거부된다. 명령·ACK은 링크 ACK을 받는다.
         ack_required = fmt != bridge.PAYLOAD_FORMAT_POSITION_REPORT
 
-        request = self._SubmitTransferRequest(
-            destination=self._Addressed(station),
-            payload_format=self._PayloadFormat(fmt),
-            payload=application,
-            ack_required=ack_required,
-        )
+        # 행위자 payload에는 우리 봉투가 붙어 있다. VDETER에는 본문만 준다.
+        # DTO 변환·계약 검사(길이·봉투 금지·addressed 전용)는 bridge가 맡는다.
+        try:
+            application, _ = strip_envelope(payload)
+            request = bridge.to_submit_request(
+                Outbound(
+                    payload=application,
+                    destination_id=station,
+                    ack_required=ack_required,
+                    data_type=data_type,
+                )
+            )
+        except ValueError as exc:
+            return False, str(exc)
+
         accepted = service.submit(request)
         if not accepted.is_ok:
             error = getattr(accepted, "error", None)
@@ -267,25 +226,24 @@ class VdeterTransport:
         )
         return True, ""
 
-    @staticmethod
-    def _payload_format_for(data_type):
-        if data_type is None:
-            return None
-        return bridge.PAYLOAD_FORMAT_BY_DATA_TYPE.get(data_type)
-
     # VDETER가 알려주는 송신 station을 우리 MMSI로 되돌린다.
     def _mmsi_for_station(self, station_value) -> int:
         for mmsi, station in self._station_by_mmsi.items():
-            if station.value == station_value:
+            if station == station_value:
                 return mmsi
         return int(station_value)
 
     # -------------------------------------------------------------- 진행
 
+    # 하위 클래스가 시계를 직접 쥐고 있으면 여기서 진행시킨다. 외부 주입
+    # 경로는 상대가 자기 시계로 돌므로 기본은 아무것도 하지 않는다.
+    def _advance(self) -> None:
+        pass
+
     def pump(self) -> list[Arrival]:
-        """시계를 진행시키고, 이번에 도착한 payload를 돌려준다."""
+        """전송을 진행시키고, 이번에 도착한 payload를 돌려준다."""
         if self._inflight:
-            self._drive(self._clock, self._group, CLOCK_STEPS_PER_TICK)
+            self._advance()
             still: list[dict] = []
             terminal = (
                 self._TransferState.COMPLETED,
@@ -320,19 +278,155 @@ class VdeterTransport:
         }
 
     def close(self) -> None:
+        pass
+
+
+class SoftwareRadioTransport(_ServiceApiTransport):
+    """Software Radio 기반 VDETER 그룹을 직접 조립해 쓰는 전송 경로.
+
+    구조는 loopback 데모(`apps/_loopback_opaque.py`)와 같다 — 공식
+    `HandlerServiceEventSink`로 endpoint에 붙고, `submit()`으로 내보내고,
+    `status()`로 완료를 본다. 다른 점은 **그룹을 하나만 만들어 계속 쓴다**는
+    것이다(데모는 전송마다 새로 만든다). 연속 전송이 되는 것은 확인했다.
+    """
+
+    name = "software"
+    detail = "VDETER 소프트웨어 무선 (Service API 종단)"
+    operational = True
+
+    def __init__(self, mass_mmsi: int, roc_mmsi: int,
+                 intruder_mmsi: int | None = None) -> None:
+        try:
+            sys.path.insert(0, os.path.join(_ROOT, "VDETER"))
+            from tests.support.stage5 import (
+                MASS_A_STATION_ID,
+                MASS_B_STATION_ID,
+                ROC_STATION_ID,
+                STATION_ENDPOINT_IDS,
+                build_stage5_software_group,
+                drive_stage5_group,
+                start_stage5_group,
+            )
+            from vdeter.service import HandlerServiceEventSink
+        except ImportError as exc:  # pragma: no cover
+            raise VdeterUnavailable(f"VDETER를 불러올 수 없습니다: {exc}") from exc
+
+        stations = {
+            mass_mmsi: MASS_A_STATION_ID.value,
+            roc_mmsi: ROC_STATION_ID.value,
+        }
+        endpoint_owner = {
+            STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value]: mass_mmsi,
+            STATION_ENDPOINT_IDS[ROC_STATION_ID.value]: roc_mmsi,
+        }
+        # 비인가 송신국은 실제로 **또 하나의 무선국**이다. 응용에서 만들어낸
+        # 가상의 송신자가 아니라 같은 채널에 있는 제3국이라야 "송신자 인증이
+        # 없다"는 사실이 그대로 재현된다. Stage 5 그룹의 MASS-B를 쓴다.
+        if intruder_mmsi is not None:
+            stations[intruder_mmsi] = MASS_B_STATION_ID.value
+            endpoint_owner[
+                STATION_ENDPOINT_IDS[MASS_B_STATION_ID.value]
+            ] = intruder_mmsi
+
+        super().__init__(stations)
+        self._drive = drive_stage5_group
+
+        def sink_factory(endpoint_id):
+            owner = endpoint_owner.get(endpoint_id)
+            if owner is None:
+                return HandlerServiceEventSink(lambda _event: None)
+            return HandlerServiceEventSink(self.event_handler_for(owner))
+
+        try:
+            self._clock, self._group = build_stage5_software_group(
+                service_sink_factory=sink_factory
+            )
+            start_stage5_group(self._clock, self._group)
+        except Exception as exc:  # pragma: no cover - cryptography 등 조립 실패
+            raise VdeterUnavailable(f"소프트웨어 무선 그룹 조립 실패: {exc}") from exc
+
+        by_station = self._group.by_station()
+        self._service_by_mmsi = {
+            mmsi: by_station[station]
+            for mmsi, station in self._station_by_mmsi.items()
+        }
+
+    def _advance(self) -> None:
+        self._drive(self._clock, self._group, CLOCK_STEPS_PER_TICK)
+
+    def close(self) -> None:
         try:
             self._group.stop()
         except Exception:  # pragma: no cover
             pass
 
 
+class ExternalServiceTransport(_ServiceApiTransport):
+    """외부(launcher/integration)가 조립한 VDE-TER Service를 주입받는 전송 경로.
+
+    Stage 7 실장비든 다른 배치든, `VdeService` 구현과 station 번호만 주면 된다.
+    이 클래스는 B210·Radio·PHY·MAC·Link를 전혀 알지 않는다.
+
+    조립 순서(모듈 docstring의 Stage 7 주입 seam 참조):
+        transport = ExternalServiceTransport(station_by_mmsi={...})
+        sink = HandlerServiceEventSink(transport.event_handler_for(mmsi))
+        ... build_stage7_b210_endpoint(..., application_sink=sink) ...
+        transport.attach_service(mmsi, endpoint)
+    """
+
+    name = "stage7"
+    detail = "외부 주입 Stage 7 VDE-TER Service"
+    operational = True
+
+    def __init__(
+        self,
+        station_by_mmsi: dict[int, int],
+        services_by_mmsi: dict[int, object] | None = None,
+        *,
+        advance=None,
+    ) -> None:
+        super().__init__(station_by_mmsi)
+        #: 주입자가 시계/스케줄을 손으로 돌려야 하는 배치를 위한 hook(선택).
+        self._advance_hook = advance
+        for mmsi, service in (services_by_mmsi or {}).items():
+            self.attach_service(mmsi, service)
+
+    def attach_service(self, mmsi: int, service) -> None:
+        """조립이 끝난 `VdeService`를 이 국의 송신 경로로 등록한다."""
+        if mmsi not in self._station_by_mmsi:
+            raise ValueError(f"station_by_mmsi에 없는 MMSI입니다: {mmsi}")
+        self._service_by_mmsi[mmsi] = service
+
+    def _advance(self) -> None:
+        if self._advance_hook is not None:
+            self._advance_hook()
+
+
 def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int,
                     intruder_mmsi: int | None = None):
-    """`kind`에 맞는 전송 경로를 만든다. vdeter가 안 되면 사유와 함께 direct로 내려간다."""
+    """`kind`에 맞는 전송 경로를 만든다. 조립할 수 없으면 사유와 함께 direct로 내려간다.
+
+    "vdeter"는 이전 이름이며 software와 같다. "stage7"은 외부 주입이 필요해
+    콘솔 CLI에서 바로 조립할 수 없다 — `ExternalServiceTransport`를 코드로
+    구성해야 하며, 별도 프로세스 launcher에 접속하는 공개 RPC는 아직 없다.
+    intruder_mmsi를 주면 software 경로에서 비인가 송신국(MASS-B)이 함께 선다.
+    """
     if kind == "direct":
         return DirectTransport(), ""
+    if kind in ("stage7", "external"):
+        return DirectTransport(), (
+            "stage7 전송은 외부에서 Service를 주입해야 한다 "
+            "(ExternalServiceTransport 참조). 별도 프로세스 Stage 7 launcher에 "
+            "접속하는 응용 RPC는 공개 API에 없다 — software 모드를 쓰거나 "
+            "in-process 조립으로 주입하라."
+        )
     try:
-        return VdeterTransport(mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi,
-                               intruder_mmsi=intruder_mmsi), ""
+        return SoftwareRadioTransport(
+            mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi, intruder_mmsi=intruder_mmsi
+        ), ""
     except VdeterUnavailable as exc:
         return DirectTransport(), str(exc)
+
+
+#: 이전 이름과의 호환. 기존 코드가 VdeterTransport를 import해도 계속 동작한다.
+VdeterTransport = SoftwareRadioTransport

@@ -35,6 +35,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common import codec  # noqa: E402
 from common import vdeter_bridge as bridge  # noqa: E402
 from common.messages import application_ack as ack  # noqa: E402

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """정량지표 3종을 실제로 측정한다.
 
-    python3 tools/measure_metrics.py                      # 직결 경로
-    python3 tools/measure_metrics.py --transport vdeter   # 실 VDE-TER 무선
-    python3 tools/measure_metrics.py --cycles 30 --json
+    python tools/measure_metrics.py                        # 직결 경로
+    python tools/measure_metrics.py --transport software   # 실 VDE-TER 소프트웨어 무선
+    python tools/measure_metrics.py --cycles 30 --json
 
 재는 것
     비인가 패킷 수용   ROC가 아닌 국이 넣은 명령을 본선이 몇 건 따랐는가
@@ -39,7 +39,7 @@
 어느 경로로 잴 것인가
     `--transport direct`  왕복이 0.5 ms 안에 끝나므로 **응용 처리 비용**이
                           그대로 드러난다. 성능 저하 지표는 이쪽으로 읽는다.
-    `--transport vdeter`  실 VDE-TER 무선을 탄다. 왕복이 8초쯤 걸리는데 그
+    `--transport software`(구 vdeter)  실 VDE-TER 무선을 탄다. 왕복이 8초쯤 걸리는데 그
                           대부분이 프레임 배정 대기라, 보안 비용은 배정 지터에
                           묻힌다. 이쪽 수치는 **무선을 타도 지표가 성립하는지**
                           확인하는 용도이고, 비율 자체는 지터를 본 것에 가깝다.
@@ -58,6 +58,10 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from ROC.roc_agent import RocAgent  # noqa: E402
 from apps.console_server import Simulation  # noqa: E402
@@ -176,7 +180,7 @@ def measure(transport: str, cycles: int, intruders: int, certificates: int) -> d
     intruder = RocAgent(mmsi=config.INTRUDER_MMSI)
     notes: list[str] = []
     if sim.transport_note:
-        notes.append(f"vdeter를 쓸 수 없어 direct로 내려감: {sim.transport_note}")
+        notes.append(f"무선 전송을 쓸 수 없어 direct로 내려감: {sim.transport_note}")
     if not cert.is_standard_backend():
         notes.append(
             "대체 HMAC 백엔드로 측정했다 — 검증 비용은 실제 ECDSA 값이 아니다 "
@@ -255,7 +259,8 @@ def measure(transport: str, cycles: int, intruders: int, certificates: int) -> d
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--transport", choices=("direct", "vdeter"), default="direct")
+    parser.add_argument("--transport", choices=("direct", "software", "vdeter"),
+                    default="direct")
     parser.add_argument("--cycles", type=int, default=20,
                         help="구간별 명령 횟수 (기본 20)")
     parser.add_argument("--intruders", type=int, default=10,

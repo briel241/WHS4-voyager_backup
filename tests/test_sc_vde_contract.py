@@ -20,6 +20,10 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common import codec, vdeter_bridge as bridge
 from common.messages import application_ack as ack
 from common.messages import route_instruction as route

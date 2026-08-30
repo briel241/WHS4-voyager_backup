@@ -9,6 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from common.observe.scenario_analysis import analyze, to_json, to_text
 from common.observe.scenario_log import LogEntry, ScenarioRun
 
