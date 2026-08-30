@@ -1926,11 +1926,21 @@ def main(argv=None) -> int:
             if not os.path.exists(path):
                 open(path, "a", encoding="utf-8").close()
             seen = 0
+            events_warned = False
             while True:
                 try:
                     sink = endpoint.start_gate.application_sink
                     events = tuple(sink.events())
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    # 무음 금지 (0.9.22): 영구 실패면 배달 증거 JSONL이
+                    # 조용히 멎는다 — 1회성 경고로 관측 가능하게.
+                    if not events_warned:
+                        events_warned = True
+                        print(
+                            f"[launcher] service_events 수집 실패(계속 재시도): "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr, flush=True,
+                        )
                     events = ()
                 if len(events) > seen:
                     with open(path, "a", encoding="utf-8") as handle:

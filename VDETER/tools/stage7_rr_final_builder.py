@@ -53,6 +53,31 @@ def _load(path):
     return json.loads(data.decode("utf-8")), hashlib.sha256(data).hexdigest()
 
 
+def _int_or_none(value):
+    """counter 값의 방어적 정수화 — 비정상 타입은 crash 대신 None.
+
+    (0.9.22 R2 감사: `retries="abc"` 주입이 traceback으로 죽음 — READY는
+    안 나오므로 fail-closed이나, 설계된 "문제 계상 후 NOT_READY" 패턴로
+    통일한다.)"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _root_run_dir(root):
+    """evidence root 경로에서 실제 run 디렉터리명을 얻는다.
+
+    규약 경로 `.../<run_id>/evidence/research_ready`의 고정 꼬리를 걷어낸
+    마지막 성분. (0.9.22 R2 감사: 구판 `run_id in parts`는 경로에 항상
+    있는 "evidence"/"research_ready" 성분과도 일치해 run_id를 그 문자열로
+    위조하면 어느 root든 통과 — 보증 0의 검사였다.)"""
+    parts = os.path.normpath(root).split(os.sep)
+    while parts and parts[-1] in ("evidence", "research_ready"):
+        parts.pop()
+    return parts[-1] if parts else ""
+
+
 def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
           verification_root=None):
     collected = {}
@@ -115,11 +140,17 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
     profiles = {c["payload"].get("profile") for c in judged.values()}
     versions = {c["payload"].get("baseline_version") for c in judged.values()}
     baseline_shas = {c["payload"].get("baseline_sha256") for c in judged.values()}
-    retries = [
-        int((c["payload"].get("counters") or {}).get("retries", 0))
-        for name, c in judged.items()
-        if name not in SCENARIO_TCS_WITH_SANCTIONED_RETRY
-    ]
+    retries = []
+    for name, c in judged.items():
+        if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY:
+            continue
+        value = _int_or_none(
+            (c["payload"].get("counters") or {}).get("retries", 0)
+        )
+        if value is None:
+            problems.append(f"retries 값 비정상(정수 아님): {name}")
+            value = -1  # 아래 != 0 검사에서 위반으로 계상
+        retries.append(value)
     hardware_maps = {
         json.dumps(c["payload"].get("hardware"), sort_keys=True)
         for c in judged.values()
@@ -185,13 +216,19 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
         # 0.9.22: retries 상한 강제 — controller 실측 상한(max_attempts=3
         # → 재시도 ≤2)과 대조. 상한이 없으면 retries를 부풀려 duplicates
         # 허용치를 임의로 키우는 우회가 성립한다 (R1-A 공격 4).
-        raw_retries = int(counters.get("retries", 0))
+        raw_retries = _int_or_none(counters.get("retries", 0))
+        if raw_retries is None:
+            problems.append(f"retries 값 비정상(정수 아님): {name}")
+            raw_retries = 0  # duplicates 허용치 0으로 보수 계상
         if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY and raw_retries > 2:
             problems.append(
                 f"retries > 상한 2 (controller max_attempts=3): "
                 f"{name} ({raw_retries})"
             )
-        dup = counters.get("duplicates", 0)
+        dup = _int_or_none(counters.get("duplicates", 0))
+        if dup is None:
+            problems.append(f"duplicates 값 비정상(정수 아님): {name}")
+            dup = 0
         limit = (
             raw_retries
             if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY else 0
@@ -213,15 +250,26 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
             # 0.9.22: run_id ↔ 소속 root 경로 대응 강제 — evidence 규약은
             # results/runs/<run_id>/evidence/research_ready/. 다른 run의
             # artifact를 복사해 root를 위장하는 바꿔치기를 기계 검사
-            # (R1-A 공격 3).
-            parts = os.path.normpath(c["path"]).split(os.sep)
-            if run_id not in parts:
+            # (R1-A 공격 3). R2 재봉합: 구판 "임의 성분 중 일치"는 항상
+            # 존재하는 "evidence"/"research_ready" 성분으로 우회 가능 —
+            # 고정 꼬리를 걷어낸 실제 run 디렉터리명과의 정확 일치로 교체.
+            run_dir = _root_run_dir(os.path.dirname(c["path"]))
+            if run_id != run_dir:
                 problems.append(
-                    f"run_id가 evidence 경로와 불일치: {name} "
-                    f"(run_id={run_id!r})"
+                    f"run_id가 evidence 경로의 run 디렉터리와 불일치: "
+                    f"{name} (run_id={run_id!r}, 경로={run_dir!r})"
                 )
     if len(hardware_maps) > 1:
         problems.append(f"hardware mapping 불일치: {len(hardware_maps)}종")
+    # 0.9.22 (R2 감사 S-1): 재현 조건 기계 기록 3필드(stage7_diag_env 등)는
+    # 기록기 신설(0.9.20) 이전에 산출된 채택 evidence에 없다. fail-closed로
+    # 하면 기준선 산문(0.9.19 ①)에 이미 공시된 조건 때문에 hardware 재실행을
+    # 강요하게 되므로, 부재를 문제 대신 **기계 노출**한다 — 이후 run부터는
+    # 필드가 실재하므로 이 목록은 자연 소멸한다.
+    reproduction_fields_missing = sorted(
+        name for name, c in judged.items()
+        if "stage7_diag_env" not in c["payload"]
+    )
     for root_key, generations in sorted(generations_by_root.items()):
         if len(generations) > 1:
             problems.append(
@@ -264,11 +312,30 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
             )
         else:
             audit_payload, _audit_sha = _load(audit_path)
-            if audit_payload.get("all_unchanged") is not True:
-                problems.append(
-                    "frozen-hash-audit all_unchanged != true "
-                    "(증언 플래그와 근거 로그 모순)"
-                )
+            # 0.9.22 R2 보강: 플래그 하나만 보면 손으로 쓴 한 줄
+            # `{"all_unchanged": true}`도 통과한다 — 감사 도구 산출물의
+            # 구조(파일 목록 실재)와 자기결속(head_commit)을 함께 요구.
+            # (배열 등 비객체 JSON의 AttributeError crash도 함께 봉합.)
+            if not isinstance(audit_payload, dict):
+                problems.append("frozen-hash-audit 구조 아님(JSON 객체 아님)")
+            else:
+                if audit_payload.get("all_unchanged") is not True:
+                    problems.append(
+                        "frozen-hash-audit all_unchanged != true "
+                        "(증언 플래그와 근거 로그 모순)"
+                    )
+                audit_files = audit_payload.get("files")
+                if not isinstance(audit_files, list) or not audit_files:
+                    problems.append(
+                        "frozen-hash-audit files 목록 부재/공백 "
+                        "(감사 도구 산출물 아님)"
+                    )
+                head_commit = audit_payload.get("head_commit")
+                if not (isinstance(head_commit, str)
+                        and len(head_commit) == 40):
+                    problems.append(
+                        "frozen-hash-audit head_commit 자기결속 부재"
+                    )
         for fname in (
             "frozen-hash-audit.json", "unit-contract.log",
             "integration-stage7.log", "frozen-audit-stdout.log",
@@ -352,12 +419,33 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
         "software_verification_ok": bool(software_ok),
         "frozen_hash_ok": bool(frozen_hash_ok),
         "verification_evidence_sha256": verification_evidence,
+        "reproduction_fields_missing": reproduction_fields_missing,
         "artifact_sha256": {name: c["sha256"] for name, c in sorted(collected.items())},
         "scope": "RESEARCH_READY는 통제된 conducted 환경에서 OTA 연구 실험 진입 "
                  "가능성만 뜻한다. full qualification(TC-STAGE7-001..020) 및 "
                  "VERIFIED/FROZEN을 대체하지 않는다.",
     }
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # 0.9.22 (R2 감사 M-9): 제자리 덮어쓰기는 이전 판정 이력을 소실시킨다
+    # (results/는 git 밖). 내용이 다르면 이전 본을 superseded-*로 보존 —
+    # §17A.5 "전량 보존"의 판정 산출물 확장.
+    if os.path.exists(out_path):
+        with open(out_path, "rb") as handle:
+            previous = handle.read()
+        new_bytes = json.dumps(
+            result, ensure_ascii=True, sort_keys=True, indent=1
+        ).encode("utf-8")
+        if previous != new_bytes:
+            import datetime as _dt
+
+            stamp = _dt.datetime.now(_dt.timezone.utc).strftime(
+                "%Y%m%dT%H%M%SZ"
+            )
+            backup = out_path[:-5] + f".superseded-{stamp}.json" \
+                if out_path.endswith(".json") \
+                else out_path + f".superseded-{stamp}"
+            with open(backup, "wb") as handle:
+                handle.write(previous)
     with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(result, handle, ensure_ascii=True, sort_keys=True, indent=1)
     return result

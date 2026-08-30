@@ -303,15 +303,51 @@ class PhaseGuard:
         return max(0.0, self._deadline - time.monotonic())
 
 
+# 판정 phase의 deadline 정본 (§17A.2와 동치; PhaseGuard 하드코드와 함께
+# 개정). 0.9.22: prepare가 결속한 phase_deadlines_s는 생성만 되고 아무
+# gate도 소비하지 않았다 — 여기서 대조해 결속을 실효화한다. soak는
+# 판정 제외(DEFERRED)라 대조 대상에 넣지 않는다.
+RR_PHASE_DEADLINE_S = {
+    "rr-p0": 15 * 60,
+    "rr-p1": 60 * 60,
+    "rr-p2-17": 70 * 60,
+    "rr-p2-19": 70 * 60,
+    "rr-p3-fault": 40 * 60,
+}
+
+
 def validate_rr_binding(arguments, metadata: dict) -> None:
     """v0.9.1 I항 negative gate — hardware configure 전에 거부한다.
 
     - RR phase는 `qualification_profile=RESEARCH_READY_MINIMAL` config에서만 실행
     - full-qualification phase는 RR profile config로 실행 금지
     - baseline hash/phase/run ID/link 불일치는 TX 전 거부
+    - 0.9.22: 디버그 우회 스위치 활성 상태의 정식 run 거부 + deadline 결속 대조
     """
 
     is_rr = arguments.phase.startswith("rr-")
+    if is_rr:
+        # 판정 표면을 바꾸는 디버그 스위치는 정식 run에서 금지 (R2 감사:
+        # STAGE7_SVCDBG_ALLOW_RX_READY는 §16.1 host-time-lock 관문 우회,
+        # STAGE7_SCENARIO_FILTER는 판정 세트 축소 — 둘 다 흔적 없이
+        # 동작하던 미공시 표면이었다).
+        for banned in ("STAGE7_SVCDBG_ALLOW_RX_READY",
+                       "STAGE7_SCENARIO_FILTER"):
+            if os.environ.get(banned):
+                raise SystemExit(
+                    f"RR_BINDING_REJECTED: 디버그 스위치 {banned} 활성 — "
+                    "정식 RR run에서는 설정 금지"
+                )
+        bound_deadline = (metadata.get("phase_deadlines_s") or {}).get(
+            arguments.phase
+        )
+        expected_deadline = RR_PHASE_DEADLINE_S.get(arguments.phase)
+        if expected_deadline is not None and bound_deadline != expected_deadline:
+            raise SystemExit(
+                f"RR_BINDING_REJECTED: phase deadline 결속 "
+                f"{bound_deadline!r}s != 실행기 {expected_deadline}s "
+                "(부재 포함 — §17A.7 결속 필드는 생성뿐 아니라 대조된다)"
+            )
     profile = metadata.get("qualification_profile")
     if is_rr:
         if profile != RESEARCH_READY_PROFILE:
@@ -373,6 +409,14 @@ def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
     metadata["rx_energy_gate_env"] = os.environ.get(
         "STAGE7_RX_ENERGY_GATE", "1"
     )
+    # 0.9.22: 판정 표면에 닿는 디버그 스위치도 기계 기록한다 — 정식 run은
+    # validate_rr_binding이 활성 자체를 거부하므로 기록값은 부작동 증명.
+    metadata["svcdbg_allow_rx_ready_env"] = os.environ.get(
+        "STAGE7_SVCDBG_ALLOW_RX_READY", "0"
+    )
+    metadata["scenario_filter_env"] = (
+        os.environ.get("STAGE7_SCENARIO_FILTER") or None
+    )
     if gain_artifact_path:
         try:
             with open(gain_artifact_path, "rb") as handle:
@@ -410,6 +454,10 @@ def write_rr_evidence(
         "run_id": run_id,
         "stage7_diag_env": metadata.get("stage7_diag_env"),
         "rx_energy_gate_env": metadata.get("rx_energy_gate_env"),
+        "svcdbg_allow_rx_ready_env": metadata.get(
+            "svcdbg_allow_rx_ready_env"
+        ),
+        "scenario_filter_env": metadata.get("scenario_filter_env"),
         "source_gain_artifact_sha256": metadata.get(
             "source_gain_artifact_sha256"
         ),

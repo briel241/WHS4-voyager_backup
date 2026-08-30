@@ -81,6 +81,7 @@ class RrEvidenceTest(unittest.TestCase):
                         "started_utc", "ended_utc", "duration_s", "counters",
                         "status", "scope", "stage7_diag_env",
                         "rx_energy_gate_env", "source_gain_artifact_sha256",
+                        "svcdbg_allow_rx_ready_env", "scenario_filter_env",
                         "lifecycle_generation"):
                 self.assertIn(key, data)
             self.assertEqual(data["profile"], "RESEARCH_READY_MINIMAL")
@@ -423,6 +424,8 @@ class RrBindingGateTest(unittest.TestCase):
             "rr_phase": "rr-p1", "run_id": "run-x",
             "baseline_sha256": "ab" * 32, "implicit_retry": 0,
             "data_link_id": None,
+            # 0.9.22: deadline 결속은 생성뿐 아니라 대조된다
+            "phase_deadlines_s": {"rr-p1": 3600, "rr-p2-17": 4200},
         }
         base.update(over)
         return base
@@ -478,6 +481,33 @@ class RrBindingGateTest(unittest.TestCase):
             app.validate_rr_binding(
                 self._Args("rr-p1", baseline_sha256=None), self._meta()
             )
+
+    # --- 0.9.22 결속 실효화 (R2 감사) ---
+
+    def test_phase_deadline_mismatch_rejected(self):
+        app = _load_coordinator_app()
+        with self.assertRaises(SystemExit):
+            app.validate_rr_binding(
+                self._Args("rr-p1"),
+                self._meta(phase_deadlines_s={"rr-p1": 2400}),
+            )
+
+    def test_phase_deadline_missing_rejected(self):
+        app = _load_coordinator_app()
+        with self.assertRaises(SystemExit):
+            app.validate_rr_binding(
+                self._Args("rr-p1"), self._meta(phase_deadlines_s={})
+            )
+
+    def test_debug_switches_rejected_for_rr(self):
+        app = _load_coordinator_app()
+        for env in ("STAGE7_SVCDBG_ALLOW_RX_READY", "STAGE7_SCENARIO_FILTER"):
+            os.environ[env] = "1"
+            try:
+                with self.assertRaises(SystemExit):
+                    app.validate_rr_binding(self._Args("rr-p1"), self._meta())
+            finally:
+                del os.environ[env]
 
 
 class RawPhyFakePassGuardTest(unittest.TestCase):
@@ -549,13 +579,29 @@ class RrFinalBuilderTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def _assert_blocked(self, result, keyword):
+        # 0.9.22 R2 보강: NOT_READY만 보면 "겨냥 검사가 죽고 무관한
+        # 문제가 동반돼도 통과"하는 약한 단언 — 겨냥 메시지를 함께 요구.
+        self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+        self.assertTrue(
+            any(keyword in p for p in result["consistency_problems"]),
+            f"겨냥 검사 메시지 {keyword!r} 부재: "
+            f"{result['consistency_problems']}",
+        )
+
     def _verification(self, base, *, all_unchanged=True):
         # 0.9.22 계약: builder는 검증 묶음(frozen-hash-audit + 로그)을
         # 필수 결속하고 all_unchanged를 실검사한다 — 픽스처도 정합하게.
         vroot = os.path.join(base, "verification")
         os.makedirs(vroot, exist_ok=True)
         with open(os.path.join(vroot, "frozen-hash-audit.json"), "w") as handle:
-            json.dump({"all_unchanged": all_unchanged, "files": []}, handle)
+            # 도구 산출물 형태 (0.9.22 R2 보강: builder가 구조·자기결속도
+            # 검사 — 손으로 쓴 한 줄 JSON은 거부된다)
+            json.dump({
+                "all_unchanged": all_unchanged,
+                "head_commit": "0" * 40,
+                "files": [{"file": "src/x.py", "unchanged": all_unchanged}],
+            }, handle)
         for log in ("unit-contract.log", "integration-stage7.log"):
             with open(os.path.join(vroot, log), "w") as handle:
                 handle.write("fixture log\n")
@@ -627,7 +673,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "tc_id")
 
     def test_tampered_artifact_missing_from_index_blocks_ready(self):
         # fail-closed 증명: index 미등재 artifact → 통과 불가 (역방향 대조)
@@ -648,7 +694,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "미등재")
 
     def test_tampered_banned_counter_aliases_block_ready(self):
         # fail-closed 증명: 실측 별칭 counter 위반 → 통과 불가
@@ -672,10 +718,10 @@ class RrFinalBuilderTest(unittest.TestCase):
                     software_ok=True, frozen_hash_ok=True,
                     verification_root=self._verification(base),
                 )
-                self.assertNotEqual(
-                    result["final_status"], "RESEARCH_READY",
-                    f"counter {key} 변조가 통과됨",
-                )
+                self._assert_blocked(result, "금지 counter")
+                self.assertTrue(any(
+                    key in p for p in result["consistency_problems"]
+                ), f"counter {key} 변조 메시지 부재")
 
     def _reindex(self, root):
         # 변조 후 sha 재계산 — sha 불일치가 아닌 '내용 규칙' 검사를 겨냥
@@ -822,10 +868,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                     software_ok=True, frozen_hash_ok=True,
                     verification_root=self._verification(base),
                 )
-                self.assertNotEqual(
-                    result["final_status"], "RESEARCH_READY",
-                    f"status={forged!r} 위장이 통과됨",
-                )
+                self._assert_blocked(result, "허용목록")
 
     def test_retries_inflation_blocks_ready(self):
         # 공격 4: retries 부풀리기로 duplicates 허용치 확장 금지 (상한 2)
@@ -847,7 +890,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "retries > 상한")
 
     def test_run_id_path_mismatch_blocks_ready(self):
         # 공격 3: 다른 run의 artifact를 복사한 root 위장 금지 —
@@ -863,7 +906,33 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "run 디렉터리와 불일치")
+
+    def test_run_id_forged_to_path_noise_blocks_ready(self):
+        # R2-A 실측 우회의 회귀 고정: run_id를 경로에 항상 존재하는
+        # "evidence"/"research_ready"로 재작성해도 거부되어야 한다.
+        import tempfile
+
+        app = self._builder()
+        for forged in ("evidence", "research_ready"):
+            with tempfile.TemporaryDirectory() as base:
+                root = os.path.join(base, "rr-fixture", "evidence",
+                                    "research_ready")
+                self._make_evidence(root, self._all_pass())
+                for tc in self._all_pass():
+                    path = os.path.join(root, f"{tc}.json")
+                    with open(path) as handle:
+                        payload = json.load(handle)
+                    payload["run_id"] = forged
+                    with open(path, "w") as handle:
+                        json.dump(payload, handle)
+                self._reindex(root)
+                result = app.build(
+                    [root], os.path.join(base, "final-result.json"),
+                    software_ok=True, frozen_hash_ok=True,
+                    verification_root=self._verification(base),
+                )
+                self._assert_blocked(result, "run 디렉터리와 불일치")
 
     def test_missing_verification_root_blocks_ready(self):
         # 공격 5: 증언 플래그만으로 READY 금지 — 검증 묶음 결속 필수
@@ -877,7 +946,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "검증 로그 미결속")
 
     def test_verification_audit_false_blocks_ready(self):
         # 공격 5: frozen-hash-audit all_unchanged=false와 증언 플래그의
@@ -893,7 +962,50 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base, all_unchanged=False),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "all_unchanged")
+
+    def test_handwritten_audit_blocks_ready(self):
+        # R2-A 실측: 한 줄 `{"all_unchanged": true}` 위조 audit — 구조·
+        # 자기결속 검사로 거부되어야 한다.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            with open(os.path.join(vroot, "frozen-hash-audit.json"),
+                      "w") as handle:
+                handle.write('{"all_unchanged": true}')
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "files 목록")
+            self._assert_blocked(result, "head_commit")
+
+    def test_nonint_retries_counted_as_problem_not_crash(self):
+        # R2-A 실측: retries="abc"가 traceback으로 죽던 것 — 문제 계상으로
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            payload["counters"]["retries"] = "abc"
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "retries 값 비정상")
 
     def test_verification_shas_bound_into_final(self):
         # 결속 실증: 검증 로그 sha가 최종 체인에 실제 포함되는가
@@ -935,7 +1047,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "lifecycle_generation 부재")
 
     def test_mixed_lifecycle_generation_blocks_ready(self):
         # 같은 root(=같은 run) 안의 1/99 혼재는 lineage 위반
@@ -957,7 +1069,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "혼재")
 
     def test_missing_source_originals_blocks_ready(self):
         # 원본(coordinator/runtime) 부재 root는 무음 누락이 아니라 거부
@@ -994,7 +1106,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
             )
-            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self._assert_blocked(result, "복수 root")
 
 
 if __name__ == "__main__":

@@ -260,6 +260,14 @@ class Stage7FakeMediumWorker:
         )
 
     def register_rx_window_lane(self, lane, hardware_time_ns, sample_count):
+        # 실구현 동등성 (0.9.22, R2 감사 M-5): 실제 assembler는 같은 창의
+        # 중복 등록을 거부한다 — fake의 무조건 관용은 중복 등록 결함을
+        # software 시험에서 은폐한다(svcdbg29 부류).
+        for window in self.rx_windows[lane]:
+            if window["start_ns"] == hardware_time_ns and not window["consumed"]:
+                raise ValueError(
+                    f"duplicate rx window: lane={lane} start={hardware_time_ns}"
+                )
         self.submit_rx_lane(lane, hardware_time_ns, sample_count)
         return True
 

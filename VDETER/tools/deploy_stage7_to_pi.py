@@ -38,6 +38,27 @@ EXCLUDE_DIR_NAMES = {"__pycache__", ".pytest_cache", ".venv", "results"}
 REMOTE_ROOT = "~/vdeter-stage7"
 
 
+def _drop_gitignored(files: list) -> list:
+    """0.9.22 (R2 감사 M-1): 파일시스템 워크는 gitignore를 모른다 —
+    §17A.8의 "개인키는 gitignore라 tar에 실리지 않음" 전제를 기제로
+    강제한다. git 판정 불가 시 배포를 중단한다(키가 실리는 방향의
+    fail-open 금지)."""
+    completed = subprocess.run(
+        ["git", "-C", VDETER_ROOT, "check-ignore", "--stdin"],
+        input="\n".join(files), capture_output=True, text=True, timeout=60,
+    )
+    if completed.returncode not in (0, 1):  # 0=일부 무시됨, 1=없음
+        raise SystemExit(
+            f"deploy 중단: git check-ignore 실패 (rc={completed.returncode}) "
+            "— gitignore 파일(개인키 등) 제외를 보증할 수 없음"
+        )
+    ignored = {line.strip() for line in completed.stdout.splitlines() if line.strip()}
+    if ignored:
+        for name in sorted(ignored):
+            print(f"[deploy] gitignore 제외: {name}")
+    return [f for f in files if f not in ignored]
+
+
 def collect_files() -> list:
     files = []
     for prefix in DEPLOY_PREFIXES:
@@ -53,7 +74,7 @@ def collect_files() -> list:
                 full = os.path.join(root, name)
                 relative = os.path.relpath(full, VDETER_ROOT).replace(os.sep, "/")
                 files.append(relative)
-    return sorted(set(files))
+    return _drop_gitignored(sorted(set(files)))
 
 
 def sha256_file(path: str) -> str:
@@ -147,7 +168,7 @@ def main(argv=None) -> int:
             [
                 "ssh", "-o", "BatchMode=yes", arguments.host,
                 f"cd {remote_dir} && sha256sum deployment_manifest.json | cut -d' ' -f1 "
-                f"&& find src tools tests configs -type f | wc -l",
+                f"&& find src apps tools tests configs -type f | wc -l",
             ],
             capture_output=True,
             text=True,

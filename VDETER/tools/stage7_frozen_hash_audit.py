@@ -77,8 +77,12 @@ def audit(root: str, base_ref: str) -> dict:
             "sha256": hashlib.sha256(current_data).hexdigest(),
         })
     head = _git(root, "rev-parse", "HEAD").decode().strip()
+    # 0.9.22 (R2 감사): head_commit만으론 dirty 트리에서의 감사를 식별할
+    # 수 없다 — 작업 트리 오염 여부도 자기결속.
+    dirty = bool(_git(root, "status", "--porcelain").decode().strip())
     return {
         "all_unchanged": all(f["unchanged"] for f in files),
+        "worktree_dirty": dirty,
         "comparison": "content-exact after CRLF→LF normalization "
                       "(raw blob hash recorded)",
         "base_ref": base_ref,

@@ -433,6 +433,9 @@ def main(argv=None) -> int:
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
         "baseline_revision": "0.9.22",
+        # 0.9.22: 판정 세트를 줄일 수 있는 필터는 콘솔 print만이 아니라
+        # 산출물에도 기계 기록한다 (정식 run은 coordinator가 활성 거부).
+        "scenario_filter": os.environ.get("STAGE7_SCENARIO_FILTER") or None,
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],
