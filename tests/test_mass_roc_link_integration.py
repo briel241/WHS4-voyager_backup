@@ -1,228 +1,405 @@
-"""MASS/ROC 응용 메시지 <-> VDE-TER 링크 계층 연동 검증 — 장비 없이 돌아간다.
+"""MASS/ROC 응용 ↔ VDE-TER Service API 종단 회귀 — 소프트웨어 무선, 장비 없음.
 
-실행: /opt/homebrew/bin/python3 tests/test_mass_roc_link_integration.py
+실행: python tests/test_mass_roc_link_integration.py
+      (pytest tests -q 로도 수집·실행된다)
 
-test_mass_roc_messages.py가 응용 계층 안에서의 왕복을 본다면, 여기서는
-그 payload가 실제로 팀원의 링크 계층(VDETER_Link/)을 통과하는지 본다.
+구식 로컬 사본(VDETER_Link/, vdeter_link.*) 기반이던 이전 판을 대체한다.
+payload는 이제 공개 Service API만으로 실제 VDE-TER 소프트웨어 무선 스택을
+왕복한다. 링크 내부(Type 92/93·Packet·Burst)는 어디서도 만지지 않는다.
 
-    응용 메시지 -> payload bytes -> Type 92/93 Message -> VDE Packet
-    -> Temporary Burst -> (bit stream) -> Extractor -> Packet Parser
-    -> payload bytes -> 응용 메시지
+    ROC 행위자 Outbound
+    → common.vdeter_bridge.to_submit_request  (SubmitTransferRequest)
+    → service.submit()  →  SoftwareRadio 송수신  →  전송 상태 COMPLETED
+    → HandlerServiceEventSink(DATA_RECEIVED) → bridge.Inbound
+    → MASS 행위자 처리 → 응용 ACK가 역방향으로 같은 경로를 왕복
 
-GNU Radio는 필요 없다. adapters/를 건드리지 않고 messages/packet/burst만 쓴다.
+검증 범위: SC-VDE-005 노선(waypoint·계획 SOG 복원·적용), SC-VDE-006 원격
+조종(heading·fallback 복원·적용), 응용 ACK 결속, source/destination, 주소
+격리(MASS-B 미수신), 재전송 중복 적용 방지.
+
+전제: in-repo VDETER/ + cryptography. 없으면 SKIP을 알리고 끝낸다(직접 실행)
+또는 pytest skip으로 표시된다 — 이 저장소의 회귀 환경에는 둘 다 있다.
 """
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
+import unittest
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "VDETER_Link" / "no_error_correction"))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_REPO, "VDETER", "src"),
+           os.path.join(_REPO, "VDETER"),
+           _REPO):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from common import codec, config
+from common import vdeter_bridge as bridge
 from common.messages import application_ack as ack
 from common.messages import position_report as pos
 from common.messages import route_instruction as route
-
-from vdeter_link.burst import temporary_builder
-from vdeter_link.burst.temporary_extractor import Extractor
-from vdeter_link.messages.type_92 import Type92Message
-from vdeter_link.messages.type_93 import Type93Message
-from vdeter_link.packet import builder as packet_builder
-from vdeter_link.packet import parser as packet_parser
-from vdeter_link.messages.registry import MESSAGE_CODECS
-from vdeter_link.utils import binary_rw
-
-FAILED: list[str] = []
-
-
-def check(cond: bool, label: str, detail: str = "") -> None:
-    print(f"  {'✅' if cond else '❌'} {label}" + (f"    {detail}" if detail else ""))
-    if not cond:
-        FAILED.append(label)
-
-
-def section(title: str) -> None:
-    print(f"\n{title}")
-
-
-# 응용 메시지들을 링크 계층 전체 사슬에 통과시키고 복원된 응용 메시지를 돌려준다.
-def round_trip(link_messages: list) -> list:
-    encoded = [MESSAGE_CODECS[m.type_id].encode(m) for m in link_messages]
-    burst = temporary_builder.build(packet_builder.build(encoded))
-
-    # Correlator 뒤의 수신 bit stream을 흉내낸다.
-    # F9A8 preamble 뒤부터가 Extractor가 보는 구간이고, tag는 그 첫 bit를 가리킨다.
-    preamble_bits = len(temporary_builder.PREAMBLE) * binary_rw.BITS_PER_BYTE
-    stream = binary_rw.bytes_to_bits(burst)[preamble_bits:]
-
-    packets = Extractor().consume(stream, [0])
-    if len(packets) != 1:
-        raise AssertionError(f"VDE Packet 1개를 기대했으나 {len(packets)}개")
-
-    return [codec.decode(m.payload) for m in packet_parser.parse(packets[0])]
-
-
-# ------------------------------------------------ Type 93 위치보고 (브로드캐스트)
-
-section("Position Report — Type 93 브로드캐스트로 링크 통과")
-
-report = pos.from_measurements(
-    longitude_degrees=129.0756,
-    latitude_degrees=35.1796,
-    sog_knots=12.3,
-    cog_degrees=87.5,
-    heading_degrees=88,
-    navigation_status=0,
-    autonomy_mode=pos.AUTONOMY_RC,
+from common.outbound import (
+    DATA_TYPE_ROUTE_CONTROL_ACK,
+    DATA_TYPE_ROUTE_CONTROL_COMMAND,
+    Outbound,
 )
-payload = codec.encode(report)
+from MASS import MassAgent, ShipState
+from ROC import RocAgent
 
-# Type 93은 ACK가 필요 없고 broadcast에 쓸 수 있다 (M.2092-2 Table 35).
-link_message = Type93Message(
-    source_id=config.MASS_MMSI,
-    session_id=0,
-    destination_id=0,
-    payload=payload,
-)
-check(link_message.length == 12 + len(payload), "Type 93 Length가 payload를 반영한다",
-      f"{link_message.length} byte")
-
-(recovered,) = round_trip([link_message])
-check(recovered == report, "위치보고가 링크를 통과해 복원된다")
-check(recovered.autonomy_mode_name == "RC", "Autonomy Mode 유지")
-check(abs(recovered.latitude_degrees - 35.1796) < 1e-6, "좌표 유지")
-
-# ------------------------------------------------- Type 92 항로 지시 (지정 수신)
-
-section("Route Instruction — Type 92 addressed로 링크 통과")
-
-instruction = route.RouteInstruction(
-    waypoints=[
-        route.waypoint_from_degrees(129.10, 35.20),
-        route.waypoint_from_degrees(129.15, 35.25),
-        route.waypoint_from_degrees(129.20, 35.30),
-    ],
-    linkage_id=42,
-    sender_classification=route.SENDER_AUTHORITY,
-    route_type=route.ROUTE_TYPE_MANDATORY,
-    duration=120,
-)
-
-# Type 92는 ACK를 요구하며 destination을 0으로 둘 수 없다 (M.2092-2 Table 40).
-command = Type92Message(
-    source_id=config.ROC_MMSI,
-    session_id=0,
-    destination_id=config.MASS_MMSI,
-    retransmission_id=0,
-    payload=codec.encode(instruction),
-)
-(recovered_route,) = round_trip([command])
-check(recovered_route == instruction, "항로 지시가 링크를 통과해 복원된다")
-check(len(recovered_route.waypoints) == 3, "waypoint 3개 유지")
-check(recovered_route.sender_name == "authority", "Sender Classification 유지")
-
-# --------------------------------------------- 다중 메시지 Packet
-
-section("다중 메시지 — 한 VDE Packet에 위치보고 + ACK")
-
-acknowledgement = ack.ApplicationAck(linkage_id=42, status=ack.STATUS_ACKNOWLEDGED)
-multi = [
-    Type93Message(
-        source_id=config.MASS_MMSI,
-        session_id=0,
-        destination_id=0,
-        payload=codec.encode(report),
-    ),
-    Type93Message(
-        source_id=config.MASS_MMSI,
-        session_id=0,
-        destination_id=config.ROC_MMSI,
-        payload=codec.encode(acknowledgement),
-    ),
-]
-recovered_multi = round_trip(multi)
-check(len(recovered_multi) == 2, "메시지 2개가 분리되어 복원된다")
-check(recovered_multi[0] == report, "첫 메시지는 위치보고")
-check(recovered_multi[1] == acknowledgement, "둘째 메시지는 ACK")
-
-# --------------------------------------------- 정상 동작 시나리오
-
-section("정상 동작 시나리오 — 명령 수신 후 침로 변화")
-
-# 1) MASS가 침로 87.5도로 항행 중임을 보고
-before = pos.from_measurements(
-    longitude_degrees=129.0756, latitude_degrees=35.1796,
-    sog_knots=12.3, cog_degrees=87.5, heading_degrees=88,
-    navigation_status=0, autonomy_mode=pos.AUTONOMY_RC,
-)
-# 2) ROC가 항로 지시
-#    3) MASS가 ACK
-# 4) MASS가 변경된 침로를 보고
-after = pos.from_measurements(
-    longitude_degrees=129.0800, latitude_degrees=35.1850,
-    sog_knots=11.0, cog_degrees=45.0, heading_degrees=46,
-    navigation_status=0, autonomy_mode=pos.AUTONOMY_RC,
-)
-
-steps = [
-    ("MASS->ROC 위치보고", Type93Message(
-        source_id=config.MASS_MMSI, session_id=0, destination_id=0,
-        payload=codec.encode(before))),
-    ("ROC->MASS 항로지시", Type92Message(
-        source_id=config.ROC_MMSI, session_id=0, destination_id=config.MASS_MMSI,
-        retransmission_id=0, payload=codec.encode(instruction))),
-    ("MASS->ROC 응용 ACK", Type93Message(
-        source_id=config.MASS_MMSI, session_id=0, destination_id=config.ROC_MMSI,
-        payload=codec.encode(acknowledgement))),
-    ("MASS->ROC 위치보고", Type93Message(
-        source_id=config.MASS_MMSI, session_id=0, destination_id=0,
-        payload=codec.encode(after))),
-]
-
-expected = [before, instruction, acknowledgement, after]
-ok = True
-for (label, link_msg), want in zip(steps, expected):
-    (got,) = round_trip([link_msg])
-    burst_size = len(temporary_builder.build(packet_builder.build(
-        [MESSAGE_CODECS[link_msg.type_id].encode(link_msg)])))
-    check(got == want, f"{label} 왕복", f"Temporary Burst {burst_size} byte")
-    ok = ok and (got == want)
-
-check(
-    ok and abs(before.cog_degrees - 87.5) < 1e-9 and abs(after.cog_degrees - 45.0) < 1e-9,
-    "명령 전후 COG 변화가 관측된다",
-    "87.5도 -> 45.0도",
-)
-
-# --------------------------------------------- 링크가 payload를 해석하지 않음
-
-section("계층 분리 — 링크는 payload를 해석하지 않는다")
-
-opaque = Type93Message(
-    source_id=config.MASS_MMSI, session_id=0, destination_id=0,
-    payload=b"\xde\xad\xbe\xef",
-)
-(link_only,) = packet_parser.parse(
-    packet_builder.build([MESSAGE_CODECS[opaque.type_id].encode(opaque)])
-)
-check(link_only.payload == b"\xde\xad\xbe\xef",
-      "링크는 임의 bytes를 그대로 나른다", "응용 계층과 독립")
+from apps.console_transport import add_envelope, strip_envelope
 
 try:
-    codec.decode(link_only.payload)
-    check(False, "응용 계층이 남의 payload를 거부한다")
-except ValueError:
-    check(True, "응용 계층이 남의 payload를 거부한다", "VPFI 불일치")
+    from tests.support.stage5 import (
+        MASS_A_STATION_ID,
+        MASS_B_STATION_ID,
+        ROC_STATION_ID,
+        STATION_ENDPOINT_IDS,
+        build_stage5_software_group,
+        drive_stage5_group,
+        start_stage5_group,
+    )
+    from vdeter.common.events import ServiceEventType
+    from vdeter.common.contracts.service import TransferState, TransferStatusRequest
+    from vdeter.service import HandlerServiceEventSink
 
-# ------------------------------------------------------------------ 결과
+    HARNESS_AVAILABLE = True
+    _IMPORT_ERROR: Exception | None = None
+except ImportError as exc:  # pragma: no cover - VDETER 없는 환경
+    HARNESS_AVAILABLE = False
+    _IMPORT_ERROR = exc
 
-print()
-if FAILED:
-    print(f"실패 {len(FAILED)}건")
-    for label in FAILED:
-        print(f"  - {label}")
-    sys.exit(1)
-print("전부 통과")
+#: 소프트웨어 그룹의 세 번째 국(MASS-B). 주소 격리 검증에 쓴다.
+MASS_B_MMSI = 440_000_003
+
+#: 전송 하나가 끝날 때까지 진행시키는 최대 시계 스텝 수 (_loopback_opaque와 동일).
+MAX_DRIVE_STEPS = 800
+
+
+class _SkipHarness(Exception):
+    """이 환경에서 소프트웨어 무선 그룹을 조립할 수 없다."""
+
+
+class _Radio:
+    """세 국(MASS-A·ROC·MASS-B)이 붙은 소프트웨어 무선 그룹 하나.
+
+    console_transport.VdeterTransport와 같은 구조로, 공개 Service API만 쓴다.
+    수신은 공식 HandlerServiceEventSink로 모으고, 응용 MMSI ↔ VDETER station
+    번역은 이 하네스가 경계에서 맡는다(운영에서는 launcher/integration의 몫).
+    """
+
+    def __init__(self) -> None:
+        if not HARNESS_AVAILABLE:
+            raise _SkipHarness(f"VDETER import 실패: {_IMPORT_ERROR}")
+
+        self.station_by_mmsi = {
+            config.MASS_MMSI: MASS_A_STATION_ID,
+            config.ROC_MMSI: ROC_STATION_ID,
+            MASS_B_MMSI: MASS_B_STATION_ID,
+        }
+        self.mmsi_by_station = {
+            station.value: mmsi for mmsi, station in self.station_by_mmsi.items()
+        }
+        mmsi_by_endpoint = {
+            STATION_ENDPOINT_IDS[station.value]: mmsi
+            for mmsi, station in self.station_by_mmsi.items()
+        }
+        #: 국별로 도착한 (source_mmsi, payload_format, application bytes)
+        self.received: dict[int, list[tuple[int, str, bytes]]] = {
+            mmsi: [] for mmsi in self.station_by_mmsi
+        }
+
+        def sink_factory(endpoint_id):
+            owner = mmsi_by_endpoint[endpoint_id]
+
+            def handle(event) -> None:
+                bridge.handle_service_event(
+                    event,
+                    on_data=lambda inbound: self.received[owner].append(
+                        (
+                            self.mmsi_by_station[inbound.source_id],
+                            inbound.payload_format,
+                            inbound.payload,
+                        )
+                    ),
+                )
+
+            return HandlerServiceEventSink(handle)
+
+        try:
+            self.clock, self.group = build_stage5_software_group(
+                service_sink_factory=sink_factory
+            )
+        except unittest.SkipTest as exc:  # cryptography 미설치 등
+            raise _SkipHarness(str(exc)) from exc
+        start_stage5_group(self.clock, self.group)
+        by_station = self.group.by_station()
+        self.service_by_mmsi = {
+            mmsi: by_station[station.value]
+            for mmsi, station in self.station_by_mmsi.items()
+        }
+
+    def close(self) -> None:
+        self.group.stop()
+
+    # 행위자 Outbound 하나를 무선으로 나른다. 반환: 종단 전송 상태.
+    def transfer(self, outbound: Outbound, *, source_mmsi: int, data_type: str):
+        application, _message_id = strip_envelope(outbound.payload)
+        destination_station = self.station_by_mmsi[outbound.destination_id]
+        request = bridge.to_submit_request(
+            Outbound(
+                payload=application,
+                destination_id=destination_station.value,
+                ack_required=outbound.ack_required,
+                data_type=data_type,
+                label=outbound.label,
+            )
+        )
+        service = self.service_by_mmsi[source_mmsi]
+        accepted = service.submit(request)
+        assert accepted.is_ok, f"submit 거부: {getattr(accepted, 'error', accepted)}"
+
+        transfer_id = accepted.value.transfer_id
+        state = None
+        for _ in range(MAX_DRIVE_STEPS):
+            drive_stage5_group(self.clock, self.group, 1)
+            state = service.status(TransferStatusRequest(transfer_id)).value.state
+            if state in (
+                TransferState.COMPLETED,
+                TransferState.FAILED,
+                TransferState.CANCELLED,
+            ):
+                break
+        return state
+
+    # 국에 도착한 것을 꺼내 행위자 payload(봉투 포함)로 되돌린다.
+    def take_arrivals(self, owner_mmsi: int) -> list[tuple[int, bytes]]:
+        arrivals, self.received[owner_mmsi] = self.received[owner_mmsi], []
+        result = []
+        for source_mmsi, payload_format, application in arrivals:
+            message_id = bridge.message_id_for_payload_format(payload_format)
+            assert message_id is not None, f"뜻밖의 payload_format: {payload_format}"
+            result.append((source_mmsi, add_envelope(application, message_id)))
+        return result
+
+
+def _skip(reason: str) -> None:
+    try:
+        import pytest
+    except ImportError:  # 직접 실행 + pytest 미설치
+        raise _SkipHarness(reason)
+    pytest.skip(reason)
+
+
+def _open_radio() -> _Radio:
+    try:
+        return _Radio()
+    except _SkipHarness as exc:
+        _skip(str(exc))
+        raise  # pytest.skip이 이미 던졌다 — 정적 분석용
+
+
+# ROC 명령 Outbound를 무선으로 보내 MASS가 처리하게 하고, 응용 ACK를 역방향
+# 무선으로 되돌려 ROC에 결속시킨다. 반환: (명령 전송 상태, ACK 전송 상태).
+def _command_round_trip(radio: _Radio, roc: RocAgent, mass: MassAgent, command: Outbound):
+    command_state = radio.transfer(
+        command, source_mmsi=roc.mmsi, data_type=DATA_TYPE_ROUTE_CONTROL_COMMAND
+    )
+
+    ack_outbounds = []
+    for source_mmsi, payload in radio.take_arrivals(mass.mmsi):
+        ack_outbounds.extend(mass.receive(payload, source_mmsi))
+
+    ack_state = None
+    for outbound in ack_outbounds:
+        ack_state = radio.transfer(
+            outbound, source_mmsi=mass.mmsi, data_type=DATA_TYPE_ROUTE_CONTROL_ACK
+        )
+    for source_mmsi, payload in radio.take_arrivals(roc.mmsi):
+        roc.receive(payload, source_mmsi)
+
+    return command_state, ack_state
+
+
+# ------------------------------------------------ SC-VDE-005 노선 명령
+
+
+def test_sc_vde_005_route_round_trip():
+    radio = _open_radio()
+    try:
+        roc = RocAgent()
+        mass = MassAgent(
+            state=ShipState(latitude=35.0, longitude=129.0, heading=90.0, sog=12.0)
+        )
+        waypoints = [
+            route.waypoint_from_degrees(129.076, 35.102, turn_radius_nm=0.5,
+                                        planned_sog_knots=12.5,
+                                        leg_geometry=route.LEG_GEOMETRY_LEXODROME),
+            route.waypoint_from_degrees(129.333, 35.208, turn_radius_nm=1.2,
+                                        planned_sog_knots=8.0,
+                                        leg_geometry=route.LEG_GEOMETRY_ORTHODROME),
+            route.waypoint_from_degrees(129.500, 35.300),
+        ]
+        command = roc.issue_route(mass.mmsi, waypoints)
+        original = codec.decode(command.payload)
+
+        command_state, ack_state = _command_round_trip(radio, roc, mass, command)
+
+        # 전송 상태 — 명령·ACK 둘 다 링크 종단 완료.
+        assert command_state is TransferState.COMPLETED
+        assert ack_state is TransferState.COMPLETED
+
+        # 주소 격리 — 지정 수신자가 아닌 MASS-B에는 아무것도 도착하지 않는다.
+        assert radio.take_arrivals(MASS_B_MMSI) == []
+
+        # waypoint·계획 SOG 복원과 실제 적용.
+        assert mass.has_route
+        assert mass.route_linkage_id == original.linkage_id
+        assert mass.remaining_waypoints == 3
+        active = mass.active_waypoint
+        assert abs(active.longitude_degrees - 129.076) < 1e-4
+        assert abs(active.latitude_degrees - 35.102) < 1e-4
+        assert active.planned_sog_knots == 12.5
+        assert mass.state.sog == 12.5  # 첫 구간 계획 SOG가 명령 속력이 된다
+
+        # 응용 ACK — ROC가 자신이 보낸 명령에 결속했다.
+        pending = roc.commands[original.linkage_id]
+        assert pending.answered
+        assert pending.status == ack.STATUS_ACKNOWLEDGED
+        assert roc.mismatched_ack_count == 0
+    finally:
+        radio.close()
+
+
+# ------------------------------------------- SC-VDE-006 원격 조종 명령
+
+
+def test_sc_vde_006_remote_control_round_trip():
+    radio = _open_radio()
+    try:
+        roc = RocAgent()
+        mass = MassAgent(
+            state=ShipState(latitude=35.0, longitude=129.0, heading=90.0, sog=12.0)
+        )
+
+        # ① heading setpoint + 계획 SOG — 복원되고 실제로 배에 반영된다.
+        steering = roc.issue_route(
+            mass.mmsi,
+            [
+                route.waypoint_from_degrees(129.05, 35.10, planned_sog_knots=6.0),
+                route.waypoint_from_degrees(129.10, 35.133, planned_sog_knots=4.0),
+            ],
+            route_type=route.ROUTE_TYPE_RECOMMENDED,
+            heading_setpoint=92.5,
+        )
+        command_state, ack_state = _command_round_trip(radio, roc, mass, steering)
+        assert command_state is TransferState.COMPLETED
+        assert ack_state is TransferState.COMPLETED
+        assert mass.heading_setpoint_degrees == 92.5
+        assert mass.state.sog == 6.0
+        assert mass.state.autonomy_mode == pos.AUTONOMY_RC  # 원격 제어로 전환
+
+        # ② fallback 지시 — 복원되고 배를 실제로 세운다.
+        fallback = roc.issue_route(
+            mass.mmsi,
+            [],
+            route_type=route.ROUTE_TYPE_RECOMMENDED,
+            fallback_state=route.FALLBACK_ANCHORING,
+        )
+        command_state, ack_state = _command_round_trip(radio, roc, mass, fallback)
+        assert command_state is TransferState.COMPLETED
+        assert ack_state is TransferState.COMPLETED
+        assert mass.fallback_name == "Anchoring"
+        assert mass.state.sog == 0.0
+
+        # 두 명령 모두 응용 ACK로 결속됐다.
+        answered = [c for c in roc.commands.values() if c.answered]
+        assert len(answered) == 2
+        assert all(c.status == ack.STATUS_ACKNOWLEDGED for c in answered)
+        assert radio.take_arrivals(MASS_B_MMSI) == []
+    finally:
+        radio.close()
+
+
+# ------------------------------------------------ 재전송 중복 적용 방지
+
+
+def test_duplicate_retransmission_not_reapplied():
+    radio = _open_radio()
+    try:
+        roc = RocAgent()
+        mass = MassAgent(
+            state=ShipState(latitude=35.0, longitude=129.0, heading=90.0, sog=12.0)
+        )
+        command = roc.issue_route(
+            mass.mmsi,
+            [
+                route.waypoint_from_degrees(129.05, 35.10, planned_sog_knots=6.0),
+                route.waypoint_from_degrees(129.10, 35.133, planned_sog_knots=4.0),
+            ],
+        )
+
+        first_state, first_ack = _command_round_trip(radio, roc, mass, command)
+        assert first_state is TransferState.COMPLETED
+        assert first_ack is TransferState.COMPLETED
+        assert mass.state.sog == 6.0
+
+        # 항해가 진행된 뒤 같은 payload가 재전송으로 다시 도착한다.
+        mass.state.sog = 9.9
+        second_state, second_ack = _command_round_trip(radio, roc, mass, command)
+        assert second_state is TransferState.COMPLETED
+        assert second_ack is TransferState.COMPLETED  # ACK는 다시 나간다
+
+        assert mass.duplicate_count == 1        # 재적용하지 않고 세기만 한다
+        assert mass.state.sog == 9.9            # 계획 SOG로 되돌리지 않는다
+        assert mass.remaining_waypoints == 2    # 진행 상태가 리셋되지 않는다
+    finally:
+        radio.close()
+
+
+# ------------------------------------------------ 계층 격리 (무선 불필요)
+
+
+def test_foreign_payload_rejected():
+    mass = MassAgent(state=ShipState(latitude=35.0, longitude=129.0))
+    before = mass.ignored_count
+    replies = mass.receive(b"\xde\xad\xbe\xef", source_id=config.ROC_MMSI)
+    assert replies == []
+    assert mass.ignored_count == before + 1
+
+
+# ------------------------------------------------------------------ 직접 실행
+
+_TESTS = (
+    test_foreign_payload_rejected,
+    test_sc_vde_005_route_round_trip,
+    test_sc_vde_006_remote_control_round_trip,
+    test_duplicate_retransmission_not_reapplied,
+)
+
+
+def main() -> int:
+    failed = 0
+    for fn in _TESTS:
+        try:
+            fn()
+        except _SkipHarness as exc:
+            print(f"SKIP {fn.__name__}: {exc}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"FAIL {fn.__name__}: {exc}")
+        else:
+            print(f"PASS {fn.__name__}")
+    if failed:
+        print(f"실패 {failed}건")
+        return 1
+    print("전부 통과")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

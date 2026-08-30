@@ -3,7 +3,7 @@
 
 MASS/ROC 응용 메시지는 byte 경계에 맞지 않는 필드를 쓴다.
 예를 들어 위도는 27 bit, 경도는 28 bit다(AIS와 동일한 부호화).
-따라서 byte 단위인 `vdeter_link/utils/binary_rw.py`와 달리
+따라서 byte 단위 입출력 헬퍼와 달리
 bit 단위 누적 writer/reader가 필요하다.
 
 표현 형식

@@ -1,19 +1,22 @@
-"""RF 벤치 테스트용 다리 — mass_roc 응용 payload를 링크 송신 콘솔에 넣고, 수신 hex를 응용 필드로 복원한다.
+"""[LEGACY 진단 도구] RF 벤치 테스트용 다리 — 응용 payload를 사람이 링크 콘솔에 옮기는 보조.
+
+⚠ 구형(Stage 3 시절, 2-B210 단방향 벤치) 진단 절차의 보조 도구다. 현재 운영
+  경로가 아니다 — MASS/ROC 운영·회귀 경로는 VDE-TER 공개 Service API를 쓴다
+  (tests/test_mass_roc_link_integration.py, apps/console_transport.py 참조).
+  이 도구 자체는 링크 계층을 import하지 않고 응용 payload bytes만 다루므로
+  수동 벤치 진단용으로 보존한다.
 
 실행:
     # 한 사이클의 송신 재료를 뽑는다 (장비 없이)
-    /opt/homebrew/bin/python3 apps/rf_normal_cycle.py payloads
+    python apps/rf_normal_cycle.py payloads
 
     # 수신기 콘솔이 찍은 Payload (hex)를 응용 메시지로 되돌린다
-    /opt/homebrew/bin/python3 apps/rf_normal_cycle.py decode "FF 01 04 ..."
+    python apps/rf_normal_cycle.py decode "FF 01 04 ..."
 
 배경:
-    mass_roc(응용)와 VDETER_Link(링크)는 각각 검증됐지만, 응용 payload가
-    실제 B210 전파를 타고 반대편에서 복원되는 경로는 아직 미검증이다.
-    이 도구는 그 경로를 열기 위한 응용 계층 쪽 다리다. 팀원의 링크 코드는
-    수정하지 않는다 — 송신 어댑터(VDETxSource)가 이미 Type 92/93 Message를
-    받아 Burst로 만들어 USRP로 내보내므로, 여기서는 그 어댑터가 그대로 받을
-    수 있는 형태(콘솔 hex 입력 / config.TX_MESSAGES 블록)로 payload를 뽑는다.
+    구식 벤치에서는 송신 어댑터가 Type 92/93 Message를 받아 Burst로 만들어
+    USRP로 내보냈고, 이 도구는 그 어댑터가 그대로 받을 수 있는 형태(콘솔 hex
+    입력 / config.TX_MESSAGES 블록)로 응용 payload를 뽑았다.
 
     물리 링크는 단방향(A=송신 전용, B=수신 전용)이므로, 이 사이클은 살아있는
     양방향 handshake가 아니라 '한 사이클에 실제로 전파를 타는 네 메시지를
@@ -28,7 +31,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "VDETER_Link" / "no_error_correction"))
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
 
 from common import codec, config
 from MASS import MassAgent, ShipState
@@ -163,8 +169,8 @@ def print_console_inputs(cycle: list[OnAir]) -> None:
 # 반복 실행용 config.TX_MESSAGES 블록. 파일을 고치기 싫으면 위의 대화식을 쓴다.
 def print_tx_messages_block(cycle: list[OnAir]) -> None:
     print("─" * 72)
-    print("반복 실행용 (TX_MODE = \"fixed\") — VDETER_Link .../vdeter_link/config.py의")
-    print("TX_MESSAGES를 아래로 교체. 한 메시지씩 gain/거리 조정하며 재현할 때 편하다.")
+    print("반복 실행용 (TX_MODE = \"fixed\") — 구식 링크 벤치 config의 TX_MESSAGES를")
+    print("아래로 교체. 한 메시지씩 gain/거리 조정하며 재현할 때 편하다. (LEGACY)")
     print("─" * 72)
     lines = ["TX_MESSAGES = ["]
     for item in cycle:
