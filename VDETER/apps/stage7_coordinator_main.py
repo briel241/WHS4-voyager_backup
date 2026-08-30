@@ -364,7 +364,9 @@ def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
         with open(path, "rb") as handle:
             metadata = json.loads(handle.read().decode("utf-8"))
     except OSError:
-        return {}
+        # git 결속 부재여도 관측 환경 필드는 기록한다 (0.9.22 —
+        # 이전엔 {} 반환으로 3필드까지 함께 소실).
+        metadata = {}
     # 0.9.20 재현성 봉합: 관측 환경(STAGE7_DIAG)과 gain artifact 출처를
     # evidence에 기계 기록한다 — 재현 조건이 산문이 아닌 산출물에 남게.
     metadata["stage7_diag_env"] = os.environ.get("STAGE7_DIAG", "0")
@@ -377,8 +379,12 @@ def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
                 metadata["source_gain_artifact_sha256"] = hashlib.sha256(
                     handle.read()
                 ).hexdigest()
-        except OSError:
-            pass
+        except OSError as exc:
+            print(
+                f"[coordinator] gain artifact 해시 실패(결속 생략): "
+                f"{gain_artifact_path}: {exc}",
+                file=sys.stderr, flush=True,
+            )
     return metadata
 
 

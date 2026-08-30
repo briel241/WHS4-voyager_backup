@@ -240,10 +240,12 @@ def main(argv=None) -> int:
                     # 방어다 (svcdbg76 실측: destination_not_deployment_member).
                     # 0.9.20: 거부 "사유"까지 검증 — 무관한 거부(예: 자원
                     # 고갈)의 허위 PASS 방지. 목적지/지원성 계열만 인정.
+                    # 0.9.22: body의 유일 신호는 public_error_code(=ErrorCode
+                    # 문자열)뿐 — reason(destination_...)은 body에 노출되지
+                    # 않으므로 매칭 불가능한 죽은 마커 2종을 제거해 조임.
                     body_text = json.dumps(body, ensure_ascii=False)
                     accepted_markers = (
-                        "destination", "UNSUPPORTED_REQUEST",
-                        "INVALID_REQUEST", "ROUTE",
+                        "UNSUPPORTED_REQUEST", "INVALID_REQUEST",
                     )
                     if not any(m in body_text for m in accepted_markers):
                         record(step_id, "FAIL",
@@ -334,11 +336,10 @@ def main(argv=None) -> int:
 
     overall_ok = True
     if arguments.mode == "scenario":
-        # v0.9.9 (2026-08-29 사용자 승인): 판정 세트 = 실증 기능군 3종.
-        # Data/직송/relay는 UNRESOLVED_UNDER_INVESTIGATION — 조사 계속,
-        # 본 동결 미보증. 디버그는 STAGE7_SCENARIO_FILTER로 6종 실행 가능.
         # v0.9.18 (2026-08-30): 데이터 세션 재현 실증(svc-run-o 완주,
         # 1시도·재시도 0)으로 data-roc-to-a를 판정 세트에 편입 — 4종.
+        # (v0.9.9의 candidate 6종 체계는 소멸: 직송/relay는 계획 정의가
+        # 없어 FILTER로도 실행 불가 — FILTER는 아래 4종의 부분집합 선택.)
         # v0.9.19 반영: data를 1순위로 — 실측상 귀(수신 창)는 서비스
         # 시작 직후의 신선한 창에서 가장 신뢰됨(svcdbg O·q 성공 조건).
         # 세트 판정은 순서 무관.
@@ -348,11 +349,7 @@ def main(argv=None) -> int:
             ("short-b-to-roc-noack", "MASS-B", "ROC", False),
             ("timeout-unknown-dest", "MASS-A", None, True),
         )
-        candidate_plan = ()
-        plan = (
-            judged_plan + candidate_plan
-            if os.environ.get("STAGE7_SCENARIO_FILTER") else judged_plan
-        )
+        plan = judged_plan
         scenario_filter = os.environ.get("STAGE7_SCENARIO_FILTER")
         if scenario_filter:
             allowed = {x.strip() for x in scenario_filter.split(",") if x.strip()}
@@ -435,7 +432,7 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.21",
+        "baseline_revision": "0.9.22",
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],

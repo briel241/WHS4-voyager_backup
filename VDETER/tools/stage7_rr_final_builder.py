@@ -38,6 +38,7 @@ APPROVED_REVISION_CHAIN = (
     "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7",
     "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14",
     "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20", "0.9.21",
+    "0.9.22",
 )
 # v0.9.14: 시나리오 계열 TC는 v0.9.8의 기록된 한정 재시도가 정당하다.
 SCENARIO_TCS_WITH_SANCTIONED_RETRY = (
@@ -52,7 +53,8 @@ def _load(path):
     return json.loads(data.decode("utf-8")), hashlib.sha256(data).hexdigest()
 
 
-def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
+def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
+          verification_root=None):
     collected = {}
     problems = []
     for root in evidence_roots:
@@ -61,6 +63,10 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
             if name in ("index", "final-result"):
                 continue
             payload, sha = _load(path)
+            # 0.9.22: 같은 TC가 복수 root에 있으면 last-wins로 조용히
+            # 덮여 index 대조가 오도된다 — 모호성 자체를 문제로 계상.
+            if name in collected:
+                problems.append(f"동일 TC가 복수 root에 존재: {name}")
             collected[name] = {"payload": payload, "sha256": sha, "path": path}
 
     def status_of(tc):
@@ -171,15 +177,36 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
                     problems.append(
                         f"금지 counter {label}({key}) != 0: {name}"
                     )
+        # 0.9.22: retries 상한 강제 — controller 실측 상한(max_attempts=3
+        # → 재시도 ≤2)과 대조. 상한이 없으면 retries를 부풀려 duplicates
+        # 허용치를 임의로 키우는 우회가 성립한다 (R1-A 공격 4).
+        raw_retries = int(counters.get("retries", 0))
+        if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY and raw_retries > 2:
+            problems.append(
+                f"retries > 상한 2 (controller max_attempts=3): "
+                f"{name} ({raw_retries})"
+            )
         dup = counters.get("duplicates", 0)
         limit = (
-            counters.get("retries", 0)
+            raw_retries
             if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY else 0
         )
         if dup > limit:
             problems.append(f"duplicates > 허용치: {name} ({dup} > {limit})")
-        if not payload.get("run_id"):
+        run_id = payload.get("run_id")
+        if not run_id:
             problems.append(f"run_id 부재: {name}")
+        else:
+            # 0.9.22: run_id ↔ 소속 root 경로 대응 강제 — evidence 규약은
+            # results/runs/<run_id>/evidence/research_ready/. 다른 run의
+            # artifact를 복사해 root를 위장하는 바꿔치기를 기계 검사
+            # (R1-A 공격 3).
+            parts = os.path.normpath(c["path"]).split(os.sep)
+            if run_id not in parts:
+                problems.append(
+                    f"run_id가 evidence 경로와 불일치: {name} "
+                    f"(run_id={run_id!r})"
+                )
     if len(hardware_maps) > 1:
         problems.append(f"hardware mapping 불일치: {len(hardware_maps)}종")
 
@@ -187,11 +214,56 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     failed = [tc for tc, s in tc_status.items() if s == "FAIL"]
     hw_blocked = [tc for tc, s in tc_status.items() if s == "HARDWARE_BLOCKED"]
     aborted = [tc for tc, s in tc_status.items() if s == "ABORTED"]
+    # 0.9.22: 허용목록 판정 — READY의 근거는 명시적 "PASS"뿐이다.
+    # 거부목록만으로는 임의 문자열("FAILED", "fail", 오타·위장)이 전
+    # 버킷을 빠져나가 READY로 탈출한다 (R1-A 공격 6, fail-open 역전).
+    unrecognized = [
+        tc for tc, s in tc_status.items()
+        if s not in ("PASS", "MISSING", "FAIL", "HARDWARE_BLOCKED", "ABORTED")
+    ]
+    if unrecognized:
+        problems.append(
+            "status 허용목록 밖(PASS 아님): "
+            + ", ".join(f"{tc}={tc_status[tc]!r}" for tc in sorted(unrecognized))
+        )
 
     if not software_ok:
         problems.append("software 검증(회귀/suite/import) 미통과")
     if not frozen_hash_ok:
         problems.append("frozen source hash audit 미통과")
+    # 0.9.22: 증언 플래그와 근거 로그의 기계적 연결 — 검증 묶음 root를
+    # 필수 결속하고, frozen-hash-audit.json의 all_unchanged를 실검사하며,
+    # 로그 sha를 최종 체인에 포함한다 (R1-A 공격 5: 순수 증언 fail-open).
+    verification_evidence = {}
+    if not verification_root:
+        problems.append("검증 로그 미결속 (--verification-root 부재)")
+    else:
+        audit_path = os.path.join(verification_root, "frozen-hash-audit.json")
+        if not os.path.exists(audit_path):
+            problems.append(
+                f"frozen-hash-audit.json 부재: {verification_root}"
+            )
+        else:
+            audit_payload, _audit_sha = _load(audit_path)
+            if audit_payload.get("all_unchanged") is not True:
+                problems.append(
+                    "frozen-hash-audit all_unchanged != true "
+                    "(증언 플래그와 근거 로그 모순)"
+                )
+        for fname in (
+            "frozen-hash-audit.json", "unit-contract.log",
+            "integration-stage7.log", "frozen-audit-stdout.log",
+        ):
+            fpath = os.path.join(verification_root, fname)
+            if not os.path.exists(fpath):
+                if fname == "frozen-audit-stdout.log":
+                    continue  # 부수 stdout 사본 — 있으면 결속, 없어도 무방
+                problems.append(f"검증 로그 부재: {fname}")
+                continue
+            with open(fpath, "rb") as handle:
+                verification_evidence[fname] = hashlib.sha256(
+                    handle.read()
+                ).hexdigest()
 
     if missing or aborted:
         final = "ABORTED" if aborted else "RESEARCH_NOT_READY"
@@ -245,6 +317,7 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
         "consistency_problems": problems,
         "software_verification_ok": bool(software_ok),
         "frozen_hash_ok": bool(frozen_hash_ok),
+        "verification_evidence_sha256": verification_evidence,
         "artifact_sha256": {name: c["sha256"] for name, c in sorted(collected.items())},
         "scope": "RESEARCH_READY는 통제된 conducted 환경에서 OTA 연구 실험 진입 "
                  "가능성만 뜻한다. full qualification(TC-STAGE7-001..020) 및 "
@@ -263,10 +336,16 @@ def main(argv=None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--software-ok", action="store_true")
     parser.add_argument("--frozen-hash-ok", action="store_true")
+    parser.add_argument(
+        "--verification-root",
+        help="frozen-hash-audit.json/unit-contract.log/integration-stage7.log"
+             "가 있는 검증 묶음 디렉터리 — 미지정 시 READY 불가 (0.9.22)",
+    )
     arguments = parser.parse_args(argv)
     result = build(
         arguments.evidence_root, arguments.out,
         software_ok=arguments.software_ok, frozen_hash_ok=arguments.frozen_hash_ok,
+        verification_root=arguments.verification_root,
     )
     try:
         print(json.dumps(result, ensure_ascii=False, indent=1))

@@ -209,7 +209,16 @@ class Stage7LaneRxDispatcher:
                 samples, data=b"\x00" * len(samples.data)
             )
             return _dc.replace(native_request, samples=zero_block)
-        except Exception:  # noqa: BLE001 - 게이트 실패 시 원 요청으로 디코드
+        except Exception as exc:  # noqa: BLE001 - 게이트 실패 시 원 요청으로 디코드
+            # 무음 전면 비활성 금지: 여기서 조용히 낙하하면 106ms/창
+            # 전량 상관 부하가 로그 한 줄 없이 재귀한다 — 1회성 경고 (0.9.22).
+            if not self._gate_state.get("_fail_warned"):
+                self._gate_state["_fail_warned"] = True
+                print(
+                    f"[launcher] rx-gate 예외 → 게이트 무효(전량 디코드): "
+                    f"{type(exc).__name__}: {exc}",
+                    file=_sys.stderr, flush=True,
+                )
             return native_request
 
     @property
