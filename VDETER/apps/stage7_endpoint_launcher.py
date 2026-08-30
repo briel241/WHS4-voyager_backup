@@ -1678,6 +1678,12 @@ def main(argv=None) -> int:
             # 청취 창을 굶긴다 — 같은 창의 표본이 이번 배치에 없는 완료
             # 항목만 앞으로 빼서 장부를 즉시 비운다 (같은 창의 표본→완료
             # 순서는 보존).
+            # 시간 분할 (svc-run-o pump-slow 실측: 실버스트 디코드가 한
+            # drain에 뭉치면 871~1685ms 정지 → 완료 반영·창 계획이 초
+            # 단위로 밀리는 머리막힘이 완료 지연 ~15-19s·장부 포화·청취
+            # 확률화의 잔존 뿌리. 300ms 예산 초과 시 남은 항목을 큐
+            # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
+            # 불변, 정지 상한만 도입.)
             mac_cycle = getattr(main, "_mac_cycle", None)
             batch = []
             for _ in range(256):
@@ -1699,7 +1705,8 @@ def main(argv=None) -> int:
                 item for item in batch
                 if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
             ]
-            for item in ordered:
+            drain_started = _time.monotonic()
+            for index, item in enumerate(ordered):
                 kind = item[0]
                 try:
                     if kind == "s":
@@ -1713,12 +1720,24 @@ def main(argv=None) -> int:
                           file=sys.stderr, flush=True)
                 if promoted > 0:
                     promoted -= 1
-                    continue  # 앞줄 완료 항목은 싸서 미니사이클 생략
-                if mac_cycle is not None:
+                elif mac_cycle is not None:
                     try:
                         mac_cycle()
                     except Exception:  # noqa: BLE001
                         pass
+                if (
+                    _time.monotonic() - drain_started > 0.3
+                    and index + 1 < len(ordered)
+                ):
+                    for leftover in reversed(ordered[index + 1:]):
+                        _dispatch_queue.appendleft(leftover)
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(
+                            f"[diag] drain-slice done={index + 1} "
+                            f"deferred={len(ordered) - index - 1}",
+                            file=sys.stderr, flush=True,
+                        )
+                    return
 
         main._drain_dispatch_queue = _drain_dispatch_queue
         main._dispatch_queue_ref = _dispatch_queue
