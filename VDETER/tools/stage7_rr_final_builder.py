@@ -225,7 +225,10 @@ def main(argv=None) -> int:
         arguments.evidence_root, arguments.out,
         software_ok=arguments.software_ok, frozen_hash_ok=arguments.frozen_hash_ok,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=1))
+    try:
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+    except UnicodeEncodeError:  # Windows cp949 콘솔 — 파일 기록엔 무영향
+        print(json.dumps(result, ensure_ascii=True, indent=1))
     return 0 if result["final_status"] == "RESEARCH_READY" else 1
 
 
