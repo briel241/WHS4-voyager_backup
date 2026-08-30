@@ -295,7 +295,7 @@ if decision.accept:
 
 **인증은 나중에 `_evaluate()` 안에 들어간다.** 자리가 이미 마련되어 있다.
 
-### 8.2 전선에 실을 수 없는 값은 본선이 직접 거른다
+### 8.2 전선에 실을 수 없는 값은 받는 쪽이 직접 거른다
 
 부호화 폭이 담을 수 있는 값이 유효 범위보다 넓은 필드가 있다. Heading Setpoint는
 12 bit라 4095까지 담기지만 유효한 값은 3600까지다. 거르지 않으면 4000이 400.0도가
@@ -314,12 +314,37 @@ if decision.accept:
 | Longitude / Latitude | ±180° / ±90° 또는 N/A(181° / 91°) |
 | Leg Geometry | 0 · 1 · 2 |
 
+**받는 쪽 양쪽 모두**가 같은 규칙을 쓴다. 노선·조종은 본선(`MassAgent._evaluate`)이,
+위치보고·응용 ACK은 육상(`RocAgent.receive`)이 본다.
+
+| 메시지 | 받는 쪽 | 규칙 함수 | 위반 시 |
+| --- | --- | --- | --- |
+| 노선·조종 (MF 2) | MASS | `route_instruction.canonical_violation` | `errors` / route unsuitable |
+| 위치보고 (MF 1) | ROC | `position_report.canonical_violation` | 항적에 반영하지 않음 (`rejected_count`) |
+| 응용 ACK (MF 3) | ROC | `application_ack.canonical_violation` | 명령을 종결시키지 않음 (`rejected_count`) |
+
+위치보고·ACK의 허용 값은 이렇다.
+
+| 필드 | 허용 |
+| --- | --- |
+| Navigation Status | 0..8 · 11 · 12 · 14 · 15 (9 · 10 · 13은 예약) |
+| Maneuver Indicator | 0 · 1 · 2 |
+| Autonomy Mode | 0..3 |
+| COG | 0..3599 또는 3600(N/A) |
+| True Heading | 0..359 또는 511(N/A) |
+| ACK Status | 0 · 4 · 7 · 8 · 9 |
+| ACK Reason | 0..3 |
+
 **왜 응용이 또 보는가** — 링크 codec은 **무선 경로만** 막는다. 콘솔 기본값(`direct`
 전송)·loopback 데모·공격 실험의 주입 지점은 codec을 지나지 않는다. 응용이 같은
-규칙을 지켜야 무선을 타든 안 타든 배가 똑같이 행동한다.
+규칙을 지켜야 무선을 타든 안 타든 똑같이 행동한다.
+
+관측만 하는 쪽에도 필요하다. 위도 raw 60,000,000은 **100도**가 되어 해도에 그려지고,
+그 해도가 육상 운영자의 상황 인식 수단이다. 예약 Status ACK을 받아들이면 무효한
+응답 한 건이 대기 중인 명령을 종결시킨다.
 
 두 판정이 갈리지 않는지는 [`tests/test_route_conformance.py`](../../tests/test_route_conformance.py)가
-링크 codec을 직접 불러 대조한다.
+링크 codec을 직접 불러 대조한다 (노선 20건 · 위치보고 15건 · ACK 128조합).
 
 ### 8.3 유효기간 실측
 

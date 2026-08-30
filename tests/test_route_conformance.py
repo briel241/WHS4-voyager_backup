@@ -1,8 +1,9 @@
-"""노선·조종 메시지의 표준 적합성 — 장비 없이 돌아간다.
+"""전선 형식 적합성 — 장비 없이 돌아간다.
 
 실행: python3 tests/test_route_conformance.py
 
-여기서 보는 것은 **본선이 받은 값을 얼마나 따져보는가**다.
+여기서 보는 것은 **받은 값을 얼마나 따져보는가**다. 노선·조종은 본선(MASS)이,
+위치보고·응용 ACK은 육상(ROC)이 받는다. 양쪽 다 본다.
 
 승인된 SC-VDE codec은 canonical raw 허용 집합을 검사해서 이상한 값을 무선에
 싣지 못하게 막는다. 그런데 그 codec은 **무선 경로만** 막는다 — 콘솔 기본값
@@ -26,6 +27,7 @@ from MASS import MassAgent, ShipState
 from ROC import RocAgent
 from common import codec, coordinates
 from common.messages import application_ack as ack
+from common.messages import position_report as pos
 from common.messages import route_instruction as route
 
 FAILED: list[str] = []
@@ -345,6 +347,146 @@ check(agent.heading_setpoint_degrees is None, "범위 밖 침로는 반영되지
 check(abs(agent.state.heading) < 1e-6,
       "배가 돌지 않았다 (예전에는 400도가 40도로 해석돼 선회했다)",
       f"{agent.state.heading:.1f}도")
+
+
+# ------------------------------------- D-1 ROC도 받은 값을 따져보는가
+
+section("D-1 ROC가 위치보고·ACK의 값을 따져보는가")
+
+MASS_ID = 440_000_001
+
+# 위치보고는 관측만 하지만, 그 관측이 육상 운영자의 상황 인식 수단이다.
+# 위도 raw 60,000,000은 100도가 되어 해도에 그려진다.
+POSITION_BASE = dict(
+    longitude=77_400_000, latitude=21_060_000, sog=125, cog=472,
+    true_heading=47, timestamp=30, navigation_status=0, autonomy_mode=2,
+)
+
+BAD_POSITIONS = [
+    ("Navigation Status 9 (예약)", {"navigation_status": 9}),
+    ("Navigation Status 10 (예약)", {"navigation_status": 10}),
+    ("Navigation Status 13 (예약)", {"navigation_status": 13}),
+    ("Maneuver Indicator 3 (예약)", {"maneuver_indicator": 3}),
+    ("Autonomy Mode 7 (예약)", {"autonomy_mode": 7}),
+    ("COG 4000", {"cog": 4000}),
+    ("True Heading 400", {"true_heading": 400}),
+    ("Latitude raw 60000000 (100도)", {"latitude": 60_000_000}),
+    ("Longitude raw 120000000 (200도)", {"longitude": 120_000_000}),
+]
+GOOD_POSITIONS = [
+    ("정상 위치보고", {}),
+    ("Navigation Status 14 (AIS-SART)", {"navigation_status": 14}),
+    ("Navigation Status 15 (undefined)", {"navigation_status": 15}),
+    ("좌표 not available",
+     {"longitude": coordinates.LONGITUDE_NOT_AVAILABLE,
+      "latitude": coordinates.LATITUDE_NOT_AVAILABLE}),
+    ("COG·Heading not available", {"cog": 3600, "true_heading": 511}),
+    ("SOG 1023 (N/A) · ROT -128 (N/A)", {"sog": 1023, "rate_of_turn": -128}),
+]
+
+
+def track_after(overrides) -> tuple[bool, int]:
+    """위치보고 하나를 ROC에 넣고 (항적에 반영됐는가, 거절 수)를 돌려준다."""
+    controller = RocAgent()
+    report = pos.PositionReport(**{**POSITION_BASE, **overrides})
+    controller.receive(codec.encode(report), source_id=MASS_ID, now=1.0)
+    return MASS_ID in controller.tracks, controller.rejected_count
+
+
+for label, overrides in BAD_POSITIONS:
+    tracked, rejected = track_after(overrides)
+    check(not tracked and rejected == 1, f"위치보고 {label} 거절")
+
+for label, overrides in GOOD_POSITIONS:
+    tracked, rejected = track_after(overrides)
+    check(tracked and rejected == 0, f"위치보고 {label} 반영")
+
+
+def answered_after(status: int, reason: int) -> tuple[bool, int]:
+    """응용 ACK 하나를 ROC에 넣고 (명령이 종결됐는가, 거절 수)를 돌려준다."""
+    controller = RocAgent()
+    issued = controller.issue_route(MASS_ID, [(35.10, 129.10)], now=0.0)
+    linkage_id = codec.decode(issued.payload).linkage_id
+    answer = ack.ApplicationAck(linkage_id=linkage_id, status=status, reason=reason)
+    controller.receive(codec.encode(answer), source_id=MASS_ID, now=1.0)
+    return controller.commands[linkage_id].answered, controller.rejected_count
+
+
+for label, status, reason in [
+    ("Status 5 (예약)", 5, 0),
+    ("Status 12 (예약)", 12, 0),
+    ("Status 15 (예약)", 15, 0),
+    ("Reason 7 (예약)", 4, 7),
+]:
+    answered, rejected = answered_after(status, reason)
+    check(not answered and rejected == 1, f"ACK {label} 거절 — 명령을 종결시키지 않는다")
+
+for label, status, reason in [
+    ("Status 4 acknowledged", ack.STATUS_ACKNOWLEDGED, ack.REASON_NONE),
+    ("Status 7 errors · not authorized", ack.STATUS_ERRORS, ack.REASON_NOT_AUTHORIZED),
+    ("Status 9 route issues · expired", ack.STATUS_ROUTE_ISSUES, ack.REASON_EXPIRED),
+]:
+    answered, rejected = answered_after(status, reason)
+    check(answered and rejected == 0, f"ACK {label} 반영")
+
+# 우리 MASS가 실제로 내보내는 위치보고는 전부 통과해야 한다. 방어가 정상 운항을
+# 막으면 안 된다 — from_measurements가 값을 clamp하므로 위반이 나올 수 없다.
+clean = True
+for nav in sorted(pos.ALLOWED_NAVIGATION_STATUSES):
+    for autonomy in sorted(pos.AUTONOMY_MODE_NAMES):
+        for sog, cog, heading in ((0.0, 0.0, 0), (12.5, 47.2, 47),
+                                  (102.2, 359.95, 359), (200.0, 359.99, 360)):
+            report = pos.from_measurements(
+                longitude_degrees=129.0, latitude_degrees=35.0,
+                sog_knots=sog, cog_degrees=cog, heading_degrees=heading,
+                navigation_status=nav, autonomy_mode=autonomy, timestamp=30)
+            if pos.canonical_violation(report) is not None:
+                clean = False
+                print(f"      위반: nav={nav} aut={autonomy} sog={sog} cog={cog}")
+count = len(pos.ALLOWED_NAVIGATION_STATUSES) * len(pos.AUTONOMY_MODE_NAMES) * 4
+check(clean, f"우리가 만드는 위치보고 {count}조합이 전부 규칙 안에 있다")
+
+
+# ------------------------------------------- 위치보고·ACK도 링크 codec과 대조
+
+section("위치보고·ACK 링크 codec 대조")
+
+try:
+    from vdeter.presentation.codecs.sc_vde_position_report import (
+        _validate_position_fields,
+    )
+    from vdeter.presentation.codecs.sc_vde_route_control import _validate_ack_fields
+
+    def _rejects(validator, message, *args) -> bool:
+        def error(text, **_kw):
+            return ("REJECT", text)
+
+        result = validator(codec.encode_body(message), *args, error, Correlation())
+        return isinstance(result, tuple)
+
+    mismatched = []
+    for label, overrides in BAD_POSITIONS + GOOD_POSITIONS:
+        report = pos.PositionReport(**{**POSITION_BASE, **overrides})
+        if (pos.canonical_violation(report) is not None) != _rejects(
+            _validate_position_fields, report
+        ):
+            mismatched.append(label)
+    check(not mismatched,
+          f"위치보고 {len(BAD_POSITIONS) + len(GOOD_POSITIONS)}건이 링크 codec과 일치",
+          ", ".join(mismatched))
+
+    mismatched = []
+    for status in range(16):
+        for reason in range(8):
+            answer = ack.ApplicationAck(linkage_id=1, status=status, reason=reason)
+            if (ack.canonical_violation(answer) is not None) != _rejects(
+                _validate_ack_fields, answer
+            ):
+                mismatched.append(f"status={status} reason={reason}")
+    check(not mismatched, "ACK Status×Reason 128조합이 링크 codec과 일치",
+          ", ".join(mismatched[:5]))
+except ImportError as exc:
+    check(True, f"SKIP — VDETER를 불러올 수 없다 ({exc})")
 
 
 # ------------------------------------------------------------------ 결과

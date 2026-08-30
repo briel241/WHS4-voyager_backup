@@ -605,9 +605,15 @@
         })
       );
       $("#track-count").textContent = snap.roc.tracks.length ? String(snap.roc.tracks.length) : "";
-      $("#tracks-hint").textContent = snap.roc.tracks.length
+      // 버린 수신이 있으면 알린다. 조용히 버리면 화면과 실제가 어긋난다.
+      const discarded = [];
+      if (snap.roc.rejected_count) discarded.push(`값이 규격 밖 ${snap.roc.rejected_count}건`);
+      if (snap.roc.ignored_count) discarded.push(`해석 실패 ${snap.roc.ignored_count}건`);
+      if (snap.roc.mismatched_ack_count) discarded.push(`송신국 불일치 ACK ${snap.roc.mismatched_ack_count}건`);
+      $("#tracks-hint").textContent = (snap.roc.tracks.length
         ? `위치보고가 ${snap.roc.report_timeout.toFixed(0)}초 이상 없으면 두절로 판정합니다. 모드는 본선이 보고한 값입니다.`
-        : "아직 위치보고가 없습니다.";
+        : "아직 위치보고가 없습니다.")
+        + (discarded.length ? `  버린 수신 — ${discarded.join(" · ")}` : "");
 
       // 명령 이력
       $("#commands").replaceChildren(
