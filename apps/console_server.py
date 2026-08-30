@@ -44,6 +44,10 @@ from urllib.parse import urlparse
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
 from MASS.mass_agent import MassAgent, ShipState  # noqa: E402
 from ROC.roc_agent import RocAgent  # noqa: E402
 from common import config  # noqa: E402
@@ -835,9 +839,13 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
         "--transport",
-        choices=("direct", "vdeter"),
+        choices=("direct", "software", "vdeter", "stage7"),
         default="direct",
-        help="direct=무선 계층 없이 직결(기본), vdeter=실 VDETER Service API 종단",
+        help=(
+            "direct=무선 계층 없이 직결(기본), software=Software Radio 기반 "
+            "실 VDETER Service API 종단(vdeter는 이전 이름), stage7=외부 주입 "
+            "Stage 7 Service — 콘솔 CLI 단독으로는 조립 불가(주입 seam 참조)"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -851,7 +859,10 @@ def main(argv=None) -> int:
     base = f"http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}"
     print(f"전송 경로: {simulation.transport.name} — {simulation.transport.detail}")
     if simulation.transport_note:
-        print(f"  ⚠ vdeter를 쓸 수 없어 direct로 내려갔습니다: {simulation.transport_note}")
+        print(
+            f"  ⚠ {args.transport} 전송을 쓸 수 없어 direct로 내려갔습니다: "
+            f"{simulation.transport_note}"
+        )
     print("MASS/ROC 콘솔이 떴습니다. 두 창을 나란히 여세요.")
     print(f"  ROC  콘솔  {base}/roc")
     print(f"  MASS 콘솔  {base}/mass")
