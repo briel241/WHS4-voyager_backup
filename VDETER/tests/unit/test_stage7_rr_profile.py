@@ -579,6 +579,16 @@ class RrFinalBuilderTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def _current_head(self):
+        import subprocess
+
+        done = subprocess.run(
+            ["git", "-C", VDETER_ROOT, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert done.returncode == 0, "시험 환경에 git HEAD 필요"
+        return done.stdout.strip()
+
     def _assert_blocked(self, result, keyword):
         # 0.9.22 R2 보강: NOT_READY만 보면 "겨냥 검사가 죽고 무관한
         # 문제가 동반돼도 통과"하는 약한 단언 — 겨냥 메시지를 함께 요구.
@@ -596,10 +606,12 @@ class RrFinalBuilderTest(unittest.TestCase):
         os.makedirs(vroot, exist_ok=True)
         with open(os.path.join(vroot, "frozen-hash-audit.json"), "w") as handle:
             # 도구 산출물 형태 (0.9.22 R2 보강: builder가 구조·자기결속도
-            # 검사 — 손으로 쓴 한 줄 JSON은 거부된다)
+            # 검사 — 손으로 쓴 한 줄 JSON은 거부되고, head_commit은 현행
+            # HEAD 일치·worktree_dirty=false까지 요구되므로 실측값 사용)
             json.dump({
                 "all_unchanged": all_unchanged,
-                "head_commit": "0" * 40,
+                "head_commit": self._current_head(),
+                "worktree_dirty": False,
                 "files": [{"file": "src/x.py", "unchanged": all_unchanged}],
             }, handle)
         for log in ("unit-contract.log", "integration-stage7.log"):
@@ -984,6 +996,51 @@ class RrFinalBuilderTest(unittest.TestCase):
             )
             self._assert_blocked(result, "files 목록")
             self._assert_blocked(result, "head_commit")
+
+    def test_stale_head_audit_blocks_ready(self):
+        # 사용자 지적(2026-08-30): head_commit 형식만 보면 코드가 바뀐
+        # 뒤의 낡은 검증 묶음이 통과 — 현행 HEAD 불일치는 거부되어야.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            audit_path = os.path.join(vroot, "frozen-hash-audit.json")
+            with open(audit_path) as handle:
+                audit = json.load(handle)
+            audit["head_commit"] = "0" * 40
+            with open(audit_path, "w") as handle:
+                json.dump(audit, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "현행 HEAD와 불일치")
+
+    def test_dirty_worktree_audit_blocks_ready(self):
+        # 오염 트리에서 만든 감사(또는 필드 부재)는 결속 거부
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            audit_path = os.path.join(vroot, "frozen-hash-audit.json")
+            with open(audit_path) as handle:
+                audit = json.load(handle)
+            audit["worktree_dirty"] = True
+            with open(audit_path, "w") as handle:
+                json.dump(audit, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "worktree_dirty")
 
     def test_nonint_retries_counted_as_problem_not_crash(self):
         # R2-A 실측: retries="abc"가 traceback으로 죽던 것 — 문제 계상으로

@@ -66,6 +66,24 @@ def _int_or_none(value):
         return None
 
 
+def _git_head():
+    """builder 자신이 속한 저장소의 현행 HEAD (실패 시 None).
+
+    (0.9.22 사용자 지적: audit head_commit을 40자 형식만 검사하면 어느
+    시점의 감사든 통과 — 현행 HEAD와의 일치를 요구해 '코드가 바뀐 뒤의
+    낡은 검증 묶음' 결속을 기계 차단한다.)"""
+    import subprocess
+    try:
+        done = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=20,
+        )
+        return done.stdout.strip() if done.returncode == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _root_run_dir(root):
     """evidence root 경로에서 실제 run 디렉터리명을 얻는다.
 
@@ -337,6 +355,27 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
                         and len(head_commit) == 40):
                     problems.append(
                         "frozen-hash-audit head_commit 자기결속 부재"
+                    )
+                else:
+                    # 0.9.22 사용자 지적: 형식 검사만으론 낡은 묶음이
+                    # 통과 — 현행 HEAD 일치를 요구(코드 변경 후엔 묶음
+                    # 재생성 강제). HEAD 확인 불능도 fail-closed.
+                    current_head = _git_head()
+                    if current_head is None:
+                        problems.append(
+                            "현행 git HEAD 확인 불가 — head_commit 결속 "
+                            "검증 불능"
+                        )
+                    elif head_commit != current_head:
+                        problems.append(
+                            "frozen-hash-audit head_commit이 현행 HEAD와 "
+                            f"불일치: {head_commit[:12]} != "
+                            f"{current_head[:12]} (검증 묶음 재생성 필요)"
+                        )
+                if audit_payload.get("worktree_dirty") is not False:
+                    problems.append(
+                        "frozen-hash-audit worktree_dirty != false "
+                        "(오염 트리 감사 또는 필드 부재)"
                     )
         for fname in (
             "frozen-hash-audit.json", "unit-contract.log",
