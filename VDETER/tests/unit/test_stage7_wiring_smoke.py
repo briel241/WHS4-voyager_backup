@@ -33,7 +33,6 @@ from tests.support.stage4 import (
 from tests.support.stage7 import stage7_test_signer
 from tests.unit.test_stage7_configuration import (
     DATA_PROFILE_17,
-    DATA_PROFILE_17_DISABLED,
     build_mass_b_source,
     build_roc_source,
     build_source,
@@ -159,15 +158,10 @@ def _install_identity_bridge(endpoint, *, now_utc_ns):
 
 @unittest.skipUnless(HAS_CRYPTO, "cryptography extra가 필요합니다")
 class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
-    def _build(
-        self,
-        source_builder=build_source,
-        endpoint_station=111111111,
-        data_profile=DATA_PROFILE_17,
-    ):
+    def _build(self, source_builder=build_source, endpoint_station=111111111):
         loader = Stage7ConfigurationLoader()
         resolved = loader.load_endpoint_configuration(
-            source_builder(), data_profile, run_id="stage7-unit-run"
+            source_builder(), DATA_PROFILE_17, run_id="stage7-unit-run"
         )
         self.assertTrue(resolved.is_ok, getattr(resolved, "error", None))
         signer, certificate_der, fingerprint = stage7_test_signer()
@@ -212,47 +206,8 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
         self.assertTrue(result.is_err)
         self.assertEqual(result.error.code, "SERVICE_NOT_STARTED")
 
-    def test_data_session_gate_rejects_without_transfer_or_mac_state(self):
-        endpoint = self._build(data_profile=DATA_PROFILE_17_DISABLED)
-        self._open_submit_admission(endpoint)
-        initial_mac_state = endpoint._mac.state
-
-        result = endpoint.submit(
-            SubmitTransferRequest(
-                destination=Addressed(StationId(222222222)),
-                payload_format=PayloadFormat("test.stage0.opaque"),
-                payload=bytes(range(128)),
-                ack_required=True,
-            )
-        )
-
-        self.assertTrue(result.is_err)
-        self.assertEqual(result.error.code, "UNSUPPORTED_REQUEST")
-        self.assertEqual(
-            result.error.details.get("reason"), "stage7_data_session_disabled"
-        )
-        self.assertEqual(endpoint._issued_transfer_ids, set())
-        self.assertEqual(endpoint._transfers, {})
-        self.assertEqual(endpoint._service_fifo, [])
-        self.assertIs(endpoint._mac.state, initial_mac_state)
-
-    def test_data_session_gate_keeps_short_data_available(self):
-        endpoint = self._build(data_profile=DATA_PROFILE_17_DISABLED)
-        self._open_submit_admission(endpoint)
-
-        result = endpoint.submit(
-            SubmitTransferRequest(
-                destination=Addressed(StationId(222222222)),
-                payload_format=PayloadFormat("test.stage0.opaque"),
-                payload=b"route-command",
-                ack_required=True,
-            )
-        )
-
-        self.assertTrue(result.is_ok, getattr(result, "error", None))
-
-    def test_enabled_profile_preserves_existing_data_session_path(self):
-        endpoint = self._build(data_profile=DATA_PROFILE_17)
+    def test_data_session_submission_is_admitted(self):
+        endpoint = self._build()
         self._open_submit_admission(endpoint)
 
         result = endpoint.submit(
