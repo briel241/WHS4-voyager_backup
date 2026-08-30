@@ -119,9 +119,14 @@ class VdeterTransport:
     detail = "VDETER 소프트웨어 무선 (Service API 종단)"
     operational = True
 
-    def __init__(self, mass_mmsi: int, roc_mmsi: int) -> None:
+    def __init__(self, mass_mmsi: int, roc_mmsi: int,
+                 intruder_mmsi: int | None = None) -> None:
         self._mass_mmsi = mass_mmsi
         self._roc_mmsi = roc_mmsi
+        # 비인가 송신국은 실제로 **또 하나의 무선국**이다. 응용에서 만들어낸
+        # 가상의 송신자가 아니라 같은 채널에 있는 제3국이라야 "송신자 인증이
+        # 없다"는 사실이 그대로 재현된다. Stage 5 그룹의 MASS-B를 쓴다.
+        self._intruder_mmsi = intruder_mmsi
         self._arrivals: list[Arrival] = []
         self._inflight: list[dict] = []
         self.completed = 0
@@ -137,6 +142,7 @@ class VdeterTransport:
             sys.path.insert(0, os.path.join(_ROOT, "VDETER"))
             from tests.support.stage5 import (
                 MASS_A_STATION_ID,
+                MASS_B_STATION_ID,
                 ROC_STATION_ID,
                 STATION_ENDPOINT_IDS,
                 build_stage5_software_group,
@@ -171,6 +177,11 @@ class VdeterTransport:
             self._mass_mmsi: STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value],
             self._roc_mmsi: STATION_ENDPOINT_IDS[ROC_STATION_ID.value],
         }
+        if self._intruder_mmsi is not None:
+            self._station_by_mmsi[self._intruder_mmsi] = MASS_B_STATION_ID
+            endpoint_of[self._intruder_mmsi] = STATION_ENDPOINT_IDS[
+                MASS_B_STATION_ID.value
+            ]
         mmsi_by_endpoint = {v: k for k, v in endpoint_of.items()}
 
         def sink_factory(endpoint_id):
@@ -315,11 +326,13 @@ class VdeterTransport:
             pass
 
 
-def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int):
+def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int,
+                    intruder_mmsi: int | None = None):
     """`kind`에 맞는 전송 경로를 만든다. vdeter가 안 되면 사유와 함께 direct로 내려간다."""
     if kind == "direct":
         return DirectTransport(), ""
     try:
-        return VdeterTransport(mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi), ""
+        return VdeterTransport(mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi,
+                               intruder_mmsi=intruder_mmsi), ""
     except VdeterUnavailable as exc:
         return DirectTransport(), str(exc)

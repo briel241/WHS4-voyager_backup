@@ -106,6 +106,13 @@ class MassAgent:
     # 비상 계획이 정한다.
     link_loss_fallback: int = config.DEFAULT_LINK_LOSS_FALLBACK
 
+    # 정량지표 계수기(common/metrics.Metrics). None이면 세지 않는다.
+    #
+    # 여기서 세는 것은 "명령을 누가 보냈고 배가 그대로 움직였는가" 하나뿐이다.
+    # authority_policy와 별개라는 점이 중요하다 — 정책을 끈 상태에서 비인가
+    # 명령이 몇 건 수용됐는지가 이 프로젝트가 보이려는 수치다.
+    metrics: object = None
+
     def __post_init__(self) -> None:
         self._waypoints: list[route.Waypoint] = []
         self._waypoint_index = 0
@@ -574,6 +581,13 @@ class MassAgent:
             self._apply_route(message, now, source_id)
         else:
             self.rejected_count += 1
+
+        # 지표는 "배가 이 명령대로 움직였는가"를 센다. 거절 ACK도 응답이므로
+        # 응답을 냈는지로 세면 안 된다.
+        if self.metrics is not None:
+            self.metrics.record_admission(
+                source_id, accepted=decision.accept or decision.cancel
+            )
 
         return [
             Outbound(

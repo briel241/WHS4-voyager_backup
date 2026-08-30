@@ -68,3 +68,10 @@ POSITION_REPORT_TIMEOUT_SEC = 10.0
 # 시험용 국 식별자 (MMSI). VDE 링크 계층의 Source/Destination ID로 넘어간다.
 MASS_MMSI = 440_000_001
 ROC_MMSI = 440_000_002
+
+# 비인가 송신국. ROC를 사칭해 명령을 넣는 제3국이며, "비인가 패킷 수용 0회"
+# 지표를 재려면 실제로 명령을 넣어 보는 국이 있어야 한다.
+#
+# VDE-TER에는 송신자 인증이 없으므로 이 국의 명령도 전파상으로는 정상이다.
+# 거절 여부는 응용 계층의 판정(MassAgent.authority_policy)에만 달려 있다.
+INTRUDER_MMSI = 440_000_003

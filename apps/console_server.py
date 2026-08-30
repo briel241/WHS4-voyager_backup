@@ -47,6 +47,7 @@ sys.path.insert(0, _ROOT)
 from MASS.mass_agent import MassAgent, ShipState  # noqa: E402
 from ROC.roc_agent import RocAgent  # noqa: E402
 from common import config  # noqa: E402
+from common import metrics as metrics_mod  # noqa: E402
 from common.codec import decode  # noqa: E402
 from common.messages import application_ack as ack  # noqa: E402
 from common.messages import position_report as pos  # noqa: E402
@@ -112,19 +113,29 @@ _FALLBACK_ORIGIN = (START_LATITUDE, START_LONGITUDE)
 class Simulation:
     """두 행위자를 잇고, 화면에 낼 스냅샷을 만든다. 모든 공개 메서드는 락을 잡는다."""
 
-    def __init__(self, transport_kind: str = "direct") -> None:
+    def __init__(self, transport_kind: str = "direct", authority: str = "open") -> None:
         self.lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
+        # 송신국 판정을 켤지. "open"은 VDE-TER의 현재 상태(송신자 인증 없음)를
+        # 그대로 재현하고, "strict"는 ROC가 아닌 국의 명령을 거절한다.
+        self.authority = authority
         # 전송 경로. vdeter를 못 만들면 사유와 함께 direct로 내려간다.
         self.transport, self.transport_note = build_transport(
-            transport_kind, mass_mmsi=config.MASS_MMSI, roc_mmsi=config.ROC_MMSI
+            transport_kind,
+            mass_mmsi=config.MASS_MMSI,
+            roc_mmsi=config.ROC_MMSI,
+            intruder_mmsi=config.INTRUDER_MMSI,
         )
         self._reset_unlocked()
 
     # ---------------------------------------------------------------- 초기화
 
     def _reset_unlocked(self) -> None:
+        # 지표 계수기. 정당한 송신국은 ROC 하나다 — 이것이 판정 근거이며,
+        # 아래 authority_policy(실제 방어)와는 별개다.
+        self.metrics = metrics_mod.Metrics(expected_senders={config.ROC_MMSI})
+
         self.mass = MassAgent(
             state=ShipState(
                 latitude=START_LATITUDE,
@@ -136,7 +147,11 @@ class Simulation:
             # 항적이 뚝뚝 끊겨 보이므로 콘솔에서만 빠르게 둔다. 채널 부하를
             # 재는 실험에서는 이 값을 None으로 두어 표준 주기를 써야 한다.
             report_interval=DEMO_REPORT_INTERVAL_SEC,
+            metrics=self.metrics,
         )
+        if self.authority == "strict":
+            roc_mmsi = config.ROC_MMSI
+            self.mass.authority_policy = lambda source_id, _message: source_id == roc_mmsi
         self.roc = RocAgent()
         self.started = time.monotonic()
         self.now = 0.0
@@ -355,6 +370,10 @@ class Simulation:
                 item["reason_name"] = verdict["reason_name"]
                 item["accepted"] = verdict["accepted"]
                 item["answered_at"] = now
+                # 명령 발행 → 응용 ACK 도착까지가 왕복 지연이다. 성능 지표는
+                # 이 값을 구간별로 모아 비교한다.
+                item["latency"] = round(now - item["issued_at"], 3)
+                self.metrics.record_latency(now - item["issued_at"])
                 return
 
     # payload가 응용 ACK면 판정을 돌려주고, 아니면 None (위치보고 등).
@@ -571,9 +590,16 @@ class Simulation:
         self._log(now, "ROC", "MASS", "send", f"{label} {len(der)} byte 전송")
 
         before = len(self._trust.fingerprints())
+        started = time.perf_counter()
         accepted, reason = mass_receive_certificate(
             der, self._trust, self._ca_der, time.time())
+        elapsed = time.perf_counter() - started
         after = len(self._trust.fingerprints())
+
+        # 정당한 인증서만 인증 성공률의 분모에 들어간다. 위조본이 통과하면
+        # 그것은 인증 실패가 아니라 비인가 수용이다.
+        self.metrics.record_authentication(
+            ok=accepted, genuine=not forged, reason=reason, seconds=elapsed)
 
         fingerprint = cert.fingerprint_of(der).hex()
         entry = {
@@ -585,6 +611,7 @@ class Simulation:
             "reason": reason,
             "fingerprint": fingerprint,
             "trust_count": after,
+            "verify_ms": round(elapsed * 1000, 2),
         }
         self.cert_log.append(entry)
         del self.cert_log[:-LOG_MAX_ENTRIES]
@@ -617,6 +644,17 @@ class Simulation:
         return lat, lon
 
     # ---------------------------------------------------------------- 링크
+
+    # 지연 표본을 어느 구간에 넣을지 바꾼다.
+    #
+    # 성능 저하는 같은 조작을 보안 절차 없이/있게 했을 때의 차이다. 콘솔은
+    # 자유 조작이라 그 경계를 자동으로 알 수 없으므로 조작자가 지정한다.
+    def set_phase(self, phase: str) -> dict:
+        with self.lock:
+            self.metrics.set_phase(phase)
+            self._log(self.now, "SIM", "—", "link",
+                      f"계측 구간 전환 → {phase}")
+            return {"ok": True, "phase": self.metrics.phase}
 
     def set_link(self, up: bool) -> dict:
         with self.lock:
@@ -677,6 +715,8 @@ class Simulation:
                     "link_up": self.link_up,
                     "dropped": self.dropped,
                 },
+                "authority": self.authority,
+                "metrics": self.metrics.summary(),
                 "commands": list(self._history),
                 "communication_log": list(self.log),
                 "mass_receive_log": list(self.mass_log),
@@ -696,7 +736,8 @@ class Simulation:
         return {"ok": True, "path": os.path.relpath(path, _ROOT),
                 "commands": len(snapshot["commands"]),
                 "certificates": len(snapshot["certificate_log"]),
-                "log_entries": len(snapshot["communication_log"])}
+                "log_entries": len(snapshot["communication_log"]),
+                "metrics": snapshot["metrics"]}
 
     def _log(self, now: float, sender: str, receiver: str, kind: str, text: str) -> None:
         self.log.append(
@@ -791,6 +832,7 @@ class Simulation:
                     "reason_name": item.get("reason_name", "") if answered else "",
                     "accepted": bool(item.get("accepted")) if answered else False,
                     "answered_at": round(item["answered_at"], 1) if answered else None,
+                    "latency": item.get("latency") if answered else None,
                 }
             )
 
@@ -798,6 +840,8 @@ class Simulation:
             "t": round(now, 1),
             "link_up": self.link_up,
             "dropped": self.dropped,
+            "authority": self.authority,
+            "metrics": self.metrics.summary(),
             "transport": {
                 "name": self.transport.name,
                 "detail": self.transport.detail,
@@ -925,6 +969,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
             elif path == "/api/link":
                 self._send_json(self.simulation.set_link(bool(body.get("up", True))))
+            elif path == "/api/phase":
+                self._send_json(self.simulation.set_phase(str(body.get("phase", ""))))
             elif path == "/api/save":
                 self._send_json(self.simulation.save_session())
             else:
@@ -990,9 +1036,16 @@ def main(argv=None) -> int:
         default="direct",
         help="direct=무선 계층 없이 직결(기본), vdeter=실 VDETER Service API 종단",
     )
+    parser.add_argument(
+        "--authority",
+        choices=("open", "strict"),
+        default="open",
+        help="open=송신자 인증 없음(VDE-TER 현재 상태 재현, 기본), "
+             "strict=ROC 외 송신국의 명령을 거절",
+    )
     args = parser.parse_args(argv)
 
-    simulation = Simulation(transport_kind=args.transport)
+    simulation = Simulation(transport_kind=args.transport, authority=args.authority)
     ConsoleHandler.simulation = simulation
 
     server = ThreadingHTTPServer((args.host, args.port), ConsoleHandler)
@@ -1001,6 +1054,8 @@ def main(argv=None) -> int:
 
     base = f"http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}"
     print(f"전송 경로: {simulation.transport.name} — {simulation.transport.detail}")
+    print("송신국 판정: " + ("ROC만 허용 (strict)" if args.authority == "strict"
+                        else "없음 (open — VDE-TER 현재 상태)"))
     if simulation.transport_note:
         print(f"  ⚠ vdeter를 쓸 수 없어 direct로 내려갔습니다: {simulation.transport_note}")
     print("MASS/ROC 콘솔이 떴습니다. 두 창을 나란히 여세요.")

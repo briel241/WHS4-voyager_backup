@@ -48,6 +48,7 @@ def read(path: str) -> str:
 
 print("[상수]")
 from common import config  # noqa: E402
+from common import metrics as met  # noqa: E402
 from MASS.mass_agent import DEFAULT_MAX_TURN_RATE, MassAgent  # noqa: E402
 
 CONSTANTS = [
@@ -59,6 +60,11 @@ CONSTANTS = [
     ("기본 fallback = DP(2)", config.DEFAULT_LINK_LOSS_FALLBACK, 2),
     ("MASS MMSI", config.MASS_MMSI, 440_000_001),
     ("ROC MMSI", config.ROC_MMSI, 440_000_002),
+    ("비인가 송신국 MMSI", config.INTRUDER_MMSI, 440_000_003),
+    # 지표 목표치는 docs/정량지표.md의 표에 그대로 적혀 있다.
+    ("비인가 수용 목표 0회", met.TARGET_UNAUTHORIZED_ACCEPTED, 0),
+    ("인증 성공률 목표 99%", met.TARGET_AUTH_SUCCESS_RATE, 0.99),
+    ("성능 저하 목표 30%", met.TARGET_LATENCY_OVERHEAD, 0.30),
 ]
 for label, actual, expected in CONSTANTS:
     check(label, actual == expected, f"실제 {actual} / 문서 {expected}")
@@ -214,7 +220,11 @@ REFERENCED = [
     "apps/control_loopback_demo.py",
     "apps/rf_normal_cycle.py",
     "tests/test_sc_vde_contract.py",
+    "tests/test_metrics.py",
+    "common/metrics.py",
+    "tools/measure_metrics.py",
     "tools/build_scenario_catalog.py",
+    "docs/정량지표.md",
     "docs/사용법.md",
     "docs/인수인계.md",
     "docs/시나리오_카탈로그_확정3종.xlsx",

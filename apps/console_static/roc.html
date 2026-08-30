@@ -151,6 +151,27 @@
     </div>
 
     <div class="panel">
+      <h2>정량지표 <span class="count" id="metric-phase"></span></h2>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr>
+            <th>지표</th><th class="num">측정</th><th class="num">목표</th><th>판정</th>
+          </tr></thead>
+          <tbody id="metric-rows"></tbody>
+        </table>
+      </div>
+      <ul class="metric-detail" id="metric-detail"></ul>
+      <div class="actions">
+        <button class="btn small" id="btn-phase-baseline">기준 구간</button>
+        <button class="btn small ghost" id="btn-phase-secured">보안 구간</button>
+        <span class="msg" id="msg-phase"></span>
+      </div>
+      <p class="hint">성능 저하는 두 구간을 비교해서 냅니다. 기준 구간에서 명령을 몇 번
+        보낸 뒤 보안 구간으로 바꿔 같은 수만큼 보내면 왕복 지연 차가 나옵니다.
+        비인가 패킷은 ROC가 아닌 송신국에서 온 명령을 셉니다.</p>
+    </div>
+
+    <div class="panel">
       <h2>교신 로그</h2>
       <ul class="list" id="log"></ul>
     </div>

@@ -46,6 +46,8 @@
     0: ["?", "알 수 없음"],
   };
 
+  const PHASE_TEXT = { baseline: "기준 구간", secured: "보안 구간" };
+
   function el(tag, attrs = {}, children = []) {
     const node = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
@@ -344,6 +346,66 @@
     return el("span", { class: `status ${cls}`, text });
   }
 
+  // ------------------------------------------------------------ 정량지표
+
+  // 판정 결과를 배지로. null은 표본이 없어 판정을 미룬 상태다.
+  function verdictPill(met) {
+    if (met === true) return statusPill("통과", "ok");
+    if (met === false) return statusPill("미달", "bad");
+    return statusPill("보류", "neutral");
+  }
+
+  const pct = (v, digits = 2) => (v == null ? "—" : `${(v * 100).toFixed(digits)}%`);
+  // 재는 값이 대부분 1 ms 아래라, ms로 반올림하면 전부 "0.0 ms"가 되어 비교가
+  // 안 된다. common/metrics.py의 _ms()와 같은 규칙을 쓴다.
+  const ms = (v) => {
+    if (v == null) return "—";
+    return v < 0.001 ? `${Math.round(v * 1e6)} µs` : `${(v * 1000).toFixed(2)} ms`;
+  };
+
+  function renderMetrics(metrics) {
+    const unauth = metrics.unauthorized_acceptance;
+    const auth = metrics.authentication;
+    const lat = metrics.latency;
+
+    const rows = [
+      ["비인가 패킷 수용", `${unauth.value}회`, "0회", unauth.met],
+      ["인증 성공률", pct(auth.rate), "99% 이상", auth.met],
+      ["성능 저하",
+        lat.overhead == null ? "—" : `${lat.overhead >= 0 ? "+" : ""}${pct(lat.overhead, 1)}`,
+        "30% 이하", lat.met],
+    ];
+    $("#metric-rows").replaceChildren(
+      ...rows.map(([name, value, target, met]) => el("tr", {}, [
+        el("td", { text: name }),
+        el("td", { class: "num", text: value }),
+        el("td", { class: "num", text: target }),
+        el("td", {}, [verdictPill(met)]),
+      ]))
+    );
+
+    const phase = $("#metric-phase");
+    phase.textContent = PHASE_TEXT[metrics.phase] || metrics.phase;
+    phase.className = `count phase-${metrics.phase}`;
+
+    const failures = Object.entries(auth.failures)
+      .map(([reason, n]) => `${reason} ${n}건`).join(", ");
+    const detail = [
+      `비인가 제시 <b>${unauth.offered}</b>건 중 수용 <b>${unauth.accepted}</b>건` +
+        ` · 송신국 ${unauth.by_source.offered}건 · 위조 자격증명 ${unauth.by_credential.offered}건`,
+      `정당한 명령 <b>${unauth.authorized_accepted}</b>/${unauth.authorized_offered}건 수용`,
+      `정당한 자격증명 <b>${auth.success}</b>/${auth.attempts}건 통과` +
+        (failures ? ` · 실패 ${failures}` : "") +
+        (auth.verify_seconds.median != null
+          ? ` · 검증 1건 ${ms(auth.verify_seconds.median)}` : ""),
+      `왕복 지연 기준 <b>${ms(lat.baseline.median)}</b>(${lat.baseline.count}건)` +
+        ` → 보안 <b>${ms(lat.secured.median)}</b>(${lat.secured.count}건)`,
+    ];
+    $("#metric-detail").replaceChildren(
+      ...detail.map((html) => el("li", { html }))
+    );
+  }
+
   function renderLog(list, entries) {
     list.replaceChildren(
       ...entries.slice().reverse().map((entry) => {
@@ -487,6 +549,17 @@
       }
     });
 
+    async function setPhase(phase) {
+      try {
+        const result = await api("/api/phase", { phase });
+        flash("#msg-phase", `계측 구간: ${PHASE_TEXT[result.phase] || result.phase}`, "ok");
+      } catch (error) {
+        flash("#msg-phase", error.message, "err");
+      }
+    }
+    $("#btn-phase-baseline").addEventListener("click", () => setPhase("baseline"));
+    $("#btn-phase-secured").addEventListener("click", () => setPhase("secured"));
+
     $("#btn-reset").addEventListener("click", async () => {
       await api("/api/reset", {});
       observed.length = 0; lastUpdatedAt = null; wps.length = 0; renderWps();
@@ -573,6 +646,7 @@
               text: "아직 발급하지 않았습니다." })])])
       );
 
+      renderMetrics(snap.metrics);
       renderLog($("#log"), snap.log);
 
       chart.render({
@@ -657,6 +731,14 @@
       $("#ct-ignored").className = `v${m.ignored_count ? " alert" : ""}`;
       $("#ct-dropped").textContent = String(snap.dropped);
       $("#ct-dropped").className = `v${snap.dropped ? " alert" : ""}`;
+
+      const unauth = snap.metrics.unauthorized_acceptance;
+      $("#ct-unauth").textContent = String(unauth.value);
+      $("#ct-unauth").className = `v${unauth.value ? " alert" : ""}`;
+      $("#ct-hint").textContent = snap.authority === "strict"
+        ? `송신국 판정 켬 — ROC(${snap.roc.mmsi}) 외의 명령은 거절합니다.`
+        : "송신국 판정 끔 — VDE-TER에는 송신자 인증이 없어 누가 보내도 받습니다."
+          + " (--authority strict로 켤 수 있습니다)";
 
       linkUp = snap.link_up;
       const linkButton = $("#btn-link");
