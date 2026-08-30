@@ -6,15 +6,30 @@
     python3 apps/scenario_runner.py list       # 목록만 출력
     python3 apps/scenario_runner.py run SC-VDE-001
     python3 apps/scenario_runner.py run SC-VDE-001 --json
+    python3 apps/scenario_runner.py run all                       # 전체 비대화형
+    python3 apps/scenario_runner.py run SC-VDE-005 --transport software
+    python3 apps/scenario_runner.py run SC-VDE-005 --transport stage7 \\
+        --run-id sc005-rf-001 --configs-dir <resolved-configs>
 
 서브명령 없이 실행하면 대화형 메뉴로 들어간다. 메뉴에서 번호(1·2·3)나 시나리오
 ID를 입력하면 즉시 실행하고 타임라인·판정을 보여준 뒤 다시 메뉴로 돌아온다.
 `a`=전체 실행, `q`=종료. 실행할 때마다 로그가 results/에 JSON으로 저장된다.
 
-각 시나리오는 작업 A~C 에서 만든 함수를 호출하는 **얇은 어댑터**다. 실행은
-현재 모의(in-process)다 — 링크(VDE-TER)를 타지 않는다. 통합 시
-``SCENARIOS`` dict 의 실행 함수만 실제 ``RocAgent``/``MassAgent`` 호출로
-갈아끼우면 되고, 로그·판정 계층은 그대로 재사용된다.
+전송 경로(`--transport`)
+    direct(기본)  기존 in-process 논리 재현 — 링크(VDE-TER)를 타지 않는다.
+                  기존 호출(`run SC-VDE-005`)과 출력·로그·판정 동작을 보존한다.
+    software      실제 VdeService 소프트웨어 무선 경로. 실제 RocAgent/MassAgent/
+                  cert_flow가 public Service API로 payload를 왕복한다
+                  (`apps/mass_roc_software.py`).
+    stage7        별도 process Stage 7 coordinator·launcher·B210 경로
+                  (`apps/stage7_run.py` → coordinator --workload mass-roc →
+                  `apps/stage7_mass_roc_controller.py`). `--run-id`·
+                  `--configs-dir`가 필수이며, 조립·연결 실패는 명시적 FAIL이다
+                  — direct/software로 fallback하지 않는다.
+
+인증서 분기(`--certificate-case normal|forged|both`, software/stage7 전용):
+단독 SC-VDE-001 기본값은 normal, `run all` 기본값은 both(정상·위조 각각
+별도 결과)다.
 
 표준 라이브러리 ``argparse`` 만 사용한다.
 """
@@ -410,14 +425,160 @@ def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> 
     return 0 if summary["passed"] else 1
 
 
-def command_run(args) -> int:
-    scenario_id = args.scenario_id
-    if scenario_id not in SCENARIOS:
-        print(f"알 수 없는 시나리오: {scenario_id}", file=sys.stderr)
+def _resolve_certificate_case(args) -> str:
+    """service backend(software/stage7)의 인증서 분기 기본값을 정한다.
+
+    단독 SC-VDE-001 실행 기본값은 normal, `run all`은 정상·위조를 각각 별도
+    결과로 실행(both)한다. `--certificate-case`로 명시하면 그 값을 쓴다.
+    """
+    if args.certificate_case is not None:
+        return args.certificate_case
+    return "both" if args.scenario_id == "all" else "normal"
+
+
+def _run_direct(args) -> int:
+    """기존 direct(논리 재현) 경로 — 동작 완전 보존 + `run all` 비대화형."""
+    if args.certificate_case is not None:
+        print("--certificate-case는 software/stage7 전용이다 (direct 논리 "
+              "재현에는 위조 분기가 없다)", file=sys.stderr)
+        return 2
+    if args.scenario_id == "all":
+        exit_code = 0
+        for scenario_id in sorted(SCENARIOS):
+            print("\n" + "=" * 60)
+            exit_code = max(exit_code, _run_and_report(
+                scenario_id, now=args.now, as_json=args.json,
+                save=not args.no_save))
+        return exit_code
+    if args.scenario_id not in SCENARIOS:
+        print(f"알 수 없는 시나리오: {args.scenario_id}", file=sys.stderr)
         print("사용 가능한 목록은 'list' 명령으로 확인하라.", file=sys.stderr)
         return 2
-    return _run_and_report(scenario_id, now=args.now, as_json=args.json,
+    return _run_and_report(args.scenario_id, now=args.now, as_json=args.json,
                            save=not args.no_save)
+
+
+_SERVICE_SCENARIO_IDS = ("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all")
+
+
+def _summarize_service_results(results: dict) -> bool:
+    """software/stage7 결과 dict를 사람이 읽게 요약하고 전체 성패를 돌려준다."""
+    from apps.stage7_mass_roc_controller import _result_ok
+
+    overall = True
+    for scenario_id, payload in sorted(results.items()):
+        ok = _result_ok(payload)
+        overall = overall and ok
+        body = payload.get("result", payload)
+        steps = body.get("steps") or []
+        failed = [s["name"] for s in steps if s.get("status") != "PASS"]
+        line = f"  {scenario_id}: {'PASS' if ok else 'FAIL'} ({len(steps)}단계"
+        if body.get("reason"):
+            line += f", 사유: {body['reason']}"
+        if failed:
+            line += f", 실패 단계: {', '.join(failed)}"
+        print(line + ")")
+        pre = payload.get("precondition")
+        if pre is not None:
+            print(f"    사전 조건 SC-VDE-005: {pre.get('status')}")
+    return overall
+
+
+def _run_software(args) -> int:
+    """software backend — 실제 VdeService 소프트웨어 무선 경로 + 실제 행위자."""
+    from apps.mass_roc_software import (
+        SoftwareHarnessUnavailable,
+        build_software_scenario_controller,
+    )
+    from apps.stage7_mass_roc_controller import run_scenarios
+
+    certificate_case = _resolve_certificate_case(args)
+
+    # run-id를 쓰면 결과 디렉터리 중복을 실행 전에 거부한다 (stage7과 동일 규칙).
+    run_dir = None
+    if args.run_id and not args.no_save:
+        from apps.stage7_run import runs_root
+        run_dir = os.path.join(runs_root(), args.run_id)
+        if os.path.exists(run_dir):
+            print(f"run-id {args.run_id!r}가 이미 존재한다: {run_dir}",
+                  file=sys.stderr)
+            return 2
+
+    try:
+        harness, controller = build_software_scenario_controller()
+    except SoftwareHarnessUnavailable as exc:
+        # 조립 실패는 명시적 FAIL — direct로 내려가지 않는다.
+        print(f"software 전송 조립 실패: {exc}", file=sys.stderr)
+        return 1
+    try:
+        results = run_scenarios(controller, args.scenario_id, certificate_case)
+    finally:
+        harness.close()
+
+    print(f"시나리오 {args.scenario_id} — software (VDETER 소프트웨어 무선)")
+    overall = _summarize_service_results(results)
+
+    if args.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+
+    if not args.no_save:
+        payload = {
+            "transport": "software",
+            "scenario_id": args.scenario_id,
+            "certificate_case": certificate_case,
+            "status": "PASS" if overall else "FAIL",
+            "results": results,
+        }
+        if run_dir is not None:
+            os.makedirs(run_dir)
+            path = os.path.join(run_dir, "final-result.json")
+        else:
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+            path = os.path.join(
+                RESULTS_DIR, f"{args.scenario_id.replace('-', '')}_software_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(f"\n로그 저장: {path}")
+    return 0 if overall else 1
+
+
+def _run_stage7(args) -> int:
+    """stage7 backend — 별도 process coordinator·launcher·B210 경로.
+
+    조립·연결 실패는 명시적 FAIL이며 direct/software로 fallback하지 않는다.
+    """
+    from apps.stage7_run import Stage7RequestError, run_stage7
+
+    if not args.run_id or not args.configs_dir:
+        print("stage7 전송에는 --run-id와 --configs-dir이 필수다",
+              file=sys.stderr)
+        return 2
+    try:
+        return run_stage7(
+            scenario_id=args.scenario_id,
+            run_id=args.run_id,
+            configs_dir=args.configs_dir,
+            certificate_case=_resolve_certificate_case(args),
+        )
+    except Stage7RequestError as exc:
+        print(f"stage7 실행 거부: {exc}", file=sys.stderr)
+        return 2
+
+
+def command_run(args) -> int:
+    if args.transport != "stage7" and args.configs_dir:
+        print("--configs-dir은 stage7 전용이다", file=sys.stderr)
+        return 2
+    if args.transport == "direct":
+        return _run_direct(args)
+    if args.scenario_id not in _SERVICE_SCENARIO_IDS:
+        print(f"{args.transport} 전송이 지원하는 시나리오: "
+              f"{', '.join(_SERVICE_SCENARIO_IDS)}", file=sys.stderr)
+        return 2
+    if args.transport == "software":
+        return _run_software(args)
+    return _run_stage7(args)
 
 
 def command_interactive(args) -> int:
@@ -472,13 +633,32 @@ def build_parser() -> argparse.ArgumentParser:
         handler=command_list)
 
     run_parser = subparsers.add_parser("run", help="시나리오 실행")
-    run_parser.add_argument("scenario_id", help="예: SC-VDE-001")
+    run_parser.add_argument("scenario_id",
+                            help="예: SC-VDE-001. 'all'은 전체를 비대화형으로 실행")
     run_parser.add_argument("--json", action="store_true",
                             help="로그·판정을 JSON 으로 출력")
     run_parser.add_argument("--now", type=float, default=None,
                             help="기준 시각(epoch). 재현용 고정값")
     run_parser.add_argument("--no-save", action="store_true",
                             help="results/ 에 저장하지 않는다")
+    run_parser.add_argument(
+        "--transport", choices=("direct", "software", "stage7"),
+        default="direct",
+        help="direct(기본): 기존 논리 재현. software: 실제 VdeService 소프트웨어 "
+             "무선. stage7: 별도 process Stage 7 coordinator·launcher·B210 — "
+             "조립 실패는 명시적 FAIL이며 direct로 fallback하지 않는다")
+    run_parser.add_argument(
+        "--run-id", default=None,
+        help="stage7 필수(software 선택): 결과 디렉터리 results/runs/<run-id>. "
+             "이미 존재하면 시작 전에 거부한다")
+    run_parser.add_argument(
+        "--configs-dir", default=None,
+        help="stage7 필수: prepare 도구가 만든 resolved config 디렉터리 "
+             "(metadata run-id가 --run-id와 일치해야 한다)")
+    run_parser.add_argument(
+        "--certificate-case", choices=("normal", "forged", "both"), default=None,
+        help="SC-VDE-001 인증서 분기 (software/stage7 전용). 기본: 단독 실행은 "
+             "normal, 'run all'은 both(정상·위조 각각 별도 결과)")
     run_parser.set_defaults(handler=command_run)
 
     return parser

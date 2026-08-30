@@ -838,18 +838,54 @@ def _spawn_controller(run_id, run_root, configs_dir, test_plan_sha, mode,
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
 
 
+def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
+                               scenario_id, certificate_case):
+    """MASS/ROC 업무 시나리오 controller를 spawn한다 (RR controller와 별개).
+
+    기존 RR scenario controller는 그대로 보존한다 — MASS/ROC workload는
+    repo-root `apps/stage7_mass_roc_controller.py`가 실제 RocAgent/MassAgent/
+    cert_flow 흐름을 수행하고 결과를 `<run_root>/mass-roc-events/`에 남긴다.
+    """
+    logs_dir = os.path.join(run_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_handle = open(  # noqa: SIM115
+        os.path.join(logs_dir, "mass-roc-controller.log"), "ab"
+    )
+    command = [
+        sys.executable,
+        os.path.join(os.path.dirname(APP_ROOT), "apps",
+                     "stage7_mass_roc_controller.py"),
+        "--run-id", run_id,
+        "--run-root", run_root,
+        "--test-plan-sha", test_plan_sha,
+        "--fixtures-dir", os.path.join(configs_dir, "fixtures"),
+        "--scenario-id", scenario_id,
+        "--certificate-case", certificate_case,
+    ]
+    return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
+
+
 def _run_rr_service_phase(
     coordinator, resolved, plan, run_root, *, run_id, metadata, tc_id, guard,
     gain_artifact_path, configs_dir, test_plan_sha, mode, soak_seconds=600,
-    min_transfers=10, phase_marks=None,
+    min_transfers=10, phase_marks=None, spawn_controller=None,
+    result_relpath=os.path.join("evidence", "scenario_result.json"),
 ):
-    """RR-P2/soak 공통: OPERATIONAL ladder→service publish→controller scenario→stop."""
+    """RR-P2/soak 공통: OPERATIONAL ladder→service publish→controller scenario→stop.
+
+    `spawn_controller`/`result_relpath`로 controller 종류를 주입할 수 있다
+    (기본은 기존 RR scenario controller — 동작 불변). MASS/ROC workload는
+    `_spawn_mass_roc_controller`와 mass-roc-events 결과 경로를 주입한다.
+    """
 
     marks = phase_marks if phase_marks is not None else {}
-    controller = _spawn_controller(
-        run_id, run_root, configs_dir, test_plan_sha, mode,
-        soak_seconds=soak_seconds, min_transfers=min_transfers,
-    )
+    if spawn_controller is not None:
+        controller = spawn_controller()
+    else:
+        controller = _spawn_controller(
+            run_id, run_root, configs_dir, test_plan_sha, mode,
+            soak_seconds=soak_seconds, min_transfers=min_transfers,
+        )
     gate_dir = os.path.join(run_root, "controller_gate")
     os.makedirs(gate_dir, exist_ok=True)
 
@@ -863,7 +899,8 @@ def _run_rr_service_phase(
         # soak-1이 정상 진행·성공 중인데 IPC 침묵만 보고 stall 오탐 정지).
         # 파일이 전부 멈추면 진짜 정지 — stall 감시가 그대로 작동한다.
         import glob as _glob
-        watch = [os.path.join(run_root, "logs", "scenario-controller.log")]
+        watch = [os.path.join(run_root, "logs", "scenario-controller.log"),
+                 os.path.join(run_root, "logs", "mass-roc-controller.log")]
         last_total = -1
         while controller.poll() is None:
             total = 0
@@ -879,7 +916,7 @@ def _run_rr_service_phase(
                 guard.progress()
             guard.check()
             time.sleep(1.0)
-        result_path = os.path.join(run_root, "evidence", "scenario_result.json")
+        result_path = os.path.join(run_root, result_relpath)
         try:
             with open(result_path, "rb") as handle:
                 return json.loads(handle.read().decode("utf-8"))
@@ -951,6 +988,71 @@ def run_rr_p2(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
     if status != "PASS":
         raise RuntimeError(f"{tc_id} FAIL — 새 run ID로만 재시도")
     return {"rr_p2": status, "link": link_id}
+
+
+def run_mass_roc(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
+                 link_id, gain_artifact_path, configs_dir, test_plan_sha,
+                 scenario_id, certificate_case):
+    """MASS/ROC 업무 시나리오 workload — RR ladder 위에서 별도 controller 실행.
+
+    RR TC evidence(`write_rr_evidence`)는 **쓰지 않는다** — 이 workload의
+    결과가 RR TC PASS로 재해석되면 안 되고, 반대로 RR fixture 결과를 MASS/ROC
+    성공으로 재해석해서도 안 된다. 결과는 `evidence/mass_roc/` 아래에 별도
+    artifact로 남긴다.
+    """
+
+    guard = PhaseGuard(f"MASS-ROC-{link_id}", deadline_s=70 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+    started = _utc_now()
+    t0 = time.monotonic()
+    status = "FAIL"
+    scenario = {}
+    error = None
+    marks = {}
+    try:
+        result, scenario, rc = _run_rr_service_phase(
+            coordinator, resolved, plan, run_root, run_id=run_id,
+            metadata=metadata, tc_id=f"MASS-ROC-{link_id}", guard=guard,
+            gain_artifact_path=gain_artifact_path, configs_dir=configs_dir,
+            test_plan_sha=test_plan_sha, mode="scenario", phase_marks=marks,
+            spawn_controller=lambda: _spawn_mass_roc_controller(
+                run_id, run_root, configs_dir, test_plan_sha,
+                scenario_id, certificate_case,
+            ),
+            result_relpath=os.path.join("mass-roc-events", "final-result.json"),
+        )
+        status = "PASS" if (
+            scenario.get("status") == "PASS" and rc == 0
+        ) else "FAIL"
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        raise
+    finally:
+        out_dir = os.path.join(run_root, "evidence", "mass_roc")
+        os.makedirs(out_dir, exist_ok=True)
+        payload = {
+            "artifact_type": "STAGE7_MASS_ROC_COORDINATOR_RESULT_V1",
+            "run_id": run_id,
+            "link_id": link_id,
+            "scenario_id": scenario_id,
+            "certificate_case": certificate_case,
+            "status": status if error is None else "FAIL",
+            "started_utc": started,
+            "ended_utc": _utc_now(),
+            "duration_s": round(time.monotonic() - t0, 1),
+            "scenario": scenario,
+            "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()},
+            "error": error,
+            "git_commit": metadata.get("git_commit"),
+            "baseline_sha256": metadata.get("baseline_sha256"),
+        }
+        with open(os.path.join(out_dir, "coordinator_result.json"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=1)
+    if status != "PASS":
+        raise RuntimeError("MASS-ROC workload FAIL — 새 run ID로만 재시도")
+    return {"mass_roc": status, "link": link_id, "scenario_id": scenario_id}
 
 
 def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
@@ -1868,7 +1970,29 @@ def main(argv=None) -> int:
         "--baseline-sha256", default=None,
         help="RR phase 필수: v0.9.1 기준선 SHA-256 (config 결속과 exact 일치 요구)",
     )
+    parser.add_argument(
+        "--workload", choices=("rr", "mass-roc"), default="rr",
+        help="rr(기본): 기존 RR fixture controller. mass-roc: 실제 RocAgent/"
+             "MassAgent/cert_flow 업무 시나리오 controller (rr-p2-17/19 전용)",
+    )
+    parser.add_argument(
+        "--scenario-id", default="all",
+        choices=("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all"),
+        help="mass-roc workload가 실행할 시나리오",
+    )
+    parser.add_argument(
+        "--certificate-case", default="normal",
+        choices=("normal", "forged", "both"),
+        help="mass-roc workload의 SC-VDE-001 인증서 분기",
+    )
     arguments = parser.parse_args(argv)
+
+    if arguments.workload == "mass-roc" and arguments.phase not in (
+        "rr-p2-17", "rr-p2-19"
+    ):
+        raise SystemExit(
+            "mass-roc workload는 rr-p2-17/rr-p2-19 phase에서만 실행할 수 있습니다"
+        )
 
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
     validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
@@ -1939,15 +2063,28 @@ def main(argv=None) -> int:
                 metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
             )
         elif arguments.phase in ("rr-p2-17", "rr-p2-19"):
-            phase_result = run_rr_p2(
-                coordinator, resolved, plan, arguments.run_root,
-                run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
-                link_id=int(arguments.phase[-2:]),
-                gain_artifact_path=arguments.gain_artifact,
-                configs_dir=arguments.configs_dir,
-                test_plan_sha=test_plan_sha,
-            )
+            if arguments.workload == "mass-roc":
+                phase_result = run_mass_roc(
+                    coordinator, resolved, plan, arguments.run_root,
+                    run_id=arguments.run_id,
+                    metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
+                    link_id=int(arguments.phase[-2:]),
+                    gain_artifact_path=arguments.gain_artifact,
+                    configs_dir=arguments.configs_dir,
+                    test_plan_sha=test_plan_sha,
+                    scenario_id=arguments.scenario_id,
+                    certificate_case=arguments.certificate_case,
+                )
+            else:
+                phase_result = run_rr_p2(
+                    coordinator, resolved, plan, arguments.run_root,
+                    run_id=arguments.run_id,
+                    metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
+                    link_id=int(arguments.phase[-2:]),
+                    gain_artifact_path=arguments.gain_artifact,
+                    configs_dir=arguments.configs_dir,
+                    test_plan_sha=test_plan_sha,
+                )
         elif arguments.phase in ("rr-p3-soak-17", "rr-p3-soak-19"):
             phase_result = run_rr_p3_soak(
                 coordinator, resolved, plan, arguments.run_root,
@@ -1972,6 +2109,7 @@ def main(argv=None) -> int:
         summary = {
             "run_id": arguments.run_id,
             "phase": arguments.phase,
+            "workload": arguments.workload,
             "phase_result": phase_result,
             "plan_sha256": plan.resolved_sha256,
             "command_log": list(coordinator.command_log()),
