@@ -72,19 +72,27 @@ class RrEvidenceTest(unittest.TestCase):
                 duration_s=60.0, counters={"cycles": 1, "retries": 0},
                 status="PASS", detail={"x": 1}, hardware={"usb_devices": "..."},
             )
-            data = json.loads(open(path, "rb").read().decode("utf-8"))
+            with open(path, "rb") as handle:
+                data = json.loads(handle.read().decode("utf-8"))
+            # 0.9.20 재현성 3필드(stage7_diag_env 등)와 lifecycle_generation
+            # 포함 — 재현 조건이 artifact에 기계 기록되는지의 회귀 방지.
             for key in ("profile", "baseline_version", "baseline_sha256",
                         "git_commit", "git_dirty", "hardware", "run_id",
                         "started_utc", "ended_utc", "duration_s", "counters",
-                        "status", "scope"):
+                        "status", "scope", "stage7_diag_env",
+                        "rx_energy_gate_env", "source_gain_artifact_sha256",
+                        "svcdbg_allow_rx_ready_env", "scenario_filter_env",
+                        "lifecycle_generation"):
                 self.assertIn(key, data)
             self.assertEqual(data["profile"], "RESEARCH_READY_MINIMAL")
             self.assertEqual(data["counters"]["retries"], 0)
+            self.assertEqual(data["lifecycle_generation"], 1)
             self.assertIn("full qualification", data["scope"])
-            index = json.loads(
-                open(os.path.join(root, "evidence", "research_ready", "index.json"),
-                     "rb").read().decode("utf-8")
+            index_path = os.path.join(
+                root, "evidence", "research_ready", "index.json"
             )
+            with open(index_path, "rb") as handle:
+                index = json.loads(handle.read().decode("utf-8"))
             self.assertIn("TC-STAGE7-RR-001", index["entries"])
             self.assertEqual(index["entries"]["TC-STAGE7-RR-001"]["status"], "PASS")
 
@@ -416,6 +424,8 @@ class RrBindingGateTest(unittest.TestCase):
             "rr_phase": "rr-p1", "run_id": "run-x",
             "baseline_sha256": "ab" * 32, "implicit_retry": 0,
             "data_link_id": None,
+            # 0.9.22: deadline 결속은 생성뿐 아니라 대조된다
+            "phase_deadlines_s": {"rr-p1": 3600, "rr-p2-17": 4200},
         }
         base.update(over)
         return base
@@ -471,6 +481,33 @@ class RrBindingGateTest(unittest.TestCase):
             app.validate_rr_binding(
                 self._Args("rr-p1", baseline_sha256=None), self._meta()
             )
+
+    # --- 0.9.22 결속 실효화 (R2 감사) ---
+
+    def test_phase_deadline_mismatch_rejected(self):
+        app = _load_coordinator_app()
+        with self.assertRaises(SystemExit):
+            app.validate_rr_binding(
+                self._Args("rr-p1"),
+                self._meta(phase_deadlines_s={"rr-p1": 2400}),
+            )
+
+    def test_phase_deadline_missing_rejected(self):
+        app = _load_coordinator_app()
+        with self.assertRaises(SystemExit):
+            app.validate_rr_binding(
+                self._Args("rr-p1"), self._meta(phase_deadlines_s={})
+            )
+
+    def test_debug_switches_rejected_for_rr(self):
+        app = _load_coordinator_app()
+        for env in ("STAGE7_SVCDBG_ALLOW_RX_READY", "STAGE7_SCENARIO_FILTER"):
+            os.environ[env] = "1"
+            try:
+                with self.assertRaises(SystemExit):
+                    app.validate_rr_binding(self._Args("rr-p1"), self._meta())
+            finally:
+                del os.environ[env]
 
 
 class RawPhyFakePassGuardTest(unittest.TestCase):
@@ -542,18 +579,83 @@ class RrFinalBuilderTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def _current_head(self):
+        import subprocess
+
+        done = subprocess.run(
+            ["git", "-C", VDETER_ROOT, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert done.returncode == 0, "시험 환경에 git HEAD 필요"
+        return done.stdout.strip()
+
+    def _assert_blocked(self, result, keyword):
+        # 0.9.22 R2 보강: NOT_READY만 보면 "겨냥 검사가 죽고 무관한
+        # 문제가 동반돼도 통과"하는 약한 단언 — 겨냥 메시지를 함께 요구.
+        self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+        self.assertTrue(
+            any(keyword in p for p in result["consistency_problems"]),
+            f"겨냥 검사 메시지 {keyword!r} 부재: "
+            f"{result['consistency_problems']}",
+        )
+
+    def _verification(self, base, *, all_unchanged=True):
+        # 0.9.22 계약: builder는 검증 묶음(frozen-hash-audit + 로그)을
+        # 필수 결속하고 all_unchanged를 실검사한다 — 픽스처도 정합하게.
+        vroot = os.path.join(base, "verification")
+        os.makedirs(vroot, exist_ok=True)
+        with open(os.path.join(vroot, "frozen-hash-audit.json"), "w") as handle:
+            # 도구 산출물 형태 (0.9.22 R2 보강: builder가 구조·자기결속도
+            # 검사 — 손으로 쓴 한 줄 JSON은 거부되고, head_commit은 현행
+            # HEAD 일치·worktree_dirty=false까지 요구되므로 실측값 사용)
+            json.dump({
+                "all_unchanged": all_unchanged,
+                "head_commit": self._current_head(),
+                "worktree_dirty": False,
+                "files": [{"file": "src/x.py", "unchanged": all_unchanged}],
+            }, handle)
+        for log in ("unit-contract.log", "integration-stage7.log"):
+            with open(os.path.join(vroot, log), "w") as handle:
+                handle.write("fixture log\n")
+        return vroot
+
     def _make_evidence(self, root, statuses, *, profile="RESEARCH_READY_MINIMAL",
                        baseline="0.9.1", sha="ab" * 32, retries=0, hardware=None):
+        # 0.9.21 강화 계약 반영: artifact_type·tc_id·run_id 필수 + index.json
+        # entries의 sha256 상호 대조가 실검사되므로 픽스처도 정합하게 만든다.
+        import hashlib as _hashlib
         os.makedirs(root, exist_ok=True)
+        # 0.9.22 원본 결속 계약: root 상위에 coordinator ≥1 + runtime ≥3
+        # 원본이 있어야 READY 가능 — 픽스처도 규약대로 만든다.
+        parent = os.path.dirname(root)
+        with open(os.path.join(parent, "coordinator-fixture.json"),
+                  "w") as handle:
+            json.dump({"fixture": True}, handle)
+        for endpoint in ("ROC", "MASS-A", "MASS-B"):
+            with open(os.path.join(parent, f"{endpoint}-runtime.json"),
+                      "w") as handle:
+                json.dump({"fixture": endpoint}, handle)
+        entries = {}
         for tc, status in statuses.items():
             payload = {
+                "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
+                "tc_id": tc, "run_id": "rr-fixture",
                 "profile": profile, "baseline_version": baseline,
                 "baseline_sha256": sha, "status": status,
                 "counters": {"retries": retries},
                 "hardware": hardware or {"usb": "x"},
+                "lifecycle_generation": 1,
             }
-            with open(os.path.join(root, f"{tc}.json"), "w") as handle:
+            path = os.path.join(root, f"{tc}.json")
+            with open(path, "w") as handle:
                 json.dump(payload, handle)
+            with open(path, "rb") as handle:
+                entries[tc] = {
+                    "sha256": _hashlib.sha256(handle.read()).hexdigest(),
+                    "status": status,
+                }
+        with open(os.path.join(root, "index.json"), "w") as handle:
+            json.dump({"profile": profile, "entries": entries}, handle)
 
     def _all_pass(self):
         s = {tc: "PASS" for tc in (
@@ -563,16 +665,102 @@ class RrFinalBuilderTest(unittest.TestCase):
         )}
         return s
 
+    def test_tampered_missing_tc_id_blocks_ready(self):
+        # 0.9.21 fail-closed 증명: tc_id 제거 변조 → 통과 불가
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            del payload["tc_id"]
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "tc_id")
+
+    def test_tampered_artifact_missing_from_index_blocks_ready(self):
+        # fail-closed 증명: index 미등재 artifact → 통과 불가 (역방향 대조)
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            index_path = os.path.join(root, "index.json")
+            with open(index_path) as handle:
+                index = json.load(handle)
+            del index["entries"]["TC-STAGE7-RR-005"]
+            with open(index_path, "w") as handle:
+                json.dump(index, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "미등재")
+
+    def test_tampered_banned_counter_aliases_block_ready(self):
+        # fail-closed 증명: 실측 별칭 counter 위반 → 통과 불가
+        import tempfile
+
+        app = self._builder()
+        for key in ("wrong_bytes_total", "underflow_count",
+                    "overflow_count", "late_command_count"):
+            with tempfile.TemporaryDirectory() as base:
+                root = os.path.join(base, "rr-fixture")
+                self._make_evidence(root, self._all_pass())
+                path = os.path.join(root, "TC-STAGE7-RR-004.json")
+                with open(path) as handle:
+                    payload = json.load(handle)
+                payload["counters"][key] = 1
+                with open(path, "w") as handle:
+                    json.dump(payload, handle)
+                self._reindex(root)
+                result = app.build(
+                    [root], os.path.join(base, "final-result.json"),
+                    software_ok=True, frozen_hash_ok=True,
+                    verification_root=self._verification(base),
+                )
+                self._assert_blocked(result, "금지 counter")
+                self.assertTrue(any(
+                    key in p for p in result["consistency_problems"]
+                ), f"counter {key} 변조 메시지 부재")
+
+    def _reindex(self, root):
+        # 변조 후 sha 재계산 — sha 불일치가 아닌 '내용 규칙' 검사를 겨냥
+        import hashlib as _hashlib
+        index_path = os.path.join(root, "index.json")
+        with open(index_path) as handle:
+            index = json.load(handle)
+        for tc in list(index["entries"].keys()):
+            path = os.path.join(root, f"{tc}.json")
+            with open(path, "rb") as handle:
+                index["entries"][tc]["sha256"] = _hashlib.sha256(
+                    handle.read()
+                ).hexdigest()
+        with open(index_path, "w") as handle:
+            json.dump(index, handle)
+
     def test_all_pass_yields_research_ready(self):
         import tempfile
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             self._make_evidence(root, self._all_pass())
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertEqual(result["final_status"], "RESEARCH_READY")
 
@@ -581,13 +769,14 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             statuses = self._all_pass()
             del statuses["TC-STAGE7-RR-005"]
             self._make_evidence(root, statuses)
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
             self.assertIn("TC-STAGE7-RR-005", result["missing"])
@@ -597,13 +786,14 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             statuses = self._all_pass()
             statuses["TC-STAGE7-RR-004"] = "FAIL"
             self._make_evidence(root, statuses)
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertEqual(result["final_status"], "RESEARCH_NOT_READY")
 
@@ -612,11 +802,12 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             self._make_evidence(root, self._all_pass())
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=False, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -625,7 +816,7 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             self._make_evidence(root, self._all_pass())
             # 프로파일이 다른 artifact 하나를 오염 주입.
             with open(os.path.join(root, "TC-STAGE7-RR-002.json"), "w") as handle:
@@ -637,6 +828,7 @@ class RrFinalBuilderTest(unittest.TestCase):
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -645,11 +837,12 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             self._make_evidence(root, self._all_pass(), retries=1)
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -658,15 +851,319 @@ class RrFinalBuilderTest(unittest.TestCase):
 
         app = self._builder()
         with tempfile.TemporaryDirectory() as base:
-            root = os.path.join(base, "rr")
+            root = os.path.join(base, "rr-fixture")
             statuses = self._all_pass()
             statuses["TC-STAGE7-RR-007"] = "HARDWARE_BLOCKED"
             self._make_evidence(root, statuses)
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
             )
             self.assertEqual(result["final_status"], "HARDWARE_BLOCKED")
+
+    # --- 0.9.22 fail-closed 증명 (R1-A 적대 감사 시정) ---
+
+    def test_tampered_unknown_status_blocks_ready(self):
+        # 공격 6: "FAILED"/"fail" 등 거부목록 밖 문자열이 READY로 탈출 금지
+        import tempfile
+
+        app = self._builder()
+        for forged in ("FAILED", "fail", "GREEN", "INCONCLUSIVE"):
+            with tempfile.TemporaryDirectory() as base:
+                root = os.path.join(base, "rr-fixture")
+                statuses = self._all_pass()
+                statuses["TC-STAGE7-RR-007"] = forged
+                self._make_evidence(root, statuses)
+                result = app.build(
+                    [root], os.path.join(base, "final-result.json"),
+                    software_ok=True, frozen_hash_ok=True,
+                    verification_root=self._verification(base),
+                )
+                self._assert_blocked(result, "허용목록")
+
+    def test_retries_inflation_blocks_ready(self):
+        # 공격 4: retries 부풀리기로 duplicates 허용치 확장 금지 (상한 2)
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            payload["counters"] = {"retries": 50, "duplicates": 50}
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "retries > 상한")
+
+    def test_run_id_path_mismatch_blocks_ready(self):
+        # 공격 3: 다른 run의 artifact를 복사한 root 위장 금지 —
+        # run_id("rr-fixture")가 경로 성분에 없으면 거부.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-other")
+            self._make_evidence(root, self._all_pass())
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "run 디렉터리와 불일치")
+
+    def test_run_id_forged_to_path_noise_blocks_ready(self):
+        # R2-A 실측 우회의 회귀 고정: run_id를 경로에 항상 존재하는
+        # "evidence"/"research_ready"로 재작성해도 거부되어야 한다.
+        import tempfile
+
+        app = self._builder()
+        for forged in ("evidence", "research_ready"):
+            with tempfile.TemporaryDirectory() as base:
+                root = os.path.join(base, "rr-fixture", "evidence",
+                                    "research_ready")
+                self._make_evidence(root, self._all_pass())
+                for tc in self._all_pass():
+                    path = os.path.join(root, f"{tc}.json")
+                    with open(path) as handle:
+                        payload = json.load(handle)
+                    payload["run_id"] = forged
+                    with open(path, "w") as handle:
+                        json.dump(payload, handle)
+                self._reindex(root)
+                result = app.build(
+                    [root], os.path.join(base, "final-result.json"),
+                    software_ok=True, frozen_hash_ok=True,
+                    verification_root=self._verification(base),
+                )
+                self._assert_blocked(result, "run 디렉터리와 불일치")
+
+    def test_missing_verification_root_blocks_ready(self):
+        # 공격 5: 증언 플래그만으로 READY 금지 — 검증 묶음 결속 필수
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+            )
+            self._assert_blocked(result, "검증 로그 미결속")
+
+    def test_verification_audit_false_blocks_ready(self):
+        # 공격 5: frozen-hash-audit all_unchanged=false와 증언 플래그의
+        # 모순은 기계 검출되어야 한다.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base, all_unchanged=False),
+            )
+            self._assert_blocked(result, "all_unchanged")
+
+    def test_handwritten_audit_blocks_ready(self):
+        # R2-A 실측: 한 줄 `{"all_unchanged": true}` 위조 audit — 구조·
+        # 자기결속 검사로 거부되어야 한다.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            with open(os.path.join(vroot, "frozen-hash-audit.json"),
+                      "w") as handle:
+                handle.write('{"all_unchanged": true}')
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "files 목록")
+            self._assert_blocked(result, "head_commit")
+
+    def test_stale_head_audit_blocks_ready(self):
+        # 사용자 지적(2026-08-30): head_commit 형식만 보면 코드가 바뀐
+        # 뒤의 낡은 검증 묶음이 통과 — 현행 HEAD 불일치는 거부되어야.
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            audit_path = os.path.join(vroot, "frozen-hash-audit.json")
+            with open(audit_path) as handle:
+                audit = json.load(handle)
+            audit["head_commit"] = "0" * 40
+            with open(audit_path, "w") as handle:
+                json.dump(audit, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "현행 HEAD와 불일치")
+
+    def test_dirty_worktree_audit_blocks_ready(self):
+        # 오염 트리에서 만든 감사(또는 필드 부재)는 결속 거부
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            vroot = self._verification(base)
+            audit_path = os.path.join(vroot, "frozen-hash-audit.json")
+            with open(audit_path) as handle:
+                audit = json.load(handle)
+            audit["worktree_dirty"] = True
+            with open(audit_path, "w") as handle:
+                json.dump(audit, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=vroot,
+            )
+            self._assert_blocked(result, "worktree_dirty")
+
+    def test_nonint_retries_counted_as_problem_not_crash(self):
+        # R2-A 실측: retries="abc"가 traceback으로 죽던 것 — 문제 계상으로
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            payload["counters"]["retries"] = "abc"
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "retries 값 비정상")
+
+    def test_verification_shas_bound_into_final(self):
+        # 결속 실증: 검증 로그 sha가 최종 체인에 실제 포함되는가
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self.assertEqual(result["final_status"], "RESEARCH_READY")
+            bound = result["verification_evidence_sha256"]
+            for fname in ("frozen-hash-audit.json", "unit-contract.log",
+                          "integration-stage7.log"):
+                self.assertIn(fname, bound)
+                self.assertEqual(len(bound[fname]), 64)
+
+    def test_missing_lifecycle_generation_blocks_ready(self):
+        # 사용자 지적(2026-08-30): §17A.6 lineage/generation 일관성의 실검사
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            del payload["lifecycle_generation"]
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "lifecycle_generation 부재")
+
+    def test_mixed_lifecycle_generation_blocks_ready(self):
+        # 같은 root(=같은 run) 안의 1/99 혼재는 lineage 위반
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-004.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            payload["lifecycle_generation"] = 99
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "혼재")
+
+    def test_missing_source_originals_blocks_ready(self):
+        # 원본(coordinator/runtime) 부재 root는 무음 누락이 아니라 거부
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            os.remove(os.path.join(base, "MASS-B-runtime.json"))
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self.assertTrue(any(
+                "원본 evidence 부재" in p
+                for p in result["consistency_problems"]
+            ))
+
+    def test_duplicate_tc_across_roots_blocks_ready(self):
+        # last-wins 모호성 금지: 같은 TC가 복수 root에 있으면 거부
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root_a = os.path.join(base, "a", "rr-fixture")
+            root_b = os.path.join(base, "b", "rr-fixture")
+            self._make_evidence(root_a, self._all_pass())
+            self._make_evidence(root_b, {"TC-STAGE7-RR-001": "PASS"})
+            result = app.build(
+                [root_a, root_b], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self._assert_blocked(result, "복수 root")
 
 
 if __name__ == "__main__":

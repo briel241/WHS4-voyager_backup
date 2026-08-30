@@ -303,15 +303,51 @@ class PhaseGuard:
         return max(0.0, self._deadline - time.monotonic())
 
 
+# 판정 phase의 deadline 정본 (§17A.2와 동치; PhaseGuard 하드코드와 함께
+# 개정). 0.9.22: prepare가 결속한 phase_deadlines_s는 생성만 되고 아무
+# gate도 소비하지 않았다 — 여기서 대조해 결속을 실효화한다. soak는
+# 판정 제외(DEFERRED)라 대조 대상에 넣지 않는다.
+RR_PHASE_DEADLINE_S = {
+    "rr-p0": 15 * 60,
+    "rr-p1": 60 * 60,
+    "rr-p2-17": 70 * 60,
+    "rr-p2-19": 70 * 60,
+    "rr-p3-fault": 40 * 60,
+}
+
+
 def validate_rr_binding(arguments, metadata: dict) -> None:
     """v0.9.1 I항 negative gate — hardware configure 전에 거부한다.
 
     - RR phase는 `qualification_profile=RESEARCH_READY_MINIMAL` config에서만 실행
     - full-qualification phase는 RR profile config로 실행 금지
     - baseline hash/phase/run ID/link 불일치는 TX 전 거부
+    - 0.9.22: 디버그 우회 스위치 활성 상태의 정식 run 거부 + deadline 결속 대조
     """
 
     is_rr = arguments.phase.startswith("rr-")
+    if is_rr:
+        # 판정 표면을 바꾸는 디버그 스위치는 정식 run에서 금지 (R2 감사:
+        # STAGE7_SVCDBG_ALLOW_RX_READY는 §16.1 host-time-lock 관문 우회,
+        # STAGE7_SCENARIO_FILTER는 판정 세트 축소 — 둘 다 흔적 없이
+        # 동작하던 미공시 표면이었다).
+        for banned in ("STAGE7_SVCDBG_ALLOW_RX_READY",
+                       "STAGE7_SCENARIO_FILTER"):
+            if os.environ.get(banned):
+                raise SystemExit(
+                    f"RR_BINDING_REJECTED: 디버그 스위치 {banned} 활성 — "
+                    "정식 RR run에서는 설정 금지"
+                )
+        bound_deadline = (metadata.get("phase_deadlines_s") or {}).get(
+            arguments.phase
+        )
+        expected_deadline = RR_PHASE_DEADLINE_S.get(arguments.phase)
+        if expected_deadline is not None and bound_deadline != expected_deadline:
+            raise SystemExit(
+                f"RR_BINDING_REJECTED: phase deadline 결속 "
+                f"{bound_deadline!r}s != 실행기 {expected_deadline}s "
+                "(부재 포함 — §17A.7 결속 필드는 생성뿐 아니라 대조된다)"
+            )
     profile = metadata.get("qualification_profile")
     if is_rr:
         if profile != RESEARCH_READY_PROFILE:
@@ -356,28 +392,57 @@ def validate_rr_binding(arguments, metadata: dict) -> None:
             )
 
 
-def _load_run_metadata(configs_dir: str) -> dict:
+def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
     """prepare 도구가 결속한 git/baseline metadata (없으면 null 유지)."""
 
     path = os.path.join(configs_dir, "git_state.json")
     try:
         with open(path, "rb") as handle:
-            return json.loads(handle.read().decode("utf-8"))
+            metadata = json.loads(handle.read().decode("utf-8"))
     except OSError:
-        return {}
+        # git 결속 부재여도 관측 환경 필드는 기록한다 (0.9.22 —
+        # 이전엔 {} 반환으로 3필드까지 함께 소실).
+        metadata = {}
+    # 0.9.20 재현성 봉합: 관측 환경(STAGE7_DIAG)과 gain artifact 출처를
+    # evidence에 기계 기록한다 — 재현 조건이 산문이 아닌 산출물에 남게.
+    metadata["stage7_diag_env"] = os.environ.get("STAGE7_DIAG", "0")
+    metadata["rx_energy_gate_env"] = os.environ.get(
+        "STAGE7_RX_ENERGY_GATE", "1"
+    )
+    # 0.9.22: 판정 표면에 닿는 디버그 스위치도 기계 기록한다 — 정식 run은
+    # validate_rr_binding이 활성 자체를 거부하므로 기록값은 부작동 증명.
+    metadata["svcdbg_allow_rx_ready_env"] = os.environ.get(
+        "STAGE7_SVCDBG_ALLOW_RX_READY", "0"
+    )
+    metadata["scenario_filter_env"] = (
+        os.environ.get("STAGE7_SCENARIO_FILTER") or None
+    )
+    if gain_artifact_path:
+        try:
+            with open(gain_artifact_path, "rb") as handle:
+                metadata["source_gain_artifact_sha256"] = hashlib.sha256(
+                    handle.read()
+                ).hexdigest()
+        except OSError as exc:
+            print(
+                f"[coordinator] gain artifact 해시 실패(결속 생략): "
+                f"{gain_artifact_path}: {exc}",
+                file=sys.stderr, flush=True,
+            )
+    return metadata
 
 
 def write_rr_evidence(
     run_root: str, tc_id: str, *, run_id: str, metadata: dict, started_utc: str,
     ended_utc: str, duration_s: float, counters: dict, status: str, detail: dict,
-    hardware: dict,
+    hardware: dict, lifecycle_generation: int = 1,
 ) -> str:
     """§17A.6 research_ready evidence artifact 하나를 기록한다."""
 
     assert status in ("PASS", "FAIL", "ABORTED")
     directory = os.path.join(run_root, "evidence", "research_ready")
     os.makedirs(directory, exist_ok=True)
-    payload = {
+    payload = {  # generation은 호출측 실값(기본 1 — 재기동 없는 절차)
         "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
         "profile": RESEARCH_READY_PROFILE,
         "tc_id": tc_id,
@@ -387,7 +452,16 @@ def write_rr_evidence(
         "git_dirty": metadata.get("git_dirty"),
         "hardware": hardware,
         "run_id": run_id,
-        "lifecycle_generation": 1,
+        "stage7_diag_env": metadata.get("stage7_diag_env"),
+        "rx_energy_gate_env": metadata.get("rx_energy_gate_env"),
+        "svcdbg_allow_rx_ready_env": metadata.get(
+            "svcdbg_allow_rx_ready_env"
+        ),
+        "scenario_filter_env": metadata.get("scenario_filter_env"),
+        "source_gain_artifact_sha256": metadata.get(
+            "source_gain_artifact_sha256"
+        ),
+        "lifecycle_generation": lifecycle_generation,
         "started_utc": started_utc,
         "ended_utc": ended_utc,
         "duration_s": round(duration_s, 1),
@@ -837,8 +911,8 @@ def run_rr_p2(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
     """`TC-STAGE7-RR-005/006`: link별 3-node 최소 기능 1회씩 (v0.9.1 G항)."""
 
     tc_id = "TC-STAGE7-RR-005" if link_id == 17 else "TC-STAGE7-RR-006"
-    # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 40분.
-    guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=40 * 60)
+    # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 70분(0.9.19).
+    guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=70 * 60)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)
     started = _utc_now()
@@ -1797,7 +1871,7 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
 
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
-    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir))
+    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
 
     from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
     from vdeter.stage7.hw_operations import read_monotonic_raw_ns
@@ -1855,20 +1929,20 @@ def main(argv=None) -> int:
             phase_result = run_rr_p0(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 processes=processes,
             )
         elif arguments.phase == "rr-p1":
             phase_result = run_rr_p1(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
             )
         elif arguments.phase in ("rr-p2-17", "rr-p2-19"):
             phase_result = run_rr_p2(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 link_id=int(arguments.phase[-2:]),
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
@@ -1878,7 +1952,7 @@ def main(argv=None) -> int:
             phase_result = run_rr_p3_soak(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 link_id=int(arguments.phase[-2:]),
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
@@ -1888,7 +1962,7 @@ def main(argv=None) -> int:
             phase_result = run_rr_p3_fault(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 processes=processes,
             )
     except Exception as error:  # noqa: BLE001

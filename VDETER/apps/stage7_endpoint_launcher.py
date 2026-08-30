@@ -326,11 +326,36 @@ def main(argv=None) -> int:
 
         while not _pump_stop.is_set():
             try:
+                # 지연 해부 (svc-run-n 이후: 게이트 후에도 완료 처리
+                # 지연 ~15-19s 잔존, mac-gap ~1s × 171 — 어느 구간이
+                # 먹는지 구간별 실측. DIAG 게이트, 300ms 초과만 출력.)
+                _t0 = _time.monotonic()
                 endpoint.dependencies.radio.poll_once()
+                _t1 = _time.monotonic()
                 _mac_cycle()
+                _t2 = _time.monotonic()
                 drain = getattr(main, "_drain_dispatch_queue", None)
                 if drain is not None:
                     drain()
+                _t3 = _time.monotonic()
+                if (
+                    _t3 - _t0 > 0.3
+                    and os.environ.get("STAGE7_DIAG", "0") == "1"
+                ):
+                    try:
+                        ingress = getattr(endpoint.stage4, "ingress", None)
+                        depth = len(getattr(ingress, "_events", ()) or ())
+                        dq = getattr(main, "_dispatch_queue_ref", None)
+                        print(
+                            f"[diag] pump-slow poll={(_t1 - _t0) * 1e3:.0f} "
+                            f"mac1={(_t2 - _t1) * 1e3:.0f} "
+                            f"drain={(_t3 - _t2) * 1e3:.0f}ms "
+                            f"qlen={'?' if dq is None else len(dq)} "
+                            f"ingress={depth} t={_t3:.3f}",
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 support = endpoint.stage4
                 if support is not None:
                     cycle_started = _time.monotonic()
@@ -457,8 +482,18 @@ def main(argv=None) -> int:
                 try:
                     state = endpoint.stage4.mac.state
                     pend = getattr(state, "delivery_pending", ()) or ()
-                    deps = getattr(state, "pending_dependencies", None)
-                    dep_n = len(deps) if deps is not None else "?"
+                    # svc-run-p 부검 D항: 실제 접근자는 pending_commands
+                    # (부류 계수는 pending_count) — '?' 사각 제거.
+                    try:
+                        from vdeter.mac.models import (
+                            PendingCommandClass as _PCCc,
+                        )
+                        dep_n = (
+                            f"rx={state.pending_count(_PCCc.RX)}"
+                            f"/all={len(state.pending_commands)}"
+                        )
+                    except Exception:  # noqa: BLE001
+                        dep_n = "?"
                     ledger = getattr(state, "delivery_ledger", ()) or ()
                     # C6: 수신 세션 잔류 감시 (감사③ — 회수 부재로 영구
                     # 잔류하면 해당 LC가 블랙홀化).
@@ -739,6 +774,63 @@ def main(argv=None) -> int:
 
             _DMC._receive_type4 = _diag_t4
 
+            # C9: ACK(Type13) 수신 매칭 관측 (svc-run-l2: ROC가 ACK를
+            # 받고도 무음 무시했는지/미도달인지 로그로 구분 불가했다 —
+            # _receive_type13/_apply_session_ack 전 경로가 무프린트).
+            _diag_orig_t13 = _DMC._receive_type13
+
+            def _diag_t13(self_c, state, body, **kwargs):
+                try:
+                    masks = getattr(body, "ack_nack_masks", None)
+                    print(
+                        f"[diag] type13-rx src={getattr(body.source_id, 'value', '?')} "
+                        f"dst={getattr(getattr(body.destination, 'station_id', None), 'value', '?')} "
+                        f"masks={masks}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                out_state = _diag_orig_t13(self_c, state, body, **kwargs)
+                try:
+                    changed = out_state is not state
+                    print(
+                        f"[diag] type13-post state_changed={changed}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return out_state
+
+            _DMC._receive_type13 = _diag_t13
+            _diag_orig_asa = _DMC._apply_session_ack
+
+            def _diag_asa(self_c, state, context, body, *a, **k):
+                try:
+                    ledger = tuple(context.frame_ledger)
+                    eligible_n = sum(
+                        1 for entry in ledger
+                        if not any(
+                            pid in context.pending_packet_ids
+                            for pid in entry.packet_ids
+                        )
+                        and not any(
+                            fi == entry.session_frame_index
+                            for fi, _p in context.retry_fragment_keys
+                        )
+                    )
+                    print(
+                        f"[diag] ack-apply xfer={context.transfer_id.value[:8]} "
+                        f"ledger={len(ledger)} eligible={eligible_n} "
+                        f"sfi={[e.session_frame_index for e in ledger]} "
+                        f"conf={[list(e.confirmed_positions) for e in ledger]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_asa(self_c, state, context, body, *a, **k)
+
+            _DMC._apply_session_ack = _diag_asa
+
             # C4: 재조립기 내부
             from vdeter.link.data_session.reassembly import (
                 DataSessionReassembler as _DRA2,
@@ -927,7 +1019,7 @@ def main(argv=None) -> int:
 
         # 해제검사 완화 (근거: frozen 규칙은 계획·해제가
         # 같은 lead라 최조기 슬롯 의도가 다음 해제 평가(≤40ms 뒤)에서
-        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 120ms 완화해
+        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 200ms 완화해(바닥 100ms)
         # 슬랙을 보장한다. 늦은 제출의 물리 방어는 어댑터 _LEAD_NS
         # 100ms가 계속 수행. 계획·창·방송 경로는 불변.)
         import dataclasses as _dc_rel
@@ -1121,6 +1213,24 @@ def main(argv=None) -> int:
                     None,
                 )
                 if link11 is None or not link11.short_data_eligible:
+                    # 파편 상한 3 명시 강제 (0.9.15/0.9.20 m9, 0.9.22 경계
+                    # 정정): frozen 산식은 세그먼트 = 헤더 4B + presentation
+                    # (link/transfer.py SEGMENT_HEADER_SIZE)이므로 3조각
+                    # 용량 645B(세그먼트) = presentation 641B. 641B 초과는
+                    # 승격하지 않고 원 단문 경로로 낙하 → frozen의 설계된
+                    # 거부(LINK_TRANSFER_SIZE_UNSUPPORTED)로 즉시 실패한다.
+                    # 검증 보증 구간(≤426B=2조각, 상한 3조각) 밖의 무음
+                    # 진입을 차단하는 게이트.
+                    if requirement.presentation_size > 3 * 215 - 4:
+                        print(
+                            "[launcher] 승격 거부 — 파편 상한 3 초과 "
+                            f"(presentation={requirement.presentation_size}"
+                            " > 641, 세그먼트 > 645)",
+                            file=sys.stderr, flush=True,
+                        )
+                        return _orig_submit_short(
+                            self_c, state, requirement, causation_event_id
+                        )
                     print(
                         "[launcher] short->session 승격 "
                         f"(link11 미적합, size="
@@ -1252,6 +1362,64 @@ def main(argv=None) -> int:
 
         _MC._on_dependency_failed = _odf_recover
 
+        # D-18 최종형: 데이터 세션 ACK 대기의 전송별 벽시계 결정 하한
+        # 65s (svc-run-m/rr-g/h 실측: 성공 ACK가 frozen 한도 7.2s는
+        # 물론, 중간형이던 계수-스킵 대기(전역 위상 따라 실대기
+        # 43~62s 요동)보다도 늦게 도착 — WAITING_ACK 진입 시각을
+        # 직접 기록해 65s 전에는 부재 계수를 아예 전달하지 않는다.
+        # 부재 계수 전용 함수라 재전송 계획·ACK 도착 처리 무관여,
+        # LOCAL_DATA_SESSION 역할 한정. 재현 전용 시험대 보정 —
+        # 실물급에서는 원 규칙 복원(§25.1 D-18).)
+        _orig_ack_to = _MC._on_data_ack_timeout
+        # 키 = (컨트롤러 인스턴스 id, transfer id): 클래스 패치의 클로저
+        # 공유 상태라 한 프로세스에 컨트롤러가 2개면 서로의 타이머를
+        # 청소하는 간섭이 생김 — 인스턴스 스코프로 격리 (0.9.22).
+        _ack_wait_started: dict = {}
+        _ack_patient_warned: list = []
+
+        def _ack_patient(self_c, state, causation_event_id, commands):
+            # 결정적 벽시계 대기 (rr-g/h 실측: 계수-스킵 방식은 전역
+            # 위상에 따라 실대기가 43~62s로 요동 — 명목 65s에도 짧은
+            # 시도가 회신(~53~58s)보다 먼저 끊김. 전송별 WAITING 진입
+            # 시각을 직접 기록해 65s 경과 전에는 부재 계수를 아예
+            # 전달하지 않는다 → 실대기 하한 65s 보장, 위상 복권 소멸.
+            # 유예는 동시 대기 전체 단위: 하나라도 65s 미만이면 이번
+            # 계수 전체를 유예한다(판정 구간은 동시 세션 1개라 동치).)
+            try:
+                now_w = _time.monotonic()
+                waiting = [
+                    (id(self_c), c.transfer_id.value)
+                    for c in state.transfers
+                    if getattr(getattr(c, "role", None), "name", "")
+                    == "LOCAL_DATA_SESSION"
+                    and getattr(getattr(c, "phase", None), "name", "")
+                    == "WAITING_ACK"
+                ]
+                for known in list(_ack_wait_started):
+                    if known[0] == id(self_c) and known not in waiting:
+                        del _ack_wait_started[known]
+                if waiting:
+                    ripe = all(
+                        now_w - _ack_wait_started.setdefault(x, now_w)
+                        >= 65.0
+                        for x in waiting
+                    )
+                    if not ripe:
+                        return state
+            except Exception as exc:  # noqa: BLE001 - 실패 시 원 경로
+                # 무음 복귀 금지: frozen 7.2s 규칙으로 낙하하면 데이터
+                # 시나리오가 원인 표식 없이 깨진다 — 1회성 경고 (0.9.22).
+                if not _ack_patient_warned:
+                    _ack_patient_warned.append(True)
+                    print(
+                        f"[launcher] D-18 ack-patient 예외 → 원 경로 낙하: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr, flush=True,
+                    )
+            return _orig_ack_to(self_c, state, causation_event_id, commands)
+
+        _MC._on_data_ack_timeout = _ack_patient
+
         # F-release (svc-run-b 실측: 유예 해제 트리거가 ClockAdvanced/타이머
         # 뿐인데 ROC 펌프 회전이 0.5~2.1s로 성겨서, 유예 intent의 직행
         # 대역 [floor 100ms, horizon−슬롯 ≈680ms]를 "이번 해제 땐 이르고
@@ -1343,6 +1511,20 @@ def main(argv=None) -> int:
         from vdeter.mac.models import (
             PendingCommandClass as _PCC,
             Stage4Limits as _S4L,
+        )
+
+        # D-19: pending quota 상향 (svc-run-j 실측: 에너지 게이트 후에도
+        # 장부 수위가 ~65에 상시 고착 — 처리 지연이 아니라 계획 선행분
+        # (미래 창 ~2프레임 × 창 수)의 구조적 점유. 원 한도 68은 이 바닥
+        # 대비 여유가 3뿐이라 shed가 창 계획을 상습 연기 → 청취 확률화
+        # (run F 1/6, H 0/6, J 0/6). 바닥+프레임 배치(~30)+여유로 상향.
+        # shed·마진은 폭주 안전판으로 유지. 런타임 클래스 패치(svcdbg66
+        # 전례), frozen 파일 0수정.
+        _S4L.PENDING_DEPENDENCY_RX = 128
+        _S4L.PENDING_DEPENDENCY_TOTAL = 160
+        print(
+            "[launcher] pending-quota RX=128 TOTAL=160 (D-19)",
+            file=sys.stderr, flush=True,
         )
 
         _orig_pfw = _MC.plan_frame_windows
@@ -1563,6 +1745,12 @@ def main(argv=None) -> int:
             # 청취 창을 굶긴다 — 같은 창의 표본이 이번 배치에 없는 완료
             # 항목만 앞으로 빼서 장부를 즉시 비운다 (같은 창의 표본→완료
             # 순서는 보존).
+            # 시간 분할 (svc-run-o pump-slow 실측: 실버스트 디코드가 한
+            # drain에 뭉치면 871~1685ms 정지 → 완료 반영·창 계획이 초
+            # 단위로 밀리는 머리막힘이 완료 지연 ~15-19s·장부 포화·청취
+            # 확률화의 잔존 뿌리. 300ms 예산 초과 시 남은 항목을 큐
+            # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
+            # 불변, 정지 상한만 도입.)
             mac_cycle = getattr(main, "_mac_cycle", None)
             batch = []
             for _ in range(256):
@@ -1584,7 +1772,8 @@ def main(argv=None) -> int:
                 item for item in batch
                 if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
             ]
-            for item in ordered:
+            drain_started = _time.monotonic()
+            for index, item in enumerate(ordered):
                 kind = item[0]
                 try:
                     if kind == "s":
@@ -1598,14 +1787,27 @@ def main(argv=None) -> int:
                           file=sys.stderr, flush=True)
                 if promoted > 0:
                     promoted -= 1
-                    continue  # 앞줄 완료 항목은 싸서 미니사이클 생략
-                if mac_cycle is not None:
+                elif mac_cycle is not None:
                     try:
                         mac_cycle()
                     except Exception:  # noqa: BLE001
                         pass
+                if (
+                    _time.monotonic() - drain_started > 0.3
+                    and index + 1 < len(ordered)
+                ):
+                    for leftover in reversed(ordered[index + 1:]):
+                        _dispatch_queue.appendleft(leftover)
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(
+                            f"[diag] drain-slice done={index + 1} "
+                            f"deferred={len(ordered) - index - 1}",
+                            file=sys.stderr, flush=True,
+                        )
+                    return
 
         main._drain_dispatch_queue = _drain_dispatch_queue
+        main._dispatch_queue_ref = _dispatch_queue
         _orig_completed = _D7.on_lane_window_completed
 
         def _completed_locked(self_d, lane_generation, lane_index, child_key, completion):
@@ -1724,11 +1926,21 @@ def main(argv=None) -> int:
             if not os.path.exists(path):
                 open(path, "a", encoding="utf-8").close()
             seen = 0
+            events_warned = False
             while True:
                 try:
                     sink = endpoint.start_gate.application_sink
                     events = tuple(sink.events())
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    # 무음 금지 (0.9.22): 영구 실패면 배달 증거 JSONL이
+                    # 조용히 멎는다 — 1회성 경고로 관측 가능하게.
+                    if not events_warned:
+                        events_warned = True
+                        print(
+                            f"[launcher] service_events 수집 실패(계속 재시도): "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr, flush=True,
+                        )
                     events = ()
                 if len(events) > seen:
                     with open(path, "a", encoding="utf-8") as handle:

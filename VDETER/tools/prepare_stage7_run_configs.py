@@ -245,10 +245,13 @@ def main(argv=None) -> int:
     rr_link = None
     if arguments.rr_phase and arguments.rr_phase.endswith(("17", "19")):
         rr_link = int(arguments.rr_phase[-2:])
+    # 0.9.22 (R2 감사 M-4): _git 실패는 None이며 bool(None)=False라
+    # "오류"가 "clean"으로 위장 기록되던 결함 — 실패는 null로 정직 기록.
+    _dirty_probe = _git("status", "--porcelain")
     git_state = {
         "git_commit": _git("rev-parse", "HEAD"),
         "git_branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
-        "git_dirty": bool(_git("status", "--porcelain")),
+        "git_dirty": None if _dirty_probe is None else bool(_dirty_probe),
         "baseline_version": baseline_version,
         "baseline_sha256": baseline_sha,
         "environment_manifest_sha256": environment_sha,
@@ -263,7 +266,7 @@ def main(argv=None) -> int:
         "implicit_retry": 0,
         "phase_deadlines_s": {
             "rr-p0": 900, "rr-p1": 3600, "rr-p1-gain": 1200,
-            "rr-p2-17": 2400, "rr-p2-19": 2400, "rr-p3-fault": 2400,
+            "rr-p2-17": 4200, "rr-p2-19": 4200, "rr-p3-fault": 2400,
             "rr-p3-soak-17": 600, "rr-p3-soak-19": 600,
         },
     }

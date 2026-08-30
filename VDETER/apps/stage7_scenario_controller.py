@@ -182,12 +182,13 @@ def main(argv=None) -> int:
     # --- 1. admission_open 대기 → 세 START 병렬 --------------------------------
     gate = os.path.join(gate_dir, "admission_open")
     # RF 사다리(CFO+fit+APPLY 재검증+rf_time PRE/POST) 실측 ~25분이 admission
-    # 전에 선행한다 — 대기 상한은 phase guard(40분)에 맞춘다 (rr-p2-17 run d
-    # 실측: 300s로는 사다리 완료 전에 포기).
-    deadline = time.monotonic() + 2_400.0
+    # 전에 선행한다 — 대기 상한은 phase guard(70분, 0.9.19)에 동기한다
+    # (rr-p2-17 run d 실측: 300s로는 사다리 완료 전에 포기; 2,400s는 구
+    # 40분 guard 기준이라 사다리 지연 시 guard보다 먼저 포기하는 부정합).
+    deadline = time.monotonic() + 4_200.0
     while not os.path.exists(gate):
         if time.monotonic() > deadline:
-            record("await-admission", "FAIL", reason="admission_open gate 2400s 초과")
+            record("await-admission", "FAIL", reason="admission_open gate 4200s 초과")
             return 1
         time.sleep(0.2)
 
@@ -237,6 +238,20 @@ def main(argv=None) -> int:
                 if expect_fail:
                     # 미지 목적지 등은 제출 단계 즉시 거부가 더 강한 정상
                     # 방어다 (svcdbg76 실측: destination_not_deployment_member).
+                    # 0.9.20: 거부 "사유"까지 검증 — 무관한 거부(예: 자원
+                    # 고갈)의 허위 PASS 방지. 목적지/지원성 계열만 인정.
+                    # 0.9.22: body의 유일 신호는 public_error_code(=ErrorCode
+                    # 문자열)뿐 — reason(destination_...)은 body에 노출되지
+                    # 않으므로 매칭 불가능한 죽은 마커 2종을 제거해 조임.
+                    body_text = json.dumps(body, ensure_ascii=False)
+                    accepted_markers = (
+                        "UNSUPPORTED_REQUEST", "INVALID_REQUEST",
+                    )
+                    if not any(m in body_text for m in accepted_markers):
+                        record(step_id, "FAIL",
+                               reason="예상 밖 거부 사유 (목적지/지원성 계열 아님)",
+                               body=body, attempts=attempts)
+                        return False
                     counters["transfers_failed_expected"] += 1
                     record(step_id, "PASS",
                            terminal="SUBMIT_REJECTED(정상 즉시 거부)",
@@ -267,7 +282,8 @@ def main(argv=None) -> int:
             })
             if outcome is not None:
                 break
-            counters["retries"] += 1
+            if attempt + 1 < max_attempts:
+                counters["retries"] += 1  # 재시도 정의 = 후속 시도가 있는 실패만
         if outcome is None:
             if not gating:
                 record(step_id, "LOSS", gating=False,
@@ -289,6 +305,18 @@ def main(argv=None) -> int:
                 wrong += len(hits)
         counters["wrong_destination"] += wrong
         if expect_fail:
+            # 0.9.20 보강: 지연형 실패도 원인 검사 — 무관 장애(자원 고갈
+            # 등)를 예상 실패로 오인하지 않게 목적지/시간류만 인정.
+            fail_text = json.dumps(outcome, ensure_ascii=False)
+            fail_markers = (
+                "destination", "TIMEOUT", "UNSUPPORTED_REQUEST",
+                "INVALID_REQUEST", "ROUTE",
+            )
+            if not any(m in fail_text for m in fail_markers):
+                record(step_id, "FAIL",
+                       reason="예상 밖 실패 원인 (목적지/시간류 아님)",
+                       terminal=fail_text[:200], attempts=attempts)
+                return False
             counters["transfers_failed_expected"] += 1
             record(step_id, "PASS", terminal="FAILED(예상된 timeout/NACK 처리)", attempts=attempts)
         else:
@@ -308,24 +336,20 @@ def main(argv=None) -> int:
 
     overall_ok = True
     if arguments.mode == "scenario":
-        # v0.9.9 (2026-08-29 사용자 승인): 판정 세트 = 실증 기능군 3종.
-        # Data/직송/relay는 UNRESOLVED_UNDER_INVESTIGATION — 조사 계속,
-        # 본 동결 미보증. 디버그는 STAGE7_SCENARIO_FILTER로 6종 실행 가능.
+        # v0.9.18 (2026-08-30): 데이터 세션 재현 실증(svc-run-o 완주,
+        # 1시도·재시도 0)으로 data-roc-to-a를 판정 세트에 편입 — 4종.
+        # (v0.9.9의 candidate 6종 체계는 소멸: 직송/relay는 계획 정의가
+        # 없어 FILTER로도 실행 불가 — FILTER는 아래 4종의 부분집합 선택.)
+        # v0.9.19 반영: data를 1순위로 — 실측상 귀(수신 창)는 서비스
+        # 시작 직후의 신선한 창에서 가장 신뢰됨(svcdbg O·q 성공 조건).
+        # 세트 판정은 순서 무관.
         judged_plan = (
+            ("data-roc-to-a", "ROC", "MASS-A", False),
             ("short-roc-to-a", "ROC", "MASS-A", False),
             ("short-b-to-roc-noack", "MASS-B", "ROC", False),
             ("timeout-unknown-dest", "MASS-A", None, True),
         )
-        # v0.9.11 편입 후보: 관제→함정 데이터 세션(인증서 운송로).
-        # 검증 통과·개정 적용 시 judged_plan으로 이동한다. 그 전에는
-        # STAGE7_SCENARIO_FILTER로만 실행된다.
-        candidate_plan = (
-            ("data-roc-to-a", "ROC", "MASS-A", False),
-        )
-        plan = (
-            judged_plan + candidate_plan
-            if os.environ.get("STAGE7_SCENARIO_FILTER") else judged_plan
-        )
+        plan = judged_plan
         scenario_filter = os.environ.get("STAGE7_SCENARIO_FILTER")
         if scenario_filter:
             allowed = {x.strip() for x in scenario_filter.split(",") if x.strip()}
@@ -408,7 +432,10 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.17",
+        "baseline_revision": "0.9.22",
+        # 0.9.22: 판정 세트를 줄일 수 있는 필터는 콘솔 print만이 아니라
+        # 산출물에도 기계 기록한다 (정식 run은 coordinator가 활성 거부).
+        "scenario_filter": os.environ.get("STAGE7_SCENARIO_FILTER") or None,
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],
