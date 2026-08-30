@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MASS 콘솔 — MASS/ROC</title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body data-console="mass">
+
+<header class="topbar">
+  <div class="brand">
+    <span class="eyebrow">VDE-TER · Maritime Autonomous Surface Ship</span>
+    <h1>MASS 콘솔 <span id="own-mmsi" style="color:var(--dim);font-weight:400;font-family:var(--mono);font-size:13px"></span></h1>
+  </div>
+  <div class="spacer"></div>
+  <div class="readout"><span class="k">SIM</span><span id="sim-time">T+00:00.0</span></div>
+  <span class="pill up" id="link-pill"><i></i><span>LINK</span></span>
+  <button class="btn ghost small" id="btn-reset" title="시뮬레이션을 처음 상태로 되돌린다">초기화</button>
+</header>
+
+<main class="layout">
+  <section class="chart-wrap" id="chart-wrap" aria-label="본선 항적 해도">
+    <svg id="chart" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="chart-legend">
+      <span><i class="track"></i>본선 항적</span>
+      <span><i class="mroute"></i>수락한 항로</span>
+    </div>
+    <div class="chart-scale" id="chart-scale"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <h2>현재 상태</h2>
+      <div class="gauges">
+        <div class="gauge"><span class="k">위도</span><span class="v coord" id="st-lat">—</span></div>
+        <div class="gauge"><span class="k">경도</span><span class="v coord" id="st-lon">—</span></div>
+        <div class="gauge"><span class="k">침로 HDG</span><span class="v" id="st-hdg">—</span></div>
+        <div class="gauge"><span class="k">속력 SOG</span><span class="v" id="st-sog">—</span></div>
+        <div class="gauge wide">
+          <span class="k">자율운항 모드</span>
+          <span class="v mode"><span class="mode-badge mode-0" id="st-mode">—</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>항로 상태</h2>
+      <div class="gauges">
+        <div class="gauge"><span class="k">남은 WP</span><span class="v" id="rt-remaining">—</span></div>
+        <div class="gauge"><span class="k">상관 ID</span><span class="v" id="rt-linkage">—</span></div>
+        <div class="gauge wide"><span class="k">다음 웨이포인트</span><span class="v coord" id="rt-next">—</span></div>
+        <div class="gauge wide" id="rt-control-wrap" hidden><span class="k">원격 조종 반영</span><span class="v" id="rt-control">—</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>수신 로그 <span class="count" id="rx-count"></span></h2>
+      <ul class="list" id="rx-log"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>카운터</h2>
+      <div class="counters">
+        <div class="gauge"><span class="k">거절</span><span class="v" id="ct-rejected">0</span></div>
+        <div class="gauge"><span class="k">해석 실패</span><span class="v" id="ct-ignored">0</span></div>
+        <div class="gauge"><span class="k">두절로 유실</span><span class="v" id="ct-dropped">0</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>무선 링크 모의</h2>
+      <div class="linkctl">
+        <button class="btn danger" id="btn-link">링크 두절</button>
+        <span class="hint">끊으면 위치보고·명령·ACK가 모두 유실되고, ROC는 10초 뒤 두절로 판정합니다.</span>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/console.js"></script>
+</body>
+</html>
