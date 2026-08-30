@@ -37,7 +37,7 @@ DEFERRED_TCS = (
 APPROVED_REVISION_CHAIN = (
     "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7",
     "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14",
-    "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19",
+    "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20",
 )
 # v0.9.14: 시나리오 계열 TC는 v0.9.8의 기록된 한정 재시도가 정당하다.
 SCENARIO_TCS_WITH_SANCTIONED_RETRY = (
@@ -66,6 +66,28 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     def status_of(tc):
         item = collected.get(tc)
         return item["payload"].get("status") if item else "MISSING"
+
+    # 0.9.20: artifact-SHA/index 상호 대조 — 각 evidence root의 index.json이
+    # 가리키는 sha256과 실측 artifact sha256의 불일치를 일관성 문제로 계상.
+    for root in evidence_roots:
+        index_path = os.path.join(root, "index.json")
+        if not os.path.exists(index_path):
+            continue
+        index_payload, _ = _load(index_path)
+        entries = index_payload.get("artifacts") or index_payload
+        if not isinstance(entries, dict):
+            continue
+        for name, meta in entries.items():
+            expected = (
+                meta.get("sha256") if isinstance(meta, dict) else meta
+            )
+            item = collected.get(name)
+            if item is None or not isinstance(expected, str):
+                continue
+            if expected != item["sha256"]:
+                problems.append(
+                    f"index/artifact sha 불일치: {name} ({root})"
+                )
 
     tc_status = {tc: status_of(tc) for tc in REQUIRED_TCS + REQUIRED_SOAK}
     deferred_status = {tc: status_of(tc) for tc in DEFERRED_TCS}

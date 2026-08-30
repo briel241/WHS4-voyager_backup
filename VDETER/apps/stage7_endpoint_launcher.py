@@ -1019,7 +1019,7 @@ def main(argv=None) -> int:
 
         # 해제검사 완화 (근거: frozen 규칙은 계획·해제가
         # 같은 lead라 최조기 슬롯 의도가 다음 해제 평가(≤40ms 뒤)에서
-        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 120ms 완화해
+        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 200ms 완화해(바닥 100ms)
         # 슬랙을 보장한다. 늦은 제출의 물리 방어는 어댑터 _LEAD_NS
         # 100ms가 계속 수행. 계획·창·방송 경로는 불변.)
         import dataclasses as _dc_rel
@@ -1344,13 +1344,14 @@ def main(argv=None) -> int:
 
         _MC._on_dependency_failed = _odf_recover
 
-        # D-18: 데이터 세션 ACK 인내 연장 (svc-run-i 실측: 함정이 353B
-        # 재조립 완주+ACK 송신까지 갔으나 +12s 지각 — frozen 한도
-        # 3프레임(7.6s)에 걸려 성공이 ACK_TIMEOUT으로 소실. 함정 수신
-        # 처리 지연의 구조적 바닥에 맞춰, 경계 3회 중 1회만 부재 계수를
-        # 전달해 유효 한도 3→27프레임(65s; rr-g 실측 — 계수 위상 편차로 실대기 43~52s, ACK 꼬리 ~55s 상회 필요). 부재 계수 전용 함수라
-        # 재전송 계획·ACK 도착 처리에는 무관여, LOCAL_DATA_SESSION
-        # 역할에만 작용 — 단문·함정 수신측 무영향.)
+        # D-18 최종형: 데이터 세션 ACK 대기의 전송별 벽시계 결정 하한
+        # 65s (svc-run-m/rr-g/h 실측: 성공 ACK가 frozen 한도 7.2s는
+        # 물론, 중간형이던 계수-스킵 대기(전역 위상 따라 실대기
+        # 43~62s 요동)보다도 늦게 도착 — WAITING_ACK 진입 시각을
+        # 직접 기록해 65s 전에는 부재 계수를 아예 전달하지 않는다.
+        # 부재 계수 전용 함수라 재전송 계획·ACK 도착 처리 무관여,
+        # LOCAL_DATA_SESSION 역할 한정. 재현 전용 시험대 보정 —
+        # 실물급에서는 원 규칙 복원(§25.1 D-18).)
         _orig_ack_to = _MC._on_data_ack_timeout
         _ack_wait_started: dict = {}
 
