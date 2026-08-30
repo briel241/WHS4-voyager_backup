@@ -58,6 +58,10 @@ from common.outbound import (  # noqa: E402
     Outbound,
 )
 
+from common.security import certificate as cert  # noqa: E402
+from common.security.cert_flow import mass_receive_certificate  # noqa: E402
+from common.security.trust_store import TrustStore  # noqa: E402
+
 from apps.console_transport import build_transport  # noqa: E402
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console_static")
@@ -159,6 +163,18 @@ class Simulation:
         self.mass_route: list[tuple[float, float]] = []
         # MASS가 마지막으로 수락한 조종 필드
         self.mass_control: dict | None = None
+
+        # SC-VDE-001 인증서 — ROC의 CA와 MASS의 신뢰저장소
+        self._ca_key, self._ca_public = cert.generate_key_pair()
+        self._ca_der = cert.build_certificate(
+            subject="ROC-CA", issuer="ROC-CA",
+            subject_public_key=self._ca_public, issuer_private_key=self._ca_key,
+            serial_number=1, not_before=time.time() - 86400.0,
+            not_after=time.time() + 365 * 86400.0,
+            roc_id="ROC-01", is_ca=True)
+        self._trust = TrustStore()
+        self._cert_serial = 1
+        self.cert_log: list[dict] = []
 
         self._snapshot_json = b"{}"
         self._record_track()
@@ -422,6 +438,10 @@ class Simulation:
                 outbound, meta = self._make_control(body, now)
             elif kind == "cancel":
                 outbound, meta = self._make_cancel(body, now)
+            elif kind == "certificate":
+                # 인증서는 항로·조종과 흐름이 다르다. 명령 큐를 타지 않고
+                # 여기서 발급→전송→검증→저장까지 마치고 결과만 남긴다.
+                return self._issue_certificate(body, now)
             else:
                 raise ValueError(f"알 수 없는 명령 종류: {kind!r}")
 
@@ -516,6 +536,68 @@ class Simulation:
         }
 
     # 방금 만든 Outbound의 Linkage ID. RocAgent가 마지막에 등록한 명령이다.
+    # ---------------------------------------------------------- SC-VDE-001
+
+    # ROC가 인증서를 발급해 MASS에게 보내고, MASS가 검증 후에만 신뢰저장소에
+    # 반영한다. `forged=true`면 서명을 훼손해 보내 거부되는 것을 보인다.
+    #
+    # 항로·조종과 달리 응용 ACK이 없다. 결과는 검증 성패와 저장소 변화다.
+    def _issue_certificate(self, body: dict, now: float) -> dict:
+        forged = bool(body.get("forged", False))
+        self._cert_serial += 1
+
+        _, vessel_public = cert.generate_key_pair()
+        der = cert.build_certificate(
+            subject=f"MASS-{self.mass.mmsi}", issuer="ROC-CA",
+            subject_public_key=vessel_public, issuer_private_key=self._ca_key,
+            serial_number=self._cert_serial,
+            not_before=time.time() - 86400.0,
+            not_after=time.time() + 30 * 86400.0,
+            mass_id="MASS-01", roc_id="ROC-01", mmsi=self.mass.mmsi)
+
+        if forged:
+            # 서명 바이트 하나를 뒤집는다. 구조는 멀쩡하고 서명만 깨진다.
+            tampered = bytearray(der)
+            tampered[-1] ^= 0xFF
+            der = bytes(tampered)
+
+        label = "위조 인증서" if forged else "정상 인증서"
+
+        if not self.link_up:
+            self.dropped += 1
+            self._log(now, "ROC", "MASS", "lost", f"{label} — 링크 두절로 전달 실패")
+            return {"ok": False, "text": f"{label} 전달 실패 (링크 두절)"}
+
+        self._log(now, "ROC", "MASS", "send", f"{label} {len(der)} byte 전송")
+
+        before = len(self._trust.fingerprints())
+        accepted, reason = mass_receive_certificate(
+            der, self._trust, self._ca_der, time.time())
+        after = len(self._trust.fingerprints())
+
+        fingerprint = cert.fingerprint_of(der).hex()
+        entry = {
+            "t": round(now, 1),
+            "serial": self._cert_serial,
+            "forged": forged,
+            "bytes": len(der),
+            "accepted": accepted,
+            "reason": reason,
+            "fingerprint": fingerprint,
+            "trust_count": after,
+        }
+        self.cert_log.append(entry)
+        del self.cert_log[:-LOG_MAX_ENTRIES]
+
+        self._log(now, "MASS", "ROC",
+                  "ack" if accepted else "reject",
+                  f"{label} 검증 {'통과' if accepted else '거부'} ({reason}) · "
+                  f"신뢰저장소 {before}→{after}건")
+
+        return {"ok": True, "accepted": accepted, "reason": reason,
+                "trust_count": after, "fingerprint": fingerprint,
+                "text": f"{label} → {'수락' if accepted else '거부'} ({reason})"}
+
     def _linkage_of(self, outbound: Outbound) -> int:
         try:
             message = decode(outbound.payload)
@@ -550,6 +632,71 @@ class Simulation:
             return {"ok": True, "link_up": self.link_up}
 
     # ---------------------------------------------------------------- 기록
+
+    # 지금까지의 세션을 results/에 JSON으로 남긴다.
+    #
+    # scenario_runner처럼 합격/불합격을 판정하지는 않는다. 콘솔은 자유 조작이라
+    # 미리 정한 기대값이 없기 때문이다. 대신 **무슨 일이 있었는지**를 남긴다 —
+    # 통신 로그·수신 판정·인증서 결과·명령 이력·항적·최종 상태.
+    def save_session(self) -> dict:
+        with self.lock:
+            snapshot = {
+                "kind": "console-session",
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "elapsed_seconds": round(self.now, 1),
+                "transport": {
+                    "name": self.transport.name,
+                    "detail": self.transport.detail,
+                    **self.transport.stats(),
+                },
+                "final_state": {
+                    "mass": {
+                        "mmsi": self.mass.mmsi,
+                        "latitude": _r(self.mass.state.latitude),
+                        "longitude": _r(self.mass.state.longitude),
+                        "heading": round(self.mass.state.heading, 1),
+                        "sog": round(self.mass.state.sog, 1),
+                        "navigation_status": self.mass.state.navigation_status,
+                        "autonomy_mode": self.mass.state.autonomy_mode,
+                        "autonomy_name": pos.AUTONOMY_MODE_NAMES.get(
+                            self.mass.state.autonomy_mode, "?"),
+                        "fallback": self.mass.fallback_name,
+                        "heading_setpoint": self.mass.heading_setpoint_degrees,
+                        "remaining_waypoints": self.mass.remaining_waypoints,
+                        "rejected_count": self.mass.rejected_count,
+                        "ignored_count": self.mass.ignored_count,
+                        "link_loss_count": self.mass.link_loss_count,
+                    },
+                    "roc": {
+                        "mmsi": self.roc.mmsi,
+                        "tracked": len(self.roc.tracks),
+                        "link_lost": self.roc.link_lost,
+                        "unanswered": len(self.roc.unanswered),
+                        "mismatched_ack_count": self.roc.mismatched_ack_count,
+                    },
+                    "link_up": self.link_up,
+                    "dropped": self.dropped,
+                },
+                "commands": list(self._history),
+                "communication_log": list(self.log),
+                "mass_receive_log": list(self.mass_log),
+                "certificate_log": list(self.cert_log),
+                "planned_route": [[_r(a), _r(b)] for a, b in self.planned_route],
+                "track": [[_r(a), _r(b)] for a, b in self.track],
+            }
+
+        results_dir = os.path.join(_ROOT, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        path = os.path.join(results_dir, f"console_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+
+        return {"ok": True, "path": os.path.relpath(path, _ROOT),
+                "commands": len(snapshot["commands"]),
+                "certificates": len(snapshot["certificate_log"]),
+                "log_entries": len(snapshot["communication_log"])}
 
     def _log(self, now: float, sender: str, receiver: str, kind: str, text: str) -> None:
         self.log.append(
@@ -672,6 +819,8 @@ class Simulation:
                 "rejected_count": mass.rejected_count,
                 "ignored_count": mass.ignored_count,
                 "link_loss_count": mass.link_loss_count,
+                "trust_count": len(self._trust.fingerprints()),
+                "cert_log": self.cert_log[-20:],
                 "navigation_status": state.navigation_status,
                 # 배가 실제로 반영 중인 값을 그대로 읽는다. 구동기가 가진
                 # 사본이 아니라 행위자 상태라야 화면과 거동이 어긋나지 않는다.
@@ -776,6 +925,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
             elif path == "/api/link":
                 self._send_json(self.simulation.set_link(bool(body.get("up", True))))
+            elif path == "/api/save":
+                self._send_json(self.simulation.save_session())
             else:
                 self._send_json({"error": "not found"}, 404)
         except ValueError as exc:

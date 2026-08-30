@@ -465,6 +465,28 @@
       }
     });
 
+    async function issueCertificate(forged) {
+      try {
+        const result = await api("/api/command", { kind: "certificate", forged });
+        flash("#msg-cert", result.text, result.accepted ? "ok" : "err");
+      } catch (error) {
+        flash("#msg-cert", error.message, "err");
+      }
+    }
+    $("#btn-cert").addEventListener("click", () => issueCertificate(false));
+    $("#btn-cert-forged").addEventListener("click", () => issueCertificate(true));
+
+    $("#btn-save").addEventListener("click", async () => {
+      try {
+        const result = await api("/api/save", {});
+        flash("#msg-cert",
+          `저장됨 ${result.path} · 명령 ${result.commands} · 인증서 ${result.certificates}`,
+          "ok");
+      } catch (error) {
+        flash("#msg-cert", error.message, "err");
+      }
+    });
+
     $("#btn-reset").addEventListener("click", async () => {
       await api("/api/reset", {});
       observed.length = 0; lastUpdatedAt = null; wps.length = 0; renderWps();
@@ -534,6 +556,22 @@
       $("#cancel-box").innerHTML = current == null
         ? "취소할 항로가 없습니다. 먼저 노선이나 조종을 발행하세요."
         : `현재 항로 Linkage ID <b>${current}</b> 에 대해 취소(Route Type 31)를 보냅니다.`;
+
+      const certLog = (snap.mass && snap.mass.cert_log) || [];
+      $("#cert-rows").replaceChildren(
+        ...(certLog.length
+          ? certLog.slice().reverse().map((c) => el("tr", {}, [
+              el("td", { class: "num", text: String(c.serial) }),
+              el("td", { text: c.forged ? "위조" : "정상" }),
+              el("td", { class: "num", text: `${c.bytes} B` }),
+              el("td", {}, [c.accepted
+                ? statusPill("수락", "ok")
+                : statusPill(`거부 · ${c.reason}`, "bad")]),
+              el("td", { class: "num", text: `${c.trust_count}건` }),
+            ]))
+          : [el("tr", {}, [el("td", { colspan: "5", class: "empty",
+              text: "아직 발급하지 않았습니다." })])])
+      );
 
       renderLog($("#log"), snap.log);
 
