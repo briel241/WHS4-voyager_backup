@@ -726,6 +726,8 @@ class Simulation:
                         "link_lost": self.roc.link_lost,
                         "unanswered": len(self.roc.unanswered),
                         "mismatched_ack_count": self.roc.mismatched_ack_count,
+                        "rejected_count": self.roc.rejected_count,
+                        "ignored_count": self.roc.ignored_count,
                     },
                     "link_up": self.link_up,
                     "dropped": self.dropped,
@@ -899,6 +901,10 @@ class Simulation:
             "roc": {
                 "mmsi": roc.mmsi,
                 "report_timeout": roc.report_timeout,
+                # 해석은 됐지만 전선에 실을 수 없는 값이라 버린 수신.
+                "rejected_count": roc.rejected_count,
+                "ignored_count": roc.ignored_count,
+                "mismatched_ack_count": roc.mismatched_ack_count,
                 "tracks": tracks,
                 "commands": commands,
                 "current_linkage_id": self._current_linkage,

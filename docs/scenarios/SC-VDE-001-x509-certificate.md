@@ -194,6 +194,41 @@ def on_data(inbound):                                  # vdeter_bridge.Inbound
 **분할·재조립·자원할당·ACK는 전부 VDE-TER Service 내부 일**이다. 응용은 Link ID도
 Message Type도 만들지 않는다. 종단 왕복은 `apps/cert_loopback_demo.py`로 확인된다.
 
+### 6.3 검증 범위 — RFC 5280 중 무엇을 하고 무엇을 안 하는가
+
+`common/security/certificate.py`의 검증은 **단일 CA · 사전 탑재 신뢰 앵커**를
+전제한 축소 구현이다. 보고서에 "X.509 검증"이라고만 적으면 실제보다 넓게
+읽히므로 범위를 못 박는다.
+
+**하는 것** (실측 확인 — 각 경우 신뢰 저장소 변화까지 검사했다)
+
+| 검사 | 실패 시 사유 |
+| --- | --- |
+| 발급자 서명 (ECDSA P-256 / SHA-256) | `bad-signature` |
+| 유효기간 시작 전 | `not-yet-valid` |
+| 유효기간 경과 | `expired` |
+| 발급자 이름이 앵커 주체와 같은가 | `issuer-mismatch` |
+| 앵커의 BasicConstraints `cA=TRUE` | `anchor-not-ca` |
+| 크기 상한 1,024 byte | `too-large` |
+| 구조 파싱 | `parse-error` |
+| 통과한 것만 저장 · 재수신 멱등 | (§A4-4.15) |
+
+**안 하는 것**
+
+| 항목 | 현재 | 왜 지금은 문제가 아닌가 |
+| --- | --- | --- |
+| **폐기 확인 (CRL/OCSP)** | 안 함. Report에 CRL(type 2)이 오면 `crl-not-handled`로 남기고 적용하지 않음 | 폐기 배포 경로 자체가 미정의. 실운용에서는 반드시 필요 |
+| **KeyUsage / keyCertSign** | 앵커의 KeyUsage를 보지 않음 | 앵커를 out-of-band로 우리가 심음 |
+| **인증서 체인** | 1단계만 (앵커 → 단말). 중간 CA·path length 없음 | 시나리오가 단일 CA 구성 |
+| **이름 대조** | Subject/Issuer의 **CN 문자열 동일성** | 우리 인증서가 CN 하나만 씀. RFC 5280의 Name 대조는 아님 |
+| **앵커에 BasicConstraints가 없을 때** | CA로 통과시킴 (판단 보류) | 앵커를 우리가 만들어 항상 넣음 |
+| **signatureAlgorithm 필드 대조** | TBS 안팎의 알고리즘 식별자를 비교하지 않음 | ECDSA/SHA-256으로 고정 검증하므로 불일치는 서명 실패로 귀결 |
+
+**대체 백엔드 주의** — `cryptography`가 없는 환경에서는 HMAC 기반 대체 경로로
+내려간다. 구조와 흐름은 같지만 **공개키 암호가 아니다.** 성능·크기 수치를
+보고할 때는 반드시 표준 백엔드에서 측정한다 (검증 1건 실측: 표준 ECDSA
+**125 µs** vs 대체 **25 µs**, 인증서 크기 **412 B** vs **280 B**).
+
 ---
 
 ## 7. 보안 관점
