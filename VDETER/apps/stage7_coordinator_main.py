@@ -370,14 +370,14 @@ def _load_run_metadata(configs_dir: str) -> dict:
 def write_rr_evidence(
     run_root: str, tc_id: str, *, run_id: str, metadata: dict, started_utc: str,
     ended_utc: str, duration_s: float, counters: dict, status: str, detail: dict,
-    hardware: dict,
+    hardware: dict, lifecycle_generation: int = 1,
 ) -> str:
     """§17A.6 research_ready evidence artifact 하나를 기록한다."""
 
     assert status in ("PASS", "FAIL", "ABORTED")
     directory = os.path.join(run_root, "evidence", "research_ready")
     os.makedirs(directory, exist_ok=True)
-    payload = {
+    payload = {  # generation은 호출측 실값(기본 1 — 재기동 없는 절차)
         "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
         "profile": RESEARCH_READY_PROFILE,
         "tc_id": tc_id,
@@ -387,7 +387,7 @@ def write_rr_evidence(
         "git_dirty": metadata.get("git_dirty"),
         "hardware": hardware,
         "run_id": run_id,
-        "lifecycle_generation": 1,
+        "lifecycle_generation": lifecycle_generation,
         "started_utc": started_utc,
         "ended_utc": ended_utc,
         "duration_s": round(duration_s, 1),
@@ -837,7 +837,7 @@ def run_rr_p2(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
     """`TC-STAGE7-RR-005/006`: link별 3-node 최소 기능 1회씩 (v0.9.1 G항)."""
 
     tc_id = "TC-STAGE7-RR-005" if link_id == 17 else "TC-STAGE7-RR-006"
-    # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 40분.
+    # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 70분(0.9.19).
     guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=70 * 60)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)

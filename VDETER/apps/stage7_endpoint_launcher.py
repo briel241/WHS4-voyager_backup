@@ -1213,6 +1213,21 @@ def main(argv=None) -> int:
                     None,
                 )
                 if link11 is None or not link11.short_data_eligible:
+                    # 파편 상한 3 명시 강제 (0.9.15/0.9.20 m9): 세그먼트가
+                    # 3조각 용량(3×215B)을 넘으면 승격하지 않고 원 단문
+                    # 경로로 낙하 → frozen의 설계된 거부
+                    # (LINK_TRANSFER_SIZE_UNSUPPORTED)로 즉시 실패한다.
+                    # 검증 보증 구간(≤426B=2조각, 상한 3조각) 밖의 무음
+                    # 진입을 차단하는 게이트.
+                    if requirement.presentation_size > 3 * 215:
+                        print(
+                            "[launcher] 승격 거부 — 파편 상한 3 초과 "
+                            f"(size={requirement.presentation_size} > 645)",
+                            file=sys.stderr, flush=True,
+                        )
+                        return _orig_submit_short(
+                            self_c, state, requirement, causation_event_id
+                        )
                     print(
                         "[launcher] short->session 승격 "
                         f"(link11 미적합, size="

@@ -182,12 +182,13 @@ def main(argv=None) -> int:
     # --- 1. admission_open 대기 → 세 START 병렬 --------------------------------
     gate = os.path.join(gate_dir, "admission_open")
     # RF 사다리(CFO+fit+APPLY 재검증+rf_time PRE/POST) 실측 ~25분이 admission
-    # 전에 선행한다 — 대기 상한은 phase guard(40분)에 맞춘다 (rr-p2-17 run d
-    # 실측: 300s로는 사다리 완료 전에 포기).
-    deadline = time.monotonic() + 2_400.0
+    # 전에 선행한다 — 대기 상한은 phase guard(70분, 0.9.19)에 동기한다
+    # (rr-p2-17 run d 실측: 300s로는 사다리 완료 전에 포기; 2,400s는 구
+    # 40분 guard 기준이라 사다리 지연 시 guard보다 먼저 포기하는 부정합).
+    deadline = time.monotonic() + 4_200.0
     while not os.path.exists(gate):
         if time.monotonic() > deadline:
-            record("await-admission", "FAIL", reason="admission_open gate 2400s 초과")
+            record("await-admission", "FAIL", reason="admission_open gate 4200s 초과")
             return 1
         time.sleep(0.2)
 
@@ -237,6 +238,18 @@ def main(argv=None) -> int:
                 if expect_fail:
                     # 미지 목적지 등은 제출 단계 즉시 거부가 더 강한 정상
                     # 방어다 (svcdbg76 실측: destination_not_deployment_member).
+                    # 0.9.20: 거부 "사유"까지 검증 — 무관한 거부(예: 자원
+                    # 고갈)의 허위 PASS 방지. 목적지/지원성 계열만 인정.
+                    body_text = json.dumps(body, ensure_ascii=False)
+                    accepted_markers = (
+                        "destination", "UNSUPPORTED_REQUEST",
+                        "INVALID_REQUEST", "ROUTE",
+                    )
+                    if not any(m in body_text for m in accepted_markers):
+                        record(step_id, "FAIL",
+                               reason="예상 밖 거부 사유 (목적지/지원성 계열 아님)",
+                               body=body, attempts=attempts)
+                        return False
                     counters["transfers_failed_expected"] += 1
                     record(step_id, "PASS",
                            terminal="SUBMIT_REJECTED(정상 즉시 거부)",
@@ -267,7 +280,8 @@ def main(argv=None) -> int:
             })
             if outcome is not None:
                 break
-            counters["retries"] += 1
+            if attempt + 1 < max_attempts:
+                counters["retries"] += 1  # 재시도 정의 = 후속 시도가 있는 실패만
         if outcome is None:
             if not gating:
                 record(step_id, "LOSS", gating=False,
