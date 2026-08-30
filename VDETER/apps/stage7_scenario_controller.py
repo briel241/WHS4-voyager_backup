@@ -329,6 +329,13 @@ def main(argv=None) -> int:
             allowed = {x.strip() for x in scenario_filter.split(",") if x.strip()}
             plan = tuple(p for p in plan if p[0] in allowed)
             print(f"[controller] scenario filter: {sorted(allowed)}", flush=True)
+        # 안정화 지연 (rr-g/h 실측: 서비스 시작 직후는 창 계획 램프로
+        # 배송 큐가 가장 혼잡한 순간 — 시나리오를 바로 쏘면 조각·ACK
+        # 처리 지연의 꼬리가 길어진다. 램프가 가라앉은 뒤 시작한다.)
+        settle_s = float(os.environ.get("STAGE7_SCENARIO_SETTLE_S", "60"))
+        if settle_s > 0:
+            print(f"[controller] settle {settle_s:.0f}s", flush=True)
+            time.sleep(settle_s)
         for name, sender, receiver, expect_fail in plan:
             ok = transfer(
                 name, sender, f"submit-{name}.json", receiver, shas[name],

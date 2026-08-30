@@ -1352,13 +1352,36 @@ def main(argv=None) -> int:
         # 재전송 계획·ACK 도착 처리에는 무관여, LOCAL_DATA_SESSION
         # 역할에만 작용 — 단문·함정 수신측 무영향.)
         _orig_ack_to = _MC._on_data_ack_timeout
+        _ack_wait_started: dict = {}
 
         def _ack_patient(self_c, state, causation_event_id, commands):
-            n = _ack_patient.__dict__["_n"] = (
-                _ack_patient.__dict__.get("_n", 0) + 1
-            )
-            if n % 9:
-                return state
+            # 결정적 벽시계 대기 (rr-g/h 실측: 계수-스킵 방식은 전역
+            # 위상에 따라 실대기가 43~62s로 요동 — 명목 65s에도 짧은
+            # 시도가 회신(~53~58s)보다 먼저 끊김. 전송별 WAITING 진입
+            # 시각을 직접 기록해 65s 경과 전에는 부재 계수를 아예
+            # 전달하지 않는다 → 실대기 하한 65s 보장, 위상 복권 소멸.)
+            try:
+                now_w = _time.monotonic()
+                waiting = [
+                    c.transfer_id.value for c in state.transfers
+                    if getattr(getattr(c, "role", None), "name", "")
+                    == "LOCAL_DATA_SESSION"
+                    and getattr(getattr(c, "phase", None), "name", "")
+                    == "WAITING_ACK"
+                ]
+                for known in list(_ack_wait_started):
+                    if known not in waiting:
+                        del _ack_wait_started[known]
+                if waiting:
+                    ripe = all(
+                        now_w - _ack_wait_started.setdefault(x, now_w)
+                        >= 65.0
+                        for x in waiting
+                    )
+                    if not ripe:
+                        return state
+            except Exception:  # noqa: BLE001 - 실패 시 원 경로
+                pass
             return _orig_ack_to(self_c, state, causation_event_id, commands)
 
         _MC._on_data_ack_timeout = _ack_patient
