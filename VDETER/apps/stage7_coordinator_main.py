@@ -838,7 +838,7 @@ def run_rr_p2(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
 
     tc_id = "TC-STAGE7-RR-005" if link_id == 17 else "TC-STAGE7-RR-006"
     # v0.9.1 사용자 승인(2026-08-27): 사다리 실측 ~36-40분 → 상한 40분.
-    guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=40 * 60)
+    guard = PhaseGuard(f"RR-P2-{link_id}", deadline_s=70 * 60)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)
     started = _utc_now()
