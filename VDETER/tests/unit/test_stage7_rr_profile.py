@@ -567,6 +567,16 @@ class RrFinalBuilderTest(unittest.TestCase):
         # entries의 sha256 상호 대조가 실검사되므로 픽스처도 정합하게 만든다.
         import hashlib as _hashlib
         os.makedirs(root, exist_ok=True)
+        # 0.9.22 원본 결속 계약: root 상위에 coordinator ≥1 + runtime ≥3
+        # 원본이 있어야 READY 가능 — 픽스처도 규약대로 만든다.
+        parent = os.path.dirname(root)
+        with open(os.path.join(parent, "coordinator-fixture.json"),
+                  "w") as handle:
+            json.dump({"fixture": True}, handle)
+        for endpoint in ("ROC", "MASS-A", "MASS-B"):
+            with open(os.path.join(parent, f"{endpoint}-runtime.json"),
+                      "w") as handle:
+                json.dump({"fixture": endpoint}, handle)
         entries = {}
         for tc, status in statuses.items():
             payload = {
@@ -576,6 +586,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 "baseline_sha256": sha, "status": status,
                 "counters": {"retries": retries},
                 "hardware": hardware or {"usb": "x"},
+                "lifecycle_generation": 1,
             }
             path = os.path.join(root, f"{tc}.json")
             with open(path, "w") as handle:
@@ -903,6 +914,70 @@ class RrFinalBuilderTest(unittest.TestCase):
                           "integration-stage7.log"):
                 self.assertIn(fname, bound)
                 self.assertEqual(len(bound[fname]), 64)
+
+    def test_missing_lifecycle_generation_blocks_ready(self):
+        # 사용자 지적(2026-08-30): §17A.6 lineage/generation 일관성의 실검사
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            del payload["lifecycle_generation"]
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+
+    def test_mixed_lifecycle_generation_blocks_ready(self):
+        # 같은 root(=같은 run) 안의 1/99 혼재는 lineage 위반
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-004.json")
+            with open(path) as handle:
+                payload = json.load(handle)
+            payload["lifecycle_generation"] = 99
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+
+    def test_missing_source_originals_blocks_ready(self):
+        # 원본(coordinator/runtime) 부재 root는 무음 누락이 아니라 거부
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr-fixture")
+            self._make_evidence(root, self._all_pass())
+            os.remove(os.path.join(base, "MASS-B-runtime.json"))
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+                verification_root=self._verification(base),
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+            self.assertTrue(any(
+                "원본 evidence 부재" in p
+                for p in result["consistency_problems"]
+            ))
 
     def test_duplicate_tc_across_roots_blocks_ready(self):
         # last-wins 모호성 금지: 같은 TC가 복수 root에 있으면 거부

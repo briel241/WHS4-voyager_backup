@@ -124,6 +124,11 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
         json.dumps(c["payload"].get("hardware"), sort_keys=True)
         for c in judged.values()
     }
+    # 0.9.22 추가 봉합: §17A.6 "run lineage/generation 일관성"의 실검사 —
+    # 구판은 run_id 존재만 보고 lifecycle_generation은 아예 읽지 않아
+    # 부재·혼재(1/99) 변조가 통과했다. 존재(정수 ≥1) + 같은 root(=같은
+    # run) 안에서 단일값을 강제한다(정당한 재시작은 새 run ID/root).
+    generations_by_root = {}
 
     if profiles - {"RESEARCH_READY_MINIMAL"}:
         problems.append(f"profile 불일치: {profiles}")
@@ -193,6 +198,14 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
         )
         if dup > limit:
             problems.append(f"duplicates > 허용치: {name} ({dup} > {limit})")
+        generation = payload.get("lifecycle_generation")
+        if not isinstance(generation, int) or generation < 1:
+            problems.append(
+                f"lifecycle_generation 부재/비정상: {name} ({generation!r})"
+            )
+        generations_by_root.setdefault(
+            os.path.dirname(os.path.normpath(c["path"])), set()
+        ).add(generation)
         run_id = payload.get("run_id")
         if not run_id:
             problems.append(f"run_id 부재: {name}")
@@ -209,6 +222,12 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
                 )
     if len(hardware_maps) > 1:
         problems.append(f"hardware mapping 불일치: {len(hardware_maps)}종")
+    for root_key, generations in sorted(generations_by_root.items()):
+        if len(generations) > 1:
+            problems.append(
+                f"lifecycle_generation 혼재(단일 run 내): {root_key} "
+                f"{sorted(generations, key=repr)}"
+            )
 
     missing = [tc for tc, s in tc_status.items() if s == "MISSING"]
     failed = [tc for tc, s in tc_status.items() if s == "FAIL"]
@@ -265,6 +284,37 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
                     handle.read()
                 ).hexdigest()
 
+    # 원본 evidence 결속: 각 root의 상위 evidence 디렉터리에 있는
+    # coordinator/runtime 원본의 sha256을 최종 체인에 포함한다 —
+    # artifact 요약이 결손인 경우(예: RR-004 TX/RX 사전화 충돌)에도
+    # 원본이 SHA로 결속·검증되게 한다 (artifact 자체는 불변 유지).
+    # 주의: 이 블록은 반드시 final 판정 **이전**이어야 한다 — 여기서
+    # 계상한 problems가 판정에 반영되게 (0.9.22 순서 재배치).
+    source_evidence = {}
+    for root in evidence_roots:
+        parent = os.path.dirname(os.path.normpath(root))
+        bound = {}
+        for pattern in ("coordinator-*.json", "*-runtime.json"):
+            for path in sorted(glob.glob(os.path.join(parent, pattern))):
+                with open(path, "rb") as handle:
+                    bound[os.path.basename(path)] = hashlib.sha256(
+                        handle.read()
+                    ).hexdigest()
+        # 0.9.22 추가 봉합: 구판 `if bound:`는 원본이 전무한 root를 조용히
+        # 누락(부재 비가시 — 삭제 변조와 구분 불가). 실측 규약(root당
+        # coordinator 1 + endpoint runtime 3)을 하한으로 강제하고, 빈
+        # 결속도 결과에 노출한다.
+        coordinator_count = sum(
+            1 for k in bound if k.startswith("coordinator-")
+        )
+        runtime_count = sum(1 for k in bound if k.endswith("-runtime.json"))
+        if coordinator_count < 1 or runtime_count < 3:
+            problems.append(
+                f"원본 evidence 부재: {root} (coordinator={coordinator_count}"
+                f", runtime={runtime_count} — 요구 ≥1/≥3)"
+            )
+        source_evidence[os.path.normpath(root)] = bound
+
     if missing or aborted:
         final = "ABORTED" if aborted else "RESEARCH_NOT_READY"
     elif failed or problems:
@@ -278,22 +328,6 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
         (v for v in versions if v in APPROVED_REVISION_CHAIN),
         key=APPROVED_REVISION_CHAIN.index, default=None,
     )
-    # 원본 evidence 결속: 각 root의 상위 evidence 디렉터리에 있는
-    # coordinator/runtime 원본의 sha256을 최종 체인에 포함한다 —
-    # artifact 요약이 결손인 경우(예: RR-004 TX/RX 사전화 충돌)에도
-    # 원본이 SHA로 결속·검증되게 한다 (artifact 자체는 불변 유지).
-    source_evidence = {}
-    for root in evidence_roots:
-        parent = os.path.dirname(os.path.normpath(root))
-        bound = {}
-        for pattern in ("coordinator-*.json", "*-runtime.json"):
-            for path in sorted(glob.glob(os.path.join(parent, pattern))):
-                with open(path, "rb") as handle:
-                    bound[os.path.basename(path)] = hashlib.sha256(
-                        handle.read()
-                    ).hexdigest()
-        if bound:
-            source_evidence[os.path.normpath(root)] = bound
 
     result = {
         "artifact_type": "STAGE7_RESEARCH_READY_FINAL_V1",
