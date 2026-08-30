@@ -263,7 +263,7 @@ def main(argv=None) -> int:
         "implicit_retry": 0,
         "phase_deadlines_s": {
             "rr-p0": 900, "rr-p1": 3600, "rr-p1-gain": 1200,
-            "rr-p2-17": 2400, "rr-p2-19": 2400, "rr-p3-fault": 2400,
+            "rr-p2-17": 4200, "rr-p2-19": 4200, "rr-p3-fault": 2400,
             "rr-p3-soak-17": 600, "rr-p3-soak-19": 600,
         },
     }

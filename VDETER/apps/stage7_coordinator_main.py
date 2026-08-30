@@ -356,15 +356,30 @@ def validate_rr_binding(arguments, metadata: dict) -> None:
             )
 
 
-def _load_run_metadata(configs_dir: str) -> dict:
+def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
     """prepare 도구가 결속한 git/baseline metadata (없으면 null 유지)."""
 
     path = os.path.join(configs_dir, "git_state.json")
     try:
         with open(path, "rb") as handle:
-            return json.loads(handle.read().decode("utf-8"))
+            metadata = json.loads(handle.read().decode("utf-8"))
     except OSError:
         return {}
+    # 0.9.20 재현성 봉합: 관측 환경(STAGE7_DIAG)과 gain artifact 출처를
+    # evidence에 기계 기록한다 — 재현 조건이 산문이 아닌 산출물에 남게.
+    metadata["stage7_diag_env"] = os.environ.get("STAGE7_DIAG", "0")
+    metadata["rx_energy_gate_env"] = os.environ.get(
+        "STAGE7_RX_ENERGY_GATE", "1"
+    )
+    if gain_artifact_path:
+        try:
+            with open(gain_artifact_path, "rb") as handle:
+                metadata["source_gain_artifact_sha256"] = hashlib.sha256(
+                    handle.read()
+                ).hexdigest()
+        except OSError:
+            pass
+    return metadata
 
 
 def write_rr_evidence(
@@ -387,6 +402,11 @@ def write_rr_evidence(
         "git_dirty": metadata.get("git_dirty"),
         "hardware": hardware,
         "run_id": run_id,
+        "stage7_diag_env": metadata.get("stage7_diag_env"),
+        "rx_energy_gate_env": metadata.get("rx_energy_gate_env"),
+        "source_gain_artifact_sha256": metadata.get(
+            "source_gain_artifact_sha256"
+        ),
         "lifecycle_generation": lifecycle_generation,
         "started_utc": started_utc,
         "ended_utc": ended_utc,
@@ -1797,7 +1817,7 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
 
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
-    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir))
+    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
 
     from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
     from vdeter.stage7.hw_operations import read_monotonic_raw_ns
@@ -1855,20 +1875,20 @@ def main(argv=None) -> int:
             phase_result = run_rr_p0(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 processes=processes,
             )
         elif arguments.phase == "rr-p1":
             phase_result = run_rr_p1(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
             )
         elif arguments.phase in ("rr-p2-17", "rr-p2-19"):
             phase_result = run_rr_p2(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 link_id=int(arguments.phase[-2:]),
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
@@ -1878,7 +1898,7 @@ def main(argv=None) -> int:
             phase_result = run_rr_p3_soak(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 link_id=int(arguments.phase[-2:]),
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
@@ -1888,7 +1908,7 @@ def main(argv=None) -> int:
             phase_result = run_rr_p3_fault(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
-                metadata=_load_run_metadata(arguments.configs_dir),
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
                 processes=processes,
             )
     except Exception as error:  # noqa: BLE001

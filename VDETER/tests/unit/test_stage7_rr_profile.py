@@ -544,16 +544,30 @@ class RrFinalBuilderTest(unittest.TestCase):
 
     def _make_evidence(self, root, statuses, *, profile="RESEARCH_READY_MINIMAL",
                        baseline="0.9.1", sha="ab" * 32, retries=0, hardware=None):
+        # 0.9.21 강화 계약 반영: artifact_type·tc_id·run_id 필수 + index.json
+        # entries의 sha256 상호 대조가 실검사되므로 픽스처도 정합하게 만든다.
+        import hashlib as _hashlib
         os.makedirs(root, exist_ok=True)
+        entries = {}
         for tc, status in statuses.items():
             payload = {
+                "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
+                "tc_id": tc, "run_id": "rr-fixture",
                 "profile": profile, "baseline_version": baseline,
                 "baseline_sha256": sha, "status": status,
                 "counters": {"retries": retries},
                 "hardware": hardware or {"usb": "x"},
             }
-            with open(os.path.join(root, f"{tc}.json"), "w") as handle:
+            path = os.path.join(root, f"{tc}.json")
+            with open(path, "w") as handle:
                 json.dump(payload, handle)
+            with open(path, "rb") as handle:
+                entries[tc] = {
+                    "sha256": _hashlib.sha256(handle.read()).hexdigest(),
+                    "status": status,
+                }
+        with open(os.path.join(root, "index.json"), "w") as handle:
+            json.dump({"profile": profile, "entries": entries}, handle)
 
     def _all_pass(self):
         s = {tc: "PASS" for tc in (

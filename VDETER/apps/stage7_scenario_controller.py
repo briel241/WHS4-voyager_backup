@@ -303,6 +303,18 @@ def main(argv=None) -> int:
                 wrong += len(hits)
         counters["wrong_destination"] += wrong
         if expect_fail:
+            # 0.9.20 보강: 지연형 실패도 원인 검사 — 무관 장애(자원 고갈
+            # 등)를 예상 실패로 오인하지 않게 목적지/시간류만 인정.
+            fail_text = json.dumps(outcome, ensure_ascii=False)
+            fail_markers = (
+                "destination", "TIMEOUT", "UNSUPPORTED_REQUEST",
+                "INVALID_REQUEST", "ROUTE",
+            )
+            if not any(m in fail_text for m in fail_markers):
+                record(step_id, "FAIL",
+                       reason="예상 밖 실패 원인 (목적지/시간류 아님)",
+                       terminal=fail_text[:200], attempts=attempts)
+                return False
             counters["transfers_failed_expected"] += 1
             record(step_id, "PASS", terminal="FAILED(예상된 timeout/NACK 처리)", attempts=attempts)
         else:
@@ -423,7 +435,7 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.20",
+        "baseline_revision": "0.9.21",
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],

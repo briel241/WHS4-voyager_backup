@@ -37,7 +37,7 @@ DEFERRED_TCS = (
 APPROVED_REVISION_CHAIN = (
     "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7",
     "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14",
-    "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20",
+    "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20", "0.9.21",
 )
 # v0.9.14: 시나리오 계열 TC는 v0.9.8의 기록된 한정 재시도가 정당하다.
 SCENARIO_TCS_WITH_SANCTIONED_RETRY = (
@@ -72,17 +72,20 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     for root in evidence_roots:
         index_path = os.path.join(root, "index.json")
         if not os.path.exists(index_path):
+            problems.append(f"index.json 부재: {root}")
             continue
         index_payload, _ = _load(index_path)
-        entries = index_payload.get("artifacts") or index_payload
+        entries = index_payload.get("entries")
         if not isinstance(entries, dict):
+            problems.append(f"index.json entries 구조 아님: {root}")
             continue
         for name, meta in entries.items():
             expected = (
                 meta.get("sha256") if isinstance(meta, dict) else meta
             )
             item = collected.get(name)
-            if item is None or not isinstance(expected, str):
+            if item is None:
+                problems.append(f"index가 가리키는 artifact 부재: {name} ({root})")
                 continue
             if expected != item["sha256"]:
                 problems.append(
@@ -126,6 +129,32 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     }
     if any(r != 0 for r in retries):
         problems.append("implicit retry != 0 인 artifact 존재")
+    # 0.9.20 보강: §17A.6 필수 확인의 실검사 — artifact type/tc_id 정합,
+    # 금지 counter(wrong bytes/destination), duplicates 규율, 금지 UHD
+    # outcome을 PASS 표기와 무관하게 counters에서 직접 검증한다.
+    for name, c in judged.items():
+        payload = c["payload"]
+        if payload.get("artifact_type") != "STAGE7_RESEARCH_READY_EVIDENCE_V1":
+            problems.append(f"artifact_type 불일치: {name}")
+        if payload.get("tc_id") not in (None, name):
+            problems.append(f"tc_id/파일명 불일치: {name}")
+        counters = payload.get("counters") or {}
+        if counters.get("wrong_destination", 0) != 0:
+            problems.append(f"wrong_destination != 0: {name}")
+        if counters.get("wrong_bytes", 0) != 0:
+            problems.append(f"wrong_bytes != 0: {name}")
+        dup = counters.get("duplicates", 0)
+        limit = (
+            counters.get("retries", 0)
+            if name in SCENARIO_TCS_WITH_SANCTIONED_RETRY else 0
+        )
+        if dup > limit:
+            problems.append(f"duplicates > 허용치: {name} ({dup} > {limit})")
+        for banned in ("uhd_underflow", "uhd_overflow", "uhd_late_command"):
+            if counters.get(banned, 0) != 0:
+                problems.append(f"금지 UHD outcome {banned} != 0: {name}")
+        if not payload.get("run_id"):
+            problems.append(f"run_id 부재: {name}")
     if len(hardware_maps) > 1:
         problems.append(f"hardware mapping 불일치: {len(hardware_maps)}종")
 
