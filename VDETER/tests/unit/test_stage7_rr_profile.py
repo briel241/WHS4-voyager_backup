@@ -577,6 +577,84 @@ class RrFinalBuilderTest(unittest.TestCase):
         )}
         return s
 
+    def test_tampered_missing_tc_id_blocks_ready(self):
+        # 0.9.21 fail-closed 증명: tc_id 제거 변조 → 통과 불가
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr")
+            self._make_evidence(root, self._all_pass())
+            path = os.path.join(root, "TC-STAGE7-RR-005.json")
+            payload = json.load(open(path))
+            del payload["tc_id"]
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            self._reindex(root)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+
+    def test_tampered_artifact_missing_from_index_blocks_ready(self):
+        # fail-closed 증명: index 미등재 artifact → 통과 불가 (역방향 대조)
+        import tempfile
+
+        app = self._builder()
+        with tempfile.TemporaryDirectory() as base:
+            root = os.path.join(base, "rr")
+            self._make_evidence(root, self._all_pass())
+            index_path = os.path.join(root, "index.json")
+            index = json.load(open(index_path))
+            del index["entries"]["TC-STAGE7-RR-005"]
+            with open(index_path, "w") as handle:
+                json.dump(index, handle)
+            result = app.build(
+                [root], os.path.join(base, "final-result.json"),
+                software_ok=True, frozen_hash_ok=True,
+            )
+            self.assertNotEqual(result["final_status"], "RESEARCH_READY")
+
+    def test_tampered_banned_counter_aliases_block_ready(self):
+        # fail-closed 증명: 실측 별칭 counter 위반 → 통과 불가
+        import tempfile
+
+        app = self._builder()
+        for key in ("wrong_bytes_total", "underflow_count",
+                    "overflow_count", "late_command_count"):
+            with tempfile.TemporaryDirectory() as base:
+                root = os.path.join(base, "rr")
+                self._make_evidence(root, self._all_pass())
+                path = os.path.join(root, "TC-STAGE7-RR-004.json")
+                payload = json.load(open(path))
+                payload["counters"][key] = 1
+                with open(path, "w") as handle:
+                    json.dump(payload, handle)
+                self._reindex(root)
+                result = app.build(
+                    [root], os.path.join(base, "final-result.json"),
+                    software_ok=True, frozen_hash_ok=True,
+                )
+                self.assertNotEqual(
+                    result["final_status"], "RESEARCH_READY",
+                    f"counter {key} 변조가 통과됨",
+                )
+
+    def _reindex(self, root):
+        # 변조 후 sha 재계산 — sha 불일치가 아닌 '내용 규칙' 검사를 겨냥
+        import hashlib as _hashlib
+        index_path = os.path.join(root, "index.json")
+        index = json.load(open(index_path))
+        for tc in list(index["entries"].keys()):
+            path = os.path.join(root, f"{tc}.json")
+            with open(path, "rb") as handle:
+                index["entries"][tc]["sha256"] = _hashlib.sha256(
+                    handle.read()
+                ).hexdigest()
+        with open(index_path, "w") as handle:
+            json.dump(index, handle)
+
     def test_all_pass_yields_research_ready(self):
         import tempfile
 

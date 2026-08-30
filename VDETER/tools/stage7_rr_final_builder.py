@@ -71,6 +71,10 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
     # 가리키는 sha256과 실측 artifact sha256의 불일치를 일관성 문제로 계상.
     for root in evidence_roots:
         index_path = os.path.join(root, "index.json")
+        root_artifacts = {
+            os.path.basename(path)[:-5]
+            for path in glob.glob(os.path.join(root, "*.json"))
+        } - {"index", "final-result"}
         if not os.path.exists(index_path):
             problems.append(f"index.json 부재: {root}")
             continue
@@ -91,6 +95,9 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
                 problems.append(
                     f"index/artifact sha 불일치: {name} ({root})"
                 )
+        # 역방향: root의 artifact가 index에 미등재면 문제 (변조·누락 방지)
+        for name in sorted(root_artifacts - set(entries.keys())):
+            problems.append(f"artifact가 index에 미등재: {name} ({root})")
 
     tc_status = {tc: status_of(tc) for tc in REQUIRED_TCS + REQUIRED_SOAK}
     deferred_status = {tc: status_of(tc) for tc in DEFERRED_TCS}
@@ -136,13 +143,34 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
         payload = c["payload"]
         if payload.get("artifact_type") != "STAGE7_RESEARCH_READY_EVIDENCE_V1":
             problems.append(f"artifact_type 불일치: {name}")
-        if payload.get("tc_id") not in (None, name):
-            problems.append(f"tc_id/파일명 불일치: {name}")
+        if payload.get("tc_id") != name:
+            problems.append(
+                f"tc_id 부재/불일치: {name} (tc_id={payload.get('tc_id')!r})"
+            )
         counters = payload.get("counters") or {}
-        if counters.get("wrong_destination", 0) != 0:
-            problems.append(f"wrong_destination != 0: {name}")
-        if counters.get("wrong_bytes", 0) != 0:
-            problems.append(f"wrong_bytes != 0: {name}")
+        # 금지 counter는 실측 명칭·별칭 전수로 검사한다 (이름 추측으로
+        # 놓치는 fail-open 방지 — 변조 픽스처 실검 근거).
+        banned_groups = {
+            "wrong destination": (
+                "wrong_destination", "wrong_destination_total",
+            ),
+            "wrong bytes": ("wrong_bytes", "wrong_bytes_total"),
+            "UHD underflow": (
+                "uhd_underflow", "underflow_count", "underflows",
+            ),
+            "UHD overflow": (
+                "uhd_overflow", "overflow_count", "overflows",
+            ),
+            "UHD late command": (
+                "uhd_late_command", "late_command_count", "late_commands",
+            ),
+        }
+        for label, keys in banned_groups.items():
+            for key in keys:
+                if counters.get(key, 0) != 0:
+                    problems.append(
+                        f"금지 counter {label}({key}) != 0: {name}"
+                    )
         dup = counters.get("duplicates", 0)
         limit = (
             counters.get("retries", 0)
@@ -150,9 +178,6 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
         )
         if dup > limit:
             problems.append(f"duplicates > 허용치: {name} ({dup} > {limit})")
-        for banned in ("uhd_underflow", "uhd_overflow", "uhd_late_command"):
-            if counters.get(banned, 0) != 0:
-                problems.append(f"금지 UHD outcome {banned} != 0: {name}")
         if not payload.get("run_id"):
             problems.append(f"run_id 부재: {name}")
     if len(hardware_maps) > 1:
@@ -181,8 +206,26 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok):
         (v for v in versions if v in APPROVED_REVISION_CHAIN),
         key=APPROVED_REVISION_CHAIN.index, default=None,
     )
+    # 원본 evidence 결속: 각 root의 상위 evidence 디렉터리에 있는
+    # coordinator/runtime 원본의 sha256을 최종 체인에 포함한다 —
+    # artifact 요약이 결손인 경우(예: RR-004 TX/RX 사전화 충돌)에도
+    # 원본이 SHA로 결속·검증되게 한다 (artifact 자체는 불변 유지).
+    source_evidence = {}
+    for root in evidence_roots:
+        parent = os.path.dirname(os.path.normpath(root))
+        bound = {}
+        for pattern in ("coordinator-*.json", "*-runtime.json"):
+            for path in sorted(glob.glob(os.path.join(parent, pattern))):
+                with open(path, "rb") as handle:
+                    bound[os.path.basename(path)] = hashlib.sha256(
+                        handle.read()
+                    ).hexdigest()
+        if bound:
+            source_evidence[os.path.normpath(root)] = bound
+
     result = {
         "artifact_type": "STAGE7_RESEARCH_READY_FINAL_V1",
+        "source_evidence_sha256": source_evidence,
         "profile": "RESEARCH_READY_MINIMAL",
         "baseline_version": latest_version,
         "baseline_versions_used": sorted(versions),
