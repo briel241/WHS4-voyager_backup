@@ -311,17 +311,15 @@ def main(argv=None) -> int:
         # v0.9.9 (2026-08-29 사용자 승인): 판정 세트 = 실증 기능군 3종.
         # Data/직송/relay는 UNRESOLVED_UNDER_INVESTIGATION — 조사 계속,
         # 본 동결 미보증. 디버그는 STAGE7_SCENARIO_FILTER로 6종 실행 가능.
+        # v0.9.18 (2026-08-30): 데이터 세션 재현 실증(svc-run-o 완주,
+        # 1시도·재시도 0)으로 data-roc-to-a를 판정 세트에 편입 — 4종.
         judged_plan = (
             ("short-roc-to-a", "ROC", "MASS-A", False),
             ("short-b-to-roc-noack", "MASS-B", "ROC", False),
             ("timeout-unknown-dest", "MASS-A", None, True),
-        )
-        # v0.9.11 편입 후보: 관제→함정 데이터 세션(인증서 운송로).
-        # 검증 통과·개정 적용 시 judged_plan으로 이동한다. 그 전에는
-        # STAGE7_SCENARIO_FILTER로만 실행된다.
-        candidate_plan = (
             ("data-roc-to-a", "ROC", "MASS-A", False),
         )
+        candidate_plan = ()
         plan = (
             judged_plan + candidate_plan
             if os.environ.get("STAGE7_SCENARIO_FILTER") else judged_plan
@@ -408,7 +406,7 @@ def main(argv=None) -> int:
                   and (steps_all_pass or counters["unexpected_errors"] == 0))
     result = {
         "artifact_type": "STAGE7_RR_SCENARIO_RESULT_V1",
-        "baseline_revision": "0.9.17",
+        "baseline_revision": "0.9.18",
         "unresolved_under_investigation": [
             "data-a-to-roc", "direct-short-a-to-b", "relay-data-a-to-b",
         ],
