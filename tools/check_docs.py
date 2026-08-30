@@ -165,6 +165,22 @@ check(
     f"실제 {MassAgent._FALLBACK_NAV_STATUS}",
 )
 
+# 전선형식 문서가 적은 Route Type 집합과 코드가 같아야 한다. 문서 쪽이 링크 팀과
+# 합의한 계약이므로, 코드가 그보다 넓으면 실 전송에서 INVALID_REQUEST가 난다.
+for doc in (
+    "docs/전선형식_노선_SC-VDE-005.md",
+    "docs/전선형식_원격조종_SC-VDE-006.md",
+):
+    line = next(
+        (l for l in read(doc).splitlines() if l.startswith("| Route Type")), ""
+    )
+    documented = {int(v) for v in re.findall(r"(\d+)=", line)}
+    check(
+        f"{os.path.basename(doc)} Route Type 집합",
+        documented == set(route.SC_VDE_ROUTE_TYPES),
+        f"문서 {sorted(documented)} / 코드 {sorted(route.SC_VDE_ROUTE_TYPES)}",
+    )
+
 
 # --------------------------------------------- 4b. 인증서 구성 일치·크기 경계
 
@@ -225,6 +241,7 @@ REFERENCED = [
     "apps/rf_normal_cycle.py",
     "tests/test_sc_vde_contract.py",
     "tests/test_metrics.py",
+    "tests/test_route_conformance.py",
     "common/metrics.py",
     "tools/measure_metrics.py",
     "tools/build_scenario_catalog.py",

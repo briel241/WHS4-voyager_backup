@@ -42,10 +42,11 @@
 **MASS의 처리 순서** — 검증이 끝난 뒤에만 상태를 바꾼다.
 
 1. 권한 판정 (`authority_policy`, 기본값은 누구든 허용 — §6.1)
-2. 스키마 검사 (예약값 거부)
-3. 누락 검사 (침로·Fallback·waypoint가 모두 없으면 거절)
-4. 경로 형상 검사 (연속 중복 waypoint 거부)
-5. 통과 → 조타 반영 + 운항 모드 RC + 응용 ACK
+2. 스키마 검사 (전선에 실을 수 없는 값 거부 — 승인된 codec과 같은 규칙)
+3. 취소 판정 (Message Linkage ID가 가리키는 지시만 해제)
+4. 누락 검사 (침로·Fallback·waypoint가 모두 없으면 거절)
+5. 경로 형상 검사 (연속 중복 waypoint 거부)
+6. 통과 → 조타 반영 + 운항 모드 RC + 응용 ACK
 
 ---
 
@@ -213,11 +214,15 @@ RC 상태에서 제어국 무응답 30 s
 
 | 조건 | 응답 |
 | --- | --- |
-| 예약값 (Sender · Fallback · Leg Geometry) | `errors` / `route unsuitable` |
+| 전선에 실을 수 없는 값 (Sender · Route Type · Start · 침로 범위 · Fallback · 좌표 범위 · Leg Geometry) | `errors` / `route unsuitable` |
 | 침로·Fallback·waypoint가 모두 없음 | `incomplete` / `route unsuitable` |
 | 연속 중복 waypoint | `route issues` / `route unsuitable` |
 | 권한 정책 위반 (정책 설정 시) | `errors` / `not authorized` |
+| 취소 지시의 Linkage ID가 반영 중인 지시와 다름 | `route issues` / `route unsuitable` (상태 불변) |
 | 유효기간 만료 | `route issues` / `validity expired` (만료 통지) |
+
+허용 값 표와 근거는 [SC-VDE-005 §8.2](SC-VDE-005-route-guidance.md)에 있다.
+두 시나리오가 같은 codec(MF 2)을 쓰므로 규칙도 같다.
 
 ---
 

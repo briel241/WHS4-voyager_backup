@@ -64,10 +64,11 @@
         <div class="row">
           <div class="field">
             <label for="route-type">항로 종류</label>
+            <!-- SC-VDE 전선 형식이 싣는 값만 둔다. Table 13.2의 3(alternative)·
+                 4(through ice)는 이 프로파일이 빼서 승인된 codec이 거부한다. -->
             <select id="route-type">
               <option value="1">Mandatory</option>
               <option value="2">Recommended</option>
-              <option value="3">Alternative</option>
               <option value="5">Ship route plan</option>
               <option value="0">not available — 거절 시연용</option>
             </select>
