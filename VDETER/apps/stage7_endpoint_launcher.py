@@ -1338,7 +1338,7 @@ def main(argv=None) -> int:
         # 재조립 완주+ACK 송신까지 갔으나 +12s 지각 — frozen 한도
         # 3프레임(7.6s)에 걸려 성공이 ACK_TIMEOUT으로 소실. 함정 수신
         # 처리 지연의 구조적 바닥에 맞춰, 경계 3회 중 1회만 부재 계수를
-        # 전달해 유효 한도 3→15프레임(36s; svc-run-m 실측 왕복 ~33s). 부재 계수 전용 함수라
+        # 전달해 유효 한도 3→21프레임(50s; svc-run-p 실측 왕복 분포 30~45s 꼬리 커버). 부재 계수 전용 함수라
         # 재전송 계획·ACK 도착 처리에는 무관여, LOCAL_DATA_SESSION
         # 역할에만 작용 — 단문·함정 수신측 무영향.)
         _orig_ack_to = _MC._on_data_ack_timeout
@@ -1347,7 +1347,7 @@ def main(argv=None) -> int:
             n = _ack_patient.__dict__["_n"] = (
                 _ack_patient.__dict__.get("_n", 0) + 1
             )
-            if n % 5:
+            if n % 7:
                 return state
             return _orig_ack_to(self_c, state, causation_event_id, commands)
 
