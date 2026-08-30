@@ -59,12 +59,7 @@ ROC_ID = 1
 # --------------------------------------------------------------------------
 
 def run_certificate_scenario(now: float) -> tuple[ScenarioRun, dict]:
-    """[보존된 모의 — 운영 미지원] 인증서 발급·검증·저장 흐름의 응용 계층 모의.
-
-    ⚠ 인증서 Data Session은 링크 계층에서 미완성이라(data_session_enabled=false)
-      운영 실행 경로에서는 이 시나리오를 **미지원**으로 처리한다
-      — `UNSUPPORTED_SCENARIOS` 참조. 응용 코드·코덱 검증용 참고 모의로만
-      보존한다.
+    """인증서 발급·전송·검증·저장 흐름의 응용 계층 재현.
 
     **모의하지 않는 것 — 링크 분할·재조립.** 예전에는 payload를 128 byte씩
     잘라 fragment 번호와 ACK을 로그에 남기고 그 개수를 판정 항목으로 썼다.
@@ -365,33 +360,10 @@ def run_control_scenario(now: float) -> tuple[ScenarioRun, dict]:
 # --------------------------------------------------------------------------
 
 SCENARIOS = {
+    "SC-VDE-001": ("X.509 인증서 송수신", run_certificate_scenario),
     "SC-VDE-005": ("S-421 노선 계획 교환", run_route_scenario),
     "SC-VDE-006": ("MASS-ROC 원격 조종", run_control_scenario),
 }
-
-#: 응용 코드는 보존되어 있으나 운영 실행을 지원하지 않는 시나리오.
-#: 실행을 요청하면 시뮬레이션 대신 구조화된 미지원 결과를 돌려준다.
-UNSUPPORTED_SCENARIOS = {
-    "SC-VDE-001": (
-        "X.509 인증서 송수신",
-        "인증서 Data Session이 링크 계층에서 미완성이다(data_session_enabled=false). "
-        "응용 코드·인증서 생성·검증·코덱과 단위시험(tests/test_certificate*.py)은 "
-        "보존되어 있으며, Data Session 완성 전까지 운영 실행은 지원하지 않는다.",
-    ),
-}
-
-
-def unsupported_result(scenario_id: str, now: float) -> dict:
-    """미지원 시나리오 실행 요청에 대한 구조화된 결과."""
-    name, reason = UNSUPPORTED_SCENARIOS[scenario_id]
-    return {
-        "scenario_id": scenario_id,
-        "name": name,
-        "status": "unsupported",
-        "supported": False,
-        "reason": reason,
-        "requested_at": now,
-    }
 
 
 # --------------------------------------------------------------------------
@@ -401,38 +373,12 @@ def unsupported_result(scenario_id: str, now: float) -> dict:
 def command_list(_args) -> int:
     for scenario_id, (name, _) in SCENARIOS.items():
         print(f"  {scenario_id}  {name}")
-    for scenario_id, (name, _reason) in UNSUPPORTED_SCENARIOS.items():
-        print(f"  {scenario_id}  {name}  [현재 미지원 — Data Session 미완성]")
-    return 0
-
-
-def _report_unsupported(scenario_id: str, *, now, as_json, save) -> int:
-    """미지원 시나리오 실행 요청 — 모의 실행 대신 구조화된 결과를 낸다."""
-    result = unsupported_result(scenario_id, now)
-    if as_json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(f"시나리오 {scenario_id} — {result['name']}")
-        print()
-        print("  현재 미지원: 실행하지 않았습니다.")
-        print(f"  사유: {result['reason']}")
-
-    if save:
-        os.makedirs(RESULTS_DIR, exist_ok=True)
-        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
-        path = os.path.join(RESULTS_DIR, f"{scenario_id}_{stamp}_unsupported.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(result, ensure_ascii=False, indent=2))
-        if not as_json:
-            print(f"\n결과 저장: {path}")
     return 0
 
 
 def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> int:
     """시나리오 하나를 실행하고 타임라인·판정을 출력, results/에 로그 저장."""
     now = time.time() if now is None else float(now)
-    if scenario_id in UNSUPPORTED_SCENARIOS:
-        return _report_unsupported(scenario_id, now=now, as_json=as_json, save=save)
     name, runner = SCENARIOS[scenario_id]
 
     run, expected = runner(now)
@@ -466,7 +412,7 @@ def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> 
 
 def command_run(args) -> int:
     scenario_id = args.scenario_id
-    if scenario_id not in SCENARIOS and scenario_id not in UNSUPPORTED_SCENARIOS:
+    if scenario_id not in SCENARIOS:
         print(f"알 수 없는 시나리오: {scenario_id}", file=sys.stderr)
         print("사용 가능한 목록은 'list' 명령으로 확인하라.", file=sys.stderr)
         return 2
@@ -476,18 +422,13 @@ def command_run(args) -> int:
 
 def command_interactive(args) -> int:
     """대화형 메뉴 — 번호나 ID를 고르면 바로 실행한다."""
-    ordered = sorted(SCENARIOS) + sorted(UNSUPPORTED_SCENARIOS)
+    ordered = sorted(SCENARIOS)
     print("=== MASS/ROC 시나리오 재현 (대화형) ===")
     print("번호나 시나리오 ID를 입력하면 바로 실행합니다.\n")
     while True:
         for index, scenario_id in enumerate(ordered, 1):
-            if scenario_id in UNSUPPORTED_SCENARIOS:
-                name = UNSUPPORTED_SCENARIOS[scenario_id][0]
-                print(f"  {index}) {scenario_id}  {name}"
-                      "  [현재 미지원 — Data Session 미완성]")
-            else:
-                print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
-        print("  a) 전체 실행 (미지원 시나리오는 미지원 결과만 출력)")
+            print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+        print("  a) 전체 실행")
         print("  q) 종료")
         try:
             choice = input("\n선택 > ").strip()
@@ -505,7 +446,7 @@ def command_interactive(args) -> int:
             targets = ordered
         elif choice.isdigit() and 1 <= int(choice) <= len(ordered):
             targets = [ordered[int(choice) - 1]]
-        elif choice.upper() in SCENARIOS or choice.upper() in UNSUPPORTED_SCENARIOS:
+        elif choice.upper() in SCENARIOS:
             targets = [choice.upper()]
         else:
             print(f"  알 수 없는 선택: {choice!r}\n")

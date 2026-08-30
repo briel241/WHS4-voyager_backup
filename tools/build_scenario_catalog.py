@@ -98,8 +98,8 @@ ROWS = [
      "발행·ACK 상관 · 항적(계획 대 실제)",
      "제어권 전환(MON↔RC) · 침로 추종 · Fallback 전환 · 링크 두절"),
     ("구현 상태",
-     "⛔ 현재 미지원 — 응용 코드·코덱·단위시험 보존,\n"
-     "실제 VDE-TER Data Session 미완성(data_session_enabled=false)",
+     "✅ 소프트웨어 무선 종단\n"
+     "Certificate Report + VDE-TER Data Session",
      "✅ 소프트웨어 무선 종단 (TEST scope · 서명/replay 보호 없음)",
      "✅ 소프트웨어 무선 종단 (TEST scope · 서명/replay 보호 없음)"),
 ]
@@ -117,7 +117,7 @@ NOTES = [
     "조종 명령 하나가 셋을 함께 바꾼다.",
     "sc_vde 두 형식은 서명·replay 보호가 없는 TEST 전용이다. 실제 조타에 쓰지 않는다.",
     "참여자 MMSI는 구현 config 기준(MASS 440000001 / ROC 440000002).",
-    "005·006의 '소프트웨어 무선 종단'은 Software Radio 기준이다. "
+    "세 시나리오의 '소프트웨어 무선 종단'은 Software Radio 기준이다. "
     "B210 실물(3노드 ROC/MASS-A/MASS-B) 시험은 별개이며 아직 수행되지 않았다.",
 ]
 
