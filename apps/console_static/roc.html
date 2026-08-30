@@ -16,6 +16,7 @@
   <div class="spacer"></div>
   <div class="readout"><span class="k">SIM</span><span id="sim-time">T+00:00.0</span></div>
   <span class="pill up" id="link-pill"><i></i><span>LINK</span></span>
+  <button class="btn ghost small" id="btn-save" title="지금까지의 세션을 results/에 JSON으로 남긴다">로그 저장</button>
   <button class="btn ghost small" id="btn-reset" title="시뮬레이션을 처음 상태로 되돌린다">초기화</button>
 </header>
 
@@ -50,6 +51,7 @@
         <button role="tab" aria-selected="true" data-tab="route">노선 지시<small>SC-VDE-005</small></button>
         <button role="tab" aria-selected="false" data-tab="control">원격 조종<small>SC-VDE-006</small></button>
         <button role="tab" aria-selected="false" data-tab="cancel">항로 취소<small>Cancellation</small></button>
+        <button role="tab" aria-selected="false" data-tab="certificate">인증서<small>SC-VDE-001</small></button>
       </div>
 
       <div class="tab-pane active" data-pane="route">
@@ -118,6 +120,24 @@
           <span class="msg" id="msg-cancel"></span>
         </div>
       </div>
+
+      <div class="tab-pane" data-pane="certificate">
+        <p class="hint">ROC가 CA로 서명한 X.509 인증서를 발급하고 본선이 검증에 통과한 것만
+          신뢰저장소에 넣습니다. 위조본은 서명 바이트를 훼손해 보냅니다.
+          ⚠ 응용 계층 검증 시연입니다 — 실제 VDE-TER 인증서 전송(Data Session)은
+          링크 계층 미완성으로 현재 미지원입니다.</p>
+        <div class="actions">
+          <button class="btn" id="btn-cert">정상 인증서 발급</button>
+          <button class="btn danger" id="btn-cert-forged">위조 인증서 발급</button>
+          <span class="msg" id="msg-cert"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr><th>serial</th><th>구분</th><th>크기</th><th>결과</th><th>저장소</th></tr></thead>
+            <tbody id="cert-rows"><tr><td colspan="5" class="empty">아직 발급하지 않았습니다.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -130,6 +150,27 @@
           <tbody id="commands"></tbody>
         </table>
       </div>
+    </div>
+
+    <div class="panel">
+      <h2>정량지표 <span class="count" id="metric-phase"></span></h2>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr>
+            <th>지표</th><th class="num">측정</th><th class="num">목표</th><th>판정</th>
+          </tr></thead>
+          <tbody id="metric-rows"></tbody>
+        </table>
+      </div>
+      <ul class="metric-detail" id="metric-detail"></ul>
+      <div class="actions">
+        <button class="btn small" id="btn-phase-baseline">기준 구간</button>
+        <button class="btn small ghost" id="btn-phase-secured">보안 구간</button>
+        <span class="msg" id="msg-phase"></span>
+      </div>
+      <p class="hint">성능 저하는 두 구간을 비교해서 냅니다. 기준 구간에서 명령을 몇 번
+        보낸 뒤 보안 구간으로 바꿔 같은 수만큼 보내면 왕복 지연 차가 나옵니다.
+        비인가 패킷은 ROC가 아닌 송신국에서 온 명령을 셉니다.</p>
     </div>
 
     <div class="panel">

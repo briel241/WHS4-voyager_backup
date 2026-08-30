@@ -322,6 +322,17 @@ button { cursor: pointer; }
 .counters .gauge .v { font-size: 24px; }
 .counters .gauge .v.alert { color: var(--bad); }
 
+/* ---------- 정량지표 ---------- */
+.metric-detail { list-style: none; margin: 10px 0 0; padding: 0; }
+.metric-detail li {
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.6;
+  font-family: var(--mono);
+}
+.metric-detail li b { color: var(--ink); font-weight: 600; }
+.count.phase-secured { color: var(--ok); }
+
 /* ---------- 명령 발행 (ROC) ---------- */
 .tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--rule); }
 .tabs button {

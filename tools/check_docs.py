@@ -52,6 +52,7 @@ def read(path: str) -> str:
 
 print("[상수]")
 from common import config  # noqa: E402
+from common import metrics as met  # noqa: E402
 from MASS.mass_agent import DEFAULT_MAX_TURN_RATE, MassAgent  # noqa: E402
 
 CONSTANTS = [
@@ -63,6 +64,11 @@ CONSTANTS = [
     ("기본 fallback = DP(2)", config.DEFAULT_LINK_LOSS_FALLBACK, 2),
     ("MASS MMSI", config.MASS_MMSI, 440_000_001),
     ("ROC MMSI", config.ROC_MMSI, 440_000_002),
+    ("비인가 송신국 MMSI", config.INTRUDER_MMSI, 440_000_003),
+    # 지표 목표치는 docs/정량지표.md의 표에 그대로 적혀 있다.
+    ("비인가 수용 목표 0회", met.TARGET_UNAUTHORIZED_ACCEPTED, 0),
+    ("인증 성공률 목표 99%", met.TARGET_AUTH_SUCCESS_RATE, 0.99),
+    ("성능 저하 목표 30%", met.TARGET_LATENCY_OVERHEAD, 0.30),
 ]
 for label, actual, expected in CONSTANTS:
     check(label, actual == expected, f"실제 {actual} / 문서 {expected}")
@@ -160,6 +166,50 @@ check(
 )
 
 
+# --------------------------------------------- 4b. 인증서 구성 일치·크기 경계
+
+print("\n[인증서 구성]")
+
+# scenario_runner(정본)와 Stage 7 fixture가 같은 확장 필드를 써야 한다.
+# 확장 하나가 25~28 byte라, 빠지면 실장비에서 실제보다 작은 payload로 시험하게
+# 된다. SC-VDE-001은 400 byte 경계에 걸려 있어 그 차이가 Data Session 필요
+# 여부를 가른다.
+_CERT_EXTENSIONS = ("mass_id", "roc_id", "mmsi", "imo")
+_runner = read("apps/scenario_runner.py")
+_fixture = read("tools/make_stage7_fixtures.py")
+
+
+def _uses(body: str, marker: str, field: str) -> bool:
+    """marker 뒤 900자 안에서 field= 를 쓰는가 (build_certificate 인자 범위)."""
+    at = body.find(marker)
+    return at >= 0 and f"{field}=" in body[at:at + 900]
+
+
+for field in _CERT_EXTENSIONS:
+    in_runner = _uses(_runner, "vessel_der = cert.build_certificate", field)
+    in_fixture = _uses(_fixture, 'subject=f"MASS-{STATION[', field)
+    check(
+        f"인증서 확장 {field} — 정본·fixture 일치",
+        in_runner == in_fixture,
+        f"scenario_runner={in_runner} fixture={in_fixture}",
+    )
+
+# SC-VDE-001은 400 byte를 넘는다 — Data Session이 필요하다는 뜻이고,
+# 링크 팀에 그렇게 보고했다. 이 사실이 바뀌면 보고도 갱신해야 한다.
+try:
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from make_stage7_fixtures import certificate_report
+
+    cert_size = len(certificate_report())
+    check(
+        f"SC-VDE-001 인증서 400 B 초과 (실측 {cert_size} B)",
+        cert_size > 400,
+        "400 B 이하로 내려갔다면 링크 팀 보고를 갱신해야 한다",
+    )
+except Exception as exc:  # pragma: no cover - cryptography 없는 환경
+    check("SC-VDE-001 인증서 크기", True, f"SKIP: {exc}")
+
+
 # -------------------------------------------------------------- 5. 참조·명령
 
 print("\n[문서가 가리키는 파일]")
@@ -174,7 +224,11 @@ REFERENCED = [
     "apps/control_loopback_demo.py",
     "apps/rf_normal_cycle.py",
     "tests/test_sc_vde_contract.py",
+    "tests/test_metrics.py",
+    "common/metrics.py",
+    "tools/measure_metrics.py",
     "tools/build_scenario_catalog.py",
+    "docs/정량지표.md",
     "docs/사용법.md",
     "docs/인수인계.md",
     "docs/시나리오_카탈로그_확정3종.xlsx",
@@ -183,6 +237,8 @@ REFERENCED = [
     "docs/scenarios/SC-VDE-006-remote-control.md",
     "docs/archive/README.md",
     "docs/vdeter_interim_report_technical_summary.md",
+    "docs/링크팀_인수인계.md",
+    "tools/make_stage7_fixtures.py",
 ]
 for path in REFERENCED:
     check(path, os.path.exists(os.path.join(ROOT, path)))

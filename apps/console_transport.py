@@ -294,12 +294,15 @@ class SoftwareRadioTransport(_ServiceApiTransport):
     detail = "VDETER 소프트웨어 무선 (Service API 종단)"
     operational = True
 
-    def __init__(self, mass_mmsi: int, roc_mmsi: int) -> None:
+    def __init__(self, mass_mmsi: int, roc_mmsi: int,
+                 intruder_mmsi: int | None = None) -> None:
         try:
             sys.path.insert(0, os.path.join(_ROOT, "VDETER"))
             from tests.support.stage5 import (
                 MASS_A_STATION_ID,
+                MASS_B_STATION_ID,
                 ROC_STATION_ID,
+                STATION_ENDPOINT_IDS,
                 build_stage5_software_group,
                 drive_stage5_group,
                 start_stage5_group,
@@ -308,18 +311,25 @@ class SoftwareRadioTransport(_ServiceApiTransport):
         except ImportError as exc:  # pragma: no cover
             raise VdeterUnavailable(f"VDETER를 불러올 수 없습니다: {exc}") from exc
 
-        super().__init__(
-            {
-                mass_mmsi: MASS_A_STATION_ID.value,
-                roc_mmsi: ROC_STATION_ID.value,
-            }
-        )
-        self._drive = drive_stage5_group
-
-        endpoint_owner = {
-            "stage5-ship-a": mass_mmsi,
-            "stage5-roc": roc_mmsi,
+        stations = {
+            mass_mmsi: MASS_A_STATION_ID.value,
+            roc_mmsi: ROC_STATION_ID.value,
         }
+        endpoint_owner = {
+            STATION_ENDPOINT_IDS[MASS_A_STATION_ID.value]: mass_mmsi,
+            STATION_ENDPOINT_IDS[ROC_STATION_ID.value]: roc_mmsi,
+        }
+        # 비인가 송신국은 실제로 **또 하나의 무선국**이다. 응용에서 만들어낸
+        # 가상의 송신자가 아니라 같은 채널에 있는 제3국이라야 "송신자 인증이
+        # 없다"는 사실이 그대로 재현된다. Stage 5 그룹의 MASS-B를 쓴다.
+        if intruder_mmsi is not None:
+            stations[intruder_mmsi] = MASS_B_STATION_ID.value
+            endpoint_owner[
+                STATION_ENDPOINT_IDS[MASS_B_STATION_ID.value]
+            ] = intruder_mmsi
+
+        super().__init__(stations)
+        self._drive = drive_stage5_group
 
         def sink_factory(endpoint_id):
             owner = endpoint_owner.get(endpoint_id)
@@ -392,12 +402,14 @@ class ExternalServiceTransport(_ServiceApiTransport):
             self._advance_hook()
 
 
-def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int):
+def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int,
+                    intruder_mmsi: int | None = None):
     """`kind`에 맞는 전송 경로를 만든다. 조립할 수 없으면 사유와 함께 direct로 내려간다.
 
     "vdeter"는 이전 이름이며 software와 같다. "stage7"은 외부 주입이 필요해
     콘솔 CLI에서 바로 조립할 수 없다 — `ExternalServiceTransport`를 코드로
     구성해야 하며, 별도 프로세스 launcher에 접속하는 공개 RPC는 아직 없다.
+    intruder_mmsi를 주면 software 경로에서 비인가 송신국(MASS-B)이 함께 선다.
     """
     if kind == "direct":
         return DirectTransport(), ""
@@ -409,7 +421,9 @@ def build_transport(kind: str, *, mass_mmsi: int, roc_mmsi: int):
             "in-process 조립으로 주입하라."
         )
     try:
-        return SoftwareRadioTransport(mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi), ""
+        return SoftwareRadioTransport(
+            mass_mmsi=mass_mmsi, roc_mmsi=roc_mmsi, intruder_mmsi=intruder_mmsi
+        ), ""
     except VdeterUnavailable as exc:
         return DirectTransport(), str(exc)
 
