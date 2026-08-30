@@ -354,6 +354,23 @@ duration = 1분 지시
    61s 경과 → 항로 자동 해제
 ```
 
+**표준과 다른 점 — 기준 시각.** Table 13.2는 유효기간을 **Start Date/Time
+(Month·Day·Hour·Minute)부터** 센다. 본 구현은 그 네 필드를 전선에 싣기만 하고
+읽지 않으며, Duration을 **지시를 수락한 시각부터** 센다.
+
+| | Table 13.2 | 본 구현 |
+| --- | --- | --- |
+| 기준 시각 | Start Date/Time | 지시 수락 시각 |
+| Start 필드 | 유효 시작을 지정 | 전선에는 싣되 항법에 쓰지 않음 (기본 N/A `0/0/24/60`) |
+
+행위자가 UTC 절대시각을 다루지 않고 `tick(now)`로 주입받은 경과 초만 쓰기
+때문이다(시험을 결정적으로 만들려는 선택). 그래서 **미래에 시작하는 항로를
+미리 보내 두는 것**이 지금은 안 된다 — 받는 즉시 유효해진다.
+
+실장비에서 UTC를 다루게 되면 `MassAgent._apply_route`가 Start Date/Time을
+읽도록 바꾼다. 전선 형식은 이미 그 필드를 나르고 있고, 승인된 codec도 혼합
+N/A를 거부하므로(§8.2) 형식 쪽 준비는 끝나 있다.
+
 ---
 
 ## 9. 로그 내용
@@ -381,7 +398,27 @@ duration = 1분 지시
 | 1 | ~~`data_type` 미배정~~ | ✅ **해결** — `sc_vde.route_control.command` / `.ack` / `sc_vde.position_report`이 VDE-TER registry에 등록됐다(TEST scope). 응용은 `DATA_TYPE_ROUTE_CONTROL_COMMAND` 등으로 보낸다 |
 | 2 | 검증 결과 전달 경로 | 미해결 — 링크 계층이 서명을 검증해도 그 결과가 응용에 오지 않는다. 다만 현재 SC-VDE 형식은 unsigned Segment Type 0이라 검증할 서명 자체가 없다 |
 | 3 | 링크 ACK 미구현 | 지금은 응용 ACK만 있다. 링크 ACK·재전송은 링크 계층 몫 |
-| 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 |
+| 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 — 아래 9.2 |
+
+### 9.2 위치보고의 broadcast ↔ addressed
+
+표준과 프로파일이 갈리는 지점이라, **어디서 바뀌는지**를 적어 둔다.
+
+| 계층 | 무엇을 하는가 | 근거 |
+| --- | --- | --- |
+| `MassAgent.tick()` | `destination_id=BROADCAST_ID`로 만든다 | AIS 위치보고는 브로드캐스트다 (M.1371) |
+| 구동기 (`console_server._deliver_to_roc`) | 수신처를 ROC로 지정해 보낸다 | `sc_vde.position_report`는 addressed 전용 (`DR-PAYLOAD-016`) |
+| `vdeter_bridge.to_submit_request` | broadcast면 거부한다 | 계약 위반을 링크에 넘기지 않는다 |
+
+행위자는 **표준대로** 두고 프로파일 제약은 구동기가 흡수한다. 표준이 바뀌거나
+링크가 MASS-originated broadcast를 지원하면 구동기 한 줄만 되돌리면 된다.
+
+실수로 broadcast가 새어 나가는 일은 없다. `to_submit_request`가 막고, 그보다
+앞서 `Outbound`가 `ack_required=True`인 broadcast를 생성 단계에서 거부한다
+(M.2092-2 Table 40 — Type 92 본문에 broadcast 수신처를 넣을 수 없다).
+
+**재현되지 않는 것**: 주변 선박이 같은 보고를 함께 듣는 상황. 도청·상황인식
+공유를 다루는 실험은 이 제약 위에서 설계해야 한다.
 
 ---
 

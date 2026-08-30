@@ -253,6 +253,53 @@ except Exception as exc:  # pragma: no cover - cryptography 없는 환경
     check(f"SC-VDE-001 인증서 크기 — SKIP ({type(exc).__name__})", True)
 
 
+# --------------------------------------------- 4c. 문서에 적은 "표준 대비 차이"
+#
+# docs/인수인계.md §5.1이 표준과 다른 점을 모아 놓았다. 그 서술이 계속 사실인지
+# 본다. 차이가 해소되면(예: Start Date/Time을 실제로 읽게 되면) 여기서 걸리고,
+# 그때 문서를 고치면 된다.
+
+print("\n[표준 대비 차이 — 문서 서술이 아직 사실인가]")
+
+# O-1 유효기간 기준 시각: 항법이 Start Date/Time을 읽지 않는다.
+_mass_source = read("MASS/mass_agent.py")
+_start_fields = ("start_month", "start_day", "start_hour", "start_minute")
+_read_start = [f for f in _start_fields if f"message.{f}" in _mass_source]
+check(
+    "Start Date/Time을 항법에 쓰지 않는다 (인수인계 §5.1-1 · SC-VDE-005 §8.3)",
+    not _read_start,
+    f"이제 {_read_start}를 읽는다면 두 문서를 갱신해야 한다",
+)
+
+# O-4 X.509 검증 범위: 문서가 나열한 실패 사유가 실재해야 한다.
+_cert_source = read("common/security/certificate.py")
+_flow_source = read("common/security/cert_flow.py")
+DOCUMENTED_REASONS = [
+    "bad-signature", "not-yet-valid", "expired", "issuer-mismatch",
+    "anchor-not-ca", "too-large", "parse-error",
+]
+_missing = [r for r in DOCUMENTED_REASONS if f'"{r}"' not in _cert_source]
+check(
+    f"인증서 실패 사유 {len(DOCUMENTED_REASONS)}종이 실재 (SC-VDE-001 §6.3)",
+    not _missing,
+    f"문서에만 있고 코드에 없다: {_missing}",
+)
+check(
+    "CRL은 적용하지 않고 crl-not-handled로 남긴다 (SC-VDE-001 §6.3)",
+    '"crl-not-handled"' in _flow_source,
+)
+
+# O-3 위치보고 범위: 행위자는 표준대로 broadcast로 만들고, 브리지가 막는다.
+check(
+    "위치보고를 행위자는 broadcast로 만든다 (SC-VDE-005 §9.2)",
+    "destination_id=BROADCAST_ID" in _mass_source,
+)
+check(
+    "브리지가 TEST scope broadcast를 거부한다 (SC-VDE-005 §9.2)",
+    "addressed 전용입니다" in read("common/vdeter_bridge.py"),
+)
+
+
 # -------------------------------------------------------------- 5. 참조·명령
 
 print("\n[문서가 가리키는 파일]")
