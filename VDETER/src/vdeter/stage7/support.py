@@ -122,8 +122,8 @@ class Stage7LaneRxDispatcher:
         Pi 실측: 무음(zeros) 창 디코드 4.9ms, 잡음 창은 레벨 무관
         ~106ms(상관 풀 탐색) — 창 완료 수요가 처리 용량을 넘어 pending
         장부 상시 포화(svc-run-f), 청취 창 기아의 뿌리. 문턱은 lane별
-        잡음 전력 중앙값 ×8(+9dB): 워밍업 300창은 무조건 디코드하며
-        통계만 수집, 이상·실패 시 원 요청 그대로(fail-open). 치환은
+        잡음 전력 10분위수 ×8: 워밍업 60창 동안 통계 수집(10창 이후
+        임시 문턱으로 잡음 창 선별 0-치환), 이상·실패 시 원 요청 그대로(fail-open). 치환은
         디코드 입력 사본에만 적용되고 관측 계약(진단 싱크·ingress·
         결과 타입)은 frozen 경로 그대로다. STAGE7_RX_ENERGY_GATE=0
         으로 비활성.
@@ -152,7 +152,24 @@ class Stage7LaneRxDispatcher:
             if state["med"] is None:
                 if power > 0.0:
                     state["warm"].append(power)
-                if len(state["warm"]) >= 300:
+                # 워밍업 다이어트 (svc-run-p 부검: 워밍업 300창×2레인
+                # 전량 풀디코드가 첫 30초에 큐 백로그 ~465항목을 만들고,
+                # 이후 수요≈용량이라 영구 잔존 → 장부 한도 고착·청취
+                # 확률화의 발원지). 워밍업 60창으로 단축하고, 10창
+                # 이후부터는 관측 최솟값(잡음 바닥의 상계)×8 임시 문턱
+                # 으로 잡음 창을 선별 0-치환 — 버스트(잡음 대비 +20dB)
+                # 는 임시 문턱도 항상 통과하므로 TBB 획득 무영향.
+                if len(state["warm"]) >= 10:
+                    provisional = min(state["warm"]) * 8.0
+                    if 0.0 < power < provisional:
+                        zero_block = _dc.replace(
+                            samples, data=b"\x00" * len(samples.data)
+                        )
+                        if len(state["warm"]) < 60:
+                            return _dc.replace(
+                                native_request, samples=zero_block
+                            )
+                if len(state["warm"]) >= 60:
                     warm = sorted(state["warm"])
                     # 잡음 추정 = 10분위수 (svc-run-k 실측: 버스트 빈번
                     # 레인(ROC 하부 — 함정 TBB·DSCH ACK)에서 중앙값이

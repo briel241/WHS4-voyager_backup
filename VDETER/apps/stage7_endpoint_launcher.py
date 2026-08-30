@@ -482,8 +482,18 @@ def main(argv=None) -> int:
                 try:
                     state = endpoint.stage4.mac.state
                     pend = getattr(state, "delivery_pending", ()) or ()
-                    deps = getattr(state, "pending_dependencies", None)
-                    dep_n = len(deps) if deps is not None else "?"
+                    # svc-run-p 부검 D항: 실제 접근자는 pending_commands
+                    # (부류 계수는 pending_count) — '?' 사각 제거.
+                    try:
+                        from vdeter.mac.models import (
+                            PendingCommandClass as _PCCc,
+                        )
+                        dep_n = (
+                            f"rx={state.pending_count(_PCCc.RX)}"
+                            f"/all={len(state.pending_commands)}"
+                        )
+                    except Exception:  # noqa: BLE001
+                        dep_n = "?"
                     ledger = getattr(state, "delivery_ledger", ()) or ()
                     # C6: 수신 세션 잔류 감시 (감사③ — 회수 부재로 영구
                     # 잔류하면 해당 LC가 블랙홀化).
