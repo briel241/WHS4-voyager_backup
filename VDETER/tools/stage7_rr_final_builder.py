@@ -1,6 +1,7 @@
 """RESEARCH_READY_MINIMAL final builder (`stage7` §17A.6, v0.9.1 J항).
 
-여러 RR run-root의 evidence/research_ready/*.json을 모아 TC-STAGE7-RR-001..008이
+여러 RR run-root의 evidence/research_ready/*.json을 모아 필수 TC
+(RR-001..005 + RR-007; RR-006/008은 v0.9.10/0.9.14 이관 — 기록 전용)가
 모두 존재·PASS하고 profile/baseline/lineage/hardware 일관성과 무결 조건을 만족할
 때만 `final-result.json`을 `RESEARCH_READY`로 생성한다. 하나라도 누락/FAIL이면
 `RESEARCH_NOT_READY`/`HARDWARE_BLOCKED`/`ABORTED`를 생성한다.
@@ -164,8 +165,9 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
     if profiles - {"RESEARCH_READY_MINIMAL"}:
         problems.append(f"profile 불일치: {profiles}")
     # v0.9.10: phase 사이에 사용자 승인 개정이 있었다 — 균일성 대신
-    # "승인 개정 사슬 내 + 최종이 사슬 말단" 을 강제하고, 진행 내역을
-    # revision_progression으로 전량 보고한다(은폐 없음).
+    # "승인 개정 사슬 내"를 강제하고 최신치를 보고한다(사슬 말단 일치는
+    # 0.9.20 명문화대로 강제하지 않음 — 문서 전용 개정이 evidence 재실행을
+    # 강요하지 않게). 진행 내역은 revision_progression으로 전량 보고(은폐 없음).
     off_chain = versions - set(APPROVED_REVISION_CHAIN)
     if off_chain:
         problems.append(f"승인 개정 사슬 밖 baseline_version: {off_chain}")
