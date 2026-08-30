@@ -42,6 +42,23 @@ Stage 6(Link 17/19) 회귀는 위 Stage 0~4 pytest 스윕의 link/wideband unit�
 시험으로 포함 실행됐다. 별도 대규모 DSP 게이트(run_phy_awgn 등)는 동결 당시 evidence
 (`VDETER/results/`)로 유지되며 이번 변경(VDETER/ 무수정)의 영향 범위 밖이다.
 
+## E. feat/mass-roc-app 후속 5건 병합 재검증 (1d1e26d)
+
+upstream 3b521ff..704a608(정량지표·GUI 인증서·Stage 7 fixture) 병합 후 재실행 결과.
+
+| 항목 | 결과 |
+| --- | --- |
+| `pytest tests -q` | **23 passed** / 실패 0 / skip 0 |
+| `tests/test_mass_roc_link_integration.py` | 4/4 통과 (중복 방지 + 지표 계수 공존 확인) |
+| `tests/test_metrics.py` | 전부 통과 |
+| `tools/check_docs.py` | PASS (검사 **62건** — 인증서 구성·크기 검사 15건 추가) |
+| `tools/measure_metrics.py` (직결) | 비인가 수용 0/20 · 인증 10/10 · 성능저하 판정 보류(이 장비 타이머 분해능 0µs — 환경적) |
+| `tools/measure_metrics.py --transport software --cycles 6` | **종합 통과** — 비인가 수용 0/20(침입국 MASS-B 실 무선 주입), 인증 10/10, 지연 기준 10.70s → 보안 10.23s |
+| 전송 smoke (software·vdeter 별칭·stage7 seam) | 통과 |
+| 콘솔 GUI (`--transport software --authority strict`) | HTTP 200, 지표 스냅샷 포함 |
+| `git diff --check` | 통과 |
+| compileall | 통과 |
+
 ## B210 실물시험
 
 **수행하지 않음** — 3노드(Pi 5 + B210 3대) 장비에 이 세션에서 접근할 수 없음.
