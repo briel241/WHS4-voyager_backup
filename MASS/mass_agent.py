@@ -123,8 +123,13 @@ class MassAgent:
         self._rate_of_turn: float | None = None
         self._last_report_at: float | None = None
         self._last_tick_at: float | None = None
+        # 마지막으로 적용한 지시 원문. 재전송으로 같은 지시가 다시 오면
+        # 재적용하지 않고 ACK만 다시 보내기 위한 기준이다.
+        self._applied_instruction: route.RouteInstruction | None = None
         self.rejected_count = 0
         self.ignored_count = 0
+        # 같은 지시의 재전송을 재적용하지 않고 ACK만 돌려준 횟수.
+        self.duplicate_count = 0
         # 원격 제어 중 링크가 끊겨 fallback으로 전환한 횟수.
         self.link_loss_count = 0
         # SC-VDE-003 — AIS 채널로 들은 메시지와 신뢰하는 공개키
@@ -567,9 +572,21 @@ class MassAgent:
     ) -> list[Outbound]:
         decision = self._evaluate(message, source_id)
 
+        # 같은 발행자가 같은 지시를 다시 보내면 ACK 유실에 대비한 재전송이다.
+        # 재적용하면 항로 진행(waypoint index)이 처음으로 되돌아가므로,
+        # 상태는 그대로 두고 ACK만 다시 보낸다.
+        duplicate = (
+            decision.accept
+            and self._applied_instruction is not None
+            and message == self._applied_instruction
+            and source_id == self._route_issuer
+        )
+
         # 검증이 끝난 뒤에만 상태를 바꾼다.
         if decision.cancel:
             self._clear_route()
+        elif duplicate:
+            self.duplicate_count += 1
         elif decision.accept:
             self._apply_route(message, now, source_id)
         else:
@@ -667,6 +684,7 @@ class MassAgent:
         self._waypoint_index = 0
         self._route_linkage_id = message.linkage_id
         self._route_issuer = issuer
+        self._applied_instruction = message
         # 수직 통과 판정의 기준점은 항로를 받아들인 지점이다.
         self._leg_origin = (self.state.latitude, self.state.longitude)
 
@@ -716,5 +734,6 @@ class MassAgent:
         self._route_linkage_id = route.LINKAGE_ID_NOT_AVAILABLE
         self._route_expires_at = None
         self._route_issuer = None
+        self._applied_instruction = None
         self._leg_origin = None
         self._heading_setpoint = route.HEADING_SETPOINT_NOT_AVAILABLE
