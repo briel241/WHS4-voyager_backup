@@ -29,6 +29,8 @@ results/*.iq
 results/*.html
 # 시나리오 실행 로그 (scenario_runner 실행 시 재생성)
 results/*.json
+# Stage 7 fixture (tools/make_stage7_fixtures.py로 재생성)
+results/stage7-fixtures/
 # RF 실측 원시 캡처 (.bin, 대용량). 그래프(.png)는 추적한다
 results/captures/*.bin
 
