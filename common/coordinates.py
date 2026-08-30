@@ -30,6 +30,14 @@ LONGITUDE_MAX_DEGREES = 180.0
 LATITUDE_MIN_DEGREES = -90.0
 LATITUDE_MAX_DEGREES = 90.0
 
+# raw 유효 범위. not available 값은 이 범위 **밖**에 있다(181도·91도).
+#
+# 부호화 폭(28·27 bit)이 담을 수 있는 값은 이 범위보다 넓다. 그 사이 구간은
+# 지구상에 없는 좌표이므로 수신 시 걸러야 한다 — 그러지 않으면 위도 100도
+# 같은 값이 항로로 실린다.
+LONGITUDE_ABS_MAX = 180 * UNITS_PER_DEGREE  # 108,000,000
+LATITUDE_ABS_MAX = 90 * UNITS_PER_DEGREE  # 54,000,000
+
 
 # 도 단위 경도를 1/10,000 분 정수로 바꾼다. None은 not available로 기록한다.
 def longitude_to_raw(degrees: float | None) -> int:
@@ -61,3 +69,13 @@ def raw_to_latitude(raw: int) -> float | None:
     if raw == LATITUDE_NOT_AVAILABLE:
         return None
     return raw / UNITS_PER_DEGREE
+
+
+# 수신한 raw 경도가 쓸 수 있는 값인가. not available도 쓸 수 있는 값으로 본다.
+def longitude_raw_ok(raw: int) -> bool:
+    return raw == LONGITUDE_NOT_AVAILABLE or -LONGITUDE_ABS_MAX <= raw <= LONGITUDE_ABS_MAX
+
+
+# 수신한 raw 위도가 쓸 수 있는 값인가. not available도 쓸 수 있는 값으로 본다.
+def latitude_raw_ok(raw: int) -> bool:
+    return raw == LATITUDE_NOT_AVAILABLE or -LATITUDE_ABS_MAX <= raw <= LATITUDE_ABS_MAX

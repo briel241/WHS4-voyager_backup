@@ -147,6 +147,24 @@ ROUTE_TYPE_NAMES = {
     ROUTE_TYPE_CANCELLATION: "cancellation",
 }
 
+# SC-VDE 전선 형식이 실을 수 있는 Route Type.
+#
+# 위 ROUTE_TYPE_NAMES는 IMO Table 13.2를 그대로 옮긴 것이고, 이쪽은 **우리가
+# 링크 팀과 합의한 전선 형식**이 허용하는 부분집합이다. 3(alternative)과
+# 4(through ice)는 표준에는 있으나 SC-VDE TEST 프로파일이 뺐으므로 실어 보내면
+# 승인된 codec이 INVALID_REQUEST로 거부한다
+# (VDETER `sc_vde_route_control.py` `_ALLOWED_ROUTE_TYPES`,
+#  docs/전선형식_노선_SC-VDE-005.md).
+SC_VDE_ROUTE_TYPES = frozenset(
+    {
+        ROUTE_TYPE_NOT_AVAILABLE,
+        ROUTE_TYPE_MANDATORY,
+        ROUTE_TYPE_RECOMMENDED,
+        ROUTE_TYPE_SHIP_ROUTE_PLAN,
+        ROUTE_TYPE_CANCELLATION,
+    }
+)
+
 # not available 값 (Table 13.2)
 LINKAGE_ID_NOT_AVAILABLE = 0
 MONTH_NOT_AVAILABLE = 0
@@ -155,6 +173,15 @@ HOUR_NOT_AVAILABLE = 24
 MINUTE_NOT_AVAILABLE = 60
 DURATION_NOT_AVAILABLE = 262_143
 DURATION_CANCEL = 0
+
+# Start Date/Time은 넷이 함께 not available이거나, 넷이 함께 정상 범위여야 한다.
+# 섞이면(예: 6월인데 시각은 N/A) 언제부터 유효한지 정할 수 없다.
+START_NOT_AVAILABLE = (
+    MONTH_NOT_AVAILABLE,
+    DAY_NOT_AVAILABLE,
+    HOUR_NOT_AVAILABLE,
+    MINUTE_NOT_AVAILABLE,
+)
 
 
 @dataclass
@@ -278,6 +305,63 @@ class RouteInstruction:
 # Waypoint 개수에 따른 본문 bit 수를 미리 계산한다.
 def body_bits_for(waypoint_count: int) -> int:
     return FIXED_BITS + waypoint_count * WAYPOINT_BITS
+
+
+# 필드가 전선에 실을 수 있는 값인지 본다. 위반이면 사유 문자열, 아니면 None.
+#
+# 승인된 SC-VDE codec이 보는 canonical raw 허용 집합과 같은 규칙이다
+# (VDETER `sc_vde_route_control.py` `_validate_command_fields`).
+#
+# **왜 응용이 또 보는가** — 그 codec은 무선 경로만 막는다. 콘솔 기본값(direct
+# 전송)·loopback 데모·공격 실험의 주입 지점은 모두 codec을 지나지 않는다.
+# M.2092-2 §A4-4.15가 요구하는 "검증에 실패하면 수신하지 않은 것처럼 행동하라"는
+# 응용이 스스로 지켜야 하는 것이고, 그래야 무선을 타든 안 타든 배가 똑같이
+# 행동한다.
+#
+# 부호화 폭이 담을 수 있는 값이 유효 범위보다 넓은 필드가 문제다. 예를 들어
+# Heading Setpoint는 12 bit라 4095까지 담기지만 유효한 값은 3600까지다. 걸러내지
+# 않으면 4000이 400.0도가 되고, 조타는 그것을 40도로 정규화해 **지시한 적 없는
+# 침로로 배가 돈다.**
+def canonical_violation(message: "RouteInstruction") -> str | None:
+    if message.sender_classification not in SENDER_NAMES:
+        return f"Sender Classification {message.sender_classification} (0·1만 허용)"
+
+    if message.route_type not in SC_VDE_ROUTE_TYPES:
+        return f"Route Type {message.route_type} ({sorted(SC_VDE_ROUTE_TYPES)}만 허용)"
+
+    start = (
+        message.start_month,
+        message.start_day,
+        message.start_hour,
+        message.start_minute,
+    )
+    if start != START_NOT_AVAILABLE and not (
+        1 <= message.start_month <= 12
+        and 1 <= message.start_day <= 31
+        and message.start_hour <= 23
+        and message.start_minute <= 59
+    ):
+        return f"Start Date/Time {start} (전체 N/A {START_NOT_AVAILABLE} 또는 정상 범위)"
+
+    if message.heading_setpoint > HEADING_SETPOINT_NOT_AVAILABLE:
+        return (
+            f"Heading Setpoint {message.heading_setpoint} "
+            f"(0..{HEADING_SETPOINT_MODULO - 1} 또는 "
+            f"{HEADING_SETPOINT_NOT_AVAILABLE}(N/A))"
+        )
+
+    if message.fallback_state not in FALLBACK_NAMES:
+        return f"Fallback State {message.fallback_state} (0..3만 허용)"
+
+    for index, waypoint in enumerate(message.waypoints, start=1):
+        if not coordinates.longitude_raw_ok(waypoint.longitude):
+            return f"WP{index} Longitude raw {waypoint.longitude} (범위 밖)"
+        if not coordinates.latitude_raw_ok(waypoint.latitude):
+            return f"WP{index} Latitude raw {waypoint.latitude} (범위 밖)"
+        if waypoint.leg_geometry not in LEG_GEOMETRY_NAMES:
+            return f"WP{index} Leg Geometry {waypoint.leg_geometry} (0·1·2만 허용)"
+
+    return None
 
 
 # 본문 bit를 writer에 이어 붙인다.

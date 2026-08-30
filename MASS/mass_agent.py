@@ -616,26 +616,32 @@ class MassAgent:
                 status=ack.STATUS_ERRORS, reason=ack.REASON_NOT_AUTHORIZED
             )
 
+        # ② 스키마 — 전선에 실을 수 없는 값이면 해석하지 않는다. 취소인지 판정하기
+        #    전에 본다. 취소도 필드가 성한 메시지여야 취소로 인정한다.
+        #    누락이 아니라 위반이므로 INCOMPLETE가 아니라 ERRORS다.
+        if route.canonical_violation(message) is not None:
+            return RouteDecision(
+                status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
+            )
+
+        # ③ 취소 — 어느 항로를 취소하는지 Message Linkage ID가 가리켜야 한다.
+        #
+        #    Table 13.2가 Linkage ID를 두는 목적이 "이 메시지가 어느 메시지에 대한
+        #    것인가"를 밝히는 것이다. 그것을 보지 않으면 오래된 취소나 재전송된
+        #    취소 한 건이 지금 따라가는 항로를 지운다. 가리키는 항로가 우리에게
+        #    없으면 지울 것도 없으므로 상태를 건드리지 않고 알린다.
         if message.is_cancellation:
+            if (
+                message.linkage_id == route.LINKAGE_ID_NOT_AVAILABLE
+                or message.linkage_id != self._route_linkage_id
+            ):
+                return RouteDecision(
+                    status=ack.STATUS_ROUTE_ISSUES,
+                    reason=ack.REASON_ROUTE_UNSUITABLE,
+                )
             return RouteDecision(status=ack.STATUS_ACKNOWLEDGED, cancel=True)
 
-        # ② 스키마 — 예약값이 들어오면 해석할 수 없다. 누락이 아니라 위반이므로
-        #    INCOMPLETE가 아니라 ERRORS다.
-        if message.sender_classification not in route.SENDER_NAMES:
-            return RouteDecision(
-                status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
-            )
-        if message.fallback_state not in route.FALLBACK_NAMES:
-            return RouteDecision(
-                status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
-            )
-        for waypoint in message.waypoints:
-            if waypoint.leg_geometry not in route.LEG_GEOMETRY_NAMES:
-                return RouteDecision(
-                    status=ack.STATUS_ERRORS, reason=ack.REASON_ROUTE_UNSUITABLE
-                )
-
-        # ③ 누락 — 따라가는 데 필요한 것이 없다.
+        # ④ 누락 — 따라가는 데 필요한 것이 없다.
         #
         # 다만 원격 조종은 waypoint 없이도 성립한다. 목표 침로나 fallback을
         # 지시하는 것 자체가 조종이며, 그때는 따라갈 항로가 없어도 된다.
@@ -660,7 +666,7 @@ class MassAgent:
                     status=ack.STATUS_INCOMPLETE, reason=ack.REASON_ROUTE_UNSUITABLE
                 )
 
-        # ④ 경로 문제 — 해석은 되지만 따라갈 수 없는 형상.
+        # ⑤ 경로 문제 — 해석은 되지만 따라갈 수 없는 형상.
         #    연속한 두 waypoint가 같은 지점이면 그 구간의 침로가 정의되지 않는다.
         for previous, current in zip(message.waypoints, message.waypoints[1:]):
             if (

@@ -270,10 +270,17 @@ Link ID 19  가용 685 B  →  waypoint 최대 16개 (표준 상한)
 | waypoint 없음 | `incomplete` | route unsuitable | **유지** |
 | Route Type 미지정 | `incomplete` | route unsuitable | **유지** |
 | 좌표가 not available | `incomplete` | route unsuitable | **유지** |
-| 취소 지시 (Type 31 / Duration 0) | `acknowledged` | — | 해제 |
+| **전선에 실을 수 없는 값** (아래 §8.2) | `errors` | route unsuitable | **유지** |
+| 취소 지시 · Linkage ID 일치 | `acknowledged` | — | 해제 |
+| **취소 지시 · Linkage ID 불일치** | `route issues` | route unsuitable | **유지** |
 | 유효기간 경과 | — | — | 자동 해제 |
 | 다른 응용의 payload | 응답 없음 (무시) | — | **유지** |
 | VPFI/MF 불일치 · 형식 손상 | 응답 없음 (무시) | — | **유지** |
+
+취소는 **Message Linkage ID가 가리키는 항로만** 해제한다. Table 13.2가 Linkage ID를
+두는 목적이 "이 메시지가 어느 메시지에 대한 것인가"를 밝히는 것이고, 그것을 보지
+않으면 오래된·재전송된 취소 한 건이 지금 따라가는 항로를 지운다. Linkage ID 0
+(not available)은 아무것도 가리키지 못하므로 같이 거절한다.
 
 ### 8.1 검증 순서가 구조로 보장된다
 
@@ -288,7 +295,33 @@ if decision.accept:
 
 **인증은 나중에 `_evaluate()` 안에 들어간다.** 자리가 이미 마련되어 있다.
 
-### 8.2 유효기간 실측
+### 8.2 전선에 실을 수 없는 값은 본선이 직접 거른다
+
+부호화 폭이 담을 수 있는 값이 유효 범위보다 넓은 필드가 있다. Heading Setpoint는
+12 bit라 4095까지 담기지만 유효한 값은 3600까지다. 거르지 않으면 4000이 400.0도가
+되고 조타가 그것을 40도로 정규화해 **지시한 적 없는 침로로 배가 돈다.**
+
+`route_instruction.canonical_violation()`이 승인된 SC-VDE codec과 **같은 규칙**으로
+검사한다.
+
+| 필드 | 허용 |
+| --- | --- |
+| Sender Classification | 0(ship) · 1(authority) |
+| Route Type | 0 · 1 · 2 · 5 · 31 |
+| Start Date/Time | 전체 N/A `0/0/24/60` 또는 넷 다 정상 범위 |
+| Heading Setpoint | 0..3599 또는 3600(N/A) |
+| Fallback State | 0..3 |
+| Longitude / Latitude | ±180° / ±90° 또는 N/A(181° / 91°) |
+| Leg Geometry | 0 · 1 · 2 |
+
+**왜 응용이 또 보는가** — 링크 codec은 **무선 경로만** 막는다. 콘솔 기본값(`direct`
+전송)·loopback 데모·공격 실험의 주입 지점은 codec을 지나지 않는다. 응용이 같은
+규칙을 지켜야 무선을 타든 안 타든 배가 똑같이 행동한다.
+
+두 판정이 갈리지 않는지는 [`tests/test_route_conformance.py`](../../tests/test_route_conformance.py)가
+링크 codec을 직접 불러 대조한다.
+
+### 8.3 유효기간 실측
 
 ```text
 duration = 1분 지시

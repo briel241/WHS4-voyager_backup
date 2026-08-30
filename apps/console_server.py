@@ -479,10 +479,21 @@ class Simulation:
     def _make_route(self, body: dict, now: float) -> tuple[Outbound, dict]:
         waypoints = _parse_waypoints(body.get("waypoints"))
         route_type = int(body.get("route_type", route.ROUTE_TYPE_MANDATORY))
-        if route_type not in route.ROUTE_TYPE_NAMES or route_type == route.ROUTE_TYPE_CANCELLATION:
-            raise ValueError(f"항로 종류가 올바르지 않습니다: {route_type}")
+        # 전선 형식이 실을 수 있는 값만 받는다. Table 13.2에는 있으나 SC-VDE
+        # 프로파일이 뺀 값(3·4)을 보내면 승인된 codec이 INVALID_REQUEST로 거부한다.
+        if route_type not in route.SC_VDE_ROUTE_TYPES or route_type == route.ROUTE_TYPE_CANCELLATION:
+            raise ValueError(
+                f"항로 종류가 올바르지 않습니다: {route_type} "
+                f"(허용: {sorted(route.SC_VDE_ROUTE_TYPES - {route.ROUTE_TYPE_CANCELLATION})})"
+            )
         duration = int(body.get("duration", route.DURATION_NOT_AVAILABLE))
-        if not 0 <= duration <= route.DURATION_NOT_AVAILABLE:
+        # Duration 0은 Table 13.2가 정한 **취소**다. 노선 발행으로 받으면 배는
+        # 항로를 싣지 않는데 화면에는 발행 성공으로 떠서 상태가 어긋난다.
+        if duration == route.DURATION_CANCEL:
+            raise ValueError(
+                "유효 시간 0은 항로 취소를 뜻합니다. 취소하려면 '항로 취소' 탭을 쓰세요"
+            )
+        if not 0 < duration <= route.DURATION_NOT_AVAILABLE:
             raise ValueError("duration 범위를 벗어났습니다")
 
         outbound = self.roc.issue_route(
