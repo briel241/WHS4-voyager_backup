@@ -119,29 +119,27 @@ def _drain_source():
     return source[start:source.index("main._drain_dispatch_queue", start)]
 
 
-def test_stale_samples_are_dropped_not_decoded():
-    """창 수명을 넘긴 표본은 버려야 한다.
+def test_samples_are_never_dropped_without_their_completion():
+    """표본만 버리고 완료를 남기면 PHY 불변식이 결정론적으로 깨진다.
 
-    처리해도 창이 이미 닫혀 결과가 버려지는데, 그 ~140ms가 뒤 항목을 또
-    늦게 만들어 백로그가 영영 안 빠진다 (phase-g-service-20260831-130917:
-    qlen 465 상시 · done=12/deferred=244 반복 · 데이터 전달 0).
+    lane sample과 completion은 radio_adapter가 **항상 인접한 쌍**으로 방출한다.
+    표본만 폐기하면 완료가 빈 버퍼로 도착해 phy_bridge의 "성공 terminal의
+    buffered sample이 정확히 한 연속 8,192-sample block이 아닙니다"가 반드시
+    터진다.
+
+    실측 phase-g-service-20260831-161748 (나이 폐기를 넣었던 실행):
+      폐기 ROC 4,275 · MASS-A 5,761 · MASS-B 5,684
+      위반 ROC 6,661 · MASS-A 8,880 · MASS-B 8,776   (비 1.54~1.56)
+    lane 하나만 오류여도 논리 창 전체가 폐기되는 병합 규칙 탓에 수신 표본의
+    44~55%가 파괴됐고, 정작 큐 포화(처리량 문제)는 해결하지 못했다.
+
+    다시 넣으려면 표본과 완료를 **함께** 버리거나, 폐기한 창을
+    record_rx_fault/reset_stream으로 정리해 완료가 도달하지 않게 해야 한다.
     """
     body = _drain_source()
-    assert "_SAMPLE_MAX_AGE_S" in body, "나이 상한 검사가 없다"
-    assert 'item[0] == "s"' in body, "표본만 골라 버려야 한다"
-    # 완료·오류는 절대 버리지 않는다 — 폐기 블록이 표본만 다루는지 확인한다.
-    drop_block = body[body.index("now_drain = "):body.index("batch = kept")]
-    assert 'item[0] == "s"' in drop_block
-    assert '"c"' not in drop_block and '"e"' not in drop_block, \
-        "완료·오류가 폐기 대상에 들어갔다"
-
-
-def test_sample_age_threshold_is_derived_from_frame_length():
-    """임계를 하드코딩하면 안 된다 — TDMA frame 길이에서 유도해야 한다."""
-    source = _read(LAUNCHER)
-    block = source[source.index("_SAMPLE_MAX_AGE_S ="):]
-    block = block[:block.index(chr(10))]
-    assert "FRAME_NANOSECONDS" in block or "_DISPATCH_FRAME_NS" in block, block
+    assert "_SAMPLE_MAX_AGE_S" not in body, (
+        "표본 나이 폐기가 다시 들어왔다 - 완료와 짝을 맞추지 않으면 "
+        "PHY 불변식을 깬다")
 
 
 def test_completion_promotion_preserves_sample_ordering():
@@ -155,12 +153,6 @@ def test_completion_promotion_preserves_sample_ordering():
     body = _drain_source()
     assert "sample_keys" in body, "표본 결속 조건이 사라졌다"
     assert 'item[0] == "c" and tuple(item[1:4]) not in sample_keys' in body,         "같은 창에 표본이 있어도 완료를 승격하고 있다"
-
-
-def test_sample_dispatch_does_not_leak_the_timestamp():
-    """적재 시각은 배수 전용이다 — 런타임 콜백 인자로 새면 안 된다."""
-    body = _drain_source()
-    assert "_samples_locked(*item[1:6])" in body,         "표본 호출이 적재 시각까지 넘기고 있다"
 
 
 def test_stall_budget_is_preserved():
