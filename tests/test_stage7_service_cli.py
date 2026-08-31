@@ -185,8 +185,7 @@ def test_critical_mismatch_blocks_before_device_access():
         # 첫 호출 = critical manifest 대조. 해시를 어긋나게 응답한다.
         script = command[-1]
         if "sha256sum" in script and "MISSING" in script:
-            files = sorted(
-                profile["_reference"]["qualification_critical_manifest"]["files"])
+            files = sorted(profile["_reference"]["qualification_critical_manifest"]["strict_files"])
             return _FakeCompleted("\n".join(f"{'0'*64}  {f}" for f in files))
         return _FakeCompleted("")
 
@@ -201,7 +200,9 @@ def test_critical_mismatch_blocks_before_device_access():
 
 def test_topology_and_trust_gates():
     profile = stage7_profile.load_profile(_profile_path())
-    critical = profile["_reference"]["qualification_critical_manifest"]["files"]
+    critical = profile["_reference"]["qualification_critical_manifest"]["strict_files"]
+    bound = list(profile["_reference"]["qualification_critical_manifest"]
+                 .get("function_bound_files") or {})
 
     def make_runner(usb_ok=True, procs="none", throttled="throttled=0x0",
                     key_mode="600", match="true"):
@@ -210,6 +211,14 @@ def test_topology_and_trust_gates():
             if "MISSING" in script:
                 return _FakeCompleted(
                     "\n".join(f"{h}  {f}" for f, h in sorted(critical.items())))
+            if script.startswith("cat "):
+                # function-bound 파일은 배포본 실물을 가져와 함수 해시를 본다.
+                for candidate in bound:
+                    if script.rstrip().endswith(candidate):
+                        with open(os.path.join(_REPO, candidate),
+                                  encoding="utf-8") as handle:
+                            return _FakeCompleted(handle.read())
+                return _FakeCompleted("")
             lines = ["##USB"]
             for name, info in profile["endpoints"].items():
                 path = info["usb_path"] if usb_ok else "9-9"

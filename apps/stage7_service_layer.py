@@ -68,10 +68,62 @@ def remote_deploy_root(profile: dict) -> str:
     return "$HOME/" + profile["pi"]["deploy_relpath"]
 
 
+def _verify_function_bound(profile: dict, root: str, runner) -> dict:
+    """orchestration 분기가 additive로 늘어나는 파일을 **함수 단위**로 결속 확인.
+
+    전체 파일 해시는 달라질 수 있다(신규 phase 추가). 대신 배포본 실물을 가져와
+    qualification 경로 함수의 AST/source 해시와 RR phase dispatch가 Phase F와
+    같은지 확인한다. 하나라도 다르면 RF 접근을 거부한다.
+    """
+    import ast
+    import hashlib
+
+    bound = (profile["_reference"]["qualification_critical_manifest"]
+             .get("function_bound_files") or {})
+    outcome = {}
+    for relpath, spec in sorted(bound.items()):
+        done = _ssh(profile, f"cat {root}/{relpath}", timeout=180.0, runner=runner)
+        source = done.stdout
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ServiceSessionError(f"{relpath} 파싱 실패: {exc}") from exc
+
+        actual = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                actual[node.name] = {
+                    "ast_sha256": hashlib.sha256(
+                        ast.dump(node).encode("utf-8")).hexdigest(),
+                    "source_sha256": hashlib.sha256(
+                        ast.unparse(node).encode("utf-8")).hexdigest(),
+                }
+        expected = spec.get("qualified_functions") or {}
+        changed = sorted(name for name, value in expected.items()
+                         if actual.get(name) != value)
+        missing = sorted(name for name in expected if name not in actual)
+        outcome[relpath] = {
+            "qualified_functions_checked": len(expected),
+            "changed": changed, "missing": missing,
+            "deployed_file_sha256": hashlib.sha256(
+                source.encode("utf-8")).hexdigest(),
+            "phase_f_file_sha256": spec.get("phase_f_file_sha256"),
+            "pass": not changed and not missing,
+        }
+        if changed or missing:
+            raise ServiceSessionError(
+                f"{relpath}의 qualification 경로가 변경됐다 — RF 접근 거부 "
+                f"(changed={changed}, missing={missing})")
+    return outcome
+
+
 def verify_remote_environment(profile: dict, *, runner=subprocess.run) -> dict:
     """§3 2~7단계. 실패하면 ServiceSessionError (RF 접근 전 차단)."""
     reference = profile["_reference"]
-    critical = reference["qualification_critical_manifest"]["files"]
+    manifest = reference["qualification_critical_manifest"]
+    # v2: 전체 파일 해시로 결속하는 strict 목록과, 함수 단위로 결속하는
+    # function-bound 목록을 분리한다. (v1 호환: files 키만 있으면 전부 strict)
+    critical = manifest.get("strict_files") or manifest.get("files") or {}
     root = remote_deploy_root(profile)
     report = {}
 
@@ -102,6 +154,9 @@ def verify_remote_environment(profile: dict, *, runner=subprocess.run) -> dict:
         raise ServiceSessionError(
             "qualification-critical 파일 불일치 — RF 접근 거부 "
             f"(missing={(missing + absent)[:3]}, mismatch={mismatch[:3]})")
+
+    # orchestration 분기가 추가되는 파일은 함수 단위로 결속을 확인한다.
+    report["function_bound"] = _verify_function_bound(profile, root, runner)
 
     endpoints = profile["endpoints"]
     serials = " ".join(sorted(e["serial"] for e in endpoints.values()))

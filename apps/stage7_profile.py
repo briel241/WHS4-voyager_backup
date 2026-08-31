@@ -103,7 +103,9 @@ def load_reference(reference_path: str, *, expected_sha256: str | None = None) -
     if not reference.get("qualified_source_commit"):
         raise ProfileError("reference에 qualified_source_commit이 없습니다")
     critical = reference.get("qualification_critical_manifest") or {}
-    if not critical.get("files"):
+    # v2: strict_files(전체 해시 결속) + function_bound_files(함수 단위 결속).
+    # v1 호환: files 하나만 있는 형식도 받는다.
+    if not (critical.get("strict_files") or critical.get("files")):
         raise ProfileError("reference에 qualification-critical manifest가 없습니다")
     reference["_reference_sha256"] = actual
     reference["_reference_path"] = os.path.abspath(reference_path)
@@ -215,9 +217,12 @@ def validate_local_bindings(profile: dict) -> dict:
                                   "detail": reference["_reference_sha256"]}
     checks["qualification_run_id"] = {
         "pass": True, "detail": reference["qualification"]["run_id"]}
+    manifest = reference["qualification_critical_manifest"]
+    strict = manifest.get("strict_files") or manifest.get("files") or {}
     checks["critical_file_count"] = {
         "pass": True,
-        "detail": str(len(reference["qualification_critical_manifest"]["files"]))}
+        "detail": f"strict={len(strict)} "
+                  f"function_bound={len(manifest.get('function_bound_files') or {})}"}
     return checks
 
 
