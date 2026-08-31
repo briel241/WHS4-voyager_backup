@@ -94,7 +94,8 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
         # bounded persistent session phase, 그리고 session이 소유한 endpoint
         # lifecycle(START/STOP)을 대행 spawn하는 헬퍼.
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["_spawn_session_lifecycle",
+        self.assertEqual(added, ["_open_session_trace",
+                                 "_spawn_session_lifecycle",
                                  "run_mass_roc_service", "run_mass_roc_session"],
                          str(added))
 

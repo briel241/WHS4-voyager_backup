@@ -538,6 +538,74 @@ def test_controller_gate_dir_override_is_honoured():
     assert hasattr(controller_module, "_run_session_lifecycle_step")
 
 
+def _session_phase_source():
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_coordinator_main.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "run_mass_roc_session")
+    return ast.unparse(node)
+
+
+def test_coordinator_session_phase_is_instrumented():
+    """coordinator session phase가 구조화 계측을 남긴다.
+
+    이 계층에 계측이 없어서 gate 경로 결함을 잡는 데 RF 실행 세 번이 들었다.
+    """
+    body = _session_phase_source()
+    for event in ("session_phase_begin", "admission_open", "intent_wait",
+                  "intent_failed", "intents_complete", "tbb_wait",
+                  "tbb_failed", "service_published", "lifecycle_proxy_reaped",
+                  "workload_child_spawn", "workload_result",
+                  "session_exception", "session_closed"):
+        assert f"'{event}'" in body, f"{event} 계측 누락"
+
+
+def test_intent_diagnostics_name_the_missing_endpoints():
+    """intent 실패 계측은 '누가 intent를 남기지 않았는가'를 담아야 한다."""
+    body = _session_phase_source()
+    assert "intent_ledger_snapshot()" in body
+    assert "intents_recorded" in body and "intents_expected" in body
+    # 대행 생사와 gate 존재 여부가 같이 찍혀야 원인이 한 줄로 갈린다.
+    assert "proxy_alive" in body and "gate_exists" in body
+
+
+def test_tbb_diagnostics_name_the_stalled_endpoints():
+    """pilot 실패(ROC만 TBB_ACTIVE)를 구분할 수 있어야 한다."""
+    body = _session_phase_source()
+    assert "tbb_ledger_snapshot()" in body
+    assert "tbb_active" in body and "tbb_expected" in body
+
+
+def test_instrumentation_never_fails_the_session():
+    """계측 오류가 판정을 바꾸면 안 된다 (fail-open)."""
+    body = _session_phase_source()
+    assert "def emit(" in body
+    # emit은 예외를 삼킨다.
+    emit_block = body[body.index("def emit("):body.index("def mark(")]
+    assert "except Exception" in emit_block and "pass" in emit_block
+
+
+def test_instrumentation_absent_from_frozen_layers():
+    """RF·PHY·timing 계층에는 계측을 넣지 않는다."""
+    forbidden = [
+        os.path.join(_REPO, "VDETER", "apps", "stage7_endpoint_launcher.py"),
+        os.path.join(_REPO, "VDETER", "src", "vdeter", "stage7", "rf_time.py"),
+    ]
+    for path in forbidden:
+        text = io.open(path, encoding="utf-8").read()
+        assert "stage7_trace" not in text and "TraceWriter" not in text, path
+    # _run_rf_qualification 본문에도 계측이 없어야 한다.
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_coordinator_main.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "_run_rf_qualification")
+    assert "emit(" not in ast.unparse(node)
+
+
 def test_session_cleanup_measured_after_launcher_teardown():
     """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",

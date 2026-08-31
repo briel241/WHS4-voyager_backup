@@ -900,8 +900,39 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
 
 
+def _open_session_trace(run_root, run_id):
+    """session phase용 JSONL 계측기. 실패해도 세션을 막지 않는다.
+
+    repo-root `apps/stage7_trace.py`를 재사용해 session/workload 결속·비밀
+    마스킹 형식을 CLI 계층과 통일한다. import가 안 되면 무계측으로 진행한다
+    (계측 부재가 판정을 바꾸면 안 되므로 fail-open이 맞다).
+    """
+    path = os.path.join(run_root, "session-coordinator-trace.jsonl")
+    try:
+        repo_root = os.path.dirname(APP_ROOT)
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from apps.stage7_trace import TraceWriter
+
+        return TraceWriter(path, session_id=run_id, diagnostics=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[coordinator] 계측 비활성 ({type(exc).__name__}: {exc})", flush=True)
+
+        class _NoTrace:
+            def emit(self, *_a, **_k):
+                pass
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        return _NoTrace()
+
+
 def _spawn_session_lifecycle(lifecycle, run_id, run_root, configs_dir,
-                             test_plan_sha):
+                             test_plan_sha, emit=None):
     """persistent session의 endpoint START/STOP 대행 controller를 spawn한다.
 
     session 모델에서 endpoint lifecycle의 주인은 session이지만, TEST adapter
@@ -929,7 +960,19 @@ def _spawn_session_lifecycle(lifecycle, run_id, run_root, configs_dir,
         "--gate-dir", os.path.join(run_root, "controller_gate"),
     ]
     os.makedirs(os.path.join(run_root, "lifecycle", lifecycle), exist_ok=True)
-    return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
+    process = subprocess.Popen(command, stdout=log_handle,
+                               stderr=subprocess.STDOUT)
+    if emit is not None:
+        # gate 경로 불일치가 조용한 무한대기로 나타났던 회귀
+        # (phase-g-service-20260831-042934) — 인자를 그대로 남긴다.
+        gate_dir = command[command.index("--gate-dir") + 1]
+        emit("lifecycle_proxy_spawn", lifecycle=lifecycle, pid=process.pid,
+             gate_dir=gate_dir,
+             gate_file=os.path.join(gate_dir, "admission_open"),
+             proxy_run_root=command[command.index("--run-root") + 1],
+             log=os.path.join(logs_dir, f"{lifecycle}.log"),
+             command=command)
+    return process
 
 
 def _run_rr_service_phase(
@@ -1562,10 +1605,23 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     service_stop_rc = None
     start_proxy = None
 
+    # --- 계측 (orchestration 계층 전용) ------------------------------------
+    # RF·PHY·slot·timing 경로는 계측하지 않는다. 여기서 남기는 것은 barrier
+    # 경계, 대행 spawn 인자, admission/intent 대기 상태뿐이다 — RF 판정에
+    # 관여하지 않는 층. 실패 시 RF 실행을 반복하지 않고도 원인이 보이게 한다.
+    trace = _open_session_trace(run_root, run_id)
+
+    def emit(event, **fields):
+        try:
+            trace.emit(event, **fields)
+        except Exception:  # noqa: BLE001 - 계측이 세션을 죽이지 않는다
+            pass
+
     def mark(name):
         guard.check()
         guard.progress(name)
         marks[name] = round(time.monotonic() - t0, 1)
+        emit("phase_mark", phase=name, elapsed_s=marks[name])
 
     def now_ns():
         return int(read_monotonic_raw_ns())
@@ -1575,6 +1631,11 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=1)
 
     try:
+        emit("session_phase_begin", run_id=run_id, members=list(present),
+             rf_time_paths=all_path_ids, rf_time_pairs=list(SERVICE_RF_TIME_PAIRS),
+             serial_by_endpoint=serial_by_endpoint,
+             configs_dir=configs_dir, run_root=run_root,
+             session_dir=session_dir, gain_artifact=gain_artifact_path)
         # ================= 1. 하드웨어 bring-up (세션당 정확히 1회) ==========
         run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
         mark("prepare_configure_arm")
@@ -1630,6 +1691,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         combined = evaluate_pre_correction_set(
             summaries, present_pairs=SERVICE_RF_TIME_PAIRS)
         print("[coordinator] validate_rf_time PRE COMPLETED", flush=True)
+        emit("rf_time_pre_summary", observed_paths=sorted(summaries),
+             outcomes={p: s["outcome"] for p, s in summaries.items()},
+             pairs=list(SERVICE_RF_TIME_PAIRS))
         mark("rf_time_pre")
 
         active_clock = f"stage7-pi-host-affine-v1:{coordinator._run_id}:0"
@@ -1679,6 +1743,12 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             raise RuntimeError(f"POST_CORRECTION FAIL paths: {failed}")
         print("[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED",
               flush=True)
+        # RF 판정 자체는 건드리지 않고 경로별 결과만 기록한다 (계측 대상은
+        # barrier 반환값이지 PHY/timing 내부가 아니다).
+        emit("rf_time_post_summary",
+             observed_paths=sorted(observed_post),
+             outcomes={s["path_id"]: s["outcome"] for s in post_summaries},
+             state="HOST_TIME_LOCKED")
         mark("rf_time_post")
 
         # ================= 2. service admission → RUNNING (1회) =============
@@ -1694,47 +1764,116 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         # 시나리오 없는 `session-start` 대행을 띄워 START만 시킨다. START는
         # publish까지 블록하므로 admission 직전에 spawn하고 publish 뒤에 회수한다.
         start_proxy = _spawn_session_lifecycle(
-            "session-start", run_id, run_root, configs_dir, test_plan_sha)
+            "session-start", run_id, run_root, configs_dir, test_plan_sha,
+            emit=emit)
         admission = coordinator.open_service_admission()
         admission_value = admission.value
         print("[coordinator] service admission OPEN", flush=True)
-        open(os.path.join(gate_dir, "admission_open"), "w").close()
+        gate_file = os.path.join(gate_dir, "admission_open")
+        open(gate_file, "w").close()
         intent_deadline = admission_value["service_start_deadline_host_raw_ns"]
+        emit("admission_open", gate_file=gate_file,
+             gate_written=os.path.exists(gate_file),
+             intent_window_id=admission_value.get("intent_window_id"),
+             intent_deadline_ns=intent_deadline,
+             intent_budget_s=round(
+                 (intent_deadline - now_ns()) / 1e9, 2))
+
+        def intent_state():
+            """intent 대기 진단: 누가 남겼고 대행은 살아 있는가."""
+            try:
+                recorded = sorted(
+                    key[-1] for key, _ in coordinator.intent_ledger_snapshot())
+            except Exception:  # noqa: BLE001
+                recorded = None
+            return {
+                "intents_recorded": recorded,
+                "intents_expected": list(present),
+                "proxy_alive": start_proxy.poll() is None,
+                "proxy_rc": start_proxy.returncode,
+                "gate_exists": os.path.exists(gate_file),
+            }
+
+        intent_t0 = time.monotonic()
+        next_report = 0.0
         while True:
             pump_events()
             if coordinator.required_intents_complete():
+                emit("intents_complete",
+                     elapsed_s=round(time.monotonic() - intent_t0, 2),
+                     **intent_state())
                 break
+            waited = time.monotonic() - intent_t0
+            if waited >= next_report:
+                emit("intent_wait", elapsed_s=round(waited, 2), **intent_state())
+                next_report = waited + 5.0
             if start_proxy.poll() is not None:
+                emit("intent_failed", reason="proxy_exited_early",
+                     elapsed_s=round(waited, 2), **intent_state())
                 raise RuntimeError(
                     "service-start 대행 controller가 intent 전에 종료했다 "
                     f"(rc={start_proxy.returncode}) — logs/session-start.log 확인")
             if now_ns() >= intent_deadline:
+                emit("intent_failed", reason="cutoff",
+                     elapsed_s=round(waited, 2), **intent_state())
                 raise RuntimeError("service-start intent cutoff 초과")
             time.sleep(0.2)
         start_commits = coordinator.commit_service_start()
+        emit("service_start_committed", members=list(present))
         staged_set = [
             [m, start_commits[m]["body"]["result"]["staged_service_started_sha256"]]
             for m in present]
         tbb_deadline = admission_value["tbb_publish_deadline_host_raw_ns"]
+
+        def tbb_state():
+            """TBB 대기 진단: 어떤 endpoint가 TBB_ACTIVE를 올렸는가.
+
+            pilot(svc-sc005-20260831-022449)은 ROC만 TBB_ACTIVE이고 MASS-A/B가
+            SERVICE_START_STAGED에 머물러 실패했다 — 그 구분이 보여야 한다.
+            """
+            try:
+                active = sorted(
+                    key[-1] for key, _ in coordinator.tbb_ledger_snapshot())
+            except Exception:  # noqa: BLE001
+                active = None
+            return {"tbb_active": active, "tbb_expected": list(present)}
+
+        tbb_t0 = time.monotonic()
+        next_tbb_report = 0.0
         while True:
             pump_events()
             if coordinator.required_tbb_complete(0):
+                emit("tbb_complete",
+                     elapsed_s=round(time.monotonic() - tbb_t0, 2), **tbb_state())
                 break
+            waited = time.monotonic() - tbb_t0
+            if waited >= next_tbb_report:
+                emit("tbb_wait", elapsed_s=round(waited, 2), **tbb_state())
+                next_tbb_report = waited + 10.0
             if now_ns() >= tbb_deadline:
+                emit("tbb_failed", reason="publish_deadline",
+                     elapsed_s=round(waited, 2), **tbb_state())
                 raise RuntimeError("TBB publish deadline 초과 (TBB_ACTIVE 미완)")
             time.sleep(0.5)
         coordinator.publish_service_start(staged_set, bridge_generation=0)
         print("[coordinator] publish_service_start COMPLETED — RUNNING", flush=True)
+        emit("service_published", bridge_generation=0)
         open(os.path.join(gate_dir, "started_ok"), "w").close()
         # START 대행 회수: publish 이후 세 START 호출이 OK로 반환해야 한다.
         start_deadline = time.monotonic() + 300.0
+        reap_t0 = time.monotonic()
         while start_proxy.poll() is None:
             guard.check()
             pump_events()
             if time.monotonic() > start_deadline:
+                emit("lifecycle_proxy_reap_timeout", lifecycle="session-start",
+                     elapsed_s=round(time.monotonic() - reap_t0, 2))
                 start_proxy.terminate()
                 raise RuntimeError("service-start 대행 controller 회수 300s 초과")
             time.sleep(0.5)
+        emit("lifecycle_proxy_reaped", lifecycle="session-start",
+             rc=start_proxy.returncode,
+             elapsed_s=round(time.monotonic() - reap_t0, 2))
         if start_proxy.returncode != 0:
             raise RuntimeError(
                 f"endpoint START 실패 (대행 rc={start_proxy.returncode})")
@@ -1761,6 +1900,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                      "이후 workload는 application state만 새로 만든다."),
         })
         print("[coordinator] SESSION READY — workload 요청 대기", flush=True)
+        emit("session_ready", phase_elapsed_s=dict(marks),
+             health_baseline=baseline_health, rf_time_paths=all_path_ids)
 
         # ================= 3. workload 요청 루프 ============================
         idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
@@ -1815,6 +1956,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 and health["bridge_generation"] == baseline_health["bridge_generation"]
                 and speed_map == baseline_health["usb_speed"]
             )
+            emit("workload_health_gate", workload=workload_id,
+                 scenario_id=scenario_id, certificate_case=certificate_case,
+                 health=health)
             if not health["pass"]:
                 raise RuntimeError(f"session health gate 실패: {health}")
 
@@ -1842,6 +1986,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             ]
             child = subprocess.Popen(command, stdout=log_handle,
                                      stderr=subprocess.STDOUT)
+            emit("workload_child_spawn", workload=workload_id, pid=child.pid,
+                 scenario_id=scenario_id, certificate_case=certificate_case,
+                 child_run_root=child_root, command=command)
             while child.poll() is None:
                 guard.check()
                 guard.progress(f"workload:{workload_id}")
@@ -1920,6 +2067,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             print(f"[coordinator] workload {workload_id} {record['status']}",
                   flush=True)
             mark(f"workload:{workload_id}")
+            emit("workload_result", workload=workload_id,
+                 scenario_id=scenario_id, status=record["status"],
+                 duration_s=record.get("duration_s"), quiescence=quiescence)
             if not quiescence["pass"]:
                 raise RuntimeError(
                     f"workload quiescence 실패 — session 종료: {quiescence}")
@@ -1929,7 +2079,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         # service STOP(application) → lifecycle stop barrier 순서는 RR 경로와
         # 같다. STOP 대행 실패는 기록하되 barrier는 반드시 수행한다.
         stop_proxy = _spawn_session_lifecycle(
-            "session-stop", run_id, run_root, configs_dir, test_plan_sha)
+            "session-stop", run_id, run_root, configs_dir, test_plan_sha,
+            emit=emit)
         stop_proxy_deadline = time.monotonic() + 300.0
         while stop_proxy.poll() is None:
             pump_events()
@@ -1938,6 +2089,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 break
             time.sleep(0.5)
         service_stop_rc = stop_proxy.returncode
+        emit("lifecycle_proxy_reaped", lifecycle="session-stop",
+             rc=service_stop_rc)
         if service_stop_rc != 0:
             print(f"[coordinator] service STOP 대행 rc={service_stop_rc}",
                   flush=True)
@@ -1953,6 +2106,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
         status = "FAIL"
+        import traceback as _tb
+        emit("session_exception", error=error,
+             traceback=_tb.format_exc()[-3000:], phase_elapsed_s=dict(marks))
         try:
             coordinator.emergency_inhibit("SERVICE_SESSION_FAIL", "session")
         except Exception:  # noqa: BLE001 - 정리 최선 노력
@@ -2033,6 +2189,13 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         os.makedirs(out_dir, exist_ok=True)
         write_json(os.path.join(out_dir, "session_result.json"), payload)
         write_json(os.path.join(session_dir, SESSION_CLOSED), payload)
+        emit("session_closed", status=status, error=error, cleanup=cleanup,
+             workloads=[w["workload_id"] for w in workloads],
+             phase_elapsed_s=dict(marks))
+        try:
+            trace.close()
+        except Exception:  # noqa: BLE001
+            pass
     if status != "PASS":
         raise RuntimeError("MASS-ROC service session FAIL — 새 session으로만 재시도")
     return {"mass_roc_session": status, "workloads": workloads,
