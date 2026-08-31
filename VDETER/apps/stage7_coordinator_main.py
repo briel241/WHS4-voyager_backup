@@ -325,6 +325,41 @@ def validate_rr_binding(arguments, metadata: dict) -> None:
     - 0.9.22: 디버그 우회 스위치 활성 상태의 정식 run 거부 + deadline 결속 대조
     """
 
+    # Phase G additive: service-only phase는 RR 판정을 만들지 않지만 결속은
+    # RR과 같은 강도로 확인한다(profile·run·baseline·retry). rr_phase는 서비스
+    # workload를 결속한 rr-p2-17/19 config를 그대로 쓴다. 아래 기존 RR 분기의
+    # 조건과 동작은 이 추가로 바뀌지 않는다.
+    if arguments.phase == "mass-roc-service":
+        for banned in ("STAGE7_SVCDBG_ALLOW_RX_READY", "STAGE7_SCENARIO_FILTER"):
+            if os.environ.get(banned):
+                raise SystemExit(
+                    f"SERVICE_BINDING_REJECTED: 디버그 스위치 {banned} 활성 — "
+                    "service run에서는 설정 금지"
+                )
+        if metadata.get("qualification_profile") != RESEARCH_READY_PROFILE:
+            raise SystemExit(
+                "SERVICE_BINDING_REJECTED: RESEARCH_READY_MINIMAL로 결속된 "
+                "config가 필요합니다"
+            )
+        if metadata.get("rr_phase") not in ("rr-p2-17", "rr-p2-19"):
+            raise SystemExit(
+                f"SERVICE_BINDING_REJECTED: service workload 결속 phase가 "
+                f"아닙니다 ({metadata.get('rr_phase')!r})"
+            )
+        if metadata.get("run_id") != arguments.run_id:
+            raise SystemExit(
+                f"SERVICE_BINDING_REJECTED: config 결속 run "
+                f"{metadata.get('run_id')!r} != 요청 run {arguments.run_id!r}"
+            )
+        expected_sha = getattr(arguments, "baseline_sha256", None)
+        if not expected_sha or metadata.get("baseline_sha256") != expected_sha:
+            raise SystemExit(
+                "SERVICE_BINDING_REJECTED: baseline SHA-256 불일치 또는 부재"
+            )
+        if metadata.get("implicit_retry") != 0:
+            raise SystemExit("SERVICE_BINDING_REJECTED: implicit_retry는 0이어야 합니다")
+        return
+
     is_rr = arguments.phase.startswith("rr-")
     if is_rr:
         # 판정 표면을 바꾸는 디버그 스위치는 정식 run에서 금지 (R2 감사:
@@ -1053,6 +1088,380 @@ def run_mass_roc(coordinator, resolved, plan, run_root: str, *, run_id, metadata
     if status != "PASS":
         raise RuntimeError("MASS-ROC workload FAIL — 새 run ID로만 재시도")
     return {"mass_roc": status, "link": link_id, "scenario_id": scenario_id}
+
+
+#: service-only phase의 RF-time 경로. `rf_time.evaluate_pre_correction_set`가
+#: 지원하는 조합은 {RA,RB,AB} 전체 또는 단일 pair뿐이라(그 밖은 "지원하지 않는
+#: pair 조합" 예외) 6경로를 그대로 쓴다. 경로를 줄이려면 frozen rf_time.py를
+#: 고쳐야 하므로 하지 않는다.
+SERVICE_RF_TIME_PATHS = P2_PATHS
+SERVICE_RF_TIME_PAIRS = ("RA", "RB", "AB")
+
+
+def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
+                         metadata, configs_dir, gain_artifact_path, test_plan_sha,
+                         scenario_id, certificate_case, processes=None):
+    """`OPERATIONAL_SERVICE`: qualification 없이 서비스 구간만 수행한다 (Phase G).
+
+    Phase F에서 발급한 qualification reference가 유효하다는 전제 위에서, 이미
+    자격이 확인된 gain·RF 설정을 **재측정하지 않고 적용만** 해 MASS/ROC 시나리오
+    하나를 독립 service session으로 돌린다.
+
+    수행: prepare/configure/arm_rx → acquire_host_time → RF-time PRE →
+    active bridge → RF-time POST(HOST_TIME_LOCKED) → admission → staged start →
+    TBB → publish → 시나리오 1건 → STOP → cleanup 확인.
+
+    **실행하지 않는 것**: `_run_rf_qualification`, CFO burst qualification,
+    adaptive gain 탐색, raw-PHY 6경로 qualification, RR/RESEARCH_READY 판정.
+    따라서 이 함수의 결과를 RR-P2 PASS나 RESEARCH_READY로 표시하면 안 된다 —
+    evidence는 `evidence/operational_service/`에 별도 형식으로만 남는다.
+    """
+
+    from vdeter.stage7.canonical_json import encode_canonical_json
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.stage7.ipc import body_set_sha256
+    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+
+    # 서비스 구간 전용 guard. qualification 사다리를 돌지 않으므로 RR phase
+    # deadline(70분)이 아니라 서비스 구간 예산을 쓴다.
+    guard = PhaseGuard("MASS-ROC-SERVICE", deadline_s=45 * 60)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+
+    present = list(ENDPOINT_IDS)
+    paths = SERVICE_RF_TIME_PATHS
+    all_path_ids = [p[0] for p in paths]
+    ship = next(m for m in present if m != "ROC")
+    channel_by_role = {
+        "upper": resolved["ROC"].endpoint.mac.tx_channel.name,
+        "lower": resolved[ship].endpoint.mac.tx_channel.name,
+    }
+    serial_by_endpoint = {m: resolved[m].b210_serial for m in present}
+
+    started = _utc_now()
+    t0 = time.monotonic()
+    marks = {}
+
+    def mark(name):
+        guard.check()
+        guard.progress(name)
+        marks[name] = time.monotonic()
+
+    def now_ns():
+        return int(read_monotonic_raw_ns())
+
+    status = "FAIL"
+    error = None
+    scenario = {}
+    controller = None
+    cleanup = {}
+    try:
+        # --- 1. endpoint/B210 prepare·configure·arm ---------------------------
+        run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+        mark("prepare_configure_arm")
+
+        # --- 2. host affine fit (§13.2) --------------------------------------
+        acquire = coordinator.run_barrier(
+            "acquire_host_time",
+            {
+                m: {
+                    "profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1",
+                    "acquisition_attempt": 1,
+                    "max_acquisition_ns": 600_000_000_000,
+                }
+                for m in present
+            },
+            members=present,
+            concurrent_commit=True,
+        )
+        fits = {m: acquire[m]["body"]["result"] for m in present}
+        for m in present:
+            if fits[m] is None or fits[m].get("outcome") != "PASS":
+                raise RuntimeError(f"{m} host affine fit FAIL")
+        print("[coordinator] acquire_host_time COMPLETED", flush=True)
+        mark("acquire_host_time")
+
+        # --- 3. RF-time PRE (§13.3) ------------------------------------------
+        def rf_time_plan(phase_tag):
+            start_base = now_ns() + 20_000_000_000
+            entries = []
+            for index, (path_id, tx_ep, rx_ep, tx_lane, rx_lane) in enumerate(paths):
+                start = start_base + index * 75_000_000_000
+                entries.append({
+                    "path_id": path_id,
+                    "tx_endpoint_id": tx_ep,
+                    "rx_endpoint_id": rx_ep,
+                    "tx_lane_index": tx_lane,
+                    "rx_lane_index": rx_lane,
+                    "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                    "scheduled_host_raw_ns": [
+                        start + k * 6_800_000_000 for k in range(10)
+                    ],
+                })
+            return _write_plan(run_root, "rf_time_plan.json",
+                               {"phase": phase_tag, "paths": entries})
+
+        provisional_clock = (
+            f"stage7-pi-host-affine-provisional-v1:{coordinator._run_id}:1"
+        )
+        rf_sha = rf_time_plan("PRE_CORRECTION")
+        pre = coordinator.run_barrier(
+            "validate_rf_time",
+            {
+                m: {
+                    "validation_phase": "PRE_CORRECTION",
+                    "rf_time_plan_sha256": rf_sha,
+                    "clock_id": provisional_clock,
+                    "path_ids": all_path_ids,
+                }
+                for m in present
+            },
+            members=present,
+            concurrent_commit=True,
+        )
+        summaries = {}
+        for m in present:
+            for summary in pre[m]["body"]["result"] or ():
+                summaries[summary["path_id"]] = summary
+        combined = evaluate_pre_correction_set(
+            summaries, present_pairs=SERVICE_RF_TIME_PAIRS
+        )
+        print("[coordinator] validate_rf_time PRE COMPLETED", flush=True)
+        mark("rf_time_pre")
+
+        # --- 4. active bridge (§13.2/§16.1) ----------------------------------
+        active_clock = f"stage7-pi-host-affine-v1:{coordinator._run_id}:0"
+        candidate_set = [
+            [m, hashlib.sha256(encode_canonical_json(fits[m])).hexdigest()]
+            for m in present
+        ]
+        corrections = combined["corrections"]
+        bodies = {}
+        for m in present:
+            correction = corrections.get(m, (0, 1))
+            bodies[m] = {
+                "candidate_set": [list(item) for item in candidate_set],
+                "candidate_set_sha256": body_set_sha256(candidate_set),
+                "candidate_sha256": dict(candidate_set)[m],
+                "active_clock_id": active_clock,
+                "bridge_generation": 0,
+                "alpha_num": fits[m]["alpha_num"],
+                "alpha_den": fits[m]["alpha_den"],
+                "beta_num": fits[m]["beta_num"],
+                "beta_den": fits[m]["beta_den"],
+                "correction_num": correction[0],
+                "correction_den": correction[1],
+            }
+        coordinator.run_barrier(
+            "prepare_active_bridge", bodies,
+            commit_command_name="commit_active_bridge",
+            abort_command_name="abort_active_bridge",
+            members=present,
+        )
+        coordinator._bridge_generation = 0
+        coordinator._bridge_members = set(present)
+        print("[coordinator] active bridge COMMITTED", flush=True)
+        mark("active_bridge")
+
+        # --- 5. RF-time POST → HOST_TIME_LOCKED -------------------------------
+        rf_sha = rf_time_plan("POST_CORRECTION")
+        post = coordinator.run_barrier(
+            "validate_rf_time",
+            {
+                m: {
+                    "validation_phase": "POST_CORRECTION",
+                    "rf_time_plan_sha256": rf_sha,
+                    "clock_id": active_clock,
+                    "path_ids": all_path_ids,
+                }
+                for m in present
+            },
+            members=present,
+            concurrent_commit=True,
+        )
+        post_summaries = []
+        for m in present:
+            post_summaries.extend(post[m]["body"]["result"] or ())
+        # summary가 비면 all()이 공허참이 되어 무검증 통과가 된다 — 명시 거부.
+        if not post_summaries:
+            raise RuntimeError("POST_CORRECTION summary가 비어 있습니다")
+        failed = [s["path_id"] for s in post_summaries if s["outcome"] != "PASS"]
+        if failed:
+            raise RuntimeError(f"POST_CORRECTION FAIL paths: {failed}")
+        print("[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED",
+              flush=True)
+        mark("rf_time_post")
+
+        # --- 6. 시나리오 controller spawn + service admission ------------------
+        controller = _spawn_mass_roc_controller(
+            run_id, run_root, configs_dir, test_plan_sha,
+            scenario_id, certificate_case,
+        )
+        gate_dir = os.path.join(run_root, "controller_gate")
+        os.makedirs(gate_dir, exist_ok=True)
+
+        def pump_events():
+            for member in present:
+                for event in coordinator._channels[member].poll_events():
+                    coordinator.receive_event(member, event)
+
+        admission = coordinator.open_service_admission()
+        admission_value = admission.value
+        print("[coordinator] service admission OPEN", flush=True)
+        open(os.path.join(gate_dir, "admission_open"), "w").close()
+        intent_deadline = admission_value["service_start_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_intents_complete():
+                break
+            if now_ns() >= intent_deadline:
+                raise RuntimeError("service-start intent cutoff 초과")
+            time.sleep(0.2)
+        start_commits = coordinator.commit_service_start()
+        staged_set = [
+            [m, start_commits[m]["body"]["result"]["staged_service_started_sha256"]]
+            for m in present
+        ]
+        tbb_deadline = admission_value["tbb_publish_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_tbb_complete(0):
+                break
+            if now_ns() >= tbb_deadline:
+                raise RuntimeError("TBB publish deadline 초과 (TBB_ACTIVE 미완)")
+            time.sleep(0.5)
+        coordinator.publish_service_start(staged_set, bridge_generation=0)
+        print("[coordinator] publish_service_start COMPLETED — RUNNING", flush=True)
+        mark("service_running")
+
+        # --- 7. 시나리오 1건 실행 대기 ----------------------------------------
+        import glob as _glob
+        watch = [os.path.join(run_root, "logs", "mass-roc-controller.log")]
+        last_total = -1
+        while controller.poll() is None:
+            total = 0
+            for path in watch + _glob.glob(
+                os.path.join(run_root, "evidence", "service_events", "*.jsonl")
+            ):
+                try:
+                    total += os.path.getsize(path)
+                except OSError:
+                    pass
+            if total != last_total:
+                last_total = total
+                guard.progress("scenario")
+            guard.check()
+            time.sleep(1.0)
+        result_path = os.path.join(run_root, "mass-roc-events", "final-result.json")
+        try:
+            with open(result_path, "rb") as handle:
+                scenario = json.loads(handle.read().decode("utf-8"))
+        except OSError:
+            scenario = {"status": "FAIL", "reason": "final-result.json 없음",
+                        "controller_rc": controller.returncode}
+        mark("scenario")
+
+        # --- 8. STOP ----------------------------------------------------------
+        stop_now = now_ns()
+        coordinator.run_barrier(
+            "stop",
+            {
+                m: {"stop_at_frame_ordinal": 0,
+                    "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
+                for m in ENDPOINT_IDS
+            },
+        )
+        mark("stop")
+
+        # --- 9. cleanup 확인 (launcher 자진 종료·worker 0·B210 3/3) ------------
+        clean_exit = True
+        if processes:
+            for _endpoint_id, process in processes.items():
+                deadline = time.monotonic() + 60.0
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.5)
+                if process.poll() is None:
+                    clean_exit = False
+        workers_after = _worker_process_count()
+        rediscovery = _rediscover_b210(sorted(serial_by_endpoint.values()))
+        speed_map = _live_b210_speed_map()
+        throttled = subprocess.run(
+            ["vcgencmd", "get_throttled"], capture_output=True, text=True
+        ).stdout.strip()
+        cleanup = {
+            "launcher_clean_exit": clean_exit,
+            "workers_after_stop": workers_after,
+            "rediscovery": rediscovery,
+            "live_speed_map": {k: v for k, v in speed_map.items()
+                               if k in serial_by_endpoint.values()},
+            "throttled": throttled,
+        }
+        mark("cleanup")
+
+        bad = [e for e in coordinator.command_log()
+               if e["status"] not in ("COMPLETED", "PREPARED")]
+        # service phase는 qualification 명령을 발행하지 않는다 — 기계 확인.
+        qualification_commands = [
+            e for e in coordinator.command_log()
+            if e["command_name"] in ("start_cfo", "calibrate_rf")
+        ]
+        status = "PASS" if (
+            scenario.get("status") == "PASS"
+            and controller.returncode == 0
+            and not bad
+            and not qualification_commands
+            and not coordinator.inhibited
+            and clean_exit
+            and workers_after == 0
+            and all(rediscovery.values())
+            and throttled == "throttled=0x0"
+        ) else "FAIL"
+        print(f"[coordinator] MASS-ROC-SERVICE {status}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if controller is not None and controller.poll() is None:
+            controller.terminate()
+        out_dir = os.path.join(run_root, "evidence", "operational_service")
+        os.makedirs(out_dir, exist_ok=True)
+        payload = {
+            "artifact_type": "STAGE7_OPERATIONAL_SERVICE_RESULT_V1",
+            "judgement_scope": "OPERATIONAL_SERVICE",
+            "not_a_qualification": (
+                "이 결과는 RF qualification이 아니다. CFO/adaptive gain/raw-PHY를 "
+                "실행하지 않았으며 RR·RESEARCH_READY 판정을 생성하지 않는다. "
+                "자격은 qualification reference(Phase F)가 담보한다."
+            ),
+            "run_id": run_id,
+            "scenario_id": scenario_id,
+            "certificate_case": certificate_case,
+            "status": status if error is None else "FAIL",
+            "started_utc": started,
+            "ended_utc": _utc_now(),
+            "duration_s": round(time.monotonic() - t0, 1),
+            "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()},
+            "scenario": scenario,
+            "cleanup": cleanup,
+            "command_log": list(coordinator.command_log()),
+            "qualification_commands_issued": [
+                e["command_name"] for e in coordinator.command_log()
+                if e["command_name"] in ("start_cfo", "calibrate_rf")
+            ],
+            "inhibited": coordinator.inhibited,
+            "error": error,
+            "git_commit": metadata.get("git_commit"),
+            "baseline_sha256": metadata.get("baseline_sha256"),
+            "gain_artifact": gain_artifact_path,
+        }
+        with open(os.path.join(out_dir, "service_result.json"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=1)
+    if status != "PASS":
+        raise RuntimeError("MASS-ROC service session FAIL — 새 run ID로만 재시도")
+    return {"mass_roc_service": status, "scenario_id": scenario_id,
+            "certificate_case": certificate_case,
+            "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()}}
 
 
 def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
@@ -1959,7 +2368,10 @@ def main(argv=None) -> int:
         "--phase", required=True,
         choices=("p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
                  "rr-p2-17", "rr-p2-19", "rr-p3-fault",
-                 "rr-p3-soak-17", "rr-p3-soak-19"),
+                 "rr-p3-soak-17", "rr-p3-soak-19",
+                 # Phase G additive: qualification 없이 서비스 구간만 수행한다.
+                 # 기존 phase의 command sequence는 이 추가로 바뀌지 않는다.
+                 "mass-roc-service"),
     )
     parser.add_argument("--edge", choices=("MASS-A", "MASS-B"), default=None,
                         help="p1 signed qualification edge")
@@ -1993,6 +2405,19 @@ def main(argv=None) -> int:
         raise SystemExit(
             "mass-roc workload는 rr-p2-17/rr-p2-19 phase에서만 실행할 수 있습니다"
         )
+    if arguments.phase == "mass-roc-service":
+        # service-only phase는 시나리오 하나를 독립 session으로 돈다.
+        # 공유 session(all)은 이 경로에서 허용하지 않는다 (Phase G 계약).
+        if arguments.scenario_id == "all":
+            raise SystemExit(
+                "mass-roc-service는 시나리오 하나만 실행합니다 "
+                "(--scenario-id all 금지 — 독립 child session을 쓰십시오)"
+            )
+        if arguments.gain_artifact is None:
+            raise SystemExit(
+                "mass-roc-service에는 --gain-artifact가 필요합니다 "
+                "(OPERATIONAL config의 RX gain 결속)"
+            )
 
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
     validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
@@ -2008,6 +2433,8 @@ def main(argv=None) -> int:
     # resolved config 집합에 결속(간이): resolved sha들의 canonical digest.
     is_rr_service = arguments.phase in (
         "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17", "rr-p3-soak-19",
+        # Phase G additive: service-only phase도 TEST adapter가 필요하다.
+        "mass-roc-service",
     )
     test_plan_sha = None
     if is_rr_service:
@@ -2094,6 +2521,19 @@ def main(argv=None) -> int:
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
                 test_plan_sha=test_plan_sha,
+            )
+        elif arguments.phase == "mass-roc-service":
+            # Phase G additive 분기 — 기존 RR phase 경로에는 영향이 없다.
+            phase_result = run_mass_roc_service(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
+                configs_dir=arguments.configs_dir,
+                gain_artifact_path=arguments.gain_artifact,
+                test_plan_sha=test_plan_sha,
+                scenario_id=arguments.scenario_id,
+                certificate_case=arguments.certificate_case,
+                processes=processes,
             )
         elif arguments.phase == "rr-p3-fault":
             phase_result = run_rr_p3_fault(

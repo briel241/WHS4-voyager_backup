@@ -51,6 +51,33 @@ class Stage7RequestError(ValueError):
     """stage7 실행 요청이 사전 검증에서 거부됐다 (endpoint 시작 전)."""
 
 
+# --------------------------------------------------------------------------
+# Phase G — formal service 실행 계층
+#
+# 정식 진입점은 `scenario_runner.py menu --transport stage7 --profile ...`이며
+# 그 아래에서 이 모듈이 독립 service session을 조율한다. 복잡한 내부 로직은
+# `apps/stage7_service_layer.py`에 두고(별도 CLI 아님) 여기서 재노출한다.
+# 아래 기존 `run_stage7()` 계약(= `run all --transport stage7`)은 불변이다.
+# --------------------------------------------------------------------------
+
+from apps.stage7_service_layer import (  # noqa: E402
+    DEFAULT_BATCH_PLAN,
+    ServiceSessionError,
+    build_coordinator_script,
+    prepare_service_config,
+    run_service_batch,
+    run_service_session,
+    verify_remote_environment,
+)
+
+__all__ = [
+    "Stage7RequestError", "ServiceSessionError", "run_stage7", "runs_root",
+    "validate_stage7_request", "run_service_session", "run_service_batch",
+    "verify_remote_environment", "prepare_service_config",
+    "build_coordinator_script", "DEFAULT_BATCH_PLAN",
+]
+
+
 def runs_root(results_dir: str | None = None) -> str:
     return os.path.join(results_dir or os.path.join(_ROOT, "results"), "runs")
 

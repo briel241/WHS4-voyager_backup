@@ -581,8 +581,107 @@ def command_run(args) -> int:
     return _run_stage7(args)
 
 
+def _stage7_menu(args) -> int:
+    """Stage 7 대화형 메뉴 — 시나리오마다 **독립 service session**을 돌린다.
+
+    `a) 전체 실행`은 공유 session이 아니라 독립 child session batch다
+    (`run all --transport stage7`의 공유 session 구현과 다른 경로).
+    """
+    from apps import stage7_profile
+    from apps.stage7_run import run_service_batch, run_service_session
+
+    try:
+        profile = stage7_profile.load_profile(args.profile)
+        checks = stage7_profile.validate_local_bindings(profile)
+    except stage7_profile.ProfileError as exc:
+        print(f"Stage 7 profile 거부: {exc}", file=sys.stderr)
+        return 2
+
+    print("=== MASS/ROC 시나리오 (Stage 7 실장비) ===")
+    print("Stage 7 환경 검증: profile·qualification reference 결속 통과 "
+          f"({len(checks)}개 항목)")
+    for line in stage7_profile.summary_lines(profile):
+        print("  " + line)
+    print("\n각 실행은 새 run-id·새 resolved config·독립 START/STOP으로 돕니다.")
+
+    ordered = sorted(SCENARIOS)
+
+    def report(result):
+        status = result.get("status")
+        print(f"\n  결과: {status}  run-id={result.get('run_id')}")
+        if result.get("error"):
+            print(f"  사유: {result['error']}")
+        marks = result.get("phase_elapsed_s") or {}
+        if marks:
+            print("  구간(초): " + ", ".join(
+                f"{k}={v}" for k, v in marks.items()))
+        print(f"  evidence: {result.get('evidence_dir')}")
+
+    while True:
+        print()
+        for index, scenario_id in enumerate(ordered, 1):
+            print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+        print("  a) 전체 실행 (독립 session 4회: 005 → 006 → 001 정상 → 001 위조)")
+        print("  q) 종료")
+        try:
+            choice = input("\n선택 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not choice:
+            continue
+        lowered = choice.lower()
+        if lowered in ("q", "quit", "exit", "종료"):
+            print("종료합니다.")
+            return 0
+
+        if lowered in ("a", "all", "전체"):
+            print("\n" + "=" * 60)
+            batch = run_service_batch(profile)
+            print(f"\n batch {batch['status']} — child run-id: "
+                  f"{batch['child_run_ids']}")
+            for child in batch["children"]:
+                report(child)
+            continue
+
+        if choice.isdigit() and 1 <= int(choice) <= len(ordered):
+            scenario_id = ordered[int(choice) - 1]
+        elif choice.upper() in SCENARIOS:
+            scenario_id = choice.upper()
+        else:
+            print(f"  알 수 없는 선택: {choice!r} (RF 실행하지 않음)")
+            continue
+
+        certificate_case = "normal"
+        if scenario_id == "SC-VDE-001":
+            try:
+                answer = input("  인증서 case [normal/forged] (기본 normal) > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            answer = answer.lower() or "normal"
+            if answer not in ("normal", "forged"):
+                print(f"  알 수 없는 인증서 case: {answer!r} (RF 실행하지 않음)")
+                continue
+            certificate_case = answer
+
+        print("\n" + "=" * 60)
+        result = run_service_session(profile, scenario_id=scenario_id,
+                                     certificate_case=certificate_case)
+        report(result)
+
+
 def command_interactive(args) -> int:
     """대화형 메뉴 — 번호나 ID를 고르면 바로 실행한다."""
+    if getattr(args, "transport", "direct") == "stage7":
+        if not getattr(args, "profile", None):
+            print("stage7 대화형 메뉴에는 --profile이 필요하다", file=sys.stderr)
+            return 2
+        return _stage7_menu(args)
+    if getattr(args, "profile", None):
+        print("--profile은 --transport stage7 전용이다", file=sys.stderr)
+        return 2
+
     ordered = sorted(SCENARIOS)
     print("=== MASS/ROC 시나리오 재현 (대화형) ===")
     print("번호나 시나리오 ID를 입력하면 바로 실행합니다.\n")
@@ -627,8 +726,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(handler=command_interactive)
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("menu", help="대화형 메뉴로 골라 실행(기본)").set_defaults(
-        handler=command_interactive)
+    menu_parser = subparsers.add_parser("menu", help="대화형 메뉴로 골라 실행(기본)")
+    menu_parser.add_argument(
+        "--transport", choices=("direct", "stage7"), default="direct",
+        help="direct(기본): 기존 논리 재현 메뉴. stage7: 실장비 메뉴 — 시나리오마다 "
+             "독립 service session(새 run-id·새 config·별도 START/STOP)")
+    menu_parser.add_argument(
+        "--profile", default=None,
+        help="stage7 필수: Stage 7 실행 profile JSON (qualification reference 결속)")
+    menu_parser.set_defaults(handler=command_interactive)
     subparsers.add_parser("list", help="시나리오 목록").set_defaults(
         handler=command_list)
 
