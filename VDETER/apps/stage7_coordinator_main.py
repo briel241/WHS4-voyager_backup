@@ -1550,6 +1550,13 @@ SESSION_RESULTS = "results"
 #: workload 요청 대기 상한 (사용자가 메뉴에서 고르는 동안 유지).
 SESSION_IDLE_TIMEOUT_S = 45 * 60
 
+#: 세션 절대 상한 = RF 장비가 연속 가동될 수 있는 최대 시간 (사용자 승인값).
+#: PhaseGuard deadline은 진행이 있어도 갱신되지 않는 절대 시각이므로, 이 값이
+#: bring-up + 전체 workload + STOP + cleanup을 모두 덮어야 한다. bring-up 실측이
+#: 1361~1715s(23~29분)이고 계속 늘고 있어, idle 상한(45분)을 그대로 쓰면
+#: workload에 16분밖에 남지 않는다 — 두 개념을 분리한다.
+SESSION_DEADLINE_S = 2 * 60 * 60
+
 
 def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                          metadata, configs_dir, gain_artifact_path,
@@ -1573,7 +1580,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     from vdeter.stage7.ipc import body_set_sha256
     from vdeter.stage7.rf_time import evaluate_pre_correction_set
 
-    guard = PhaseGuard("MASS-ROC-SESSION", deadline_s=SESSION_IDLE_TIMEOUT_S,
+    guard = PhaseGuard("MASS-ROC-SESSION", deadline_s=SESSION_DEADLINE_S,
                        stall_s=SESSION_IDLE_TIMEOUT_S)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)

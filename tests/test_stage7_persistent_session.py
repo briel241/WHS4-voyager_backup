@@ -606,6 +606,46 @@ def test_instrumentation_absent_from_frozen_layers():
     assert "emit(" not in ast.unparse(node)
 
 
+def test_session_deadline_covers_bringup_plus_workloads():
+    """세션 절대 시한이 bring-up을 덮고도 workload 예산을 남겨야 한다.
+
+    PhaseGuard deadline은 진행이 있어도 갱신되지 않는 절대 시각이다. idle
+    상한(45분)을 그대로 쓰면 bring-up 실측 1715s를 빼고 16분만 남는다.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_coord_for_test",
+        os.path.join(_REPO, "VDETER", "apps", "stage7_coordinator_main.py"))
+    source = io.open(spec.origin, encoding="utf-8").read()
+    tree = ast.parse(source)
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in ("SESSION_DEADLINE_S", "SESSION_IDLE_TIMEOUT_S"):
+                constants[name] = eval(ast.unparse(node.value))  # noqa: S307
+
+    assert constants["SESSION_DEADLINE_S"] == 2 * 60 * 60, "승인값 2시간"
+    # 두 개념이 분리돼야 한다 — 같으면 회귀.
+    assert constants["SESSION_DEADLINE_S"] != constants["SESSION_IDLE_TIMEOUT_S"]
+    # 실측 최장 bring-up(1715s) + workload 4개(각 900s 상한) + 종료 여유.
+    assert constants["SESSION_DEADLINE_S"] >= 1715 + 4 * 900 + 600
+
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "run_mass_roc_session")
+    body = ast.unparse(node)
+    assert "deadline_s=SESSION_DEADLINE_S" in body
+    assert "stall_s=SESSION_IDLE_TIMEOUT_S" in body
+
+
+def test_workload_timeout_unchanged():
+    """workload 하나당 시한은 승인대로 900초를 유지한다."""
+    from apps.stage7_session import WORKLOAD_TIMEOUT_S
+
+    assert WORKLOAD_TIMEOUT_S == 900.0
+
+
 def test_session_cleanup_measured_after_launcher_teardown():
     """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
