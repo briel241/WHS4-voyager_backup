@@ -228,7 +228,14 @@ class MassRocScenarioController:
             if state in ("COMPLETED", "FAILED", "CANCELLED"):
                 return state
             self._events.poll()
-            time.sleep(0.02)
+            # STATUS 1건마다 endpoint의 TEST adapter가 replay 항목을 영구
+            # 보관한다(command_id가 매번 새 uuid4라 재사용되지 않는다).
+            # 상주 세션에서는 adapter 인스턴스 하나가 workload 4개·2시간을
+            # 살므로 20ms 주기면 endpoint당 1만~1.5만 항목(수십 MB)이 쌓인다.
+            # ACK 대기 하한이 65초라 폴링 총량이 그대로 누적량이다.
+            # 0.5초로 낮추면 25배 줄고, terminal 감지는 최대 0.5초 늦어질 뿐
+            # 판정 창(240초)에는 영향이 없다.
+            time.sleep(0.5)
         return state
 
     def _wait_received(self, endpoint_id: str, payload_sha: str,

@@ -22,6 +22,7 @@ class _SequentialServer:
         self.accept_calls = []
         self.responses = []
         self.connections = []
+        self.recv_timeouts = []
         self.peer_active = False
         self._connection = None
         self._peer = None
@@ -40,6 +41,7 @@ class _SequentialServer:
         self._peer = (len(self.connections), expected_uid)
 
     def recv_message(self, timeout):
+        self.recv_timeouts.append(timeout)
         assert self.peer_active
         if self._current:
             return self._current.pop(0)
@@ -76,6 +78,10 @@ def test_test_adapter_accepts_session_start_workload_and_stop_sequentially():
 
     assert [call[1] for call in server.accept_calls] == [1234, 1234, 1234]
     assert all(call[0] is None for call in server.accept_calls)
+    # accept는 유계여야 stop_event를 실제로 관측한다 — teardown의 close()가
+    # blocking accept를 깨운다는 전제는 Linux에서 성립하지 않는다.
+    assert all(call[2] == 5.0 for call in server.accept_calls)
+    assert all(timeout == 5.0 for timeout in server.recv_timeouts)
     assert [call[0]["step"] for call in adapter.calls] == [
         "session-start", "workload-001", "session-stop"]
     assert all(call[1] == (1234,) for call in adapter.calls)
@@ -121,22 +127,43 @@ def test_test_adapter_stop_during_active_peer_closes_it_without_next_accept():
     assert server._connection is None and server._peer is None
 
 
-def test_adapter_internal_oserror_is_not_misclassified_as_peer_eof():
+def test_adapter_internal_error_isolates_the_peer_not_the_listener(capsys):
+    """어댑터 내부 오류는 그 피어만 끊고, 리스너는 다음 피어를 계속 받는다.
+
+    fail-close의 단위가 리스너가 되면 상주 세션에서는 재앙이다: 이 소켓에
+    START 대행·workload 4개·STOP 대행이 차례로 붙으므로, workload 2에서
+    스레드가 죽으면 이후 전부가 300초 타임아웃으로 무너지고 bring-up
+    25~30분까지 통째로 버려진다. 피어 단위로 격리하되, 오류가 정상 EOF로
+    묻히지 않도록 종류와 메시지를 반드시 남긴다.
+    """
     stop_event = threading.Event()
-    server = _SequentialServer([[{"step": "workload-001"}]], stop_event)
+    server = _SequentialServer(
+        [[{"step": "workload-001"}], [{"step": "session-stop"}]], stop_event)
 
-    class _FailingAdapter(_Adapter):
+    class _FailingOnceAdapter(_Adapter):
+        def __init__(self):
+            super().__init__()
+            self.seen = 0
+
         def handle_command(self, message, *, peer):
-            raise OSError("application evidence write failed")
+            self.seen += 1
+            if self.seen == 1:
+                raise OSError("application evidence write failed")
+            stop_event.set()
+            return {"reply": message["step"]}
 
-    try:
-        _serve_test_adapter_peers(
-            server, _FailingAdapter(), expected_uid=1234,
-            stop_event=stop_event)
-    except OSError as error:
-        assert "evidence write failed" in str(error)
-    else:
-        raise AssertionError("adapter 내부 OSError가 peer EOF로 숨겨졌다")
+    adapter = _FailingOnceAdapter()
+    # 예외가 밖으로 새지 않아야 한다 — 새면 스레드가 죽고 리스너가 방치된다.
+    _serve_test_adapter_peers(
+        server, adapter, expected_uid=1234, stop_event=stop_event)
 
-    assert len(server.accept_calls) == 1
+    # 실패한 피어의 연결만 닫히고, 다음 피어를 정상 accept했다.
+    assert len(server.accept_calls) == 2
     assert server.connections[0].closed
+    assert server.responses == [{"reply": "session-stop"}]
+    assert server._connection is None and server._peer is None
+
+    # 조용히 삼키지 않는다 — 종류와 메시지가 stderr에 남는다.
+    captured = capsys.readouterr().err
+    assert "OSError" in captured
+    assert "evidence write failed" in captured

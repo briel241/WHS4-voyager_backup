@@ -158,7 +158,16 @@ def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event)
             test_server.accept(
                 expected_pid=None,
                 expected_uid=expected_uid,
-                timeout=1.0,
+                # 유계 대기여야 stop_event를 실제로 관측한다. teardown의
+                # test_server.close()가 blocking accept를 깨운다는 전제는
+                # Linux에서 거짓이다 — CPython 타임아웃 소켓은 poll()에 들어간
+                # 뒤 다른 스레드의 close()로 깨어나지 않는다. 3600초로 두면
+                # join(2.0)이 매번 만료된다.
+                # RF-time 지터 우려는 근거가 없다: rr-p1은 is_rr_service가
+                # 아니라 test_plan_sha=None이므로 이 스레드가 아예 생성되지
+                # 않는다(자격 구간에서 실행 0). Phase G에서도 초당 1회 미만
+                # 깨어남은 20Hz 펌프 대비 측정 불가하다.
+                timeout=5.0,
             )
         except TimeoutError:
             continue
@@ -169,7 +178,8 @@ def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event)
 
         try:
             while not stop_event.is_set():
-                message = test_server.recv_message(timeout=1.0)
+                # Same per-peer timeout as the pre-reconnect implementation.
+                message = test_server.recv_message(timeout=5.0)
                 if message is None:
                     continue
                 response = adapter.handle_command(
@@ -180,6 +190,18 @@ def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event)
             # Normal peer teardown: close only this accepted connection, then
             # return to accept() without closing/unlinking the listener.
             pass
+        except Exception as error:  # noqa: BLE001
+            # 피어 하나의 실패로 리스너를 잃지 않는다. 상주 세션에서는 이
+            # 소켓에 START 대행·workload 4개·STOP 대행이 차례로 붙으므로,
+            # 스레드가 죽으면 이후 전부가 300초 타임아웃으로 무너지고
+            # bring-up 25~30분까지 통째로 버려진다. fail-close 단위는
+            # 리스너가 아니라 피어여야 한다.
+            # 특히 send_message는 recv_message가 걸어둔 5초 타임아웃 소켓에
+            # sendall하므로 socket.timeout(=OSError, ConnectionError 아님)이
+            # 날 수 있다.
+            print(f"[launcher] test adapter peer 오류(다음 피어 계속): "
+                  f"{type(error).__name__}: {error}",
+                  file=sys.stderr, flush=True)
         finally:
             connection = getattr(test_server, "_connection", None)
             if connection is not None:
@@ -2061,9 +2083,13 @@ def main(argv=None) -> int:
                     expected_uid=os.getuid(),  # type: ignore[attr-defined]
                     stop_event=_pump_stop,
                 )
-            except OSError as error:
+            except BaseException as error:  # noqa: BLE001
+                # 스레드가 조용히 죽으면 리스너만 남아 controller가 응답 없이
+                # 매달린다 — coordinator에는 아무 신호도 가지 않는다.
+                # 최소한 흔적은 반드시 남긴다.
                 if not _pump_stop.is_set():
-                    print(f"[launcher] test adapter 오류: {error}",
+                    print(f"[launcher] test adapter 스레드 종료: "
+                          f"{type(error).__name__}: {error}",
                           file=sys.stderr, flush=True)
 
         def _event_jsonl_loop():
@@ -2110,7 +2136,16 @@ def main(argv=None) -> int:
     tbb_emitted = False
     try:
         while True:
-            watching_tbb = client.state == "SERVICE_START_STAGED" and not tbb_emitted
+            # emit_tbb_active는 state를 먼저 TBB_ACTIVE로 바꾼 뒤 이벤트를
+            # 보낸다(runtime_client.py:165-166). 전송이 실패하면 tbb_emitted는
+            # False인데 state는 이미 바뀌어 있어, SERVICE_START_STAGED만 보면
+            # 재시도가 영영 일어나지 않는다 — 90초 TBB 창을 그대로 놓친다.
+            # TBB_ACTIVE도 감시 대상에 넣어 재시도 경로를 연다. publish로
+            # RUNNING이 되면 자동으로 꺼진다.
+            watching_tbb = (
+                client.state in ("SERVICE_START_STAGED", "TBB_ACTIVE")
+                and not tbb_emitted
+            )
             message = server.recv_message(timeout=0.5 if watching_tbb else 120.0)
             if message is None:
                 if watching_tbb:

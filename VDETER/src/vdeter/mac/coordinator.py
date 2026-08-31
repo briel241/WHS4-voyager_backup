@@ -197,6 +197,23 @@ STOP_DRAIN_NANOSECONDS = FRAME_NANOSECONDS * 2
 #: Data Session 한 frame이 담는 최대 fragment 수 (DC slot 14개).
 FRAGMENTS_PER_FRAME = 14
 
+#: Link가 재조립 session context를 폐기하는 오류 code
+#: (`link/data_session/reassembly.py`의 `_discard_error` 경로 + UNKNOWN_SESSION).
+#: 이 code가 오면 MAC도 자기 RX session을 버려야 다음 DataStart가 재OPEN한다.
+_REASSEMBLY_DISCARD_CODES = frozenset({
+    ErrorCode.LINK_DATA_ROUTE_MISMATCH,
+    ErrorCode.LINK_FRAGMENT_CONFLICT,
+    ErrorCode.LINK_FRAGMENT_NUMBER_INVALID,
+    ErrorCode.LINK_INVALID_MESSAGE_FIELD,
+    ErrorCode.LINK_REASSEMBLY_CAPACITY_EXHAUSTED,
+    ErrorCode.LINK_REASSEMBLY_INCOMPLETE,
+    ErrorCode.LINK_SEGMENT_LENGTH_INVALID,
+    ErrorCode.LINK_SEGMENT_SESSION_BOUNDARY,
+    ErrorCode.LINK_SESSION_CONFLICT,
+    ErrorCode.LINK_UNKNOWN_SESSION,
+    ErrorCode.LINK_UNSUPPORTED_SEGMENT_TYPE,
+})
+
 #: 어떤 유효 Type 13도 이 frame 수 동안 오지 않으면 Session을 실패 종료한다.
 ACK_ABSENCE_LIMIT = 3
 
@@ -5533,6 +5550,19 @@ class MacCoordinator:
             return self._terminate_transfer(
                 next_state, transfer_id, envelope.payload.error, envelope.event_id, commands
             )
+        # 재조립 실패는 Link가 session context를 이미 폐기한다
+        # (`link/data_session/reassembly.py` `_discard_error` → `_contexts.pop`).
+        # 그런데 이 경로에는 transfer_id가 없어 위 분기를 타지 않고, RX session은
+        # 논리채널로 조회되므로(`rx_session_for_channel`) MAC이 죽은 handle을
+        # 계속 재사용해 이후 모든 fragment가 LINK_UNKNOWN_SESSION이 된다.
+        # 단발 실행에서는 프로세스가 곧 죽어 보이지 않았지만, 상주 세션에서는
+        # workload 1의 오류 1건이 workload 2~4의 수신을 조용히 무효화한다.
+        # session을 여기서 버리면 다음 DataStart가 정상적으로 재OPEN한다.
+        session_handle = getattr(envelope.correlation, "session_handle", None)
+        error = getattr(envelope.payload, "error", None)
+        if session_handle is not None and error is not None:
+            if getattr(error, "code", None) in _REASSEMBLY_DISCARD_CODES:
+                next_state = next_state.without_rx_session(session_handle.value)
         return next_state
 
     def _on_presentation_delivery_result(self, state: MacState, envelope, commands: list):
