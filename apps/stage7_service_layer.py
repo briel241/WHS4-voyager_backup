@@ -296,7 +296,9 @@ def build_coordinator_script(profile: dict, run_id: str, scenario_id: str,
         + " --gain-artifact " + root + "/"
         + profile["gain"]["remote_artifact_input_relpath"]
         + " --baseline-sha256 " + profile["baseline_sha256"]
-        + " --workload mass-roc"
+        # --workload는 넘기지 않는다. mass-roc-service phase 자체가 MASS/ROC
+        # workload이며, 기존 --workload mass-roc 게이트는 rr-p2-17/19 전용이라
+        # 함께 주면 충돌한다 (기존 게이트는 그대로 둔다).
         + " --scenario-id " + scenario_id
         + " --certificate-case " + certificate_case + "\n"
     )

@@ -453,3 +453,18 @@ if __name__ == "__main__":
             value()
             print(f"  {name} OK")
     print("PASS: Phase G CLI/service dispatch 계약")
+
+
+def test_coordinator_script_does_not_conflict_with_workload_gate():
+    """service phase 명령은 rr-p2 전용 --workload 게이트와 충돌하지 않는다."""
+    profile = stage7_profile.load_profile(_profile_path())
+    script = service_layer.build_coordinator_script(
+        profile, "svc-test", "SC-VDE-005", "normal")
+    assert "--phase mass-roc-service" in script
+    assert "--workload" not in script
+    assert "--scenario-id SC-VDE-005" in script
+    assert "--certificate-case normal" in script
+    assert "--gain-artifact" in script
+    assert "--baseline-sha256" in script
+    # 공유 session(all)을 넘기지 않는다.
+    assert "--scenario-id all" not in script
