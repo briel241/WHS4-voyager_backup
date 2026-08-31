@@ -53,10 +53,15 @@ def _write_json(path: str, payload: dict) -> None:
 
 def _ssh(profile: dict, script: str, *, timeout: float = 300.0,
          check: bool = True, runner=subprocess.run):
-    """Pi에서 명령을 실행한다 (BatchMode). 비밀정보는 출력하지 않는다."""
+    """Pi에서 명령을 실행한다 (BatchMode). 비밀정보는 출력하지 않는다.
+
+    원격 파일에는 UTF-8 한글 주석이 있다. Windows 기본 로케일(cp949)로 디코드하면
+    깨지므로 인코딩을 명시한다.
+    """
     command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                profile["pi"]["host"], script]
-    done = runner(command, capture_output=True, text=True, timeout=timeout)
+    done = runner(command, capture_output=True, text=True, timeout=timeout,
+                  encoding="utf-8", errors="replace")
     if check and done.returncode != 0:
         raise ServiceSessionError(
             f"원격 명령 실패(rc={done.returncode}): "
@@ -253,7 +258,8 @@ def prepare_service_config(profile: dict, run_id: str, logs: list, *,
         "--rr-phase", preparation["rr_phase"],
         "--gain-artifact", profile["gain"]["artifact_input_path"],
     ]
-    done = runner(command, capture_output=True, text=True, cwd=_ROOT, timeout=900)
+    done = runner(command, capture_output=True, text=True, cwd=_ROOT, timeout=900,
+                  encoding="utf-8", errors="replace")
     logs.append(("prepare-config", (done.stdout or "") + (done.stderr or "")))
     if done.returncode != 0:
         raise ServiceSessionError(
@@ -367,7 +373,8 @@ def run_service_session(profile: dict, *, scenario_id: str,
                 profile["pi"]["host"] + ":" + profile["pi"]["deploy_relpath"]
                 + "/runs/" + run_id,
                 os.path.join(session_dir, "remote-run")],
-               capture_output=True, text=True, timeout=900)
+               capture_output=True, text=True, timeout=900,
+               encoding="utf-8", errors="replace")
         service_path = os.path.join(
             session_dir, "remote-run", "evidence", "operational_service",
             "service_result.json")
