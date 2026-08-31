@@ -900,6 +900,35 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
 
 
+def _spawn_session_lifecycle(lifecycle, run_id, run_root, configs_dir,
+                             test_plan_sha):
+    """persistent session의 endpoint START/STOP 대행 controller를 spawn한다.
+
+    session 모델에서 endpoint lifecycle의 주인은 session이지만, TEST adapter
+    socket 연결은 controller 프로세스에만 있다. 이 대행은 시나리오를 실행하지
+    않고 (`--scenario-id none`) START 또는 STOP 한 단계만 수행한 뒤 종료한다.
+    """
+    logs_dir = os.path.join(run_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_handle = open(  # noqa: SIM115
+        os.path.join(logs_dir, f"{lifecycle}.log"), "ab"
+    )
+    command = [
+        sys.executable,
+        os.path.join(os.path.dirname(APP_ROOT), "apps",
+                     "stage7_mass_roc_controller.py"),
+        "--run-id", run_id,
+        "--run-root", os.path.join(run_root, "lifecycle", lifecycle),
+        "--test-plan-sha", test_plan_sha,
+        "--fixtures-dir", os.path.join(configs_dir, "fixtures"),
+        "--scenario-id", "none",
+        "--lifecycle", lifecycle,
+        "--workload-id", lifecycle,
+    ]
+    os.makedirs(os.path.join(run_root, "lifecycle", lifecycle), exist_ok=True)
+    return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
+
+
 def _run_rr_service_phase(
     coordinator, resolved, plan, run_root, *, run_id, metadata, tc_id, guard,
     gain_artifact_path, configs_dir, test_plan_sha, mode, soak_seconds=600,
@@ -1527,6 +1556,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     status = "FAIL"
     error = None
     cleanup = {}
+    service_stop_rc = None
+    start_proxy = None
 
     def mark(name):
         guard.check()
@@ -1655,6 +1686,12 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
 
         gate_dir = os.path.join(run_root, "controller_gate")
         os.makedirs(gate_dir, exist_ok=True)
+        # endpoint START는 TEST adapter socket을 통해서만 가능하고 그 연결은
+        # controller 프로세스가 소유한다. session이 lifecycle의 주인이므로
+        # 시나리오 없는 `session-start` 대행을 띄워 START만 시킨다. START는
+        # publish까지 블록하므로 admission 직전에 spawn하고 publish 뒤에 회수한다.
+        start_proxy = _spawn_session_lifecycle(
+            "session-start", run_id, run_root, configs_dir, test_plan_sha)
         admission = coordinator.open_service_admission()
         admission_value = admission.value
         print("[coordinator] service admission OPEN", flush=True)
@@ -1664,6 +1701,10 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             pump_events()
             if coordinator.required_intents_complete():
                 break
+            if start_proxy.poll() is not None:
+                raise RuntimeError(
+                    "service-start 대행 controller가 intent 전에 종료했다 "
+                    f"(rc={start_proxy.returncode}) — logs/session-start.log 확인")
             if now_ns() >= intent_deadline:
                 raise RuntimeError("service-start intent cutoff 초과")
             time.sleep(0.2)
@@ -1682,6 +1723,19 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         coordinator.publish_service_start(staged_set, bridge_generation=0)
         print("[coordinator] publish_service_start COMPLETED — RUNNING", flush=True)
         open(os.path.join(gate_dir, "started_ok"), "w").close()
+        # START 대행 회수: publish 이후 세 START 호출이 OK로 반환해야 한다.
+        start_deadline = time.monotonic() + 300.0
+        while start_proxy.poll() is None:
+            guard.check()
+            pump_events()
+            if time.monotonic() > start_deadline:
+                start_proxy.terminate()
+                raise RuntimeError("service-start 대행 controller 회수 300s 초과")
+            time.sleep(0.5)
+        if start_proxy.returncode != 0:
+            raise RuntimeError(
+                f"endpoint START 실패 (대행 rc={start_proxy.returncode})")
+        print("[coordinator] endpoint START 3/3 확인", flush=True)
         mark("service_running")
 
         baseline_health = {
@@ -1869,6 +1923,21 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
 
         # ================= 4. STOP (세션당 1회) =============================
+        # service STOP(application) → lifecycle stop barrier 순서는 RR 경로와
+        # 같다. STOP 대행 실패는 기록하되 barrier는 반드시 수행한다.
+        stop_proxy = _spawn_session_lifecycle(
+            "session-stop", run_id, run_root, configs_dir, test_plan_sha)
+        stop_proxy_deadline = time.monotonic() + 300.0
+        while stop_proxy.poll() is None:
+            pump_events()
+            if time.monotonic() > stop_proxy_deadline:
+                stop_proxy.terminate()
+                break
+            time.sleep(0.5)
+        service_stop_rc = stop_proxy.returncode
+        if service_stop_rc != 0:
+            print(f"[coordinator] service STOP 대행 rc={service_stop_rc}",
+                  flush=True)
         stop_now = now_ns()
         coordinator.run_barrier(
             "stop",
@@ -1886,14 +1955,33 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         except Exception:  # noqa: BLE001 - 정리 최선 노력
             pass
     finally:
+        # START 대행이 남아 있으면 먼저 회수한다 (실패 경로에서 블록 중일 수 있다).
+        if start_proxy is not None and start_proxy.poll() is None:
+            start_proxy.terminate()
+            try:
+                start_proxy.wait(timeout=30.0)
+            except subprocess.TimeoutExpired:
+                start_proxy.kill()
+        # launcher를 실제로 내린 **뒤에** cleanup을 계측한다. 이전 판(0.9.x)은
+        # main()의 teardown보다 먼저 재보아 정상 종료 중에도 worker 3·재발견
+        # 실패로 기록됐다 — 장치 상태가 아니라 계측 순서 결함이었다.
         clean_exit = True
         if processes:
-            for _endpoint_id, process in processes.items():
+            for endpoint_id, process in processes.items():
                 deadline = time.monotonic() + 60.0
                 while process.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.5)
                 if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=30.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10.0)
+                    # 자발 종료하지 않았다는 사실 자체는 그대로 남긴다.
                     clean_exit = False
+                    print(f"[coordinator] {endpoint_id} launcher 강제 종료",
+                          flush=True)
         cleanup = {
             "launcher_clean_exit": clean_exit,
             "workers_after_stop": _worker_process_count(),
@@ -1930,6 +2018,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             },
             "workloads": workloads,
             "cleanup": cleanup,
+            "service_stop_rc": service_stop_rc,
             "qualification_commands_issued": qualification_commands,
             "inhibited": coordinator.inhibited,
             "error": error,

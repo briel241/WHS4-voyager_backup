@@ -90,10 +90,12 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
         self.assertEqual(changed, ["main", "validate_rr_binding"], str(changed))
-        # Phase G orchestration은 함수 추가로만 이뤄진다:
-        # 단발 service phase와 bounded persistent session phase.
+        # Phase G orchestration은 함수 추가로만 이뤄진다: 단발 service phase,
+        # bounded persistent session phase, 그리고 session이 소유한 endpoint
+        # lifecycle(START/STOP)을 대행 spawn하는 헬퍼.
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["run_mass_roc_service", "run_mass_roc_session"],
+        self.assertEqual(added, ["_spawn_session_lifecycle",
+                                 "run_mass_roc_service", "run_mass_roc_session"],
                          str(added))
 
 

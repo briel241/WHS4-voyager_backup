@@ -426,6 +426,98 @@ def test_menu_parser_has_verbose_and_diagnostics():
     assert args.verbose is True and args.diagnostics is True
 
 
+def _lifecycle_step(lifecycle, outcomes, gate=True):
+    """`_run_session_lifecycle_step`을 실제 어댑터 없이 구동한다."""
+    import apps.stage7_mass_roc_controller as controller_module
+    from apps.stage7_trace import NullTrace
+
+    calls = []
+
+    def invoke_fixture(endpoint_id, operation, relpath, step_id):
+        calls.append((endpoint_id, operation, relpath))
+        return outcomes.get(endpoint_id, True), {"call_outcome": "OK"}
+
+    with tempfile.TemporaryDirectory() as gate_dir:
+        if gate:
+            open(os.path.join(gate_dir, "admission_open"), "w").close()
+        rc = controller_module._run_session_lifecycle_step(
+            lifecycle, invoke_fixture, gate_dir, NullTrace())
+    return rc, calls
+
+
+def test_session_start_proxy_calls_start_on_all_endpoints():
+    """session 소유 모델에서도 endpoint START는 반드시 호출된다.
+
+    이 호출이 빠지면 endpoint가 service-start intent를 남기지 않아
+    coordinator가 30s intent cutoff에서 죽는다 (phase-g-session 실측).
+    """
+    rc, calls = _lifecycle_step("session-start", {})
+    assert rc == 0
+    assert sorted(c[0] for c in calls) == ["MASS-A", "MASS-B", "ROC"]
+    assert {c[1] for c in calls} == {"START"}
+    # endpoint별 고유 START fixture를 쓴다 (공유 fixture 금지).
+    assert len({c[2] for c in calls}) == 3
+
+
+def test_session_stop_proxy_calls_stop_on_all_endpoints():
+    rc, calls = _lifecycle_step("session-stop", {})
+    assert rc == 0
+    assert {c[1] for c in calls} == {"STOP"}
+    assert sorted(c[0] for c in calls) == ["MASS-A", "MASS-B", "ROC"]
+
+
+def test_session_start_proxy_fails_closed_on_partial_start():
+    rc, _ = _lifecycle_step("session-start", {"MASS-B": False})
+    assert rc == 1, "일부 endpoint START 실패가 성공으로 보고됐다"
+
+
+def test_session_lifecycle_proxy_runs_no_scenario():
+    """대행은 시나리오를 실행하지 않는다 — application state를 만들지 않는다."""
+    source = io.open(os.path.join(_REPO, "apps",
+                                  "stage7_mass_roc_controller.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "_run_session_lifecycle_step")
+    called = {c.func.id for c in ast.walk(node)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+    assert "run_scenarios" not in called
+
+
+def test_session_phase_spawns_start_proxy_before_admission():
+    """coordinator session phase가 START 대행을 admission 전에 띄우는지."""
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_coordinator_main.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "run_mass_roc_session")
+    body = ast.unparse(node)
+    spawn_at = body.index("_spawn_session_lifecycle('session-start'")
+    admission_at = body.index("open_service_admission()")
+    intent_at = body.index("service-start intent cutoff")
+    assert spawn_at < admission_at < intent_at, (
+        "START 대행이 admission·intent 대기보다 먼저 spawn되지 않는다")
+    # publish 이후 회수하고, rc가 0이 아니면 session을 실패시킨다.
+    assert "endpoint START 실패" in body
+    assert "_spawn_session_lifecycle('session-stop'" in body
+
+
+def test_session_cleanup_measured_after_launcher_teardown():
+    """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_coordinator_main.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "run_mass_roc_session")
+    body = ast.unparse(node)
+    terminate_at = body.index("process.terminate()")
+    workers_at = body.index("'workers_after_stop'")
+    assert terminate_at < workers_at, (
+        "launcher teardown 전에 worker 수를 재고 있다")
+
+
 def test_legacy_paths_unchanged():
     """기존 direct 대화형·비대화형 run all 계약은 그대로다."""
     parser = runner.build_parser()

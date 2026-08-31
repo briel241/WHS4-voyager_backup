@@ -953,16 +953,21 @@ def main(argv=None) -> int:
     parser.add_argument("--fixtures-dir", required=True,
                         help="START/STOP fixture 디렉터리 (RR controller와 공유)")
     parser.add_argument("--scenario-id", required=True,
-                        choices=("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all"))
+                        choices=("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all",
+                                 "none"))
     parser.add_argument("--certificate-case", default="normal",
                         choices=("normal", "forged", "both"))
     parser.add_argument(
         "--workload-id", default=None,
         help="persistent session의 workload child ID (step/scenario namespace 결속)")
     parser.add_argument(
-        "--lifecycle", choices=("owned", "session"), default="owned",
+        "--lifecycle",
+        choices=("owned", "session", "session-start", "session-stop"),
+        default="owned",
         help="owned(기본): 이 프로세스가 endpoint START/STOP을 소유한다. "
-             "session: hardware session이 소유하므로 START/STOP을 하지 않는다")
+             "session: hardware session이 소유하므로 START/STOP을 하지 않는다. "
+             "session-start/session-stop: session 소유자를 대신해 endpoint "
+             "lifecycle 한 단계만 수행하고 즉시 종료한다 (시나리오 미실행)")
     parser.add_argument(
         "--events-dir", default=None,
         help="session run-root의 service_events 디렉터리 (session lifecycle 전용)")
@@ -1023,6 +1028,15 @@ def main(argv=None) -> int:
         body = response.get("body") or {}
         return body.get("call_outcome") == "OK", body
 
+    if arguments.lifecycle in ("session-start", "session-stop"):
+        # session 소유자(coordinator) 대행: endpoint lifecycle 한 단계만
+        # 수행한다. adapter socket은 이 프로세스에만 있으므로 START/STOP은
+        # 반드시 이 경로를 지난다 — coordinator는 barrier만 소유한다.
+        rc = _run_session_lifecycle_step(
+            arguments.lifecycle, invoke_fixture, gate_dir, trace)
+        trace.close()
+        return rc
+
     if session_owned:
         # hardware session이 endpoint lifecycle을 소유한다. 이 child는
         # application workload만 실행하고 START/STOP·admission을 만지지 않는다.
@@ -1081,6 +1095,64 @@ def main(argv=None) -> int:
     del controller
     print(f"[mass-roc-controller] 종결 {final['status']}", flush=True)
     return 0 if overall else 1
+
+
+def _run_session_lifecycle_step(lifecycle, invoke_fixture, gate_dir, trace):
+    """persistent session의 endpoint START/STOP 한 단계만 수행한다.
+
+    session 모델에서 endpoint lifecycle은 session이 소유하지만, TEST adapter
+    socket 연결은 이 controller 프로세스에만 존재한다. coordinator는 barrier를
+    소유하고, 실제 service START/STOP 호출은 이 대행 프로세스가 수행한다.
+    """
+    import threading
+
+    operation = "START" if lifecycle == "session-start" else "STOP"
+    trace.emit("session_lifecycle_step_begin", operation=operation)
+
+    if operation == "START":
+        # admission이 열리기 전 START는 거절된다 — gate를 먼저 기다린다.
+        gate = os.path.join(gate_dir, "admission_open")
+        deadline = time.monotonic() + 600.0
+        while not os.path.exists(gate):
+            if time.monotonic() > deadline:
+                print("[mass-roc-controller] admission_open gate 600s 초과",
+                      flush=True)
+                trace.emit("session_lifecycle_step_end", operation=operation,
+                           ok=False, reason="admission_gate_timeout")
+                return 1
+            time.sleep(0.2)
+
+    outcomes: dict = {}
+
+    def _call(endpoint_id):
+        relpath = (f"start-{endpoint_id.lower()}.json" if operation == "START"
+                   else "stop.json")
+        try:
+            ok, body = invoke_fixture(
+                endpoint_id, operation, relpath,
+                f"{operation.lower()}-{endpoint_id}")
+        except Exception as exc:  # noqa: BLE001 - 세 endpoint를 독립 판정
+            outcomes[endpoint_id] = (False, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        outcomes[endpoint_id] = (ok, body)
+
+    threads = [threading.Thread(target=_call, args=(endpoint,))
+               for endpoint in ENDPOINT_IDS]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=300.0)
+
+    ok = all(outcomes.get(endpoint, (False, None))[0] for endpoint in ENDPOINT_IDS)
+    trace.emit("session_lifecycle_step_end", operation=operation, ok=ok,
+               outcomes={endpoint: bool(value[0])
+                         for endpoint, value in outcomes.items()})
+    if not ok:
+        print(f"[mass-roc-controller] session {operation} 실패: {outcomes}",
+              flush=True)
+        return 1
+    print(f"[mass-roc-controller] session {operation} 3/3 OK", flush=True)
+    return 0
 
 
 def _own_endpoint_lifecycle_start(inline_controller, invoke_fixture, gate_dir):
