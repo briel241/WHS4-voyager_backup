@@ -646,6 +646,31 @@ def test_workload_timeout_unchanged():
     assert WORKLOAD_TIMEOUT_S == 900.0
 
 
+def test_pump_gate_covers_every_service_state():
+    """펌프 게이트가 서비스 구간 상태를 하나도 빠뜨리지 않아야 한다.
+
+    TBB_ACTIVE 누락이 자기 교착을 만들었다: ROC가 self-activation으로 그
+    상태에 들어가는 순간 자기 펌프가 멈춰 TBB 방송이 끊기고, MASS는 획득할
+    대상을 잃는다 (phase-g-service-20260831-050301, ROC rx-gate 0줄).
+    RF qualification 구간(CONFIGURED·CFO_*·RF_GAIN_* 등)은 계속 제외돼야
+    한다 — 그게 c063d0d가 막은 rr-p1 회귀다.
+    """
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_endpoint_launcher.py"),
+                     encoding="utf-8").read()
+    marker = "_PUMP_ACTIVE_STATES = ("
+    body = source[source.index(marker):]
+    gate = set(eval(body[body.index("("):body.index(")") + 1]))  # noqa: S307
+
+    for state in ("SERVICE_ADMISSION_READY", "SERVICE_START_STAGED",
+                  "TBB_ACTIVE", "RUNNING"):
+        assert state in gate, f"서비스 상태 {state}가 펌프 게이트에서 빠졌다"
+    # qualification 사다리 상태는 여전히 제외 — 넣으면 B210 경합이 되살아난다.
+    for state in ("CONFIGURED", "RX_READY", "ARMED"):
+        assert state not in gate, f"qualification 상태 {state}가 게이트에 들어왔다"
+    assert not any(s.startswith(("CFO_", "RF_GAIN_", "HOST_TIME_")) for s in gate)
+
+
 def test_session_cleanup_measured_after_launcher_teardown():
     """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",

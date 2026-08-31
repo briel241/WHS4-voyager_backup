@@ -345,9 +345,24 @@ def main(argv=None) -> int:
     #: 실시간 펌프를 돌리는 endpoint 상태 (§16.1 서비스 구간).
     #: 그 앞의 RF qualification 구간(CONFIGURED·RX_READY·CFO_*·HOST_TIME_*·
     #: RF_GAIN_*)에서는 Stage7PiOperations가 radio를 독점해야 한다.
+    #:
+    #: TBB_ACTIVE/TBB_ACQUIRING 누락은 자기 교착이었다 (2026-08-31 실측):
+    #: ROC는 방송자라 수신 없이 self-activation으로 TBB_ACTIVE가 되는데, 그
+    #: 순간 자기 펌프가 멈춰 TBB 방송 fragment 순환(1주기 1개, 완료 관측이
+    #: radio.poll_once 의존)이 첫 조각에서 끊긴다. MASS-A/B는 조립할 TBB가
+    #: 공중에 없어 SERVICE_START_STAGED에 영구 정체하고, publish는 MASS 획득을
+    #: 기다리므로 펌프도 영영 재개되지 않는다.
+    #: 증거 — phase-g-service-20260831-050301: ROC rx-gate 0줄(펌프 정지),
+    #: MASS-A 9줄/MASS-B 26줄, 최종 ROC=TBB_ACTIVE·MASS=SERVICE_START_STAGED.
+    #: 대조 rr-p2-17-20260830j/k(게이트 도입 전): ROC 82/64줄로 세 노드 균등,
+    #: admission→publish 9.9~11.8s.
+    #: 서비스 구간 안의 상태만 더한다 — RF qualification 사다리 제외는 그대로라
+    #: c063d0d가 막은 rr-p1 skipped_past_due 회귀는 계속 보호된다.
     _PUMP_ACTIVE_STATES = (
         "SERVICE_ADMISSION_READY",
         "SERVICE_START_STAGED",
+        "TBB_ACQUIRING",
+        "TBB_ACTIVE",
         "RUNNING",
     )
 
