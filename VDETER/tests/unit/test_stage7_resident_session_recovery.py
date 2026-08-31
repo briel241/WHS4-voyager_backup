@@ -111,6 +111,61 @@ def test_rx_sessions_are_keyed_by_channel_so_a_dead_handle_persists():
     assert "transfers" not in block and "tx_sessions" not in block
 
 
+# ------------------------------------------------------------------ 큐 정체
+
+def _drain_source():
+    source = _read(LAUNCHER)
+    start = source.index("def _drain_dispatch_queue():")
+    return source[start:source.index("main._drain_dispatch_queue", start)]
+
+
+def test_stale_samples_are_dropped_not_decoded():
+    """창 수명을 넘긴 표본은 버려야 한다.
+
+    처리해도 창이 이미 닫혀 결과가 버려지는데, 그 ~140ms가 뒤 항목을 또
+    늦게 만들어 백로그가 영영 안 빠진다 (phase-g-service-20260831-130917:
+    qlen 465 상시 · done=12/deferred=244 반복 · 데이터 전달 0).
+    """
+    body = _drain_source()
+    assert "_SAMPLE_MAX_AGE_S" in body, "나이 상한 검사가 없다"
+    assert 'item[0] == "s"' in body, "표본만 골라 버려야 한다"
+    # 완료·오류는 절대 버리지 않는다 — 싸고 pending 장부를 비운다.
+    assert 'item[0] in ("c", "e")' in body
+
+
+def test_sample_age_threshold_is_derived_from_frame_length():
+    """임계를 하드코딩하면 안 된다 — TDMA frame 길이에서 유도해야 한다."""
+    source = _read(LAUNCHER)
+    block = source[source.index("_SAMPLE_MAX_AGE_S ="):]
+    block = block[:block.index(chr(10))]
+    assert "FRAME_NANOSECONDS" in block or "_DISPATCH_FRAME_NS" in block, block
+
+
+def test_completions_are_processed_before_samples():
+    """완료를 표본 뒤에 줄세우면 pending RX 장부가 굶는다.
+
+    실측: 장부 126~128 포화 · window-shed 6,600건 · MAC_TRANSFER_FAILED 504건.
+    """
+    body = _drain_source()
+    cheap = body.index('ordered = [item for item in batch if item[0] in ("c", "e")]')
+    heavy = body.index('ordered += [item for item in batch if item[0] == "s"]')
+    assert cheap < heavy, "완료가 표본보다 먼저 배치되지 않았다"
+
+
+def test_sample_dispatch_does_not_leak_the_timestamp():
+    """적재 시각은 배수 전용이다 — 런타임 콜백 인자로 새면 안 된다."""
+    body = _drain_source()
+    assert "_samples_locked(*item[1:6])" in body,         "표본 호출이 적재 시각까지 넘기고 있다"
+
+
+def test_stall_budget_is_preserved():
+    """300ms 예산과 MAC 미니사이클은 그대로 유지돼야 한다 (기존 보호)."""
+    body = _drain_source()
+    assert "> 0.3" in body
+    assert "mac_cycle()" in body
+    assert "appendleft(leftover)" in body
+
+
 if __name__ == "__main__":
     for name, value in sorted(globals().items()):
         if name.startswith("test_") and callable(value):

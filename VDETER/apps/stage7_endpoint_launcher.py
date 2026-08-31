@@ -1896,9 +1896,21 @@ def main(argv=None) -> int:
 
         _dispatch_queue = _deque()
 
+        # 표본 항목의 적재 시각(monotonic). 창 수명을 넘긴 표본은 디코드해도
+        # 결과가 버려지므로, 그 ~140ms는 다음 항목을 또 늦게 만드는 순수 낭비다.
+        # 적재 시점을 항목에 실어 배수에서 나이로 거른다.
+        from vdeter.mac.tdma import FRAME_NANOSECONDS as _DISPATCH_FRAME_NS
+
+        #: 표본을 버리는 나이 상한. RX 창은 TDMA frame 안의 slot이라 frame이
+        #: 지나면 그 표본은 쓸모가 없다. 2 frame(4.8s)까지 관대하게 둔다 —
+        #: 유효한 작업을 버리지 않으면서도, 실측된 13~17초 큐 지연은 확실히
+        #: 끊는 값이다. 하드코딩하지 않고 frame 길이에서 유도한다.
+        _SAMPLE_MAX_AGE_S = 2.0 * (_DISPATCH_FRAME_NS / 1_000_000_000.0)
+
         def _q_samples(self_d, lane_generation, lane_index, child_key, received):
             _dispatch_queue.append(
-                ("s", self_d, lane_generation, lane_index, child_key, received)
+                ("s", self_d, lane_generation, lane_index, child_key, received,
+                 _time.monotonic())
             )
 
         def _q_completed(self_d, lane_generation, lane_index, child_key, completion):
@@ -1935,24 +1947,43 @@ def main(argv=None) -> int:
                     break
             if not batch:
                 return
-            sample_keys = {
-                tuple(item[1:4]) for item in batch if item[0] == "s"
-            }
-            ordered = [
-                item for item in batch
-                if item[0] == "c" and tuple(item[1:4]) not in sample_keys
-            ]
+            # (1) 창 수명을 넘긴 표본은 버린다. 처리해도 창이 이미 닫혀
+            #     결과가 버려지는데, 그 ~140ms가 뒤 항목을 또 늦게 만들어
+            #     백로그가 영영 안 빠지는 악순환의 원료가 된다.
+            #     phase-g-service-20260831-130917 실측: qlen 465 상시,
+            #     done=12/deferred=244 반복, 큐 지연 ~13s → 청취 창이 만료 후
+            #     처리되어 RADIO_RX_WINDOW_INCOMPLETE 118건·데이터 전달 0.
+            #     완료("c")·오류("e")는 절대 버리지 않는다 — 싸고, 장부를 비운다.
+            now_drain = _time.monotonic()
+            aged = 0
+            kept = []
+            for item in batch:
+                if item[0] == "s" and len(item) > 6:
+                    if now_drain - item[6] > _SAMPLE_MAX_AGE_S:
+                        aged += 1
+                        continue
+                kept.append(item)
+            batch = kept
+            if aged and os.environ.get("STAGE7_DIAG", "0") == "1":
+                print(f"[diag] drain-aged dropped={aged} qlen={len(_dispatch_queue)}",
+                      file=sys.stderr, flush=True)
+            if not batch:
+                return
+
+            # (2) 완료·오류를 항상 먼저 처리한다. 표본 디코드 뒤에 줄세우면
+            #     pending RX 장부가 비지 않아 shed가 청취 창을 굶긴다
+            #     (실측 장부 126~128 포화 · window-shed 6,600건).
+            #     같은 창의 표본은 어차피 같은 배치 안에서 뒤따라 처리된다.
+            ordered = [item for item in batch if item[0] in ("c", "e")]
             promoted = len(ordered)
-            ordered += [
-                item for item in batch
-                if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
-            ]
+            ordered += [item for item in batch if item[0] == "s"]
             drain_started = _time.monotonic()
             for index, item in enumerate(ordered):
                 kind = item[0]
                 try:
                     if kind == "s":
-                        _samples_locked(*item[1:])
+                        # 적재 시각(item[6])은 배수 전용이라 넘기지 않는다.
+                        _samples_locked(*item[1:6])
                     elif kind == "c":
                         _completed_locked(*item[1:])
                     else:
