@@ -1911,6 +1911,94 @@ def main(argv=None) -> int:
                 ("e", self_d, lane_generation, lane_index, child_key, code, details)
             )
 
+        # ── 병목 해부 계측 (조사 전용, STAGE7_DIAG=1에서만 활성)
+        # phase-g-service-20260831-202830 실측: drain 총 296s 중 PHY 디코드는
+        # 55.9s(19%)뿐 — 나머지 81%의 귀속처가 미상이다. drain을 항목 종류로,
+        # 그 안을 구간별로 쪼개 누적한다. 계측은 전부 fail-open이며 원본
+        # 호출 순서·인자·반환을 바꾸지 않는다. PHY/MAC/TDMA/RF는 불변.
+        _COST = {}
+        _COST_LAST = [_time.monotonic()]
+
+        def _cost_add(label, elapsed):
+            slot = _COST.get(label)
+            if slot is None:
+                _COST[label] = [1, elapsed]
+            else:
+                slot[0] += 1
+                slot[1] += elapsed
+
+        def _cost_wrap(owner, name, label):
+            """owner.name을 시간 계측으로 감싼다 (fail-open)."""
+
+            try:
+                original = getattr(owner, name)
+            except Exception:  # noqa: BLE001
+                return
+
+            def _wrapped(*args, **kwargs):
+                _started = _time.monotonic()
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    try:
+                        _cost_add(label, _time.monotonic() - _started)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            try:
+                setattr(owner, name, _wrapped)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if os.environ.get("STAGE7_DIAG", "0") == "1":
+            try:
+                from vdeter.phy.multilink import MultiRatePhy as _MRP_c
+                from vdeter.runtime.phy_bridge import (
+                    RuntimePhyRadioBridge as _BRG_c,
+                )
+                from vdeter.stage7.phy_facade import (
+                    Stage7LaneRxIngress as _ING_c,
+                )
+
+                _cost_wrap(_ING_c, "observe_block", "ingress.observe_block")
+                _cost_wrap(_ING_c, "promote_window", "ingress.promote")
+                _cost_wrap(_ING_c, "finalize_window", "ingress.finalize")
+                _cost_wrap(_BRG_c, "observe_samples", "bridge.observe_samples")
+                _cost_wrap(_BRG_c, "complete_window", "bridge.complete_window")
+                _cost_wrap(_MRP_c, "decode_samples", "phy.decode")
+                _cost_wrap(_D7, "_energy_gate", "gate")
+                _cost_wrap(_D7, "_lane_terminal", "lane_terminal")
+                # register_window는 아래에서 _reg_locked로 재대입되므로
+                # 여기서 감싸면 덮인다 — 재대입 뒤에 감싼다.
+            except Exception as _cost_error:  # noqa: BLE001
+                print(
+                    f"[launcher] cost-instrument 미적용: {_cost_error}",
+                    file=sys.stderr, flush=True,
+                )
+
+        def _cost_report():
+            """10초마다 누적 비용을 한 줄로 낸다 (fail-open)."""
+
+            try:
+                if os.environ.get("STAGE7_DIAG", "0") != "1" or not _COST:
+                    return
+                now = _time.monotonic()
+                if now - _COST_LAST[0] < 10.0:
+                    return
+                _COST_LAST[0] = now
+                parts = [
+                    f"{label}={slot[0]}/{slot[1] * 1e3:.0f}ms"
+                    for label, slot in sorted(
+                        _COST.items(), key=lambda kv: -kv[1][1]
+                    )
+                ]
+                print(
+                    "[diag] cost " + " ".join(parts),
+                    file=sys.stderr, flush=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         def _drain_dispatch_queue():
             # 항목당 처리(수신 디코드)가 ~140ms라 일괄 drain이 MAC 박동을
             # 초 단위로 멎게 한다 (svc-run-c 실측) — 항목 사이에 MAC
@@ -1926,6 +2014,7 @@ def main(argv=None) -> int:
             # 확률화의 잔존 뿌리. 300ms 예산 초과 시 남은 항목을 큐
             # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
             # 불변, 정지 상한만 도입.)
+            _cost_report()
             mac_cycle = getattr(main, "_mac_cycle", None)
             batch = []
             for _ in range(256):
@@ -1950,6 +2039,7 @@ def main(argv=None) -> int:
             drain_started = _time.monotonic()
             for index, item in enumerate(ordered):
                 kind = item[0]
+                _item_started = _time.monotonic()
                 try:
                     if kind == "s":
                         _samples_locked(*item[1:])
@@ -1960,11 +2050,22 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[launcher] dispatch-drain 오류: {error}",
                           file=sys.stderr, flush=True)
+                try:
+                    _cost_add("drain." + kind, _time.monotonic() - _item_started)
+                except Exception:  # noqa: BLE001
+                    pass
                 if promoted > 0:
                     promoted -= 1
                 elif mac_cycle is not None:
+                    _mac_started = _time.monotonic()
                     try:
                         mac_cycle()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        _cost_add(
+                            "drain.mac_cycle", _time.monotonic() - _mac_started
+                        )
                     except Exception:  # noqa: BLE001
                         pass
                 if (
@@ -1994,6 +2095,8 @@ def main(argv=None) -> int:
         _D7.register_window = _reg_locked
         _D7.on_lane_samples = _q_samples
         _D7.on_lane_window_completed = _q_completed
+        # 재대입 뒤에 감싸야 계측이 살아남는다 (fail-open).
+        _cost_wrap(_D7, "register_window", "dispatcher.register")
     except Exception as error:  # noqa: BLE001
         print(f"[launcher] 런타임 배선 실패: {error}", flush=True)
         raise
