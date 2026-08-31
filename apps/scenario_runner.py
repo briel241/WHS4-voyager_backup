@@ -582,13 +582,21 @@ def command_run(args) -> int:
 
 
 def _stage7_menu(args) -> int:
-    """Stage 7 대화형 메뉴 — 시나리오마다 **독립 service session**을 돌린다.
+    """Stage 7 대화형 메뉴 — bounded persistent service session (Phase G).
 
-    `a) 전체 실행`은 공유 session이 아니라 독립 child session batch다
-    (`run all --transport stage7`의 공유 session 구현과 다른 경로).
+    CLI 시작 시 하드웨어 session을 **한 번** 세우고(B210 acquire·endpoint START·
+    C1~C6 RF-time PRE/POST·HOST_TIME_LOCKED·admission·TBB·publish), 메뉴 선택
+    마다 **application workload child만** 새로 만든다. `q`나 fault에서 한 번만
+    전체 cleanup을 수행한다.
+
+    터미널에는 상위 진행 상태·PASS/FAIL·간단한 사유·소요시간·evidence 경로만
+    출력한다. 상세 event/transfer/quiescence/traceback은 evidence 파일에만
+    남는다 (`--verbose`가 있어야 터미널 상세가 늘어난다).
     """
     from apps import stage7_profile
-    from apps.stage7_run import run_service_batch, run_service_session
+    from apps.stage7_run import open_service_session
+
+    verbose = bool(getattr(args, "verbose", False))
 
     try:
         profile = stage7_profile.load_profile(args.profile)
@@ -598,77 +606,141 @@ def _stage7_menu(args) -> int:
         return 2
 
     print("=== MASS/ROC 시나리오 (Stage 7 실장비) ===")
-    print("Stage 7 환경 검증: profile·qualification reference 결속 통과 "
+    print(f"Stage 7 환경 검증: profile·qualification reference 결속 통과 "
           f"({len(checks)}개 항목)")
     for line in stage7_profile.summary_lines(profile):
         print("  " + line)
-    print("\n각 실행은 새 run-id·새 resolved config·독립 START/STOP으로 돕니다.")
+
+    print("\n하드웨어 service session 준비 중 — B210 acquire·endpoint START·"
+          "C1~C6 RF-time·time-lock·admission (약 21~22분, session당 1회)")
+    session = None
+    try:
+        session = open_service_session(
+            profile, diagnostics=bool(getattr(args, "diagnostics", False)))
+    except Exception as exc:  # noqa: BLE001 - 사유는 evidence에, 터미널은 요약
+        print(f"\nservice session 시작 실패: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        if session is not None:
+            print(f"evidence: {os.path.relpath(session.session_dir, RESULTS_DIR + os.sep + '..')}",
+                  file=sys.stderr)
+        return 1
+
+    ready = session.ready or {}
+    print(f"\nsession READY — id={session.session_id} "
+          f"({session.marks.get('session_ready', '?')}초)")
+    if verbose:
+        print(f"  bring-up 구간: {ready.get('phase_elapsed_s')}")
+    print(f"  evidence: {os.path.relpath(session.session_dir, os.path.dirname(RESULTS_DIR))}")
+    print("  이후 시나리오 선택은 application state만 새로 만듭니다 "
+          "(하드웨어 재기동 없음).")
 
     ordered = sorted(SCENARIOS)
 
     def report(result):
         status = result.get("status")
-        print(f"\n  결과: {status}  run-id={result.get('run_id')}")
-        if result.get("error"):
-            print(f"  사유: {result['error']}")
-        marks = result.get("phase_elapsed_s") or {}
-        if marks:
-            print("  구간(초): " + ", ".join(
-                f"{k}={v}" for k, v in marks.items()))
-        print(f"  evidence: {result.get('evidence_dir')}")
+        quiescence = result.get("quiescence") or {}
+        print(f"\n  결과: {status}  workload={result.get('workload_id')}")
+        scenario = result.get("scenario") or {}
+        if status != "PASS":
+            reason = (scenario.get("error")
+                      or result.get("error")
+                      or ("quiescence 실패" if not quiescence.get("pass") else ""))
+            if reason:
+                print(f"  사유: {str(reason)[:200]}")
+        print(f"  소요: {result.get('wall_clock_s')}초 · "
+              f"quiescence={'PASS' if quiescence.get('pass') else 'FAIL'}")
+        if verbose:
+            print(f"  quiescence 상세: {quiescence}")
 
-    while True:
-        print()
-        for index, scenario_id in enumerate(ordered, 1):
-            print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
-        print("  a) 전체 실행 (독립 session 4회: 005 → 006 → 001 정상 → 001 위조)")
-        print("  q) 종료")
-        try:
-            choice = input("\n선택 > ").strip()
-        except (EOFError, KeyboardInterrupt):
+    def run_one(scenario_id, certificate_case):
+        print(f"\n{'=' * 60}\n  workload 실행: {scenario_id}"
+              + (f" ({certificate_case})" if scenario_id == "SC-VDE-001" else ""))
+        result = session.run_workload(scenario_id, certificate_case)
+        report(result)
+        return result
+
+    exit_code = 0
+    try:
+        while True:
+            if session.status not in ("READY",):
+                print(f"\nsession이 더 이상 workload를 받을 수 없습니다 "
+                      f"(status={session.status}) — 정리하고 종료합니다.")
+                exit_code = 1
+                break
             print()
-            return 0
-        if not choice:
-            continue
-        lowered = choice.lower()
-        if lowered in ("q", "quit", "exit", "종료"):
-            print("종료합니다.")
-            return 0
-
-        if lowered in ("a", "all", "전체"):
-            print("\n" + "=" * 60)
-            batch = run_service_batch(profile)
-            print(f"\n batch {batch['status']} — child run-id: "
-                  f"{batch['child_run_ids']}")
-            for child in batch["children"]:
-                report(child)
-            continue
-
-        if choice.isdigit() and 1 <= int(choice) <= len(ordered):
-            scenario_id = ordered[int(choice) - 1]
-        elif choice.upper() in SCENARIOS:
-            scenario_id = choice.upper()
-        else:
-            print(f"  알 수 없는 선택: {choice!r} (RF 실행하지 않음)")
-            continue
-
-        certificate_case = "normal"
-        if scenario_id == "SC-VDE-001":
+            for index, scenario_id in enumerate(ordered, 1):
+                print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+            print("  a) 전체 실행 (독립 workload 4회: 005 → 006 → 001 정상 → 001 위조)")
+            print("  q) 종료 (session cleanup)")
             try:
-                answer = input("  인증서 case [normal/forged] (기본 normal) > ").strip()
+                choice = input("\n선택 > ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
-                return 0
-            answer = answer.lower() or "normal"
-            if answer not in ("normal", "forged"):
-                print(f"  알 수 없는 인증서 case: {answer!r} (RF 실행하지 않음)")
+                break
+            if not choice:
                 continue
-            certificate_case = answer
+            lowered = choice.lower()
+            if lowered in ("q", "quit", "exit", "종료"):
+                break
 
-        print("\n" + "=" * 60)
-        result = run_service_session(profile, scenario_id=scenario_id,
-                                     certificate_case=certificate_case)
-        report(result)
+            if lowered in ("a", "all", "전체"):
+                from apps.stage7_service_layer import DEFAULT_BATCH_PLAN
+                for scenario_id, certificate_case in DEFAULT_BATCH_PLAN:
+                    result = run_one(scenario_id, certificate_case)
+                    if result.get("status") != "PASS":
+                        exit_code = 1
+                        break
+                    if session.status != "READY":
+                        exit_code = 1
+                        break
+                continue
+
+            if choice.isdigit() and 1 <= int(choice) <= len(ordered):
+                scenario_id = ordered[int(choice) - 1]
+            elif choice.upper() in SCENARIOS:
+                scenario_id = choice.upper()
+            else:
+                print(f"  알 수 없는 선택: {choice!r} (RF 실행하지 않음)")
+                continue
+
+            certificate_case = "normal"
+            if scenario_id == "SC-VDE-001":
+                try:
+                    answer = input(
+                        "  인증서 case [normal/forged] (기본 normal) > ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                answer = answer.lower() or "normal"
+                if answer not in ("normal", "forged"):
+                    print(f"  알 수 없는 인증서 case: {answer!r} (RF 실행하지 않음)")
+                    continue
+                certificate_case = answer
+
+            result = run_one(scenario_id, certificate_case)
+            if result.get("status") != "PASS":
+                exit_code = 1
+    except Exception as exc:  # noqa: BLE001 - 어떤 예외에서도 cleanup은 돈다
+        print(f"\nsession 오류: {type(exc).__name__}: {exc}", file=sys.stderr)
+        session.error = f"{type(exc).__name__}: {exc}"
+        exit_code = 1
+    finally:
+        print("\nsession cleanup 중 (endpoint STOP·B210 반환)...")
+        closed = session.close()
+        summary = session.summary()
+        summary_path = os.path.join(session.session_dir, "session-summary.json")
+        with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=1,
+                      sort_keys=True)
+        cleanup = (closed or {}).get("cleanup") or {}
+        print(f"cleanup: {'PASS' if cleanup.get('pass') else 'FAIL'} "
+              f"· session status={session.status}")
+        if verbose:
+            print(f"  cleanup 상세: {cleanup}")
+        print(f"evidence: {os.path.relpath(session.session_dir, os.path.dirname(RESULTS_DIR))}")
+        if session.status != "PASS" or not cleanup.get("pass"):
+            exit_code = exit_code or 1
+    return exit_code
 
 
 def command_interactive(args) -> int:
@@ -734,6 +806,12 @@ def build_parser() -> argparse.ArgumentParser:
     menu_parser.add_argument(
         "--profile", default=None,
         help="stage7 필수: Stage 7 실행 profile JSON (qualification reference 결속)")
+    menu_parser.add_argument(
+        "--verbose", action="store_true",
+        help="터미널에 상세를 출력한다 (기본은 상위 진행·판정·소요시간만)")
+    menu_parser.add_argument(
+        "--diagnostics", action="store_true",
+        help="evidence 계측 상세도를 높인다 (터미널 출력량은 늘리지 않는다)")
     menu_parser.set_defaults(handler=command_interactive)
     subparsers.add_parser("list", help="시나리오 목록").set_defaults(
         handler=command_list)

@@ -329,7 +329,7 @@ def validate_rr_binding(arguments, metadata: dict) -> None:
     # RR과 같은 강도로 확인한다(profile·run·baseline·retry). rr_phase는 서비스
     # workload를 결속한 rr-p2-17/19 config를 그대로 쓴다. 아래 기존 RR 분기의
     # 조건과 동작은 이 추가로 바뀌지 않는다.
-    if arguments.phase == "mass-roc-service":
+    if arguments.phase in ("mass-roc-service", "mass-roc-session"):
         for banned in ("STAGE7_SVCDBG_ALLOW_RX_READY", "STAGE7_SCENARIO_FILTER"):
             if os.environ.get(banned):
                 raise SystemExit(
@@ -1464,6 +1464,489 @@ def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
             "phase_elapsed_s": {k: round(v - t0, 1) for k, v in marks.items()}}
 
 
+#: session 제어 파일 이름 (로컬 service 계층과 공유하는 계약).
+SESSION_DIR_NAME = "session"
+SESSION_READY = "ready.json"
+SESSION_SHUTDOWN = "shutdown"
+SESSION_CLOSED = "closed.json"
+SESSION_REQUESTS = "requests"
+SESSION_RESULTS = "results"
+
+#: workload 요청 대기 상한 (사용자가 메뉴에서 고르는 동안 유지).
+SESSION_IDLE_TIMEOUT_S = 45 * 60
+
+
+def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
+                         metadata, configs_dir, gain_artifact_path,
+                         test_plan_sha, processes=None):
+    """`OPERATIONAL_SERVICE` bounded persistent session (Phase G 최종 모델).
+
+    하드웨어 service session을 **한 번** 세우고(B210 acquire·endpoint START·
+    host fit·C1~C6 RF-time PRE/POST·active bridge·HOST_TIME_LOCKED·admission·
+    TBB·publish), 그 뒤에는 요청이 올 때마다 **application workload child만**
+    새로 만들어 실행한다. 시나리오마다 하드웨어를 다시 세우지 않는다.
+
+    workload 사이에는 quiescence를 기계로 확인하고, `q`(shutdown 마커) 또는
+    fault에서 한 번만 전체 cleanup을 수행한다.
+
+    **실행하지 않는 것**: `_run_rf_qualification`, CFO qualification,
+    adaptive gain 탐색, raw-PHY qualification, RR/RESEARCH_READY 판정.
+    """
+
+    from vdeter.stage7.canonical_json import encode_canonical_json
+    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.stage7.ipc import body_set_sha256
+    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+
+    guard = PhaseGuard("MASS-ROC-SESSION", deadline_s=SESSION_IDLE_TIMEOUT_S,
+                       stall_s=SESSION_IDLE_TIMEOUT_S)
+    for channel in coordinator._channels.values():
+        channel.attach_guard(guard)
+
+    present = list(ENDPOINT_IDS)
+    paths = SERVICE_RF_TIME_PATHS
+    all_path_ids = [p[0] for p in paths]
+    required_path_ids = set(all_path_ids)
+    ship = next(m for m in present if m != "ROC")
+    channel_by_role = {
+        "upper": resolved["ROC"].endpoint.mac.tx_channel.name,
+        "lower": resolved[ship].endpoint.mac.tx_channel.name,
+    }
+    serial_by_endpoint = {m: resolved[m].b210_serial for m in present}
+
+    session_dir = os.path.join(run_root, SESSION_DIR_NAME)
+    requests_dir = os.path.join(session_dir, SESSION_REQUESTS)
+    results_dir = os.path.join(session_dir, SESSION_RESULTS)
+    for directory in (session_dir, requests_dir, results_dir):
+        os.makedirs(directory, exist_ok=True)
+
+    started = _utc_now()
+    t0 = time.monotonic()
+    marks = {}
+    workloads = []
+    status = "FAIL"
+    error = None
+    cleanup = {}
+
+    def mark(name):
+        guard.check()
+        guard.progress(name)
+        marks[name] = round(time.monotonic() - t0, 1)
+
+    def now_ns():
+        return int(read_monotonic_raw_ns())
+
+    def write_json(path, payload):
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=1)
+
+    try:
+        # ================= 1. 하드웨어 bring-up (세션당 정확히 1회) ==========
+        run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
+        mark("prepare_configure_arm")
+
+        acquire = coordinator.run_barrier(
+            "acquire_host_time",
+            {m: {"profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1",
+                 "acquisition_attempt": 1,
+                 "max_acquisition_ns": 600_000_000_000} for m in present},
+            members=present, concurrent_commit=True,
+        )
+        fits = {m: acquire[m]["body"]["result"] for m in present}
+        for m in present:
+            if fits[m] is None or fits[m].get("outcome") != "PASS":
+                raise RuntimeError(f"{m} host affine fit FAIL")
+        print("[coordinator] acquire_host_time COMPLETED", flush=True)
+        mark("acquire_host_time")
+
+        def rf_time_plan(phase_tag):
+            start_base = now_ns() + 20_000_000_000
+            entries = []
+            for index, (path_id, tx_ep, rx_ep, tx_lane, rx_lane) in enumerate(paths):
+                start = start_base + index * 75_000_000_000
+                entries.append({
+                    "path_id": path_id, "tx_endpoint_id": tx_ep,
+                    "rx_endpoint_id": rx_ep, "tx_lane_index": tx_lane,
+                    "rx_lane_index": rx_lane,
+                    "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+                    "scheduled_host_raw_ns": [start + k * 6_800_000_000
+                                              for k in range(10)],
+                })
+            return _write_plan(run_root, "rf_time_plan.json",
+                               {"phase": phase_tag, "paths": entries})
+
+        provisional_clock = (
+            f"stage7-pi-host-affine-provisional-v1:{coordinator._run_id}:1")
+        rf_sha = rf_time_plan("PRE_CORRECTION")
+        pre = coordinator.run_barrier(
+            "validate_rf_time",
+            {m: {"validation_phase": "PRE_CORRECTION",
+                 "rf_time_plan_sha256": rf_sha, "clock_id": provisional_clock,
+                 "path_ids": all_path_ids} for m in present},
+            members=present, concurrent_commit=True,
+        )
+        summaries = {}
+        for m in present:
+            for summary in pre[m]["body"]["result"] or ():
+                summaries[summary["path_id"]] = summary
+        # 빈 summary가 all([])로 공허참 통과하지 않도록 required set을 명시 검사.
+        missing_pre = sorted(required_path_ids - set(summaries))
+        if missing_pre:
+            raise RuntimeError(f"PRE_CORRECTION summary 누락: {missing_pre}")
+        combined = evaluate_pre_correction_set(
+            summaries, present_pairs=SERVICE_RF_TIME_PAIRS)
+        print("[coordinator] validate_rf_time PRE COMPLETED", flush=True)
+        mark("rf_time_pre")
+
+        active_clock = f"stage7-pi-host-affine-v1:{coordinator._run_id}:0"
+        candidate_set = [
+            [m, hashlib.sha256(encode_canonical_json(fits[m])).hexdigest()]
+            for m in present]
+        corrections = combined["corrections"]
+        bodies = {}
+        for m in present:
+            correction = corrections.get(m, (0, 1))
+            bodies[m] = {
+                "candidate_set": [list(item) for item in candidate_set],
+                "candidate_set_sha256": body_set_sha256(candidate_set),
+                "candidate_sha256": dict(candidate_set)[m],
+                "active_clock_id": active_clock, "bridge_generation": 0,
+                "alpha_num": fits[m]["alpha_num"], "alpha_den": fits[m]["alpha_den"],
+                "beta_num": fits[m]["beta_num"], "beta_den": fits[m]["beta_den"],
+                "correction_num": correction[0], "correction_den": correction[1],
+            }
+        coordinator.run_barrier(
+            "prepare_active_bridge", bodies,
+            commit_command_name="commit_active_bridge",
+            abort_command_name="abort_active_bridge", members=present,
+        )
+        coordinator._bridge_generation = 0
+        coordinator._bridge_members = set(present)
+        print("[coordinator] active bridge COMMITTED", flush=True)
+        mark("active_bridge")
+
+        rf_sha = rf_time_plan("POST_CORRECTION")
+        post = coordinator.run_barrier(
+            "validate_rf_time",
+            {m: {"validation_phase": "POST_CORRECTION",
+                 "rf_time_plan_sha256": rf_sha, "clock_id": active_clock,
+                 "path_ids": all_path_ids} for m in present},
+            members=present, concurrent_commit=True,
+        )
+        post_summaries = []
+        for m in present:
+            post_summaries.extend(post[m]["body"]["result"] or ())
+        observed_post = {s["path_id"] for s in post_summaries}
+        missing_post = sorted(required_path_ids - observed_post)
+        if missing_post:
+            raise RuntimeError(f"POST_CORRECTION summary 누락: {missing_post}")
+        failed = [s["path_id"] for s in post_summaries if s["outcome"] != "PASS"]
+        if failed:
+            raise RuntimeError(f"POST_CORRECTION FAIL paths: {failed}")
+        print("[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED",
+              flush=True)
+        mark("rf_time_post")
+
+        # ================= 2. service admission → RUNNING (1회) =============
+        def pump_events():
+            for member in present:
+                for event in coordinator._channels[member].poll_events():
+                    coordinator.receive_event(member, event)
+
+        gate_dir = os.path.join(run_root, "controller_gate")
+        os.makedirs(gate_dir, exist_ok=True)
+        admission = coordinator.open_service_admission()
+        admission_value = admission.value
+        print("[coordinator] service admission OPEN", flush=True)
+        open(os.path.join(gate_dir, "admission_open"), "w").close()
+        intent_deadline = admission_value["service_start_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_intents_complete():
+                break
+            if now_ns() >= intent_deadline:
+                raise RuntimeError("service-start intent cutoff 초과")
+            time.sleep(0.2)
+        start_commits = coordinator.commit_service_start()
+        staged_set = [
+            [m, start_commits[m]["body"]["result"]["staged_service_started_sha256"]]
+            for m in present]
+        tbb_deadline = admission_value["tbb_publish_deadline_host_raw_ns"]
+        while True:
+            pump_events()
+            if coordinator.required_tbb_complete(0):
+                break
+            if now_ns() >= tbb_deadline:
+                raise RuntimeError("TBB publish deadline 초과 (TBB_ACTIVE 미완)")
+            time.sleep(0.5)
+        coordinator.publish_service_start(staged_set, bridge_generation=0)
+        print("[coordinator] publish_service_start COMPLETED — RUNNING", flush=True)
+        open(os.path.join(gate_dir, "started_ok"), "w").close()
+        mark("service_running")
+
+        baseline_health = {
+            "active_clock_id": active_clock,
+            "bridge_generation": coordinator._bridge_generation,
+            "faults": len(list(coordinator.faults())),
+            "serial_by_endpoint": serial_by_endpoint,
+            "usb_speed": {k: v for k, v in _live_b210_speed_map().items()
+                          if k in serial_by_endpoint.values()},
+        }
+        write_json(os.path.join(session_dir, SESSION_READY), {
+            "artifact_type": "STAGE7_SERVICE_SESSION_READY_V1",
+            "judgement_scope": "OPERATIONAL_SERVICE",
+            "run_id": run_id, "started_utc": started,
+            "ready_at_utc": _utc_now(),
+            "phase_elapsed_s": dict(marks),
+            "rf_time_paths": all_path_ids,
+            "health_baseline": baseline_health,
+            "note": ("하드웨어 bring-up은 이 session에서 한 번만 수행됐다. "
+                     "이후 workload는 application state만 새로 만든다."),
+        })
+        print("[coordinator] SESSION READY — workload 요청 대기", flush=True)
+
+        # ================= 3. workload 요청 루프 ============================
+        idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
+        while True:
+            guard.check()
+            if os.path.exists(os.path.join(session_dir, SESSION_SHUTDOWN)):
+                print("[coordinator] shutdown 요청 수신", flush=True)
+                break
+            pending = sorted(
+                name for name in os.listdir(requests_dir)
+                if name.endswith(".json")
+                and not os.path.exists(os.path.join(results_dir, name)))
+            if not pending:
+                if time.monotonic() > idle_deadline:
+                    raise RuntimeError("session idle timeout — workload 요청 없음")
+                pump_events()
+                time.sleep(0.5)
+                continue
+
+            request_name = pending[0]
+            with open(os.path.join(requests_dir, request_name), "rb") as handle:
+                request = json.loads(handle.read().decode("utf-8"))
+            workload_id = request["workload_id"]
+            scenario_id = request["scenario_id"]
+            certificate_case = request.get("certificate_case", "normal")
+            print(f"[coordinator] workload 시작 {workload_id} {scenario_id}",
+                  flush=True)
+            guard.progress(f"workload:{workload_id}")
+            workload_started = time.monotonic()
+
+            # --- session health gate (매 workload 직전) ---------------------
+            pump_events()
+            alive = ([p for p in (processes or {}).values() if p.poll() is None]
+                     if processes else None)
+            speed_map = {k: v for k, v in _live_b210_speed_map().items()
+                         if k in serial_by_endpoint.values()}
+            health = {
+                "launchers_alive": None if alive is None else len(alive),
+                "expected_launchers": None if alive is None else len(processes),
+                "workers_running": _worker_process_count(),
+                "inhibited": coordinator.inhibited,
+                "faults": len(list(coordinator.faults())),
+                "bridge_generation": coordinator._bridge_generation,
+                "active_clock_id": active_clock,
+                "usb_speed": speed_map,
+            }
+            health["pass"] = (
+                (alive is None or len(alive) == len(processes))
+                and health["workers_running"] == 3
+                and not health["inhibited"]
+                and health["faults"] == baseline_health["faults"]
+                and health["bridge_generation"] == baseline_health["bridge_generation"]
+                and speed_map == baseline_health["usb_speed"]
+            )
+            if not health["pass"]:
+                raise RuntimeError(f"session health gate 실패: {health}")
+
+            # --- workload child 실행 (endpoint START/STOP 없음) -------------
+            child_root = os.path.join(run_root, "workloads", workload_id)
+            os.makedirs(child_root, exist_ok=True)
+            logs_dir = os.path.join(run_root, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            log_handle = open(  # noqa: SIM115
+                os.path.join(logs_dir, f"workload-{workload_id}.log"), "ab")
+            command = [
+                sys.executable,
+                os.path.join(os.path.dirname(APP_ROOT), "apps",
+                             "stage7_mass_roc_controller.py"),
+                "--run-id", run_id,
+                "--run-root", child_root,
+                "--test-plan-sha", test_plan_sha,
+                "--fixtures-dir", os.path.join(configs_dir, "fixtures"),
+                "--scenario-id", scenario_id,
+                "--certificate-case", certificate_case,
+                "--workload-id", workload_id,
+                "--lifecycle", "session",
+                "--events-dir", os.path.join(run_root, "evidence",
+                                             "service_events"),
+            ]
+            child = subprocess.Popen(command, stdout=log_handle,
+                                     stderr=subprocess.STDOUT)
+            while child.poll() is None:
+                guard.check()
+                guard.progress(f"workload:{workload_id}")
+                pump_events()
+                time.sleep(1.0)
+            log_handle.close()
+
+            scenario_result = None
+            result_path = os.path.join(child_root, "mass-roc-events",
+                                       "final-result.json")
+            try:
+                with open(result_path, "rb") as handle:
+                    scenario_result = json.loads(handle.read().decode("utf-8"))
+            except OSError:
+                pass
+
+            # --- workload quiescence gate ----------------------------------
+            pump_events()
+            transfers = []
+            for payload in (scenario_result or {}).get("results", {}).values():
+                body = payload.get("result", payload)
+                transfers.extend(body.get("transfers") or [])
+                pre_body = payload.get("precondition")
+                if pre_body:
+                    transfers.extend(pre_body.get("transfers") or [])
+            non_terminal = [t for t in transfers
+                            if t.get("final_transfer_state") not in
+                            ("COMPLETED", "FAILED", "CANCELLED")]
+            alive_after = ([p for p in (processes or {}).values()
+                            if p.poll() is None] if processes else None)
+            quiescence = {
+                "child_exit_code": child.returncode,
+                "child_terminated": child.poll() is not None,
+                "transfers_observed": len(transfers),
+                "non_terminal_transfers": len(non_terminal),
+                "launchers_alive": None if alive_after is None else len(alive_after),
+                "workers_running": _worker_process_count(),
+                "inhibited": coordinator.inhibited,
+                "faults": len(list(coordinator.faults())),
+                "bridge_generation": coordinator._bridge_generation,
+                "active_clock_id": active_clock,
+                "usb_speed": {k: v for k, v in _live_b210_speed_map().items()
+                              if k in serial_by_endpoint.values()},
+            }
+            quiescence["pass"] = (
+                quiescence["child_terminated"]
+                and not non_terminal
+                and quiescence["workers_running"] == 3
+                and not quiescence["inhibited"]
+                and quiescence["faults"] == baseline_health["faults"]
+                and quiescence["bridge_generation"] == baseline_health["bridge_generation"]
+                and quiescence["usb_speed"] == baseline_health["usb_speed"]
+                and (alive_after is None or len(alive_after) == len(processes))
+            )
+
+            record = {
+                "artifact_type": "STAGE7_SERVICE_WORKLOAD_RESULT_V1",
+                "judgement_scope": "OPERATIONAL_SERVICE",
+                "workload_id": workload_id, "scenario_id": scenario_id,
+                "certificate_case": certificate_case,
+                "session_run_id": run_id,
+                "child_exit_code": child.returncode,
+                "duration_s": round(time.monotonic() - workload_started, 1),
+                "session_health_before": health,
+                "quiescence": quiescence,
+                "scenario": scenario_result,
+                "status": "PASS" if (
+                    child.returncode == 0
+                    and (scenario_result or {}).get("status") == "PASS"
+                    and quiescence["pass"]) else "FAIL",
+            }
+            write_json(os.path.join(results_dir, request_name), record)
+            workloads.append({k: record[k] for k in
+                              ("workload_id", "scenario_id", "certificate_case",
+                               "status", "duration_s")})
+            print(f"[coordinator] workload {workload_id} {record['status']}",
+                  flush=True)
+            mark(f"workload:{workload_id}")
+            if not quiescence["pass"]:
+                raise RuntimeError(
+                    f"workload quiescence 실패 — session 종료: {quiescence}")
+            idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
+
+        # ================= 4. STOP (세션당 1회) =============================
+        stop_now = now_ns()
+        coordinator.run_barrier(
+            "stop",
+            {m: {"stop_at_frame_ordinal": 0,
+                 "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
+             for m in ENDPOINT_IDS},
+        )
+        mark("stop")
+        status = "PASS" if all(w["status"] == "PASS" for w in workloads) else "FAIL"
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        status = "FAIL"
+        try:
+            coordinator.emergency_inhibit("SERVICE_SESSION_FAIL", "session")
+        except Exception:  # noqa: BLE001 - 정리 최선 노력
+            pass
+    finally:
+        clean_exit = True
+        if processes:
+            for _endpoint_id, process in processes.items():
+                deadline = time.monotonic() + 60.0
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.5)
+                if process.poll() is None:
+                    clean_exit = False
+        cleanup = {
+            "launcher_clean_exit": clean_exit,
+            "workers_after_stop": _worker_process_count(),
+            "rediscovery": _rediscover_b210(sorted(serial_by_endpoint.values())),
+            "usb_speed": {k: v for k, v in _live_b210_speed_map().items()
+                          if k in serial_by_endpoint.values()},
+            "throttled": subprocess.run(["vcgencmd", "get_throttled"],
+                                        capture_output=True, text=True).stdout.strip(),
+        }
+        cleanup["pass"] = (
+            clean_exit and cleanup["workers_after_stop"] == 0
+            and all(cleanup["rediscovery"].values())
+            and cleanup["throttled"] == "throttled=0x0")
+        if status == "PASS" and not cleanup["pass"]:
+            status = "FAIL"
+        qualification_commands = [
+            e["command_name"] for e in coordinator.command_log()
+            if e["command_name"] in ("start_cfo", "calibrate_rf")]
+        payload = {
+            "artifact_type": "STAGE7_OPERATIONAL_SERVICE_SESSION_RESULT_V1",
+            "judgement_scope": "OPERATIONAL_SERVICE",
+            "not_a_qualification": (
+                "RF qualification이 아니다 — CFO/adaptive gain/raw-PHY 미실행, "
+                "RR·RESEARCH_READY 판정 미생성. 자격은 Phase F reference가 담보한다."),
+            "run_id": run_id, "status": status,
+            "started_utc": started, "ended_utc": _utc_now(),
+            "duration_s": round(time.monotonic() - t0, 1),
+            "phase_elapsed_s": dict(marks),
+            "hardware_lifecycle": {
+                "b210_acquire": 1, "endpoint_start": 1, "acquire_host_time": 1,
+                "rf_time_pre": 1, "rf_time_post": 1, "active_bridge": 1,
+                "service_admission": 1, "endpoint_stop": 1,
+                "note": "workload 수와 무관하게 각 1회",
+            },
+            "workloads": workloads,
+            "cleanup": cleanup,
+            "qualification_commands_issued": qualification_commands,
+            "inhibited": coordinator.inhibited,
+            "error": error,
+            "git_commit": metadata.get("git_commit"),
+            "baseline_sha256": metadata.get("baseline_sha256"),
+            "gain_artifact": gain_artifact_path,
+        }
+        out_dir = os.path.join(run_root, "evidence", "operational_service")
+        os.makedirs(out_dir, exist_ok=True)
+        write_json(os.path.join(out_dir, "session_result.json"), payload)
+        write_json(os.path.join(session_dir, SESSION_CLOSED), payload)
+    if status != "PASS":
+        raise RuntimeError("MASS-ROC service session FAIL — 새 session으로만 재시도")
+    return {"mass_roc_session": status, "workloads": workloads,
+            "phase_elapsed_s": dict(marks)}
+
+
 def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
                    metadata, link_id, gain_artifact_path, configs_dir,
                    test_plan_sha):
@@ -2371,7 +2854,7 @@ def main(argv=None) -> int:
                  "rr-p3-soak-17", "rr-p3-soak-19",
                  # Phase G additive: qualification 없이 서비스 구간만 수행한다.
                  # 기존 phase의 command sequence는 이 추가로 바뀌지 않는다.
-                 "mass-roc-service"),
+                 "mass-roc-service", "mass-roc-session"),
     )
     parser.add_argument("--edge", choices=("MASS-A", "MASS-B"), default=None,
                         help="p1 signed qualification edge")
@@ -2405,6 +2888,13 @@ def main(argv=None) -> int:
         raise SystemExit(
             "mass-roc workload는 rr-p2-17/rr-p2-19 phase에서만 실행할 수 있습니다"
         )
+    if arguments.phase == "mass-roc-session":
+        # persistent session은 workload 요청을 파일로 받는다.
+        # 시나리오는 요청마다 정해지므로 --scenario-id를 쓰지 않는다.
+        if arguments.gain_artifact is None:
+            raise SystemExit(
+                "mass-roc-session에는 --gain-artifact가 필요합니다 "
+                "(OPERATIONAL config의 RX gain 결속)")
     if arguments.phase == "mass-roc-service":
         # service-only phase는 시나리오 하나를 독립 session으로 돈다.
         # 공유 session(all)은 이 경로에서 허용하지 않는다 (Phase G 계약).
@@ -2433,8 +2923,8 @@ def main(argv=None) -> int:
     # resolved config 집합에 결속(간이): resolved sha들의 canonical digest.
     is_rr_service = arguments.phase in (
         "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17", "rr-p3-soak-19",
-        # Phase G additive: service-only phase도 TEST adapter가 필요하다.
-        "mass-roc-service",
+        # Phase G additive: service-only/session phase도 TEST adapter가 필요하다.
+        "mass-roc-service", "mass-roc-session",
     )
     test_plan_sha = None
     if is_rr_service:
@@ -2521,6 +3011,17 @@ def main(argv=None) -> int:
                 gain_artifact_path=arguments.gain_artifact,
                 configs_dir=arguments.configs_dir,
                 test_plan_sha=test_plan_sha,
+            )
+        elif arguments.phase == "mass-roc-session":
+            # Phase G 최종 모델: bounded persistent session.
+            phase_result = run_mass_roc_session(
+                coordinator, resolved, plan, arguments.run_root,
+                run_id=arguments.run_id,
+                metadata=_load_run_metadata(arguments.configs_dir, arguments.gain_artifact),
+                configs_dir=arguments.configs_dir,
+                gain_artifact_path=arguments.gain_artifact,
+                test_plan_sha=test_plan_sha,
+                processes=processes,
             )
         elif arguments.phase == "mass-roc-service":
             # Phase G additive 분기 — 기존 RR phase 경로에는 영향이 없다.

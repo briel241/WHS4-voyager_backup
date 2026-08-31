@@ -90,8 +90,11 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
         self.assertEqual(changed, ["main", "validate_rr_binding"], str(changed))
+        # Phase G orchestration은 함수 추가로만 이뤄진다:
+        # 단발 service phase와 bounded persistent session phase.
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["run_mass_roc_service"], str(added))
+        self.assertEqual(added, ["run_mass_roc_service", "run_mass_roc_session"],
+                         str(added))
 
 
 class _FakeArgs:

@@ -272,14 +272,71 @@ def test_profile_rejected_for_direct_menu():
     assert runner.main(["menu", "--profile", "p.json"]) == 2
 
 
-def _drive_menu(inputs, session_fn, batch_fn=None):
-    """대화형 메뉴를 가짜 입력으로 구동하고 dispatch를 기록한다."""
-    original_input = __builtins__["input"] if isinstance(__builtins__, dict) \
-        else __builtins__.input
-    original_session = stage7_run.run_service_session
-    original_batch = stage7_run.run_service_batch
+class _FakeSession:
+    """menu가 쓰는 persistent session 대역 (실제 SSH·RF 없음)."""
+
+    def __init__(self, *, workload_status="PASS", quiescence_pass=True):
+        self.session_id = "phase-g-service-testsession"
+        self.session_dir = os.path.join(_REPO, "VDETER", "results", "phase-g",
+                                        "unit-test-session")
+        self.status = "READY"
+        self.ready = {"phase_elapsed_s": {"rf_time_post": 1240.0},
+                      "rf_time_paths": ["C1", "C2", "C3", "C4", "C5", "C6"]}
+        self.marks = {"session_ready": 1300.0}
+        self.workloads = []
+        self.calls = []
+        self.closed = None
+        self.error = None
+        self.close_count = 0
+        self._workload_status = workload_status
+        self._quiescence_pass = quiescence_pass
+        self._counter = 0
+
+    def run_workload(self, scenario_id, certificate_case="normal"):
+        if self.status != "READY":
+            from apps.stage7_service_layer import ServiceSessionError
+            raise ServiceSessionError(f"session이 READY가 아닙니다: {self.status}")
+        self._counter += 1
+        self.calls.append((scenario_id, certificate_case))
+        workload_id = f"{self.session_id}-w{self._counter:03d}"
+        result = {
+            "workload_id": workload_id, "scenario_id": scenario_id,
+            "certificate_case": certificate_case,
+            "status": self._workload_status,
+            "wall_clock_s": 12.3,
+            "quiescence": {"pass": self._quiescence_pass},
+            "scenario": {"status": self._workload_status},
+        }
+        self.workloads.append(result)
+        if not self._quiescence_pass:
+            self.status = "QUIESCENCE_FAIL"
+        return result
+
+    def close(self):
+        # 실제 Stage7ServiceSession.close()와 같은 계약: closed 결과로 상태를
+        # 갱신한다(quiescence 실패는 유지).
+        self.close_count += 1
+        self.closed = {"status": "PASS", "cleanup": {"pass": True}}
+        if self.status != "QUIESCENCE_FAIL":
+            self.status = self.closed["status"]
+        return self.closed
+
+    def summary(self):
+        return {"session_id": self.session_id, "status": self.status,
+                "workload_ids": [w["workload_id"] for w in self.workloads]}
+
+
+def _drive_menu(inputs, session, extra_args=()):
+    """대화형 메뉴를 가짜 입력으로 구동한다. 실제 session 생성은 mock한다."""
+    import builtins
+
+    import apps.stage7_run as run_module
+
+    original_input = builtins.input
+    original_open = run_module.open_service_session
     original_report = runner._run_and_report
     supplied = iter(inputs)
+    opened = []
 
     def fake_input(_prompt=""):
         try:
@@ -287,142 +344,110 @@ def _drive_menu(inputs, session_fn, batch_fn=None):
         except StopIteration:
             raise EOFError
 
+    def fake_open(profile, **kwargs):
+        opened.append(kwargs)
+        os.makedirs(session.session_dir, exist_ok=True)
+        return session
+
     def forbidden_direct(*_a, **_k):
         raise AssertionError("stage7 메뉴가 direct 시나리오로 fallback했다")
 
-    import builtins
     builtins.input = fake_input
-    stage7_run.run_service_session = session_fn
-    stage7_run.run_service_batch = batch_fn or (
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("batch가 호출되면 안 된다")))
+    run_module.open_service_session = fake_open
     runner._run_and_report = forbidden_direct
     try:
-        return runner.main(["menu", "--transport", "stage7",
-                            "--profile", _profile_path()])
+        rc = runner.main(["menu", "--transport", "stage7",
+                          "--profile", _profile_path(), *extra_args])
     finally:
         builtins.input = original_input
-        stage7_run.run_service_session = original_session
-        stage7_run.run_service_batch = original_batch
+        run_module.open_service_session = original_open
         runner._run_and_report = original_report
+    return rc, opened
 
 
-def test_menu_dispatches_formal_service_runner_by_number_and_id():
-    calls = []
-
-    def session(profile, *, scenario_id, certificate_case="normal", **kwargs):
-        calls.append((scenario_id, certificate_case))
-        return {"status": "PASS", "run_id": f"svc-{len(calls)}",
-                "phase_elapsed_s": {"total": 1.0}, "evidence_dir": "x"}
-
-    # 2) = SC-VDE-005 (정렬 순: 001, 005, 006), 그다음 ID 직접 입력, 그리고 q
-    rc = _drive_menu(["2", "SC-VDE-006", "q"], session)
+def test_menu_opens_one_session_and_dispatches_workloads():
+    session = _FakeSession()
+    rc, opened = _drive_menu(["2", "SC-VDE-006", "q"], session)
     assert rc == 0
-    assert calls == [("SC-VDE-005", "normal"), ("SC-VDE-006", "normal")]
+    # 하드웨어 session은 한 번만 열린다.
+    assert len(opened) == 1
+    assert session.calls == [("SC-VDE-005", "normal"), ("SC-VDE-006", "normal")]
+    # 종료 시 cleanup은 정확히 한 번.
+    assert session.close_count == 1
 
 
 def test_menu_certificate_case_selection():
-    calls = []
-
-    def session(profile, *, scenario_id, certificate_case="normal", **kwargs):
-        calls.append((scenario_id, certificate_case))
-        return {"status": "PASS", "run_id": "svc-x",
-                "phase_elapsed_s": {}, "evidence_dir": "x"}
-
-    rc = _drive_menu(["1", "forged", "1", "", "q"], session)
+    session = _FakeSession()
+    rc, _ = _drive_menu(["1", "forged", "1", "", "q"], session)
     assert rc == 0
-    assert calls == [("SC-VDE-001", "forged"), ("SC-VDE-001", "normal")]
+    assert session.calls == [("SC-VDE-001", "forged"), ("SC-VDE-001", "normal")]
 
 
 def test_menu_rejects_bad_input_without_rf():
-    calls = []
-
-    def session(profile, **kwargs):
-        calls.append(kwargs)
-        return {"status": "PASS", "run_id": "x", "phase_elapsed_s": {},
-                "evidence_dir": "x"}
-
-    rc = _drive_menu(["9", "SC-VDE-999", "hello", "q"], session)
+    session = _FakeSession()
+    rc, _ = _drive_menu(["9", "SC-VDE-999", "hello", "q"], session)
     assert rc == 0
-    assert calls == [], "잘못된 입력이 RF 실행을 유발했다"
+    assert session.calls == [], "잘못된 입력이 RF workload를 유발했다"
+    assert session.close_count == 1
 
 
 def test_menu_bad_certificate_case_rejected_without_rf():
-    calls = []
-
-    def session(profile, **kwargs):
-        calls.append(kwargs)
-        return {"status": "PASS", "run_id": "x", "phase_elapsed_s": {},
-                "evidence_dir": "x"}
-
-    rc = _drive_menu(["1", "bogus", "q"], session)
-    assert rc == 0 and calls == []
+    session = _FakeSession()
+    rc, _ = _drive_menu(["1", "bogus", "q"], session)
+    assert rc == 0 and session.calls == []
 
 
-def test_menu_fresh_run_id_per_execution():
-    seen = []
-
-    def session(profile, *, scenario_id, certificate_case="normal", **kwargs):
-        # 실제 계층과 같은 규칙으로 run-id를 만든다 (중복 금지 확인용).
-        run_id = f"svc-{scenario_id}-{len(seen)}"
-        seen.append(run_id)
-        return {"status": "PASS", "run_id": run_id, "phase_elapsed_s": {},
-                "evidence_dir": "x"}
-
+def test_menu_fresh_workload_id_per_execution():
+    session = _FakeSession()
     _drive_menu(["2", "2", "2", "q"], session)
-    assert len(seen) == 3 and len(set(seen)) == 3
+    ids = [w["workload_id"] for w in session.workloads]
+    assert len(ids) == 3 and len(set(ids)) == 3
 
 
-# --------------------------------------------------- `a` 독립 child batch 계약
-
-def test_batch_runs_independent_children_not_shared_session():
-    calls = []
-
-    def session(profile, *, scenario_id, certificate_case="normal", **kwargs):
-        calls.append((scenario_id, certificate_case))
-        return {"status": "PASS", "run_id": f"svc-{len(calls)}",
-                "phase_elapsed_s": {}, "evidence_dir": "x"}
-
-    profile = stage7_profile.load_profile(_profile_path())
-    batch = service_layer.run_service_batch(profile, session_fn=session)
-    assert batch["status"] == "PASS"
-    assert batch["shared_session_used"] is False
-    assert calls == [("SC-VDE-005", "normal"), ("SC-VDE-006", "normal"),
-                     ("SC-VDE-001", "normal"), ("SC-VDE-001", "forged")]
-    # child run-id가 전부 다르다.
-    assert len(set(batch["child_run_ids"])) == 4
-    # 공유 session(scenario_id=all)을 절대 쓰지 않는다.
-    assert all(scenario != "all" for scenario, _ in calls)
+def test_menu_a_runs_independent_children_in_one_session():
+    session = _FakeSession()
+    rc, opened = _drive_menu(["a", "q"], session)
+    assert rc == 0
+    assert len(opened) == 1, "batch가 hardware session을 다시 열었다"
+    assert session.calls == [("SC-VDE-005", "normal"), ("SC-VDE-006", "normal"),
+                             ("SC-VDE-001", "normal"), ("SC-VDE-001", "forged")]
+    # 공유 session controller(scenario_id=all)를 절대 호출하지 않는다.
+    assert all(scenario != "all" for scenario, _ in session.calls)
+    assert session.close_count == 1
 
 
-def test_batch_stops_after_failed_child():
-    calls = []
-
-    def session(profile, *, scenario_id, certificate_case="normal", **kwargs):
-        calls.append(scenario_id)
-        status = "FAIL" if scenario_id == "SC-VDE-006" else "PASS"
-        return {"status": status, "run_id": f"svc-{len(calls)}",
-                "phase_elapsed_s": {}, "evidence_dir": "x"}
-
-    profile = stage7_profile.load_profile(_profile_path())
-    batch = service_layer.run_service_batch(profile, session_fn=session)
-    assert batch["status"] == "FAIL"
-    assert calls == ["SC-VDE-005", "SC-VDE-006"], calls
+def test_menu_quiescence_failure_stops_and_cleans_up():
+    session = _FakeSession(quiescence_pass=False)
+    rc, _ = _drive_menu(["a", "q"], session)
+    assert rc == 1
+    # 첫 child에서 quiescence 실패 → 다음 child를 시작하지 않는다.
+    assert session.calls == [("SC-VDE-005", "normal")]
+    assert session.close_count == 1
 
 
-def test_menu_a_uses_batch_not_shared_all():
-    used = {}
+def test_menu_eof_still_cleans_up():
+    session = _FakeSession()
+    rc, _ = _drive_menu([], session)   # 입력 없음 → EOF
+    assert session.close_count == 1
 
-    def session(profile, **kwargs):
-        raise AssertionError("batch가 session을 직접 호출하면 안 된다(여기선 batch mock)")
 
-    def batch(profile, *a, **k):
-        used["batch"] = True
-        return {"status": "PASS", "children": [], "child_run_ids": [],
-                "shared_session_used": False}
+def test_menu_exception_still_cleans_up():
+    session = _FakeSession()
 
-    rc = _drive_menu(["a", "q"], session, batch_fn=batch)
-    assert rc == 0 and used.get("batch") is True
+    def explode(*_a, **_k):
+        raise RuntimeError("workload 폭발")
+
+    session.run_workload = explode
+    rc, _ = _drive_menu(["2", "q"], session)
+    assert rc == 1
+    assert session.close_count == 1
+
+
+def test_menu_verbose_and_diagnostics_flags_reach_session():
+    session = _FakeSession()
+    rc, opened = _drive_menu(["q"], session, extra_args=("--diagnostics",))
+    assert rc == 0
+    assert opened and opened[0].get("diagnostics") is True
 
 
 # ------------------------------------------- 기존 `run all --transport stage7` 불변

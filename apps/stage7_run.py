@@ -69,12 +69,18 @@ from apps.stage7_service_layer import (  # noqa: E402
     run_service_session,
     verify_remote_environment,
 )
+from apps.stage7_session import (  # noqa: E402
+    Stage7ServiceSession,
+    open_service_session,
+)
 
 __all__ = [
     "Stage7RequestError", "ServiceSessionError", "run_stage7", "runs_root",
     "validate_stage7_request", "run_service_session", "run_service_batch",
     "verify_remote_environment", "prepare_service_config",
     "build_coordinator_script", "DEFAULT_BATCH_PLAN",
+    # Phase G 최종 모델 — bounded persistent session
+    "open_service_session", "Stage7ServiceSession",
 ]
 
 

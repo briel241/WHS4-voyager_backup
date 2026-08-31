@@ -165,9 +165,19 @@ class MassRocScenarioController:
 
     def __init__(self, *, controller, events, now_fn=None,
                  status_timeout_s: float = 120.0,
-                 receive_timeout_s: float = 120.0) -> None:
+                 receive_timeout_s: float = 120.0,
+                 workload_id: str = "single", trace=None) -> None:
         self._controller = controller
         self._events = events
+        if trace is None:
+            from apps.stage7_trace import NullTrace
+            trace = NullTrace()
+        #: 상위 계층 계측기. 계측 유무가 명령 순서·판정을 바꾸지 않는다.
+        self._trace = trace
+        #: 같은 hardware session에서 여러 workload가 돌 때 step/scenario ID가
+        #: 겹치면 adapter replay cache가 이전 응답을 돌려줄 수 있다. 모든
+        #: 식별자에 workload child ID를 결속해 namespace를 분리한다.
+        self._workload_id = workload_id
         self._now = now_fn if now_fn is not None else time.time
         self._status_timeout_s = status_timeout_s
         self._receive_timeout_s = receive_timeout_s
@@ -185,7 +195,8 @@ class MassRocScenarioController:
             "payload_sha256": hashlib.sha256(payload).hexdigest(),
         }
         response = self._controller.invoke_service_inline(
-            endpoint_id, scenario_id="mass-roc", step_id=step_id,
+            endpoint_id, scenario_id=f"mass-roc:{self._workload_id}",
+            step_id=f"{self._workload_id}/{step_id}",
             service_operation="SUBMIT", request=request,
         )
         body = response.get("body") or {}
@@ -198,7 +209,8 @@ class MassRocScenarioController:
 
     def _status(self, endpoint_id: str, transfer_id: str) -> str | None:
         response = self._controller.invoke_service_inline(
-            endpoint_id, scenario_id="mass-roc", step_id="status",
+            endpoint_id, scenario_id=f"mass-roc:{self._workload_id}",
+            step_id=f"{self._workload_id}/status/{transfer_id[:8]}",
             service_operation="STATUS",
             request={"transfer_id": transfer_id},
         )
@@ -254,8 +266,24 @@ class MassRocScenarioController:
             payload_format=payload_format, payload=app_payload,
             ack_required=ack_required,
         )
+        self._trace.emit("submit", step=step, sender=sender_ep,
+                         receiver=receiver_ep, transfer_id=transfer_id,
+                         payload_format=payload_format,
+                         payload_sha256=sha, payload_len=len(app_payload),
+                         source_station=STATION_BY_ENDPOINT[sender_ep],
+                         destination_station=dest_station,
+                         ack_required=ack_required)
         state = self._wait_terminal(sender_ep, transfer_id)
+        self._trace.emit("transfer_terminal", step=step,
+                         transfer_id=transfer_id, terminal_state=state)
         received = self._wait_received(receiver_ep, sha, before=before)
+        self._trace.emit("data_received", step=step, receiver=receiver_ep,
+                         present=received is not None,
+                         received_at_ns=(received or {}).get("received_at_ns"),
+                         t_mono=(received or {}).get("t_mono"),
+                         original_source=(received or {}).get("original_source"),
+                         original_destination=(received or {}).get(
+                             "original_destination"))
 
         # 오목적지·중복 관측 (증분 기준).
         wrong = 0
@@ -805,12 +833,31 @@ def _received(records, endpoint_id, sha):
 
 
 class EventLog:
-    """launcher event JSONL tail — public event만 본다 (RR controller와 동일)."""
+    """launcher event JSONL tail — public event만 본다 (RR controller와 동일).
 
-    def __init__(self, run_root: str) -> None:
-        self._dir = os.path.join(run_root, "evidence", "service_events")
+    `events_dir`를 주면 그 디렉터리를 직접 읽는다 (persistent session에서는
+    event JSONL이 session run-root에 있고 workload child의 run-root와 다르다).
+
+    `start_at_end=True`면 시작 시점의 파일 끝을 baseline으로 잡고 그 이후
+    event만 판정한다 — 같은 session에서 앞선 workload가 남긴 stale event가
+    이번 workload의 PASS 조건에 섞이지 않게 하는 격리 장치다.
+    """
+
+    def __init__(self, run_root: str, *, events_dir: str | None = None,
+                 start_at_end: bool = False) -> None:
+        self._dir = events_dir or os.path.join(run_root, "evidence",
+                                               "service_events")
         self._offsets = {ep: 0 for ep in ENDPOINT_IDS}
         self.records = {ep: [] for ep in ENDPOINT_IDS}
+        self.baseline = {ep: 0 for ep in ENDPOINT_IDS}
+        if start_at_end:
+            for endpoint_id in ENDPOINT_IDS:
+                path = os.path.join(self._dir, f"{endpoint_id}.jsonl")
+                try:
+                    self._offsets[endpoint_id] = os.path.getsize(path)
+                except OSError:
+                    self._offsets[endpoint_id] = 0
+                self.baseline[endpoint_id] = self._offsets[endpoint_id]
 
     def poll(self) -> None:
         for endpoint_id in ENDPOINT_IDS:
@@ -909,7 +956,21 @@ def main(argv=None) -> int:
                         choices=("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all"))
     parser.add_argument("--certificate-case", default="normal",
                         choices=("normal", "forged", "both"))
+    parser.add_argument(
+        "--workload-id", default=None,
+        help="persistent session의 workload child ID (step/scenario namespace 결속)")
+    parser.add_argument(
+        "--lifecycle", choices=("owned", "session"), default="owned",
+        help="owned(기본): 이 프로세스가 endpoint START/STOP을 소유한다. "
+             "session: hardware session이 소유하므로 START/STOP을 하지 않는다")
+    parser.add_argument(
+        "--events-dir", default=None,
+        help="session run-root의 service_events 디렉터리 (session lifecycle 전용)")
+    parser.add_argument(
+        "--diagnostics", action="store_true",
+        help="evidence 상세도를 높인다 (터미널 출력량은 늘리지 않는다)")
     arguments = parser.parse_args(argv)
+    workload_id = arguments.workload_id or "single"
 
     from vdeter.stage7.hw_operations import read_monotonic_raw_ns
     from vdeter.stage7.testing.controller import Stage7ScenarioController
@@ -929,11 +990,25 @@ def main(argv=None) -> int:
         adapter_channels=channels,
         host_raw_clock=read_monotonic_raw_ns,
     )
-    events = EventLog(arguments.run_root)
+    session_owned = arguments.lifecycle == "session"
+    events = EventLog(arguments.run_root, events_dir=arguments.events_dir,
+                      start_at_end=session_owned)
+    from apps.stage7_trace import TraceWriter
+    trace = TraceWriter(
+        os.path.join(arguments.run_root, "workload-trace.jsonl"),
+        session_id=arguments.run_id, workload_id=workload_id,
+        diagnostics=arguments.diagnostics)
     controller = MassRocScenarioController(controller=inline_controller,
                                            events=events,
                                            status_timeout_s=240.0,
-                                           receive_timeout_s=240.0)
+                                           receive_timeout_s=240.0,
+                                           workload_id=workload_id,
+                                           trace=trace)
+    trace.emit("workload_begin", scenario_id=arguments.scenario_id,
+               certificate_case=arguments.certificate_case,
+               lifecycle=arguments.lifecycle,
+               controller_instance=hex(id(controller)),
+               event_cursor_start=dict(events.baseline))
 
     gate_dir = os.path.join(arguments.run_root, "controller_gate")
     os.makedirs(gate_dir, exist_ok=True)
@@ -948,7 +1023,70 @@ def main(argv=None) -> int:
         body = response.get("body") or {}
         return body.get("call_outcome") == "OK", body
 
-    # --- admission_open 대기 → 세 START 병렬 (RR controller와 동일 게이트) ---
+    if session_owned:
+        # hardware session이 endpoint lifecycle을 소유한다. 이 child는
+        # application workload만 실행하고 START/STOP·admission을 만지지 않는다.
+        print(f"[mass-roc-controller] session workload {workload_id} 시작 "
+              f"(endpoint lifecycle 미소유)", flush=True)
+    else:
+        _own_endpoint_lifecycle_start(
+            inline_controller, invoke_fixture, gate_dir)
+
+    results: dict = {}
+    run_error: str | None = None
+    cleanup_errors: list[str] = []
+    try:
+        results = run_scenarios(controller, arguments.scenario_id,
+                                arguments.certificate_case, trace=trace)
+    except Exception as exc:  # noqa: BLE001 - 원래 예외를 evidence에 보존
+        run_error = f"{type(exc).__name__}: {exc}"
+        import traceback as _tb
+        trace.emit("workload_exception", error=run_error,
+                   traceback=_tb.format_exc()[-2000:])
+    finally:
+        if not session_owned:
+            for endpoint_id in ENDPOINT_IDS:
+                try:
+                    invoke_fixture(endpoint_id, "STOP", "stop.json",
+                                   f"stop-{endpoint_id}")
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_errors.append(f"{endpoint_id} STOP 실패: {exc}")
+
+    overall = run_error is None and bool(results)         and all(_result_ok(item) for item in results.values())
+    for scenario_id, payload in results.items():
+        _write_result(arguments.run_root, scenario_id, payload)
+    final = {
+        "artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
+        "run_id": arguments.run_id,
+        "workload_id": workload_id,
+        "lifecycle": arguments.lifecycle,
+        "scenario_id": arguments.scenario_id,
+        "certificate_case": arguments.certificate_case,
+        "status": "PASS" if overall else "FAIL",
+        "error": run_error,
+        "cleanup_errors": cleanup_errors,
+        "event_baseline": getattr(events, "baseline", None),
+        "results": results,
+        "command_log": inline_controller.command_log,
+    }
+    _write_result(arguments.run_root, "final-result", final)
+    # workload 경계에서 buffer를 비우고, application 객체 폐기를 남긴다.
+    events.poll()
+    trace.emit("workload_end", status=final["status"],
+               error=run_error, cleanup_errors=cleanup_errors,
+               event_cursor_end={ep: len(records)
+                                 for ep, records in events.records.items()},
+               application_objects_released=True)
+    trace.close()
+    del controller
+    print(f"[mass-roc-controller] 종결 {final['status']}", flush=True)
+    return 0 if overall else 1
+
+
+def _own_endpoint_lifecycle_start(inline_controller, invoke_fixture, gate_dir):
+    """`owned` lifecycle: admission gate 대기 후 세 endpoint START (기존 동작)."""
+    import threading
+
     gate = os.path.join(gate_dir, "admission_open")
     deadline = time.monotonic() + 4_200.0
     while not os.path.exists(gate):
@@ -957,7 +1095,6 @@ def main(argv=None) -> int:
             return 1
         time.sleep(0.2)
 
-    import threading
 
     start_results: dict = {}
 
@@ -978,43 +1115,7 @@ def main(argv=None) -> int:
         return 1
     open(os.path.join(gate_dir, "started_ok"), "w").close()
     print("[mass-roc-controller] start-all PASS", flush=True)
-
-    results: dict = {}
-    run_error: str | None = None
-    cleanup_errors: list[str] = []
-    try:
-        results = run_scenarios(controller, arguments.scenario_id,
-                                arguments.certificate_case)
-    except Exception as exc:  # noqa: BLE001 - 원래 예외를 evidence에 보존
-        run_error = f"{type(exc).__name__}: {exc}"
-    finally:
-        # cleanup — 중간 실패에도 endpoint STOP을 요청하고 실패를 함께 기록.
-        for endpoint_id in ENDPOINT_IDS:
-            try:
-                invoke_fixture(endpoint_id, "STOP", "stop.json",
-                               f"stop-{endpoint_id}")
-            except Exception as exc:  # noqa: BLE001
-                cleanup_errors.append(f"{endpoint_id} STOP 실패: {exc}")
-
-    overall = run_error is None and bool(results) \
-        and all(_result_ok(item) for item in results.values())
-    for scenario_id, payload in results.items():
-        _write_result(arguments.run_root, scenario_id, payload)
-    final = {
-        "artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
-        "run_id": arguments.run_id,
-        "scenario_id": arguments.scenario_id,
-        "certificate_case": arguments.certificate_case,
-        "status": "PASS" if overall else "FAIL",
-        "error": run_error,
-        "cleanup_errors": cleanup_errors,
-        "results": results,
-        "command_log": inline_controller.command_log,
-    }
-    _write_result(arguments.run_root, "final-result", final)
-    print(f"[mass-roc-controller] 종결 {final['status']}", flush=True)
-    return 0 if overall else 1
-
+    return 0
 
 def _result_ok(payload: dict) -> bool:
     if "result" in payload:  # 006 형식 (precondition + result)
@@ -1025,7 +1126,7 @@ def _result_ok(payload: dict) -> bool:
 
 
 def run_scenarios(controller: MassRocScenarioController, scenario_id: str,
-                  certificate_case: str) -> dict:
+                  certificate_case: str, trace=None) -> dict:
     """scenario_id/certificate_case에 맞춰 시나리오를 실행하고 결과 dict를 모은다.
 
     `all`에서는 SC-VDE-005를 한 번만 실행하고 **같은 agent 쌍·그 결과**를
@@ -1033,7 +1134,12 @@ def run_scenarios(controller: MassRocScenarioController, scenario_id: str,
     RF command/ACK 왕복 한 세트를 낭비하지 않게 한다. 단독 SC-VDE-006은
     여전히 자기 사전 조건 005를 스스로 실행한다.
     """
+    if trace is None:
+        from apps.stage7_trace import NullTrace
+        trace = NullTrace()
     results: dict = {}
+    trace.emit("scenarios_begin", scenario_id=scenario_id,
+               certificate_case=certificate_case)
     if scenario_id == "all":
         roc, mass = _default_agents()
         pre = controller.run_sc_vde_005(agents=(roc, mass))
@@ -1050,6 +1156,15 @@ def run_scenarios(controller: MassRocScenarioController, scenario_id: str,
         for case in cases:
             results[f"SC-VDE-001[{case}]"] = \
                 controller.run_sc_vde_001(certificate_case=case).to_dict()
+    for name, payload in results.items():
+        body = payload.get("result", payload)
+        trace.emit("scenario_result", scenario=name,
+                   status=body.get("status"), reason=body.get("reason"),
+                   counters=body.get("counters"),
+                   transfers=len(body.get("transfers") or []),
+                   steps=[(s["name"], s["status"])
+                          for s in (body.get("steps") or [])])
+    trace.emit("scenarios_end", results=sorted(results))
     return results
 
 
