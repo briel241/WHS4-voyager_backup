@@ -1557,6 +1557,65 @@ SESSION_IDLE_TIMEOUT_S = 45 * 60
 #: workload에 16분밖에 남지 않는다 — 두 개념을 분리한다.
 SESSION_DEADLINE_S = 2 * 60 * 60
 
+#: application workload child 상한. 로컬 ``Stage7ServiceSession``의 900초
+#: 계약과 같은 값으로 coordinator도 직접 강제한다. 한쪽만 timeout이면 원격
+#: child가 살아 남아 B210 cleanup을 막을 수 있다.
+SESSION_WORKLOAD_TIMEOUT_S = 900.0
+
+#: workload/lifecycle child의 bounded process cleanup 상한.
+CHILD_TERMINATE_TIMEOUT_S = 30.0
+CHILD_KILL_TIMEOUT_S = 10.0
+
+
+def _terminate_process_bounded(process, *, terminate_timeout_s=None,
+                               kill_timeout_s=None):
+    """살아 있는 child를 terminate -> wait -> kill -> wait 순서로 회수한다."""
+    terminate_timeout_s = (CHILD_TERMINATE_TIMEOUT_S
+                           if terminate_timeout_s is None
+                           else terminate_timeout_s)
+    kill_timeout_s = (CHILD_KILL_TIMEOUT_S
+                      if kill_timeout_s is None else kill_timeout_s)
+    outcome = {
+        "terminate_sent": False,
+        "kill_sent": False,
+        "exit_code": process.poll(),
+        "error": None,
+    }
+    if outcome["exit_code"] is not None:
+        return outcome
+    try:
+        process.terminate()
+        outcome["terminate_sent"] = True
+        try:
+            process.wait(timeout=terminate_timeout_s)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            outcome["kill_sent"] = True
+            try:
+                process.wait(timeout=kill_timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                outcome["error"] = (
+                    f"kill 이후 {kill_timeout_s}s 내 종료하지 않음: {exc}")
+    except Exception as exc:  # noqa: BLE001 - cleanup 결과를 evidence로 보존
+        outcome["error"] = f"{type(exc).__name__}: {exc}"
+    outcome["exit_code"] = process.poll()
+    return outcome
+
+
+def _service_session_terminal_status(workloads, service_stop_rc,
+                                     endpoint_stop_completed):
+    """빈 측정·workload 실패·불완전 STOP을 모두 fail-closed 판정한다."""
+    failures = []
+    if not workloads:
+        failures.append("workload가 하나도 완료되지 않음")
+    elif not all(item.get("status") == "PASS" for item in workloads):
+        failures.append("하나 이상의 workload가 FAIL")
+    if service_stop_rc != 0:
+        failures.append(f"service STOP 대행 rc={service_stop_rc}")
+    if not endpoint_stop_completed:
+        failures.append("endpoint STOP 미완료")
+    return ("FAIL", "; ".join(failures)) if failures else ("PASS", None)
+
 
 def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                          metadata, configs_dir, gain_artifact_path,
@@ -1610,6 +1669,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     error = None
     cleanup = {}
     service_stop_rc = None
+    endpoint_stop_completed = False
     start_proxy = None
 
     # --- 계측 (orchestration 계층 전용) ------------------------------------
@@ -1996,12 +2056,104 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             emit("workload_child_spawn", workload=workload_id, pid=child.pid,
                  scenario_id=scenario_id, certificate_case=certificate_case,
                  child_run_root=child_root, command=command)
-            while child.poll() is None:
-                guard.check()
-                guard.progress(f"workload:{workload_id}")
-                pump_events()
-                time.sleep(1.0)
-            log_handle.close()
+            workload_deadline = workload_started + SESSION_WORKLOAD_TIMEOUT_S
+            workload_abort = None
+            try:
+                while child.poll() is None:
+                    abort_reason = None
+                    abort_detail = None
+                    try:
+                        guard.check()
+                        pump_events()
+                    except Exception as exc:  # noqa: BLE001 - child부터 회수
+                        abort_reason = "session_guard_or_event_failure"
+                        abort_detail = f"{type(exc).__name__}: {exc}"
+                    if (abort_reason is None and os.path.exists(
+                            os.path.join(session_dir, SESSION_SHUTDOWN))):
+                        abort_reason = "session_shutdown"
+                    if abort_reason is None:
+                        fault_count = len(list(coordinator.faults()))
+                        if (coordinator.inhibited
+                                or fault_count != baseline_health["faults"]):
+                            abort_reason = "session_fault"
+                            abort_detail = (
+                                f"inhibited={coordinator.inhibited}, "
+                                f"faults={fault_count}, "
+                                f"baseline={baseline_health['faults']}")
+                    if (abort_reason is None
+                            and time.monotonic() >= workload_deadline):
+                        abort_reason = "workload_timeout"
+                        abort_detail = f"상한 {SESSION_WORKLOAD_TIMEOUT_S}s"
+                    if abort_reason is not None:
+                        workload_abort = {
+                            "artifact_type": "STAGE7_SERVICE_WORKLOAD_ABORT_V1",
+                            "status": "FAIL",
+                            "workload_id": workload_id,
+                            "scenario_id": scenario_id,
+                            "reason": abort_reason,
+                            "detail": abort_detail,
+                            "elapsed_s": round(
+                                time.monotonic() - workload_started, 1),
+                            "child_pid": child.pid,
+                            "failure_preserved_before_terminate": True,
+                        }
+                        abort_dir = os.path.join(
+                            child_root, "evidence", "operational_service")
+                        os.makedirs(abort_dir, exist_ok=True)
+                        abort_path = os.path.join(
+                            abort_dir, "workload_abort.json")
+                        try:
+                            write_json(abort_path, workload_abort)
+                        except Exception as exc:  # noqa: BLE001
+                            workload_abort["preserve_error"] = (
+                                f"{type(exc).__name__}: {exc}")
+                        emit("workload_child_abort", **workload_abort)
+                        workload_abort["child_cleanup"] = (
+                            _terminate_process_bounded(child))
+                        try:
+                            write_json(abort_path, workload_abort)
+                        except Exception:  # noqa: BLE001 - 최초 상태는 이미 보존
+                            pass
+                        emit("workload_child_reaped", workload=workload_id,
+                             reason=abort_reason,
+                             child_cleanup=workload_abort["child_cleanup"])
+                        break
+                    time.sleep(1.0)
+            finally:
+                log_handle.close()
+
+            if workload_abort is not None:
+                quiescence = {
+                    "pass": False,
+                    "child_exit_code": child.returncode,
+                    "child_terminated": child.poll() is not None,
+                    "abort_reason": workload_abort["reason"],
+                    "child_cleanup": workload_abort["child_cleanup"],
+                }
+                record = {
+                    "artifact_type": "STAGE7_SERVICE_WORKLOAD_RESULT_V1",
+                    "judgement_scope": "OPERATIONAL_SERVICE",
+                    "workload_id": workload_id, "scenario_id": scenario_id,
+                    "certificate_case": certificate_case,
+                    "session_run_id": run_id,
+                    "child_exit_code": child.returncode,
+                    "duration_s": round(time.monotonic() - workload_started, 1),
+                    "session_health_before": health,
+                    "quiescence": quiescence,
+                    "scenario": None,
+                    "status": "FAIL",
+                    "error": workload_abort,
+                }
+                write_json(os.path.join(results_dir, request_name), record)
+                workloads.append({k: record[k] for k in
+                                  ("workload_id", "scenario_id",
+                                   "certificate_case", "status", "duration_s")})
+                emit("workload_result", workload=workload_id,
+                     scenario_id=scenario_id, status="FAIL",
+                     duration_s=record["duration_s"], quiescence=quiescence)
+                raise RuntimeError(
+                    f"workload {workload_id} 중단: "
+                    f"{workload_abort['reason']} ({workload_abort['detail']})")
 
             scenario_result = None
             result_path = os.path.join(child_root, "mass-roc-events",
@@ -2092,7 +2244,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         while stop_proxy.poll() is None:
             pump_events()
             if time.monotonic() > stop_proxy_deadline:
-                stop_proxy.terminate()
+                emit("lifecycle_proxy_abort", lifecycle="session-stop",
+                     reason="timeout", timeout_s=300.0)
+                _terminate_process_bounded(stop_proxy)
                 break
             time.sleep(0.5)
         service_stop_rc = stop_proxy.returncode
@@ -2108,8 +2262,12 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                  "stop_deadline_host_raw_ns": stop_now + 30_000_000_000}
              for m in ENDPOINT_IDS},
         )
+        endpoint_stop_completed = service_stop_rc == 0
         mark("stop")
-        status = "PASS" if all(w["status"] == "PASS" for w in workloads) else "FAIL"
+        status, terminal_error = _service_session_terminal_status(
+            workloads, service_stop_rc, endpoint_stop_completed)
+        if terminal_error is not None:
+            error = terminal_error
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
         status = "FAIL"
@@ -2123,11 +2281,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     finally:
         # START 대행이 남아 있으면 먼저 회수한다 (실패 경로에서 블록 중일 수 있다).
         if start_proxy is not None and start_proxy.poll() is None:
-            start_proxy.terminate()
-            try:
-                start_proxy.wait(timeout=30.0)
-            except subprocess.TimeoutExpired:
-                start_proxy.kill()
+            start_cleanup = _terminate_process_bounded(start_proxy)
+            emit("lifecycle_proxy_abort", lifecycle="session-start",
+                 reason="session_finalization", child_cleanup=start_cleanup)
         # launcher를 실제로 내린 **뒤에** cleanup을 계측한다. 이전 판(0.9.x)은
         # main()의 teardown보다 먼저 재보아 정상 종료 중에도 worker 3·재발견
         # 실패로 기록됐다 — 장치 상태가 아니라 계측 순서 결함이었다.
@@ -2138,12 +2294,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 while process.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.5)
                 if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=30.0)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=10.0)
+                    launcher_cleanup = _terminate_process_bounded(process)
+                    emit("launcher_cleanup", endpoint_id=endpoint_id,
+                         child_cleanup=launcher_cleanup)
                     # 자발 종료하지 않았다는 사실 자체는 그대로 남긴다.
                     clean_exit = False
                     print(f"[coordinator] {endpoint_id} launcher 강제 종료",
@@ -2179,7 +2332,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             "hardware_lifecycle": {
                 "b210_acquire": 1, "endpoint_start": 1, "acquire_host_time": 1,
                 "rf_time_pre": 1, "rf_time_post": 1, "active_bridge": 1,
-                "service_admission": 1, "endpoint_stop": 1,
+                "service_admission": 1,
+                "endpoint_stop": 1 if endpoint_stop_completed else 0,
                 "note": "workload 수와 무관하게 각 1회",
             },
             "workloads": workloads,

@@ -143,6 +143,54 @@ def service_event_record(event, *, mono_clock=time.monotonic) -> dict:
     return record
 
 
+def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event):
+    """Serve one TEST-adapter peer at a time, accepting the next after EOF.
+
+    A persistent hardware session uses separate controller processes for
+    session-start, each workload, and session-stop. Each process therefore
+    opens a fresh connection to the same endpoint socket. Keep the listener
+    alive across peer EOF while retaining the per-accept UID check and never
+    accepting a second peer until the current one has disconnected.
+    """
+
+    while not stop_event.is_set():
+        try:
+            test_server.accept(
+                expected_pid=None,
+                expected_uid=expected_uid,
+                timeout=1.0,
+            )
+        except TimeoutError:
+            continue
+        except OSError:
+            if stop_event.is_set():
+                return
+            raise
+
+        try:
+            while not stop_event.is_set():
+                message = test_server.recv_message(timeout=1.0)
+                if message is None:
+                    continue
+                response = adapter.handle_command(
+                    message, peer=(expected_uid,)
+                )
+                test_server.send_message(response)
+        except ConnectionError:
+            # Normal peer teardown: close only this accepted connection, then
+            # return to accept() without closing/unlinking the listener.
+            pass
+        finally:
+            connection = getattr(test_server, "_connection", None)
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+            test_server._connection = None
+            test_server._peer = None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Stage 7 endpoint launcher")
     parser.add_argument("--run-id", required=True)
@@ -1983,6 +2031,7 @@ def main(argv=None) -> int:
 
     # --- v0.9.1 G항: RR TEST adapter 스레드 + public event JSONL ------------------
     test_threads = []
+    test_server = None
     if arguments.test_plan_sha:
         import glob as _glob
         import json as _json_local
@@ -2006,21 +2055,16 @@ def main(argv=None) -> int:
 
         def _adapter_loop():
             try:
-                test_server.accept(
-                    expected_pid=None,
+                _serve_test_adapter_peers(
+                    test_server,
+                    adapter,
                     expected_uid=os.getuid(),  # type: ignore[attr-defined]
-                    timeout=3600.0,
+                    stop_event=_pump_stop,
                 )
-                while True:
-                    message = test_server.recv_message(timeout=5.0)
-                    if message is None:
-                        continue
-                    response = adapter.handle_command(
-                        message, peer=(os.getuid(),)  # type: ignore[attr-defined]
-                    )
-                    test_server.send_message(response)
-            except (ConnectionError, OSError):
-                return
+            except OSError as error:
+                if not _pump_stop.is_set():
+                    print(f"[launcher] test adapter 오류: {error}",
+                          file=sys.stderr, flush=True)
 
         def _event_jsonl_loop():
             events_dir = os.path.join(arguments.run_root, "evidence", "service_events")
@@ -2032,7 +2076,7 @@ def main(argv=None) -> int:
                 open(path, "a", encoding="utf-8").close()
             seen = 0
             events_warned = False
-            while True:
+            while not _pump_stop.is_set():
                 try:
                     sink = endpoint.start_gate.application_sink
                     events = tuple(sink.events())
@@ -2054,7 +2098,7 @@ def main(argv=None) -> int:
                             handle.write(_json_local.dumps(record, ensure_ascii=True))
                             handle.write("\n")
                     seen = len(events)
-                time.sleep(0.5)
+                _pump_stop.wait(0.5)
 
         for target in (_adapter_loop, _event_jsonl_loop):
             thread = _threading.Thread(target=target, daemon=True)
@@ -2087,6 +2131,12 @@ def main(argv=None) -> int:
     except SystemExit as stop_signal:
         exit_code = int(stop_signal.code or 0)
     finally:
+        _pump_stop.set()
+        if test_server is not None:
+            test_server.close()
+        for thread in test_threads:
+            thread.join(timeout=2.0)
+        _pump_thread.join(timeout=2.0)
         try:
             endpoint.dependencies.radio.close_qualification_lease()
         except Exception:  # noqa: BLE001 - 종료 경로 최선 노력

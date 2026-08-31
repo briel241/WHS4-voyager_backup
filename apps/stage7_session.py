@@ -62,6 +62,9 @@ class Stage7ServiceSession:
         self.remote_preflight = None
         self.config = None
         self.logs = []
+        self.evidence_collection = None
+        self._coordinator_launch_attempted = False
+        self._coordinator_spawned = False
         self._counter = 0
         self._started = clock()
         self.diagnostics = bool(diagnostics)
@@ -182,7 +185,12 @@ class Stage7ServiceSession:
             + self.remote_run_root + "/coordinator-console.log 2>&1 < /dev/null &\n"
             "echo spawned\n"
         )
+        # SSH가 원격 nohup spawn 직후 끊기면 호출자는 성공 응답을 못 받았어도
+        # coordinator가 살아 있을 수 있다. 시도 사실을 먼저 기록해 close()가
+        # 그 경우에도 bounded cleanup 확인을 생략하지 않게 한다.
+        self._coordinator_launch_attempted = True
         self._ssh(script, timeout=180.0)
+        self._coordinator_spawned = True
         self._mark("coordinator_spawned")
         self.trace.emit("coordinator_spawned", phase="mass-roc-session",
                         remote_run_root=self.remote_run_root)
@@ -302,47 +310,188 @@ class Stage7ServiceSession:
             return self.closed
         self.trace.state("STOPPING")
         self.trace.flush()
+        close_errors = []
+        coordinator_exited = False
+        shutdown_rc = None
         try:
-            self._ssh("mkdir -p " + self.remote_session_dir + " && touch "
-                      + self.remote_session_dir + "/" + SESSION_SHUTDOWN,
-                      timeout=120.0, check=False)
-            deadline = self.clock() + SESSION_CLOSE_TIMEOUT_S
-            while self.clock() < deadline:
-                if self._coordinator_exited():
-                    break
-                time.sleep(3.0)
+            shutdown = self._ssh(
+                "mkdir -p " + self.remote_session_dir + " && touch "
+                + self.remote_session_dir + "/" + SESSION_SHUTDOWN,
+                timeout=120.0, check=False)
+            shutdown_rc = shutdown.returncode
+            if shutdown_rc != 0:
+                close_errors.append(
+                    f"shutdown 요청 실패(rc={shutdown_rc})")
+            if self._coordinator_launch_attempted:
+                deadline = self.clock() + SESSION_CLOSE_TIMEOUT_S
+                while self.clock() < deadline:
+                    if self._coordinator_exited():
+                        coordinator_exited = True
+                        break
+                    time.sleep(3.0)
+                if not coordinator_exited:
+                    coordinator_exited = self._coordinator_exited()
+            if self._coordinator_launch_attempted and not coordinator_exited:
+                close_errors.append(
+                    "bounded close timeout — coordinator가 남아 있을 수 있음")
             closed = self._remote_json(SESSION_CLOSED)
             if closed is None:
                 closed = {"status": "FAIL", "error": "closed.json 없음"}
-            closed.setdefault("coordinator_rc", self._coordinator_rc())
+            coordinator_rc = self._coordinator_rc() if coordinator_exited else None
+            reported_rc = closed.get("coordinator_rc")
+            if reported_rc is not None and reported_rc != coordinator_rc:
+                close_errors.append(
+                    "closed.json과 done.rc의 coordinator rc가 다름")
+            closed["coordinator_rc"] = coordinator_rc
+            if coordinator_exited and coordinator_rc != 0:
+                close_errors.append(
+                    f"coordinator 비정상 종료(rc={coordinator_rc})")
+            cleanup = closed.get("cleanup") or {}
+            if closed.get("status") != "PASS":
+                close_errors.append(
+                    f"원격 close status={closed.get('status')!r}")
+            if cleanup.get("pass") is not True:
+                close_errors.append("원격 cleanup pass가 true가 아님")
+            closed["bounded_close"] = {
+                "timeout_s": SESSION_CLOSE_TIMEOUT_S,
+                "shutdown_request_returncode": shutdown_rc,
+                "coordinator_exited": coordinator_exited,
+                "coordinator_may_be_running": (
+                    self._coordinator_launch_attempted and not coordinator_exited),
+                "launch_attempted": self._coordinator_launch_attempted,
+                "spawn_confirmed": self._coordinator_spawned,
+                "pass": not close_errors,
+            }
+            if close_errors:
+                previous = closed.get("error")
+                closed["status"] = "FAIL"
+                closed["error"] = "; ".join(
+                    ([str(previous)] if previous else []) + close_errors)
             self.closed = closed
         except Exception as exc:  # noqa: BLE001 - cleanup 실패도 evidence로
             self.closed = {
                 "status": "FAIL",
                 "error": f"cleanup 실패: {type(exc).__name__}: {exc}",
+                "bounded_close": {
+                    "timeout_s": SESSION_CLOSE_TIMEOUT_S,
+                    "shutdown_request_returncode": shutdown_rc,
+                    "coordinator_exited": coordinator_exited,
+                    "coordinator_may_be_running": (
+                        self._coordinator_launch_attempted and not coordinator_exited),
+                    "launch_attempted": self._coordinator_launch_attempted,
+                    "spawn_confirmed": self._coordinator_spawned,
+                    "pass": False,
+                },
             }
+
+        try:
+            self.evidence_collection = self.collect_evidence()
+        except Exception as exc:  # noqa: BLE001 - 수집 실패도 session FAIL
+            self.evidence_collection = {
+                "pass": False,
+                "error": f"evidence 수집 실패: {type(exc).__name__}: {exc}",
+            }
+            previous = self.closed.get("error")
+            self.closed["status"] = "FAIL"
+            self.closed["error"] = "; ".join(
+                ([str(previous)] if previous else [])
+                + [self.evidence_collection["error"]])
         self._mark("session_closed")
-        if self.status != "QUIESCENCE_FAIL":
+        if self.closed.get("status") != "PASS":
+            self.status = "FAIL"
+            self.error = self.closed.get("error")
+        elif self.status != "QUIESCENCE_FAIL":
             self.status = self.closed.get("status", "FAIL")
         self.trace.emit("session_closed", status=self.status,
                         cleanup=(self.closed or {}).get("cleanup"),
+                        bounded_close=(self.closed or {}).get("bounded_close"),
+                        evidence_collection=self.evidence_collection,
                         coordinator_rc=(self.closed or {}).get("coordinator_rc"),
                         error=(self.closed or {}).get("error"))
         self.trace.state("CLOSED" if self.status == "PASS" else "FAILED")
         self.trace.close()
-        self.collect_evidence()
         return self.closed
 
-    def collect_evidence(self) -> None:
+    def _validate_existing_evidence_target(self, target: str) -> dict:
+        from apps.stage7_service_layer import ServiceSessionError
+
+        if not os.path.isdir(target):
+            raise ServiceSessionError(
+                f"기존 evidence target이 디렉터리가 아닙니다: {target}")
+        files = []
+        for base, _dirs, names in os.walk(target):
+            files.extend(os.path.join(base, name) for name in names)
+        if not files:
+            raise ServiceSessionError(
+                f"기존 evidence target이 비어 있습니다: {target}")
+
+        if self.ready is not None:
+            ready_path = os.path.join(target, SESSION_DIR_NAME, SESSION_READY)
+            if not os.path.isfile(ready_path):
+                raise ServiceSessionError(
+                    "기존 evidence target에 session/ready.json이 없습니다")
+            try:
+                with open(ready_path, "r", encoding="utf-8") as handle:
+                    collected_ready = json.load(handle)
+            except (OSError, ValueError) as exc:
+                raise ServiceSessionError(
+                    f"기존 session/ready.json 검증 실패: {exc}") from exc
+            if collected_ready.get("run_id") != self.session_id:
+                raise ServiceSessionError(
+                    "기존 evidence target의 ready run-id가 현재 session과 다릅니다")
+        if self.closed and self.closed.get("artifact_type"):
+            closed_path = os.path.join(target, SESSION_DIR_NAME, SESSION_CLOSED)
+            if not os.path.isfile(closed_path):
+                raise ServiceSessionError(
+                    "기존 evidence target에 session/closed.json이 없습니다")
+            try:
+                with open(closed_path, "r", encoding="utf-8") as handle:
+                    collected_closed = json.load(handle)
+            except (OSError, ValueError) as exc:
+                raise ServiceSessionError(
+                    f"기존 session/closed.json 검증 실패: {exc}") from exc
+            if collected_closed.get("status") != self.closed.get("status"):
+                raise ServiceSessionError(
+                    "기존 evidence target의 closed status가 현재 결과와 다릅니다")
+            if collected_closed.get("run_id") != self.session_id:
+                raise ServiceSessionError(
+                    "기존 evidence target의 closed run-id가 현재 session과 다릅니다")
+        expected_rc = (self.closed or {}).get("coordinator_rc")
+        if expected_rc is not None:
+            rc_path = os.path.join(target, "done.rc")
+            try:
+                with open(rc_path, "r", encoding="utf-8") as handle:
+                    collected_rc = int(handle.read().strip())
+            except (OSError, ValueError) as exc:
+                raise ServiceSessionError(
+                    f"기존 evidence target의 done.rc 검증 실패: {exc}") from exc
+            if collected_rc != expected_rc:
+                raise ServiceSessionError(
+                    "기존 evidence target의 coordinator rc가 현재 결과와 다릅니다")
+        return {"pass": True, "reused": True, "file_count": len(files),
+                "target": target}
+
+    def collect_evidence(self) -> dict:
+        from apps.stage7_service_layer import ServiceSessionError
+
         target = os.path.join(self.session_dir, "remote-run")
         if os.path.exists(target):
-            return
-        self.runner(["scp", "-q", "-r",
-                     self.profile["pi"]["host"] + ":"
-                     + self.profile["pi"]["deploy_relpath"]
-                     + "/runs/" + self.session_id, target],
-                    capture_output=True, text=True, timeout=900,
-                    encoding="utf-8", errors="replace")
+            return self._validate_existing_evidence_target(target)
+        done = self.runner(
+            ["scp", "-q", "-r",
+             self.profile["pi"]["host"] + ":"
+             + self.profile["pi"]["deploy_relpath"]
+             + "/runs/" + self.session_id, target],
+            capture_output=True, text=True, timeout=900,
+            encoding="utf-8", errors="replace")
+        if done.returncode != 0:
+            detail = ((done.stdout or "") + (done.stderr or ""))[-300:]
+            raise ServiceSessionError(
+                f"remote evidence scp 실패(rc={done.returncode}): {detail}")
+        validated = self._validate_existing_evidence_target(target)
+        validated.update({"reused": False,
+                          "scp_returncode": done.returncode})
+        return validated
 
     def summary(self) -> dict:
         return {
@@ -370,6 +519,7 @@ class Stage7ServiceSession:
             "workloads": self.workloads,
             "workload_ids": [w.get("workload_id") for w in self.workloads],
             "closed": self.closed,
+            "evidence_collection": self.evidence_collection,
             "hardware_lifecycle_note": (
                 "B210 acquire·endpoint START·host fit·RF-time PRE/POST·"
                 "active bridge·admission·STOP은 session당 각 1회. "

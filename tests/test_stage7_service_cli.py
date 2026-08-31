@@ -13,6 +13,7 @@ RF 없이 증명하는 것:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -201,8 +202,16 @@ def test_critical_mismatch_blocks_before_device_access():
 def test_topology_and_trust_gates():
     profile = stage7_profile.load_profile(_profile_path())
     critical = profile["_reference"]["qualification_critical_manifest"]["strict_files"]
-    bound = list(profile["_reference"]["qualification_critical_manifest"]
-                 .get("function_bound_files") or {})
+    bound_specs = (profile["_reference"]["qualification_critical_manifest"]
+                   .get("function_bound_files") or {})
+    # 이 시험은 USB/process/trust 게이트를 격리한다. 보존된 과거 profile의
+    # Phase-G 전체-file 결속만 현재 fake 배포 source에 맞춰 새 게이트를 통과시킨다.
+    for candidate, spec in bound_specs.items():
+        with open(os.path.join(_REPO, candidate), encoding="utf-8") as handle:
+            source = handle.read()
+        spec["phase_g_file_sha256"] = hashlib.sha256(
+            source.encode("utf-8")).hexdigest()
+    bound = list(bound_specs)
 
     def make_runner(usb_ok=True, procs="none", throttled="throttled=0x0",
                     key_mode="600", match="true"):

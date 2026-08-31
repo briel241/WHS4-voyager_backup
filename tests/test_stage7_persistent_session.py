@@ -127,6 +127,7 @@ class _FakePi:
         self.commands = []
         self.bringup_count = 0
         self.stop_count = 0
+        self.run_id = None
 
     def __call__(self, command, **kwargs):
         script = command[-1] if command and command[0] == "ssh" else " ".join(command)
@@ -135,12 +136,14 @@ class _FakePi:
             return _FakeCompleted("")
         if "--phase mass-roc-session" in script:
             self.bringup_count += 1
+            self.run_id = script.split("--run-id ", 1)[1].split()[0]
             return _FakeCompleted("spawned")
         if script.startswith("cat ") and "ready.json" in script:
             if not self.ready:
                 return _FakeCompleted("")
             return _FakeCompleted(json.dumps({
                 "artifact_type": "STAGE7_SERVICE_SESSION_READY_V1",
+                "run_id": self.run_id,
                 "rf_time_paths": ["C1", "C2", "C3", "C4", "C5", "C6"],
                 "phase_elapsed_s": {"rf_time_post": 1240.0},
                 "health_baseline": {"faults": 0},
@@ -185,6 +188,7 @@ class _FakePi:
             self.closed_written = True
             return _FakeCompleted(json.dumps({
                 "artifact_type": "STAGE7_OPERATIONAL_SERVICE_SESSION_RESULT_V1",
+                "run_id": self.run_id,
                 "status": "PASS",
                 "cleanup": {"pass": True, "workers_after_stop": 0,
                             "rediscovery": {"34D03DD": True, "3515425": True,
@@ -680,7 +684,7 @@ def test_session_cleanup_measured_after_launcher_teardown():
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                 and n.name == "run_mass_roc_session")
     body = ast.unparse(node)
-    terminate_at = body.index("process.terminate()")
+    terminate_at = body.index("_terminate_process_bounded(process)")
     workers_at = body.index("'workers_after_stop'")
     assert terminate_at < workers_at, (
         "launcher teardown 전에 worker 수를 재고 있다")

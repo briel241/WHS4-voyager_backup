@@ -32,6 +32,15 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: 세션 간 상태를 공유하지 않는다 — 매 세션 새 run-id.
 SESSION_RUN_ID_PREFIX = "svc"
 
+#: Stage 7 hardware/session ownership과 충돌하는 실제 process argv 패턴.
+#: B210 backend는 multiprocessing ``spawn`` child라 모듈 파일명이 argv에
+#: 나타나지 않을 수 있으므로 ``spawn_main`` 계열도 보수적으로 차단한다.
+_COMPETING_PROCESS_PATTERN = (
+    "stage7_coordinator_main|stage7_endpoint_launcher|"
+    "stage7_mass_roc_controller|multiprocessing\\.spawn|spawn_main|"
+    "vdeter-b210-gr-uhd|uhd_|usrp"
+)
+
 #: 대화형 `a) 전체 실행`이 차례로 도는 독립 child 계획.
 DEFAULT_BATCH_PLAN = (
     ("SC-VDE-005", "normal"),
@@ -94,6 +103,17 @@ def _verify_function_bound(profile: dict, root: str, runner) -> dict:
         except SyntaxError as exc:
             raise ServiceSessionError(f"{relpath} 파싱 실패: {exc}") from exc
 
+        deployed_file_sha256 = hashlib.sha256(
+            source.encode("utf-8")).hexdigest()
+        expected_file_sha256 = spec.get("phase_g_file_sha256")
+        if not expected_file_sha256:
+            raise ServiceSessionError(
+                f"{relpath} reference에 phase_g_file_sha256 결속이 없습니다")
+        if deployed_file_sha256 != expected_file_sha256:
+            raise ServiceSessionError(
+                f"{relpath}의 배포본 전체 파일이 Phase G reference와 다릅니다 "
+                "— RF 접근 거부")
+
         actual = {}
         for node in tree.body:
             if isinstance(node, ast.FunctionDef):
@@ -104,21 +124,76 @@ def _verify_function_bound(profile: dict, root: str, runner) -> dict:
                         ast.unparse(node).encode("utf-8")).hexdigest(),
                 }
         expected = spec.get("qualified_functions") or {}
+        if not expected:
+            raise ServiceSessionError(
+                f"{relpath} reference에 qualified_functions 결속이 없습니다")
         changed = sorted(name for name, value in expected.items()
-                         if actual.get(name) != value)
+                          if actual.get(name) != value)
         missing = sorted(name for name in expected if name not in actual)
+
+        expected_dispatch = spec.get("rr_phase_dispatch")
+        if not isinstance(expected_dispatch, dict) or not expected_dispatch:
+            raise ServiceSessionError(
+                f"{relpath} reference에 rr_phase_dispatch 결속이 없습니다")
+        phase_names = {
+            "p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
+            "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17",
+            "rr-p3-soak-19", "mass-roc-service",
+        }
+        actual_dispatch = {}
+        main = next((node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)
+                     and node.name == "main"), None)
+        if main is None:
+            raise ServiceSessionError(f"{relpath}에 main 함수가 없습니다")
+        for node in ast.walk(main):
+            if not isinstance(node, ast.If):
+                continue
+            phases = [constant.value for constant in ast.walk(node.test)
+                      if isinstance(constant, ast.Constant)
+                      and isinstance(constant.value, str)
+                      and constant.value in phase_names]
+            called = sorted({
+                call.func.id
+                for statement in node.body
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id.startswith("run_")
+            })
+            for phase in phases:
+                if called:
+                    previous = actual_dispatch.get(phase, [])
+                    actual_dispatch[phase] = sorted(set(previous + called))
+        dispatch_mismatch = {
+            phase: {"expected": expected, "actual": actual_dispatch.get(phase)}
+            for phase, expected in expected_dispatch.items()
+            if actual_dispatch.get(phase) != expected
+        }
+        # reference의 rr_phase_dispatch는 qualified RR 분기 golden trace다.
+        # 이후 추가된 service 분기는 전체-file SHA로 별도 결속되므로 여기서는
+        # 기존 phase mapping의 변경/누락만 거부하고 additive key는 기록만 한다.
+        dispatch_additions = {
+            phase: called for phase, called in actual_dispatch.items()
+            if phase not in expected_dispatch
+        }
+        dispatch_changed = bool(dispatch_mismatch)
         outcome[relpath] = {
             "qualified_functions_checked": len(expected),
             "changed": changed, "missing": missing,
-            "deployed_file_sha256": hashlib.sha256(
-                source.encode("utf-8")).hexdigest(),
+            "dispatch_changed": dispatch_changed,
+            "dispatch_mismatch": dispatch_mismatch,
+            "dispatch_additions": dispatch_additions,
+            "deployed_file_sha256": deployed_file_sha256,
             "phase_f_file_sha256": spec.get("phase_f_file_sha256"),
-            "pass": not changed and not missing,
+            "phase_g_file_sha256": expected_file_sha256,
+            "pass": not changed and not missing and not dispatch_changed,
         }
-        if changed or missing:
+        if changed or missing or dispatch_changed:
             raise ServiceSessionError(
                 f"{relpath}의 qualification 경로가 변경됐다 — RF 접근 거부 "
-                f"(changed={changed}, missing={missing})")
+                f"(changed={changed}, missing={missing}, "
+                f"dispatch_mismatch={dispatch_mismatch})")
     return outcome
 
 
@@ -173,7 +248,7 @@ def verify_remote_environment(profile: dict, *, runner=subprocess.run) -> dict:
         '[ "$ser" = "$want" ] && echo "$(basename $d) $ser $(cat $d/speed 2>/dev/null)"; '
         'done; done\n'
         'echo "##PROC"\n'
-        'pgrep -af "stage7_coordinator_main|stage7_endpoint_launcher|uhd_|usrp" '
+        'pgrep -af "' + _COMPETING_PROCESS_PATTERN + '" '
         '| grep -v pgrep || echo none\n'
         'echo "##THROTTLE"\nvcgencmd get_throttled\n'
         'echo "##TRUST"\n'

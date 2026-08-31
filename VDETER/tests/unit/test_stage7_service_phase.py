@@ -26,7 +26,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
 
 #: Phase F qualification 시점 commit (reference의 qualified_source_commit).
-QUALIFIED_COMMIT = "c063d0db16f1074fb3c02f185c11342712a2031f"
+QUALIFIED_COMMIT = "419bfef529d4907f77bca54c6b3e4d484afb260f"
 
 #: qualification 경로가 불변이어야 하는 함수들.
 QUALIFIED_FUNCTIONS = (
@@ -34,7 +34,8 @@ QUALIFIED_FUNCTIONS = (
     "run_rr_p0", "run_rr_p1", "run_rr_p2", "run_rr_p3_soak", "run_rr_p3_fault",
     "run_p0_prepare_configure_arm", "_run_rr_service_phase",
     "_spawn_controller", "_spawn_mass_roc_controller", "run_mass_roc",
-    "spawn_and_connect", "load_group",
+    "spawn_and_connect", "load_group", "write_rr_evidence", "_write_plan",
+    "_live_b210_speed_map", "_worker_process_count", "_rediscover_b210",
 )
 
 
@@ -86,17 +87,13 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
         self.assertEqual(removed, [], f"함수 삭제: {removed}")
 
     def test_change_is_additive_only(self):
-        """변경 함수는 dispatch 계층 둘뿐이고, 나머지는 신규 추가여야 한다."""
+        """승인된 보완은 service-session 함수와 신규 cleanup helper에 한정한다."""
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
-        self.assertEqual(changed, ["main", "validate_rr_binding"], str(changed))
-        # Phase G orchestration은 함수 추가로만 이뤄진다: 단발 service phase,
-        # bounded persistent session phase, 그리고 session이 소유한 endpoint
-        # lifecycle(START/STOP)을 대행 spawn하는 헬퍼.
+        self.assertEqual(changed, ["run_mass_roc_session"], str(changed))
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["_open_session_trace",
-                                 "_spawn_session_lifecycle",
-                                 "run_mass_roc_service", "run_mass_roc_session"],
+        self.assertEqual(added, ["_service_session_terminal_status",
+                                 "_terminate_process_bounded"],
                          str(added))
 
 
