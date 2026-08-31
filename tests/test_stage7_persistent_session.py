@@ -503,6 +503,41 @@ def test_session_phase_spawns_start_proxy_before_admission():
     assert "_spawn_session_lifecycle('session-stop'" in body
 
 
+def test_session_lifecycle_proxy_watches_session_gate_dir():
+    """대행은 자기 run-root가 아니라 **session run-root**의 gate를 본다.
+
+    대행의 run-root는 <run_root>/lifecycle/<단계>다. gate를 run-root 기준으로
+    찾으면 열리지 않는 경로를 기다리다 30s intent 창을 놓친다
+    (phase-g-service-20260831-042934 실측).
+    """
+    source = io.open(os.path.join(_REPO, "VDETER", "apps",
+                                  "stage7_coordinator_main.py"),
+                     encoding="utf-8").read()
+    tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "_spawn_session_lifecycle")
+    body = ast.unparse(node)
+    assert "'--gate-dir'" in body
+    assert "os.path.join(run_root, 'controller_gate')" in body
+    # 대행 run-root는 별도 하위 경로여야 한다 (session artifact와 섞이지 않게).
+    assert "'lifecycle'" in body
+
+
+def test_controller_gate_dir_override_is_honoured():
+    """--gate-dir가 주어지면 run-root 기준 기본값을 덮어쓴다."""
+    import apps.stage7_mass_roc_controller as controller_module
+
+    source = io.open(os.path.join(_REPO, "apps",
+                                  "stage7_mass_roc_controller.py"),
+                     encoding="utf-8").read()
+    assert "arguments.gate_dir or os.path.join" in source
+    parser_source = ast.parse(source)
+    main_node = next(n for n in parser_source.body
+                     if isinstance(n, ast.FunctionDef) and n.name == "main")
+    assert "'--gate-dir'" in ast.unparse(main_node)
+    assert hasattr(controller_module, "_run_session_lifecycle_step")
+
+
 def test_session_cleanup_measured_after_launcher_teardown():
     """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",

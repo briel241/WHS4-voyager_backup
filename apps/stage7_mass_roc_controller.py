@@ -969,6 +969,11 @@ def main(argv=None) -> int:
              "session-start/session-stop: session 소유자를 대신해 endpoint "
              "lifecycle 한 단계만 수행하고 즉시 종료한다 (시나리오 미실행)")
     parser.add_argument(
+        "--gate-dir", default=None,
+        help="admission_open gate 디렉터리. 기본값은 <run-root>/controller_gate. "
+             "session lifecycle 대행은 자기 run-root가 아니라 session run-root의 "
+             "gate를 봐야 하므로 반드시 명시한다")
+    parser.add_argument(
         "--events-dir", default=None,
         help="session run-root의 service_events 디렉터리 (session lifecycle 전용)")
     parser.add_argument(
@@ -1015,7 +1020,8 @@ def main(argv=None) -> int:
                controller_instance=hex(id(controller)),
                event_cursor_start=dict(events.baseline))
 
-    gate_dir = os.path.join(arguments.run_root, "controller_gate")
+    gate_dir = arguments.gate_dir or os.path.join(arguments.run_root,
+                                                  "controller_gate")
     os.makedirs(gate_dir, exist_ok=True)
 
     def invoke_fixture(endpoint_id, operation, relpath, step_id):

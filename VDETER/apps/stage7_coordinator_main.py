@@ -924,6 +924,9 @@ def _spawn_session_lifecycle(lifecycle, run_id, run_root, configs_dir,
         "--scenario-id", "none",
         "--lifecycle", lifecycle,
         "--workload-id", lifecycle,
+        # gate는 session run-root에 있다. 대행의 run-root(<run_root>/lifecycle/…)
+        # 기준으로 찾으면 영원히 열리지 않는 경로를 본다.
+        "--gate-dir", os.path.join(run_root, "controller_gate"),
     ]
     os.makedirs(os.path.join(run_root, "lifecycle", lifecycle), exist_ok=True)
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
