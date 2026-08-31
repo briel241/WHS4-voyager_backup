@@ -483,7 +483,8 @@ class Stage7ServiceSession:
              + self.profile["pi"]["deploy_relpath"]
              + "/runs/" + self.session_id, target],
             capture_output=True, text=True, timeout=900,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL)
         if done.returncode != 0:
             detail = ((done.stdout or "") + (done.stderr or ""))[-300:]
             raise ServiceSessionError(

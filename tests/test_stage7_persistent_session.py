@@ -690,6 +690,37 @@ def test_session_cleanup_measured_after_launcher_teardown():
         "launcher teardown 전에 worker 수를 재고 있다")
 
 
+def test_remote_calls_never_inherit_stdin():
+    """원격 호출이 대화형 메뉴의 입력을 삼키면 안 된다.
+
+    ssh는 원격으로 넘길 stdin을 읽는다. bring-up 22분 동안의 ssh 호출이
+    부모 stdin을 상속받아 입력을 다 먹고, SESSION READY 직후 메뉴가 첫
+    input()에서 EOF를 만나 workload를 하나도 못 돌린 적이 있다
+    (phase-g-service-20260831-111702).
+    """
+    for relpath in ("apps/stage7_service_layer.py", "apps/stage7_session.py"):
+        source = io.open(os.path.join(_REPO, relpath), encoding="utf-8").read()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = ast.unparse(node.func)
+            if name not in ("runner", "self.runner", "subprocess.run"):
+                continue
+            kwargs = {kw.arg for kw in node.keywords}
+            assert "stdin" in kwargs, (
+                f"{relpath}: {name}(...) 가 stdin을 끊지 않는다 - "
+                "대화형 입력을 삼킬 수 있다")
+
+    # ssh에는 -n도 함께 건다 (이중 안전장치).
+    layer = io.open(os.path.join(_REPO, "apps", "stage7_service_layer.py"),
+                    encoding="utf-8").read()
+    block = layer[layer.index("def _ssh("):]
+    block = block[:block.index("def remote_deploy_root")]
+    assert '"-n"' in block
+    assert "subprocess.DEVNULL" in block
+
+
 def test_legacy_paths_unchanged():
     """기존 direct 대화형·비대화형 run all 계약은 그대로다."""
     parser = runner.build_parser()

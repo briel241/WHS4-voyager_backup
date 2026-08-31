@@ -67,10 +67,16 @@ def _ssh(profile: dict, script: str, *, timeout: float = 300.0,
     원격 파일에는 UTF-8 한글 주석이 있다. Windows 기본 로케일(cp949)로 디코드하면
     깨지므로 인코딩을 명시한다.
     """
-    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+    command = ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                profile["pi"]["host"], script]
+    # stdin을 반드시 끊는다. ssh는 원격으로 넘길 stdin을 읽으므로, 지정하지
+    # 않으면 부모의 stdin을 상속받아 **대화형 메뉴의 입력을 통째로 삼킨다**.
+    # phase-g-service-20260831-111702 실측: bring-up 22분 동안의 ssh 호출들이
+    # 입력을 다 먹어, SESSION READY 직후 메뉴가 첫 input()에서 EOF를 만나
+    # workload를 하나도 못 돌리고 종료했다. -n과 DEVNULL을 둘 다 건다.
     done = runner(command, capture_output=True, text=True, timeout=timeout,
-                  encoding="utf-8", errors="replace")
+                  encoding="utf-8", errors="replace",
+                  stdin=subprocess.DEVNULL)
     if check and done.returncode != 0:
         raise ServiceSessionError(
             f"원격 명령 실패(rc={done.returncode}): "
@@ -333,8 +339,11 @@ def prepare_service_config(profile: dict, run_id: str, logs: list, *,
         "--rr-phase", preparation["rr_phase"],
         "--gain-artifact", profile["gain"]["artifact_input_path"],
     ]
+    # 이 도구도 내부에서 ssh를 돈다 — stdin을 끊지 않으면 대화형 메뉴 입력을
+    # 삼킨다 (`_ssh` 주석 참조).
     done = runner(command, capture_output=True, text=True, cwd=_ROOT, timeout=900,
-                  encoding="utf-8", errors="replace")
+                  encoding="utf-8", errors="replace",
+                  stdin=subprocess.DEVNULL)
     logs.append(("prepare-config", (done.stdout or "") + (done.stderr or "")))
     if done.returncode != 0:
         raise ServiceSessionError(
@@ -451,7 +460,8 @@ def run_service_session(profile: dict, *, scenario_id: str,
                 + "/runs/" + run_id,
                 os.path.join(session_dir, "remote-run")],
                capture_output=True, text=True, timeout=900,
-               encoding="utf-8", errors="replace")
+               encoding="utf-8", errors="replace",
+               stdin=subprocess.DEVNULL)
         service_path = os.path.join(
             session_dir, "remote-run", "evidence", "operational_service",
             "service_result.json")
