@@ -1970,13 +1970,26 @@ def main(argv=None) -> int:
             if not batch:
                 return
 
-            # (2) 완료·오류를 항상 먼저 처리한다. 표본 디코드 뒤에 줄세우면
-            #     pending RX 장부가 비지 않아 shed가 청취 창을 굶긴다
-            #     (실측 장부 126~128 포화 · window-shed 6,600건).
-            #     같은 창의 표본은 어차피 같은 배치 안에서 뒤따라 처리된다.
-            ordered = [item for item in batch if item[0] in ("c", "e")]
+            # (2) 완료 승격은 **원래 조건 그대로** 둔다 — 같은 배치에 표본이
+            #     있는 창의 완료를 앞으로 빼면 안 된다.
+            #     phase-g-service-20260831-152333 실측: 완료를 무조건 앞세웠더니
+            #     PHY_INTERNAL_INVARIANT_BROKEN이 12,925건 터졌다
+            #     ("성공 terminal의 buffered sample이 8,192-sample block이
+            #      아닙니다", buffered_samples=0). 창이 표본을 받기 전에 닫혀
+            #     빈 버퍼로 성공 종료를 시도한 것이다. 직전 두 실행은 0건이었다.
+            #     같은 창의 표본→완료 순서는 PHY 불변식이 요구하는 결속이다.
+            sample_keys = {
+                tuple(item[1:4]) for item in batch if item[0] == "s"
+            }
+            ordered = [
+                item for item in batch
+                if item[0] == "c" and tuple(item[1:4]) not in sample_keys
+            ]
             promoted = len(ordered)
-            ordered += [item for item in batch if item[0] == "s"]
+            ordered += [
+                item for item in batch
+                if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
+            ]
             drain_started = _time.monotonic()
             for index, item in enumerate(ordered):
                 kind = item[0]

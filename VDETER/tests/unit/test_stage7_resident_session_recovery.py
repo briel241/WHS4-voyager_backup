@@ -129,8 +129,11 @@ def test_stale_samples_are_dropped_not_decoded():
     body = _drain_source()
     assert "_SAMPLE_MAX_AGE_S" in body, "나이 상한 검사가 없다"
     assert 'item[0] == "s"' in body, "표본만 골라 버려야 한다"
-    # 완료·오류는 절대 버리지 않는다 — 싸고 pending 장부를 비운다.
-    assert 'item[0] in ("c", "e")' in body
+    # 완료·오류는 절대 버리지 않는다 — 폐기 블록이 표본만 다루는지 확인한다.
+    drop_block = body[body.index("now_drain = "):body.index("batch = kept")]
+    assert 'item[0] == "s"' in drop_block
+    assert '"c"' not in drop_block and '"e"' not in drop_block, \
+        "완료·오류가 폐기 대상에 들어갔다"
 
 
 def test_sample_age_threshold_is_derived_from_frame_length():
@@ -141,15 +144,17 @@ def test_sample_age_threshold_is_derived_from_frame_length():
     assert "FRAME_NANOSECONDS" in block or "_DISPATCH_FRAME_NS" in block, block
 
 
-def test_completions_are_processed_before_samples():
-    """완료를 표본 뒤에 줄세우면 pending RX 장부가 굶는다.
+def test_completion_promotion_preserves_sample_ordering():
+    """같은 배치에 표본이 있는 창의 완료를 앞으로 빼면 안 된다.
 
-    실측: 장부 126~128 포화 · window-shed 6,600건 · MAC_TRANSFER_FAILED 504건.
+    완료를 무조건 앞세웠더니 창이 표본을 받기 전에 닫혀 빈 버퍼로 성공
+    종료를 시도했다 — phase-g-service-20260831-152333 실측:
+    PHY_INTERNAL_INVARIANT_BROKEN 12,925건 (buffered_samples=0).
+    직전 두 실행은 0건이었다. 표본→완료 순서는 PHY 불변식의 요구다.
     """
     body = _drain_source()
-    cheap = body.index('ordered = [item for item in batch if item[0] in ("c", "e")]')
-    heavy = body.index('ordered += [item for item in batch if item[0] == "s"]')
-    assert cheap < heavy, "완료가 표본보다 먼저 배치되지 않았다"
+    assert "sample_keys" in body, "표본 결속 조건이 사라졌다"
+    assert 'item[0] == "c" and tuple(item[1:4]) not in sample_keys' in body,         "같은 창에 표본이 있어도 완료를 승격하고 있다"
 
 
 def test_sample_dispatch_does_not_leak_the_timestamp():
