@@ -167,6 +167,12 @@ class Stage7ServiceSession:
         gain_rel = self.profile["gain"]["remote_artifact_input_relpath"]
         inner = (
             "PYTHONPYCACHEPREFIX=/tmp/stage7-session-pyc "
+            # `--diagnostics`는 endpoint launcher의 진단 계측도 켠다. 이게 없으면
+            # RX 창 계획·MAC 박동·unclean lane 사유가 통째로 기록되지 않아,
+            # DEVICE_ERROR로 접힌 내부 code를 사후에 되살릴 수 없다
+            # (phase-g-service-20260831-114945: [diag] 0줄, DEVICE_ERROR 458건 —
+            #  성공 대조군 rr-p2-17-20260830k는 40,242줄).
+            + ("STAGE7_DIAG=1 " if self.diagnostics else "")
             + self.profile["pi"]["venv_python"]
             + " apps/stage7_coordinator_main.py"
             + " --run-id " + self.session_id
