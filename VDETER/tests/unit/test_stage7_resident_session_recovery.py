@@ -181,11 +181,36 @@ def test_decode_and_reset_share_one_fifo():
             "decode와 reset이 같은 lane 큐로 가지 않는다")
 
 
-def test_workers_are_spawned_not_forked():
-    """런처는 여러 스레드를 쓴다 — fork는 자식에서 교착할 수 있다."""
+def test_workers_use_forkserver_not_spawn_or_bare_fork():
+    """forkserver여야 한다.
+
+    - bare fork 금지: 런처는 여러 스레드를 쓴다 (자식 교착 위험).
+    - spawn 금지: 자식 cmdline이 `spawn_main`을 담아 코디네이터의 B210
+      worker 계수(pgrep -fc "spawn_mai[n]")에 잡힌다 —
+      phase-g-service-20260901-005253에서 workers_running 9(3+6)로 session
+      health gate가 불합격했다.
+    - forkserver 자식은 forkserver.main cmdline을 상속해 걸리지 않고,
+      fork도 깨끗이 exec된 서버 프로세스에서 일어난다.
+    """
     body = _pool_source()
-    assert 'get_context("spawn")' in body, "spawn이 아니다"
-    assert "fork" not in body
+    assert 'get_context("forkserver")' in body, "forkserver가 아니다"
+    assert 'get_context("spawn")' not in body, (
+        "spawn 자식은 코디네이터의 worker 계수에 잡힌다")
+
+
+def test_executor_is_bound_only_after_workers_are_ready():
+    """기동 중에는 제출하지 않는다 — 워커 6개 동시 기동이 Pi를 잠시
+    포화시켜 job 큐가 찬다 (phase-g-service-20260901-005253: MASS-B lane0
+    Full). READY 이후에만 executor를 건다."""
+    body = _pool_source()
+    assert "def poll_ready(self):" in body
+    assert "RESULT_READY" in body
+    source = _read(LAUNCHER)
+    ensure = source[source.index("def _ensure_decode_pool():"):]
+    ensure = ensure[:ensure.index("def _pump_decode_results():")]
+    assert "poll_ready()" in ensure
+    assert ensure.index("poll_ready()") < ensure.index("set_decode_executor"), (
+        "READY 확인 전에 executor를 걸고 있다")
 
 
 def test_queues_are_bounded():

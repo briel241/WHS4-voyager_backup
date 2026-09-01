@@ -2007,7 +2007,7 @@ def main(argv=None) -> int:
         # (표본 경로는 0.14ms/건). PHY는 순수 파이썬이라 GIL이 풀리지 않아
         # 스레드로는 분리되지 않는다. 런처는 8곳에서 스레드를 쓰므로 fork는
         # 위험하다 — spawn으로 띄운다.
-        _DECODE_JOB_QUEUE_MAX = 32
+        _DECODE_JOB_QUEUE_MAX = 64
         _DECODE_RESULT_QUEUE_MAX = 64
         _DECODE_RESULT_DEADLINE_S = 30.0
         _decode_pool_slot = {"pool": None}
@@ -2031,7 +2031,19 @@ def main(argv=None) -> int:
                 self._w = _w
                 self._dispatcher = dispatcher
                 self._lane_generation = lane_generation
-                self._context = _mp.get_context("spawn")
+                # forkserver: spawn 자식의 cmdline은 `spawn_main`을 담아
+                # 코디네이터의 B210 worker 계수(pgrep -fc "spawn_mai[n]")에
+                # 잡힌다 — phase-g-service-20260901-005253에서 workers_running
+                # 9(3+6)로 session health gate가 불합격했다. forkserver
+                # 자식은 forkserver.main cmdline을 상속해 걸리지 않는다.
+                # fork도 스레드가 많은 런처가 아니라 깨끗이 exec된 서버
+                # 프로세스에서 일어나므로 안전하다.
+                self._context = _mp.get_context("forkserver")
+                try:
+                    self._context.set_forkserver_preload(
+                        ["vdeter.stage7.rx_decode_worker"])
+                except Exception:  # noqa: BLE001
+                    pass
                 self._jobs = []
                 self._results = []
                 self._procs = []
@@ -2055,12 +2067,42 @@ def main(argv=None) -> int:
                     self._jobs.append(jobs)
                     self._results.append(results)
                     self._procs.append(process)
+                self._ready = set()
                 print(
                     "[launcher] rx-decode workers 기동 "
                     f"lanes={len(self._procs)} "
                     f"pids={[p.pid for p in self._procs]}",
                     file=sys.stderr, flush=True,
                 )
+
+            def poll_ready(self):
+                """모든 lane이 READY일 때만 True. 그 전에는 동기 경로가 돈다.
+
+                워커 6개가 동시에 기동하면 Pi가 잠시 포화된다 — 그 사이
+                제출하면 job 큐가 찬다 (phase-g-service-20260901-005253:
+                MASS-B lane0 Full). READY 이후에만 executor를 건다.
+                """
+
+                if len(self._ready) == len(self._procs):
+                    return True
+                for lane_index, results in enumerate(self._results):
+                    while True:
+                        try:
+                            message = results.get_nowait()
+                        except Exception:  # noqa: BLE001
+                            break
+                        if message[0] == self._w.RESULT_READY:
+                            self._ready.add(lane_index)
+                        elif message[0] == self._w.RESULT_FATAL:
+                            self.fail(f"worker 기동 FATAL lane={lane_index}: "
+                                      f"{str(message[3])[:400]}")
+                            return False
+                for lane_index, process in enumerate(self._procs):
+                    if not process.is_alive() and lane_index not in self._ready:
+                        self.fail(f"worker 기동 중 사망 lane={lane_index} "
+                                  f"exitcode={process.exitcode}")
+                        return False
+                return len(self._ready) == len(self._procs)
 
             # --- 제출 -------------------------------------------------------
 
@@ -2257,6 +2299,18 @@ def main(argv=None) -> int:
             pool = _decode_pool_slot.get("pool")
             if pool is not None and _decode_pool_slot.get("bound") is dispatcher:
                 return
+            if pool is not None and _decode_pool_slot.get("owner") is dispatcher:
+                # 이미 만들어 둔 pool이 READY가 되면 그때 건다.
+                if not pool.poll_ready():
+                    return
+                dispatcher.set_decode_executor(pool.submit)
+                for lane_index, stack in enumerate(dispatcher._stacks):
+                    stack.bridge.set_native_reset_sink(
+                        pool.reset_sink(lane_index))
+                _decode_pool_slot["bound"] = dispatcher
+                print("[launcher] rx-decode executor 결속 완료",
+                      file=sys.stderr, flush=True)
+                return
             try:
                 from vdeter.common.identifiers import Uuid4IdSource as _U4
 
@@ -2275,13 +2329,11 @@ def main(argv=None) -> int:
                 print(f"[launcher] rx-decode 기동 실패 — {type(error).__name__}: "
                       f"{error}", file=sys.stderr, flush=True)
                 raise
-            dispatcher.set_decode_executor(fresh.submit)
-            for lane_index, stack in enumerate(stacks):
-                stack.bridge.set_native_reset_sink(fresh.reset_sink(lane_index))
             if pool is not None:
                 pool.shutdown()
             _decode_pool_slot["pool"] = fresh
-            _decode_pool_slot["bound"] = dispatcher
+            _decode_pool_slot["owner"] = dispatcher
+            _decode_pool_slot["bound"] = None
 
         def _pump_decode_results():
             pool = _decode_pool_slot.get("pool")
