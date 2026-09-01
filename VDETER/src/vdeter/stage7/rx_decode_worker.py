@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import traceback
+from time import perf_counter as _perf
 
 #: job 종류. (kind, job_id, lane_generation, payload...)
 JOB_DECODE = "decode"
@@ -231,9 +232,11 @@ def run_worker(job_queue, result_queue, *, lane_index: int,
                        f"알 수 없는 job 종류: {kind!r}"))
                 return
             _, _, _, rx_window_key, epoch_id, t0_ns, device_request = item
+            _decode_started = _perf()
             decoded, records, first_sample_ns = decoder.decode(
                 device_request, rx_window_key, epoch_id, t0_ns
             )
+            decode_seconds = _perf() - _decode_started
         except BaseException:  # noqa: BLE001
             # 조용히 넘어가지 않는다 — 펌프가 세션을 fail-closed로 끝낸다.
             _emit(result_queue,
@@ -241,16 +244,20 @@ def run_worker(job_queue, result_queue, *, lane_index: int,
                    "decode worker 예외: " + traceback.format_exc(limit=8)))
             return
 
+        # decode_seconds를 실어 보낸다 — 펌프가 왕복에서 빼면 job 큐 대기가
+        # 남는다. 워커 왕복 1,449ms(MASS-A 실측)가 계산인지 대기인지 가른다.
         if decoded is None:
             _emit(result_queue,
-                  (RESULT_ERR, job_id, generation, None, records))
+                  (RESULT_ERR, job_id, generation, None, records,
+                   decode_seconds))
         elif decoded.is_err:
             _emit(result_queue,
-                  (RESULT_ERR, job_id, generation, decoded.error, records))
+                  (RESULT_ERR, job_id, generation, decoded.error, records,
+                   decode_seconds))
         else:
             _emit(result_queue,
                   (RESULT_OK, job_id, generation, decoded.value, records,
-                   first_sample_ns))
+                   first_sample_ns, decode_seconds))
 
 
 def _emit(result_queue, message) -> None:

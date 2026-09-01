@@ -2147,6 +2147,8 @@ def main(argv=None) -> int:
                     self._results.append(results)
                     self._procs.append(process)
                 self._ready = set()
+                #: lane별 워커에 나가 있는 job 수 (제출 +1, 결과 -1).
+                self._inflight = [0] * len(self._procs)
                 print(
                     "[launcher] rx-decode workers 기동 "
                     f"lanes={len(self._procs)} "
@@ -2211,6 +2213,11 @@ def main(argv=None) -> int:
                     _time.monotonic(),
                 )
                 _, rx_window_key = context
+                try:
+                    self._inflight[lane_index] += 1
+                    _cost_add("depth.inflight", self._inflight[lane_index])
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     self._jobs[lane_index].put_nowait(
                         (self._w.JOB_DECODE, job_id, lane_generation,
@@ -2277,7 +2284,15 @@ def main(argv=None) -> int:
                     return
                 pending_lane, generation, context, _submitted = entry
                 try:
-                    _cost_add("lat.worker", _time.monotonic() - _submitted)
+                    self._inflight[pending_lane] = max(
+                        0, self._inflight[pending_lane] - 1)
+                    round_trip = _time.monotonic() - _submitted
+                    _cost_add("lat.worker", round_trip)
+                    # 워커가 실은 실제 계산 시간 (마지막 원소).
+                    decode_s = message[-1]
+                    if isinstance(decode_s, float):
+                        _cost_add("lat.decode", decode_s)
+                        _cost_add("lat.jobwait", max(0.0, round_trip - decode_s))
                 except Exception:  # noqa: BLE001
                     pass
                 try:
