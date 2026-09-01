@@ -366,6 +366,17 @@ def main(argv=None) -> int:
                 utc_q, ClockDomain.UTC, self._utc_clock_id
             )
 
+    _launcher_clock = _AnchoredSystemTimeSource()
+
+    #: 창 추적: native 첫 표본 ns -> (submit까지 ms, commit까지 ms).
+    #: proc_lag_ms는 단일 사건인데 lat.* 는 세션 평균이라 서로 뺄 수 없다.
+    #: type-4를 실은 그 창 하나를 끝까지 따라가 "런처 도달 전"과 "런처 안"을
+    #: 가른다. 계측 전용이며 fail-open이다.
+    _win_trace = {}
+
+    def _utc_ns():
+        return _launcher_clock.now_utc().total_nanoseconds()
+
     built = build_stage7_b210_endpoint(
         resolved,
         deployment,
@@ -373,7 +384,7 @@ def main(argv=None) -> int:
         intent_notifier=intent_notifier,
         host_raw_clock=read_monotonic_raw_ns,
         monitor_enabled=True,
-        time_source_override=_AnchoredSystemTimeSource(),
+        time_source_override=_launcher_clock,
     )
     if built.is_err:
         print(f"[launcher] endpoint 조립 실패: {built.error}", file=sys.stderr)
@@ -995,12 +1006,26 @@ def main(argv=None) -> int:
                         for al in (getattr(out_state, "lc_allocations", ())
                                    or ())
                     ]
+                    # 이 type-4를 실은 창 하나의 실제 분해. 세션 평균이 아니라
+                    # 같은 사건이라 proc_lag에서 그대로 뺄 수 있다.
+                    trace = _win_trace.get(recv_ns)
+                    if trace is None:
+                        span = "trace=없음"
+                    else:
+                        to_submit, to_commit = trace
+                        span = (
+                            f"to_submit_ms={to_submit:.0f} "
+                            f"to_commit_ms={to_commit:.0f} "
+                            f"worker_ms={to_commit - to_submit:.0f} "
+                            f"post_commit_ms={(now_ns - recv_ns) / 1e6 - to_commit:.0f}"
+                        )
                     print(
                         f"[diag] type4-rx allocs {before_n}->{after_n} "
                         f"recv_ns={recv_ns} "
                         f"proc_lag_ms={(now_ns - recv_ns) / 1e6:.0f} "
                         f"recv_frame={recv_frame} now_frame={now_frame} "
                         f"frames_late={now_frame - recv_frame if recv_frame else '?'} "
+                        f"{span} "
                         f"allocs(lc,act-now,last-now)={allocs}",
                         file=sys.stderr, flush=True,
                     )
@@ -2128,6 +2153,8 @@ def main(argv=None) -> int:
                 self._procs = []
                 self._pending = {}
                 self._next_job_id = 0
+                #: job_id -> 제출 UTC ns (창 추적용, 계측 전용).
+                self._submit_utc = {}
                 self._fatal = None
                 for lane_index in range(len(stacks)):
                     jobs = self._context.Queue(maxsize=_DECODE_JOB_QUEUE_MAX)
@@ -2212,6 +2239,12 @@ def main(argv=None) -> int:
                     lane_index, lane_generation, context,
                     _time.monotonic(),
                 )
+                try:
+                    if len(self._submit_utc) > 4096:
+                        self._submit_utc.clear()
+                    self._submit_utc[job_id] = _utc_ns()
+                except Exception:  # noqa: BLE001
+                    pass
                 _, rx_window_key = context
                 try:
                     self._inflight[lane_index] += 1
@@ -2304,6 +2337,18 @@ def main(argv=None) -> int:
                             attempt_records=message[4],
                         )
                     else:
+                        try:
+                            first_ns = message[5]
+                            sent = self._submit_utc.pop(message[1], None)
+                            if first_ns and sent:
+                                if len(_win_trace) > 4096:
+                                    _win_trace.clear()
+                                _win_trace[first_ns] = (
+                                    (sent - first_ns) / 1e6,
+                                    (_utc_ns() - first_ns) / 1e6,
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
                         self._dispatcher.complete_decoded(
                             generation, pending_lane, context,
                             result=message[3],
@@ -2539,13 +2584,6 @@ def main(argv=None) -> int:
                 # 역압: 워커가 밀렸으면 창 완료를 미루고 다음 회전에 잇는다.
                 # 300ms 예산 초과와 같은 방식(원순서로 앞머리 복귀)이며
                 # 처리량은 불변, 정지 상한만 유지된다.
-                if kind == "c":
-                    try:
-                        _q_at = _c_stamp.pop(id(item[5]), None)
-                        if _q_at is not None:
-                            _cost_add("lat.queue", _time.monotonic() - _q_at)
-                    except Exception:  # noqa: BLE001
-                        pass
                 if kind == "c" and not _decode_can_accept(item[3]):
                     for leftover in reversed(ordered[index:]):
                         _dispatch_queue.appendleft(leftover)
@@ -2555,6 +2593,13 @@ def main(argv=None) -> int:
                               file=sys.stderr, flush=True)
                     return
                 _item_started = _time.monotonic()
+                if kind == "c":
+                    try:
+                        _q_at = _c_stamp.pop(id(item[5]), None)
+                        if _q_at is not None:
+                            _cost_add("lat.queue", _item_started - _q_at)
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     if kind == "s":
                         _samples_locked(*item[1:])
