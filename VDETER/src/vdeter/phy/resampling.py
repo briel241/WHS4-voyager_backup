@@ -170,12 +170,10 @@ def _decimate_slot_reference(
 
 
 def _decimate_slot_vectorized(samples: Sequence[complex]) -> tuple[complex, ...]:
-    """참조 구현과 같은 연산을 numpy로 수행한다.
+    """참조 구현과 같은 연산·같은 검증을 numpy로 수행한다.
 
-    `numpy.convolve(x, taps)[k] == sum_j x[k-j]*taps[j]`이고 범위 밖은 0으로
-    확장되므로, `k = RATE_FACTOR*i + delay`를 뽑으면 참조 루프의
-    `0 <= source < length` 가드까지 동일하다. 검증(길이·유한성)도 같은
-    조건을 같은 예외로 낸다.
+    `convolve(x, taps)[RATE_FACTOR*i + delay]`가 참조 루프의 zero-extension
+    가드까지 그대로 대응한다.
     """
 
     array = _numpy.asarray(samples, dtype=_numpy.complex128)
@@ -199,13 +197,9 @@ def _decimate_slot_vectorized(samples: Sequence[complex]) -> tuple[complex, ...]
 def decimate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
     """device 8,192 @307,200 -> native 2,048 @76,800, 군지연 보상 포함.
 
-    numpy가 있으면 같은 연산을 벡터화해 수행한다. 참조 이중 루프는 창당
-    2,048x97 = 198,656회 스칼라 복소 곱누산이라 Pi 5 실측 39.5ms가 걸리고,
-    이것이 Stage 7 수신 파이프라인의 최대 단일 비용이었다 (벡터화 후 2.1ms).
-
-    합산 순서가 달라 부동소수 반올림 차이가 생긴다 — Pi 5 실측 최대 절대오차
-    1.5e-18(신호 크기 대비 상대 ~1e-15, 배정밀도 eps의 수 배). numpy가 없거나
-    벡터 경로가 실패하면 참조 구현으로 되돌아간다.
+    numpy가 있으면 벡터 경로를, 없으면 참조 구현을 쓴다. 합산 순서가 달라
+    반올림이 1e-15 상대 수준으로 갈리지만 PHY 경계 출력(cf32le float32)은
+    같다.
     """
 
     if _numpy is not None:

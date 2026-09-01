@@ -120,19 +120,10 @@ class Stage7LaneRxDispatcher:
     def set_decode_executor(self, executor) -> None:
         """리샘플·energy gate·디코드를 외부 실행기에 위임한다.
 
-        `on_lane_window_completed`의 무거운 구간(phase-g-service-20260831-214853
-        실측: 리샘플 37.93ms + 디코드 48.76ms = 창당 86.7ms, 펌프 drain의 96.7%)을
-        별도 프로세스로 옮기기 위한 seam이다. executor는
-
-            executor(lane_index, lane_generation, context, device_request,
-                     epoch_id, t0_hardware_ns)
-
-        형태로 호출되고, 결과가 준비되면 호출자가 **펌프 스레드에서**
-        `complete_decoded(...)`에 그 `context`를 그대로 돌려준다.
-
-        미설정(기본 None)이면 현행 동기 경로 그대로다 — 기존 호출자·시험의
-        동작은 변하지 않는다. ledger·논리창·generation·MAC 상태는 executor
-        유무와 무관하게 이 dispatcher와 펌프가 계속 소유한다.
+        `executor(lane_index, lane_generation, context, device_request,
+        epoch_id, t0_hardware_ns)`로 호출되고, 결과는 호출자가 **펌프
+        스레드에서** `complete_decoded(...)`에 같은 `context`로 돌려준다.
+        미설정(기본)이면 현행 동기 경로 그대로다.
         """
 
         self._decode_executor = executor
@@ -392,12 +383,8 @@ class Stage7LaneRxDispatcher:
                          received_at_ns=None, attempt_records=()):
         """외부 실행기의 decode 결과를 **펌프 스레드에서** 반영한다.
 
-        동기 경로의 decode 이후 구간(진단 기록 · finalize_window · lane
-        terminal)을 순서 그대로 수행한다. MAC/dispatcher 상태를 건드리는 것은
-        여기가 전부다.
-
-        늦게 도착한 결과(generation 교체·창 소멸·이미 terminal)는 기존
-        stale 경로로 폐기한다.
+        동기 경로의 decode 이후 구간(진단 기록·finalize_window·lane terminal)을
+        순서 그대로 수행하고, 늦게 온 결과는 기존 stale 경로로 폐기한다.
         """
 
         if lane_generation != self._lane_generation:

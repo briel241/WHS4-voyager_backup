@@ -127,17 +127,11 @@ class RuntimePhyRadioBridge:
         self._native_reset_sink = None
 
     def set_native_reset_sink(self, sink) -> None:
-        """native PHY측 reset을 외부에 위임한다 (Stage 7 decode worker).
+        """native PHY reset을 `sink(channel)`에 위임한다 (미설정 시 현행대로).
 
-        native PHY의 수신 stream 상태(`_rx_streams`)를 다른 프로세스가 소유할
-        때, reset이 그 프로세스로 **decode job과 같은 FIFO**로 전달돼야
-        순서가 보존된다. sink는 `sink(channel)` 형태로 호출되며 channel이
-        None이면 전 채널 reset이다. sink를 두지 않으면(기본) 현행대로
-        native PHY를 직접 부른다 — 기존 호출자의 동작은 변하지 않는다.
-
-        ledger는 이 bridge가 계속 소유하므로 sink 유무와 무관하게 여기서
-        비운다.
+        ledger는 sink 유무와 무관하게 이 bridge가 비운다.
         """
+
         self._native_reset_sink = sink
 
     # --- TX ----------------------------------------------------------------
@@ -420,11 +414,8 @@ class RuntimePhyRadioBridge:
     def complete_window(self, completion):
         """성공 terminal: CLEAN·완전한 한 연속 block일 때만 native 요청을 만든다.
 
-        `complete_device_window`(창 조립·장부 정리)와
-        `to_native_decode_request`(device→native 리샘플)의 합성이다. 두
-        단계를 따로 실행해야 하는 호출자(Stage 7 decode worker)는 앞의 것만
-        부르고 리샘플을 다른 프로세스에서 수행한다. 이 합성 API의 반환
-        의미는 분리 전과 동일하다.
+        `complete_device_window` + `to_native_decode_request`의 합성이며
+        반환 의미는 분리 전과 같다.
         """
 
         prepared = self.complete_device_window(completion)
@@ -433,12 +424,9 @@ class RuntimePhyRadioBridge:
         return self.to_native_decode_request(prepared.value)
 
     def complete_device_window(self, completion):
-        """성공 terminal을 **device-rate** PhyDecodeRequest까지만 만든다.
+        """성공 terminal을 device-rate PhyDecodeRequest까지만 만든다 (리샘플 제외).
 
-        장부 조회·삭제, 무결성 검사, block 병합, 요청 조립까지 수행하고
-        리샘플(`to_native_decode_request`)은 하지 않는다. 여기까지가 이
-        bridge가 소유한 상태를 건드리는 전부이므로 펌프 스레드에 남고,
-        리샘플 이후는 옮길 수 있다.
+        이 bridge가 소유한 상태를 건드리는 구간은 여기까지다.
         """
 
         key = (

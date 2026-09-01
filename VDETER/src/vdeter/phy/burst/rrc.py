@@ -172,14 +172,9 @@ def _matched_filter_reference(source) -> tuple[complex, ...]:
 def matched_filter(samples) -> tuple[complex, ...]:
     """RRC matched filter. 판정·탐색·출력 의미는 참조 구현과 같다.
 
-    `output[n] = sum_j TAPS[j] * source[n + H - j]` (H=RRC_HALF_SPAN_SAMPLES)
-    이고 범위 밖은 0으로 확장되므로 `numpy.convolve(source, TAPS)`의
-    `[H : H+len(source)]` 구간과 정확히 대응한다 — 참조 루프의
-    `max(0, ...)`·`min(len-1, ...)` 가드까지 같은 결과다.
-
-    Pi 5 프로파일에서 이 함수가 잡음 창 디코드 시간의 38%를 차지했다
-    (창당 ~17ms). 합산 순서가 달라 부동소수 반올림 차이가 생기지만
-    PHY 경계 출력은 float32라 전송선상 결과는 보존된다.
+    `output[n] = sum_j TAPS[j]*source[n+H-j]`이므로
+    `convolve(source, TAPS)[H : H+len]`이 zero-extension 가드까지 대응한다.
+    numpy가 없으면 참조 구현으로 돌아간다.
     """
 
     source = tuple(complex(value) for value in samples)
