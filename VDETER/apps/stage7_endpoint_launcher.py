@@ -930,6 +930,39 @@ def main(argv=None) -> int:
                 return _diag_orig_rec(self_e, event_type, *a, **k)
 
             _DVE._record = _diag_rec
+
+            # ROC측: 자원할당(type 4) body 생성 시각. MASS의 type4-rx와
+            # 짝지으면 "ROC가 늦게 보냈나 / MASS가 늦게 처리했나"가 갈린다.
+            try:
+                from vdeter.mac import resources as _t4res
+
+                _diag_orig_build = _t4res.build_allocation_body
+
+                def _diag_build(*a, **k):
+                    body = _diag_orig_build(*a, **k)
+                    try:
+                        print(
+                            f"[diag] type4-build lc_tx={body.logical_channel_tx} "
+                            f"lc_rx={body.logical_channel_rx} "
+                            f"frame_delay={body.tdma_frame_delay} "
+                            f"t={_time.monotonic():.3f}",
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return body
+
+                _t4res.build_allocation_body = _diag_build
+                # coordinator가 모듈 참조로 부르므로 그쪽도 같이 바꾼다.
+                _DMC_mod = sys.modules.get(_DMC.__module__)
+                if _DMC_mod is not None:
+                    _rm = getattr(_DMC_mod, "resource_module", None)
+                    if _rm is not None:
+                        _rm.build_allocation_body = _diag_build
+            except Exception as _be:  # noqa: BLE001
+                print(f"[diag] type4-build 훅 미적용: {_be}",
+                      file=sys.stderr, flush=True)
+
             _diag_orig_t4 = _DMC._receive_type4
 
             def _diag_t4(self_c, state, *a, **k):
@@ -939,12 +972,41 @@ def main(argv=None) -> int:
                     after_n = len(
                         getattr(out_state, "lc_allocations", ()) or ()
                     )
+                    # 활성화 프레임은 **RF 수신 시각** 기준으로 정해진다
+                    # (_receive_type4: transmit_frame = frame(received),
+                    #  활성화 = transmit_frame + CANONICAL_TDMA_FRAME_DELAY).
+                    # 처리가 늦어 활성화 프레임이 이미 지나갔으면 그 프레임의
+                    # DC 창은 계획되지 않는다 — 그 지각을 직접 잰다.
+                    from vdeter.mac.tdma import (
+                        frame_ordinal_at_nanoseconds as _t4_fo,
+                    )
+
+                    decoded = k.get("decoded")
+                    recv_ns = None
+                    if decoded is not None:
+                        recv_ns = decoded.received_at.total_nanoseconds()
+                    now_ns = self_c._now_utc_nanoseconds()
+                    recv_frame = _t4_fo(recv_ns) if recv_ns else None
+                    now_frame = _t4_fo(now_ns)
+                    allocs = [
+                        (al.logical_channel_rx,
+                         al.activation_frame_ordinal - now_frame,
+                         al.last_valid_frame_ordinal - now_frame)
+                        for al in (getattr(out_state, "lc_allocations", ())
+                                   or ())
+                    ]
                     print(
-                        f"[diag] type4-rx allocs {before_n}->{after_n}",
+                        f"[diag] type4-rx allocs {before_n}->{after_n} "
+                        f"recv_ns={recv_ns} "
+                        f"proc_lag_ms={(now_ns - recv_ns) / 1e6:.0f} "
+                        f"recv_frame={recv_frame} now_frame={now_frame} "
+                        f"frames_late={now_frame - recv_frame if recv_frame else '?'} "
+                        f"allocs(lc,act-now,last-now)={allocs}",
                         file=sys.stderr, flush=True,
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as _t4_err:  # noqa: BLE001
+                    print(f"[diag] type4-rx probe 오류: {_t4_err}",
+                          file=sys.stderr, flush=True)
                 return out_state
 
             _DMC._receive_type4 = _diag_t4
@@ -2010,6 +2072,8 @@ def main(argv=None) -> int:
         _DECODE_JOB_QUEUE_MAX = 64
         _DECODE_RESULT_QUEUE_MAX = 64
         _DECODE_RESULT_DEADLINE_S = 30.0
+        #: reset은 순서를 지켜야 해 미룰 수 없다 — 자리가 날 때까지 기다린다.
+        _DECODE_RESET_ENQUEUE_TIMEOUT_S = 15.0
         _decode_pool_slot = {"pool": None}
 
         class _DecodePool:
@@ -2146,10 +2210,17 @@ def main(argv=None) -> int:
                 """bridge의 native reset을 같은 FIFO로 보낸다."""
 
                 def _sink(channel):
+                    # reset은 미루거나 버릴 수 없다 — decode와의 순서가
+                    # PHY stream 연속성 판정을 좌우한다. 역압으로 큐가 차
+                    # 있는 것이 정상 상태이므로 put_nowait은 곧바로 Full이
+                    # 된다 (phase-g-service-20260901-021201: MASS-A가
+                    # "reset 전달 실패 lane=0: Full"로 죽었다). 자리가 날
+                    # 때까지 기다리되 상한을 둔다.
                     try:
-                        self._jobs[lane_index].put_nowait(
+                        self._jobs[lane_index].put(
                             (self._w.JOB_RESET, None, self._lane_generation,
-                             channel)
+                             channel),
+                            timeout=_DECODE_RESET_ENQUEUE_TIMEOUT_S,
                         )
                     except Exception as error:  # noqa: BLE001
                         self.fail(
