@@ -38,6 +38,10 @@ SESSION_RUN_ID_PREFIX = "svc"
 _COMPETING_PROCESS_PATTERN = (
     "stage7_coordinator_main|stage7_endpoint_launcher|"
     "stage7_mass_roc_controller|multiprocessing\\.spawn|spawn_main|"
+    # decode worker는 forkserver로 뜬다 (spawn 자식은 코디네이터의 B210
+    # worker 계수에 잡힌다). 그래서 잔존 탐지도 여기서 따로 해야 한다 —
+    # 실제로 고아 워커가 다음 세션을 막은 적이 있다.
+    "multiprocessing\\.forkserver|"
     "vdeter-b210-gr-uhd|uhd_|usrp"
 )
 

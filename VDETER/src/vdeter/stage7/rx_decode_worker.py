@@ -163,10 +163,38 @@ def _drain_sink_records(sink):
         return ()
 
 
+def _watch_parent(initial_ppid: int, interval: float = 1.0) -> None:
+    """부모가 사라지면 스스로 죽는다.
+
+    런처가 fail-closed로 `os._exit`할 때 multiprocessing의 atexit 정리가
+    건너뛰어져 워커가 고아로 남는다 (phase-g-service-20260901-005253 이후
+    PPID 1인 워커가 살아남아 다음 세션의 경쟁 프로세스 검사를 막았다).
+    호스트측 검사에만 기대지 않고 워커가 직접 끊는다.
+    """
+
+    import time as _t
+
+    while True:
+        _t.sleep(interval)
+        try:
+            if os.getppid() != initial_ppid:
+                os._exit(0)
+        except Exception:  # noqa: BLE001
+            os._exit(0)
+
+
 def run_worker(job_queue, result_queue, *, lane_index: int,
                lane_generation: int, id_source_kind: str,
                id_source_seed: int) -> None:
     """워커 프로세스 진입점. FIFO를 순서대로 비운다."""
+
+    try:
+        import threading as _th
+
+        _th.Thread(target=_watch_parent, args=(os.getppid(),),
+                   daemon=True, name="rx-decode-parent-watch").start()
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         decoder = LaneDecoder(
