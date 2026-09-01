@@ -237,6 +237,29 @@ def test_failure_is_closed_and_never_restarts():
         assert banned not in body, f"자동 재시작 흔적: {banned}"
 
 
+def test_queue_pressure_is_backpressure_not_a_session_kill():
+    """큐가 차는 것은 워커가 죽은 게 아니라 잠시 밀린 것이다.
+
+    admission 직후 6개 워커가 동시에 데워지는 구간에서 디코드가 건당
+    111ms -> 687ms로 느려진다 (phase-g-service-20260901-013149: MASS-A가
+    30초 만에 lane0 Full로 세션을 버렸고, 같은 구간을 넘긴 ROC/MASS-B는
+    각각 7,128/6,312창을 정상 처리했다).
+
+    회복 가능한 혼잡은 300ms 예산과 같은 방식으로 미룬다 — 창 완료를
+    원순서로 큐 앞머리에 되돌리고 다음 회전에 잇는다. 진짜 멈춘 워커는
+    결과 deadline이 잡는다.
+    """
+    body = _pool_source()
+    assert "def can_accept(self, lane_index):" in body
+    drain = _drain_source()
+    assert "_decode_can_accept(item[3])" in drain, "역압 판단이 없다"
+    assert drain.index("_decode_can_accept") < drain.index("_item_started"), (
+        "창 완료를 처리한 뒤에 역압을 보고 있다")
+    assert "appendleft(leftover)" in drain
+    # 진짜 멈춘 워커를 놓치면 안 된다.
+    assert "_DECODE_RESULT_DEADLINE_S" in _read(LAUNCHER)
+
+
 def test_fatal_paths_are_not_silent():
     """큐 포화·사망·지연·결과 반영 실패가 전부 fail()로 모여야 한다."""
     body = _pool_source()

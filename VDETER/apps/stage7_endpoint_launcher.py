@@ -2104,6 +2104,21 @@ def main(argv=None) -> int:
                         return False
                 return len(self._ready) == len(self._procs)
 
+            def can_accept(self, lane_index):
+                """이 lane의 job 큐에 여유가 있는가 (역압 판단용).
+
+                큐가 차는 것은 워커가 죽은 게 아니라 잠시 밀린 것이다 —
+                admission 직후 6개 워커가 동시에 데워지는 구간에서 디코드가
+                건당 111ms -> 687ms로 느려진다 (phase-g-service-20260901-013149
+                실측). 그때 치명 처리하면 회복 가능한 혼잡에 세션을 버린다.
+                여유가 없으면 이 회전에서 창 완료를 미루고 다음에 잇는다.
+                """
+
+                try:
+                    return not self._jobs[lane_index].full()
+                except Exception:  # noqa: BLE001
+                    return True
+
             # --- 제출 -------------------------------------------------------
 
             def submit(self, lane_index, lane_generation, context,
@@ -2335,6 +2350,12 @@ def main(argv=None) -> int:
             _decode_pool_slot["owner"] = dispatcher
             _decode_pool_slot["bound"] = None
 
+        def _decode_can_accept(lane_index):
+            pool = _decode_pool_slot.get("pool")
+            if pool is None or _decode_pool_slot.get("bound") is None:
+                return True
+            return pool.can_accept(lane_index)
+
         def _pump_decode_results():
             pool = _decode_pool_slot.get("pool")
             if pool is None:
@@ -2390,6 +2411,17 @@ def main(argv=None) -> int:
             drain_started = _time.monotonic()
             for index, item in enumerate(ordered):
                 kind = item[0]
+                # 역압: 워커가 밀렸으면 창 완료를 미루고 다음 회전에 잇는다.
+                # 300ms 예산 초과와 같은 방식(원순서로 앞머리 복귀)이며
+                # 처리량은 불변, 정지 상한만 유지된다.
+                if kind == "c" and not _decode_can_accept(item[3]):
+                    for leftover in reversed(ordered[index:]):
+                        _dispatch_queue.appendleft(leftover)
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(f"[diag] decode-backpressure done={index} "
+                              f"deferred={len(ordered) - index}",
+                              file=sys.stderr, flush=True)
+                    return
                 _item_started = _time.monotonic()
                 try:
                     if kind == "s":
