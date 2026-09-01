@@ -1964,8 +1964,23 @@ def main(argv=None) -> int:
                 ("s", self_d, lane_generation, lane_index, child_key, received)
             )
 
+        #: 창 완료의 큐 적재 시각 (id(completion) -> monotonic). drain에서 뺀다.
+        _c_stamp = {}
+
         def _q_completed(self_d, lane_generation, lane_index, child_key, completion):
             _decode_pool_slot["dispatcher_seen"] = self_d
+            # 지연 해부: proc_lag_ms 1.7~2.3초가 큐 앞쪽인지 뒤쪽인지 가른다.
+            # completed_at은 adapter가 self._time_source.now_monotonic()으로
+            # 채우므로 같은 프로세스 monotonic과 직접 비교된다.
+            try:
+                now_m = _time.monotonic()
+                if len(_c_stamp) > 4096:
+                    _c_stamp.clear()
+                _c_stamp[id(completion)] = now_m
+                done_ns = completion.completed_at.total_nanoseconds()
+                _cost_add("lat.radio2launcher", now_m - done_ns / 1e9)
+            except Exception:  # noqa: BLE001
+                pass
             _dispatch_queue.append(
                 ("c", self_d, lane_generation, lane_index, child_key, completion)
             )
@@ -2262,6 +2277,10 @@ def main(argv=None) -> int:
                     return
                 pending_lane, generation, context, _submitted = entry
                 try:
+                    _cost_add("lat.worker", _time.monotonic() - _submitted)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
                     if kind == self._w.RESULT_ERR:
                         error = message[3]
                         self._dispatcher.complete_decoded(
@@ -2505,6 +2524,13 @@ def main(argv=None) -> int:
                 # 역압: 워커가 밀렸으면 창 완료를 미루고 다음 회전에 잇는다.
                 # 300ms 예산 초과와 같은 방식(원순서로 앞머리 복귀)이며
                 # 처리량은 불변, 정지 상한만 유지된다.
+                if kind == "c":
+                    try:
+                        _q_at = _c_stamp.pop(id(item[5]), None)
+                        if _q_at is not None:
+                            _cost_add("lat.queue", _time.monotonic() - _q_at)
+                    except Exception:  # noqa: BLE001
+                        pass
                 if kind == "c" and not _decode_can_accept(item[3]):
                     for leftover in reversed(ordered[index:]):
                         _dispatch_queue.appendleft(leftover)
