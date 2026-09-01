@@ -98,7 +98,16 @@ def _root_run_dir(root):
 
 
 def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
-          verification_root=None):
+          verification_root=None, head_provider=None):
+    """`head_provider`는 현행 HEAD를 돌려주는 호출가능 객체다 (기본 `_git_head`).
+
+    검사 자체는 바뀌지 않는다 — audit의 `head_commit`이 현행 HEAD와 같아야
+    하고, 못 얻으면 fail-closed다. 주입 지점을 둔 이유는 시험이 ambient git
+    상태에 의존하지 않게 하기 위해서다 (배포본처럼 `.git`이 없는 환경에서도
+    "일치하면 통과·불일치하면 거부" 논리를 그대로 검증할 수 있다).
+    """
+
+    _head_of = head_provider if head_provider is not None else _git_head
     collected = {}
     problems = []
     for root in evidence_roots:
@@ -360,7 +369,7 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
                     # 0.9.22 사용자 지적: 형식 검사만으론 낡은 묶음이
                     # 통과 — 현행 HEAD 일치를 요구(코드 변경 후엔 묶음
                     # 재생성 강제). HEAD 확인 불능도 fail-closed.
-                    current_head = _git_head()
+                    current_head = _head_of()
                     if current_head is None:
                         problems.append(
                             "현행 git HEAD 확인 불가 — head_commit 결속 "

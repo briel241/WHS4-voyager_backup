@@ -579,15 +579,17 @@ class RrFinalBuilderTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def _current_head(self):
-        import subprocess
+    #: 시험용 고정 HEAD. 빌더에 같은 값을 주입해 "audit head_commit이 현행
+    #: HEAD와 일치하면 통과, 아니면 거부"라는 논리를 그대로 검증한다. 실제
+    #: git을 읽으면 `.git`이 없는 배포본 같은 환경에서 시험이 아예 못 돈다
+    #: (기존: `AssertionError: 시험 환경에 git HEAD 필요`).
+    FIXED_HEAD = "a1b2c3d4" * 5
 
-        done = subprocess.run(
-            ["git", "-C", VDETER_ROOT, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=20,
-        )
-        assert done.returncode == 0, "시험 환경에 git HEAD 필요"
-        return done.stdout.strip()
+    def _current_head(self):
+        return self.FIXED_HEAD
+
+    def _head_provider(self):
+        return lambda: self.FIXED_HEAD
 
     def _assert_blocked(self, result, keyword):
         # 0.9.22 R2 보강: NOT_READY만 보면 "겨냥 검사가 죽고 무관한
@@ -684,6 +686,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "tc_id")
 
@@ -705,6 +708,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "미등재")
 
@@ -729,6 +733,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                     [root], os.path.join(base, "final-result.json"),
                     software_ok=True, frozen_hash_ok=True,
                     verification_root=self._verification(base),
+                    head_provider=self._head_provider(),
                 )
                 self._assert_blocked(result, "금지 counter")
                 self.assertTrue(any(
@@ -761,6 +766,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertEqual(result["final_status"], "RESEARCH_READY")
 
@@ -777,6 +783,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
             self.assertIn("TC-STAGE7-RR-005", result["missing"])
@@ -794,6 +801,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertEqual(result["final_status"], "RESEARCH_NOT_READY")
 
@@ -808,6 +816,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=False, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -829,6 +838,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -843,6 +853,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
 
@@ -859,6 +870,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertEqual(result["final_status"], "HARDWARE_BLOCKED")
 
@@ -879,6 +891,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                     [root], os.path.join(base, "final-result.json"),
                     software_ok=True, frozen_hash_ok=True,
                     verification_root=self._verification(base),
+                    head_provider=self._head_provider(),
                 )
                 self._assert_blocked(result, "허용목록")
 
@@ -901,6 +914,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "retries > 상한")
 
@@ -917,6 +931,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "run 디렉터리와 불일치")
 
@@ -943,6 +958,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                     [root], os.path.join(base, "final-result.json"),
                     software_ok=True, frozen_hash_ok=True,
                     verification_root=self._verification(base),
+                    head_provider=self._head_provider(),
                 )
                 self._assert_blocked(result, "run 디렉터리와 불일치")
 
@@ -957,6 +973,7 @@ class RrFinalBuilderTest(unittest.TestCase):
             result = app.build(
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "검증 로그 미결속")
 
@@ -973,6 +990,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base, all_unchanged=False),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "all_unchanged")
 
@@ -993,6 +1011,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=vroot,
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "files 목록")
             self._assert_blocked(result, "head_commit")
@@ -1017,6 +1036,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=vroot,
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "현행 HEAD와 불일치")
 
@@ -1039,6 +1059,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=vroot,
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "worktree_dirty")
 
@@ -1061,6 +1082,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "retries 값 비정상")
 
@@ -1076,6 +1098,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertEqual(result["final_status"], "RESEARCH_READY")
             bound = result["verification_evidence_sha256"]
@@ -1103,6 +1126,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "lifecycle_generation 부재")
 
@@ -1125,6 +1149,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "혼재")
 
@@ -1141,6 +1166,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self.assertNotEqual(result["final_status"], "RESEARCH_READY")
             self.assertTrue(any(
@@ -1162,6 +1188,7 @@ class RrFinalBuilderTest(unittest.TestCase):
                 [root_a, root_b], os.path.join(base, "final-result.json"),
                 software_ok=True, frozen_hash_ok=True,
                 verification_root=self._verification(base),
+                head_provider=self._head_provider(),
             )
             self._assert_blocked(result, "복수 root")
 

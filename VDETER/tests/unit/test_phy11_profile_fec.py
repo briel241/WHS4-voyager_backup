@@ -62,6 +62,56 @@ class Phy11ProfileAndFecTest(unittest.TestCase):
             return None
         return struct.unpack("<Q", struct.pack("<d", value))[0]
 
+    #: soft 중간값(사후확률·외재정보·metric)의 허용 ULP.
+    #:
+    #: `_max_star`(turbo.py:119)의 `math.log1p`가 플랫폼 libm 구현에 따라
+    #: 1 ULP 갈린다. 호출 #332에서 최초 분기하며 `exp`는 양 플랫폼이 비트
+    #: 동일하다 — 연산 순서·FMA 차이가 아니라 단일 라이브러리 함수 차이다.
+    #: 고정밀 60자리 기준으로는 glibc(aarch64)가 정확 반올림값이고 규격
+    #: 기준값(x86)이 1 ULP 어긋나 있다.
+    #:
+    #: 전 공식 벡터의 soft 배열을 두 플랫폼에서 전량 대조한 실측 최대는
+    #: 8 ULP다(8회 반복 × posterior/extrinsic/metric/final_llr). 판정·복호
+    #: 비트·CRC는 계속 정확 일치를 요구한다 — 이 값들은 양 플랫폼에서
+    #: 이미 동일하며 |최종 LLR| 최솟값 60.25 대비 판정 여유는 1.3e17배다.
+    SOFT_ULP_TOLERANCE = 8
+
+    def _assert_bits_close(self, expected_bits, got_bits, label):
+        """이미 비트로 변환된 두 배열을 ULP 허용치로 대조한다."""
+
+        self.assertEqual(len(expected_bits), len(got_bits), f"{label}: 길이 불일치")
+        worst = 0
+        worst_index = None
+        for index, (want, got) in enumerate(zip(expected_bits, got_bits)):
+            if want is None or got is None:
+                self.assertEqual(want, got, f"{label}[{index}]: -inf 불일치")
+                continue
+            delta = abs(want - got)
+            if delta > worst:
+                worst, worst_index = delta, index
+        self.assertLessEqual(
+            worst, self.SOFT_ULP_TOLERANCE,
+            f"{label}: 최대 {worst} ULP > 허용 {self.SOFT_ULP_TOLERANCE} "
+            f"(index {worst_index})")
+
+    def _assert_soft_close(self, expected_bits, values, label):
+        """float 배열을 비트로 바꿔 ULP 허용치로 대조한다."""
+
+        self._assert_bits_close(
+            expected_bits, [self._float_bits(value) for value in values], label)
+
+    def _assert_soft_rows_close(self, expected_rows, rows, label):
+        """`_branch_rows`/`_metric_rows`가 낸 **비트 dict**를 대조한다."""
+
+        self.assertEqual(sorted(expected_rows), sorted(rows), f"{label}: 키 집합 불일치")
+        for key, want in expected_rows.items():
+            got = rows[key]
+            if want and isinstance(want[0], list):
+                for state, (w, g) in enumerate(zip(want, got)):
+                    self._assert_bits_close(w, g, f"{label}[{key}][{state}]")
+            else:
+                self._assert_bits_close(want, got, f"{label}[{key}]")
+
     @classmethod
     def _metric_rows(cls, rows) -> dict[str, list[int | None]]:
         return {
@@ -179,29 +229,34 @@ class Phy11ProfileAndFecTest(unittest.TestCase):
         for iteration, expected in enumerate(reference["iterations"], start=1):
             diagnostics = {} if iteration == 1 else None
             post1, ext1 = _siso(sys1, p01, zeros, la1, diagnostics=diagnostics)
-            self.assertEqual(expected["siso1_posterior_f64_bits"], [self._float_bits(value) for value in post1])
-            self.assertEqual(expected["siso1_extrinsic_f64_bits"], [self._float_bits(value) for value in ext1])
+            self._assert_soft_close(
+                expected["siso1_posterior_f64_bits"], post1, "siso1_posterior")
+            self._assert_soft_close(
+                expected["siso1_extrinsic_f64_bits"], ext1, "siso1_extrinsic")
             la2 = interleave(ext1)
             post2, ext2 = _siso(sys2, p02, zeros, la2)
-            self.assertEqual(expected["siso2_posterior_f64_bits"], [self._float_bits(value) for value in post2])
-            self.assertEqual(expected["siso2_extrinsic_f64_bits"], [self._float_bits(value) for value in ext2])
+            self._assert_soft_close(
+                expected["siso2_posterior_f64_bits"], post2, "siso2_posterior")
+            self._assert_soft_close(
+                expected["siso2_extrinsic_f64_bits"], ext2, "siso2_extrinsic")
             if diagnostics is not None:
                 checkpoints = reference["first_iteration_siso1_step_checkpoints"]
-                self.assertEqual(
+                self._assert_soft_rows_close(
                     checkpoints["gamma_branch_metric_f64_bits"],
                     self._branch_rows(diagnostics["gamma_branch_metrics"]),
-                )
-                self.assertEqual(
+                    "gamma_branch_metric")
+                self._assert_soft_rows_close(
                     checkpoints["alpha_metric_f64_bits"],
                     self._metric_rows(diagnostics["alpha_metrics"]),
-                )
-                self.assertEqual(
+                    "alpha_metric")
+                self._assert_soft_rows_close(
                     checkpoints["beta_metric_f64_bits"],
                     self._metric_rows(diagnostics["beta_metrics"]),
-                )
+                    "beta_metric")
             la1 = deinterleave(ext2)
         final = deinterleave(post2)
-        self.assertEqual(reference["final_llr_f64_bits"], [self._float_bits(value) for value in final])
+        self._assert_soft_close(
+            reference["final_llr_f64_bits"], final, "final_llr")
         self.assertEqual(
             tuple(int(bit) for bit in reference["hard_bits"]),
             tuple(0 if value >= 0.0 else 1 for value in final),
