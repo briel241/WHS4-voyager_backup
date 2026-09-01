@@ -1897,11 +1897,13 @@ def main(argv=None) -> int:
         _dispatch_queue = _deque()
 
         def _q_samples(self_d, lane_generation, lane_index, child_key, received):
+            _decode_pool_slot["dispatcher_seen"] = self_d
             _dispatch_queue.append(
                 ("s", self_d, lane_generation, lane_index, child_key, received)
             )
 
         def _q_completed(self_d, lane_generation, lane_index, child_key, completion):
+            _decode_pool_slot["dispatcher_seen"] = self_d
             _dispatch_queue.append(
                 ("c", self_d, lane_generation, lane_index, child_key, completion)
             )
@@ -2234,39 +2236,52 @@ def main(argv=None) -> int:
                 details=_Det.of(reason=str(reason)[:200]),
             ).error
 
-        _orig_dispatcher_init = _D7.__init__
+        def _ensure_decode_pool():
+            """dispatcher가 보이면 executor를 건다 (펌프 스레드에서만).
 
-        def _dispatcher_init_with_decode_pool(self_d, support, stacks, *,
-                                              lane_generation):
-            _orig_dispatcher_init(self_d, support, stacks,
-                                  lane_generation=lane_generation)
+            `_D7.__init__`을 패치하는 방법은 쓸 수 없다 — dispatcher는 런처의
+            monkeypatch 블록보다 **먼저** 생성돼 있어서 `__init__` 패치가
+            영영 실행되지 않는다(phase-g-service-20260901-001527 실측: 워커가
+            실행 끝에서야 떴고 전 구간이 동기 경로로 돌았다). 클래스 메서드
+            패치는 기존 인스턴스에도 먹지만 `__init__`은 그렇지 않다.
+
+            그래서 dispatch 항목이 실어 나르는 dispatcher 참조를 보고 첫
+            drain에서 건다. 세대가 바뀌어 dispatcher가 교체되면 다시 건다.
+            """
+
             if os.environ.get("STAGE7_RX_DECODE_WORKERS", "1") != "1":
+                return
+            dispatcher = _decode_pool_slot.get("dispatcher_seen")
+            if dispatcher is None:
+                return
+            pool = _decode_pool_slot.get("pool")
+            if pool is not None and _decode_pool_slot.get("bound") is dispatcher:
                 return
             try:
                 from vdeter.common.identifiers import Uuid4IdSource as _U4
 
+                stacks = dispatcher._stacks
+                lane_generation = dispatcher._lane_generation
                 id_kind = (
                     "UUID4"
                     if isinstance(getattr(stacks[0].facade, "_id_source", None),
                                   _U4)
                     else "DETERMINISTIC"
                 )
-                pool = _DecodePool(self_d, stacks, lane_generation, id_kind)
+                fresh = _DecodePool(dispatcher, stacks, lane_generation, id_kind)
             except Exception as error:  # noqa: BLE001
-                # 기동 실패는 조용히 동기 경로로 떨어지지 않는다 — 어느 경로로
-                # 돌았는지 모르는 evidence가 가장 나쁘다.
+                # 조용히 동기 경로로 떨어지지 않는다 — 어느 경로로 돌았는지
+                # 모르는 evidence가 가장 나쁘다.
                 print(f"[launcher] rx-decode 기동 실패 — {type(error).__name__}: "
                       f"{error}", file=sys.stderr, flush=True)
                 raise
-            self_d.set_decode_executor(pool.submit)
+            dispatcher.set_decode_executor(fresh.submit)
             for lane_index, stack in enumerate(stacks):
-                stack.bridge.set_native_reset_sink(pool.reset_sink(lane_index))
-            previous = _decode_pool_slot.get("pool")
-            if previous is not None:
-                previous.shutdown()
-            _decode_pool_slot["pool"] = pool
-
-        _D7.__init__ = _dispatcher_init_with_decode_pool
+                stack.bridge.set_native_reset_sink(fresh.reset_sink(lane_index))
+            if pool is not None:
+                pool.shutdown()
+            _decode_pool_slot["pool"] = fresh
+            _decode_pool_slot["bound"] = dispatcher
 
         def _pump_decode_results():
             pool = _decode_pool_slot.get("pool")
@@ -2295,6 +2310,7 @@ def main(argv=None) -> int:
             # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
             # 불변, 정지 상한만 도입.)
             _cost_report()
+            _ensure_decode_pool()
             # worker 결과 반영은 반드시 펌프 스레드에서 한다 (MAC/dispatcher
             # 상태 소유자). 큐를 비우는 것이 창 완료보다 우선이다.
             _pump_decode_results()

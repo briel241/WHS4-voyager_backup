@@ -168,7 +168,7 @@ def test_stall_budget_is_preserved():
 def _pool_source():
     source = _read(LAUNCHER)
     start = source.index("class _DecodePool:")
-    return source[start:source.index("_D7.__init__ = ", start)]
+    return source[start:source.index("def _ensure_decode_pool():", start)]
 
 
 def test_decode_and_reset_share_one_fifo():
@@ -234,9 +234,26 @@ def test_startup_failure_does_not_fall_back_silently():
     """워커 기동 실패 시 동기 경로로 조용히 떨어지면 어느 경로로 돌았는지
     모르는 evidence가 남는다."""
     source = _read(LAUNCHER)
-    init = source[source.index("def _dispatcher_init_with_decode_pool("):]
-    init = init[:init.index("_D7.__init__ = ")]
+    init = source[source.index("def _ensure_decode_pool():"):]
+    init = init[:init.index("def _pump_decode_results():")]
     assert "raise" in init
+
+
+def test_pool_is_not_bound_through_dispatcher_init():
+    """`_D7.__init__` 패치는 무효다 — dispatcher가 monkeypatch보다 먼저
+    생성돼 있어 생성자가 다시 불리지 않는다 (phase-g-service-20260901-001527
+    실측: 워커가 실행 끝에서야 떴고 전 구간이 동기 경로로 돌았다).
+
+    dispatch 항목이 실어 나르는 dispatcher 참조로 펌프 스레드에서 건다.
+    """
+    source = _read(LAUNCHER)
+    assert "_D7.__init__ = " not in source, (
+        "__init__ 패치로 executor를 걸고 있다 — 실행 중에 적용되지 않는다")
+    assert source.count('_decode_pool_slot["dispatcher_seen"] = self_d') >= 2, (
+        "큐 적재 시점에 dispatcher를 잡지 않는다")
+    drain = _drain_source()
+    assert "_ensure_decode_pool()" in drain, (
+        "펌프 스레드에서 executor를 걸지 않는다")
 
 
 if __name__ == "__main__":
