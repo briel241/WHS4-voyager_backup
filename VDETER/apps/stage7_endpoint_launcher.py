@@ -1008,16 +1008,31 @@ def main(argv=None) -> int:
                     ]
                     # 이 type-4를 실은 창 하나의 실제 분해. 세션 평균이 아니라
                     # 같은 사건이라 proc_lag에서 그대로 뺄 수 있다.
-                    trace = _win_trace.get(recv_ns)
+                    #
+                    # recv_ns는 창의 첫 표본이 아니라 **버스트 검출 시각**이다
+                    # (_merge_results가 min(packet.received_at)을 쓴다). 창
+                    # 첫 표본을 키로 잡아 정확 일치를 노리면 빗나가므로, 그
+                    # 시각을 담은 창을 고른다. win_offset_ms가 창 길이보다
+                    # 크면 해당 창이 이미 밀려난 것이니 그것도 보인다.
+                    trace = None
+                    offset_ms = 0.0
+                    starts = [k for k in _win_trace if k <= recv_ns]
+                    if starts:
+                        window_first_ns = max(starts)
+                        trace = _win_trace[window_first_ns]
+                        offset_ms = (recv_ns - window_first_ns) / 1e6
                     if trace is None:
                         span = "trace=없음"
                     else:
                         to_submit, to_commit = trace
+                        # 세 구간을 recv_ns 기준으로 옮긴다 —
+                        # pre + worker + post = proc_lag_ms 가 되게.
                         span = (
-                            f"to_submit_ms={to_submit:.0f} "
-                            f"to_commit_ms={to_commit:.0f} "
+                            f"win_offset_ms={offset_ms:.0f} "
+                            f"pre_ms={to_submit - offset_ms:.0f} "
                             f"worker_ms={to_commit - to_submit:.0f} "
-                            f"post_commit_ms={(now_ns - recv_ns) / 1e6 - to_commit:.0f}"
+                            f"post_ms="
+                            f"{(now_ns - recv_ns) / 1e6 - to_commit + offset_ms:.0f}"
                         )
                     print(
                         f"[diag] type4-rx allocs {before_n}->{after_n} "
