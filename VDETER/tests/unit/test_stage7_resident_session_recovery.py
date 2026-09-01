@@ -176,9 +176,14 @@ def test_decode_and_reset_share_one_fifo():
     앞지르면 결과가 조용히 달라진다. 두 job은 같은 큐로 가야 한다."""
     body = _pool_source()
     assert "JOB_DECODE" in body and "JOB_RESET" in body
-    for marker in ('self._jobs[lane_index].put_nowait',):
-        assert body.count(marker) >= 2, (
-            "decode와 reset이 같은 lane 큐로 가지 않는다")
+    # 제출 방식은 다르다(decode는 역압, reset은 대기) — 같은 lane 큐로
+    # 들어가는 것이 순서 보장의 근거다.
+    assert body.count("self._jobs[lane_index].put") >= 2, (
+        "decode와 reset이 같은 lane 큐로 가지 않는다")
+    submit = body[body.index("def submit(self"):body.index("def reset_sink(self")]
+    sink = body[body.index("def reset_sink(self"):body.index("# --- 회수")]
+    assert "JOB_DECODE" in submit and "self._jobs[lane_index].put" in submit
+    assert "JOB_RESET" in sink and "self._jobs[lane_index].put" in sink
 
 
 def test_workers_use_forkserver_not_spawn_or_bare_fork():
@@ -258,6 +263,22 @@ def test_queue_pressure_is_backpressure_not_a_session_kill():
     assert "appendleft(leftover)" in drain
     # 진짜 멈춘 워커를 놓치면 안 된다.
     assert "_DECODE_RESULT_DEADLINE_S" in _read(LAUNCHER)
+
+
+def test_reset_waits_for_room_instead_of_failing_on_a_full_queue():
+    """reset은 미루거나 버릴 수 없다 — decode와의 순서가 PHY stream 연속성
+    판정을 좌우한다.
+
+    역압을 넣은 뒤로는 큐가 차 있는 것이 정상 상태다. put_nowait이면 곧바로
+    Full이 되어 세션이 죽는다 (phase-g-service-20260901-021201: MASS-A가
+    "reset 전달 실패 lane=0: Full"). 자리가 날 때까지 상한을 두고 기다린다.
+    """
+    body = _pool_source()
+    sink = body[body.index("def reset_sink(self, lane_index):"):]
+    sink = sink[:sink.index("# --- 회수")]
+    assert "put_nowait(" not in sink, "reset을 put_nowait으로 넣고 있다"
+    assert "_DECODE_RESET_ENQUEUE_TIMEOUT_S" in sink, "대기 상한이 없다"
+    assert "self.fail(" in sink, "상한 초과가 조용히 넘어간다"
 
 
 def test_fatal_paths_are_not_silent():
