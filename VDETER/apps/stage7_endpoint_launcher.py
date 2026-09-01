@@ -2251,6 +2251,26 @@ def main(argv=None) -> int:
                         pass
                 # 3) 워커 회수 (상한 있음).
                 self.shutdown()
+                # os._exit는 multiprocessing의 atexit 정리를 건너뛴다 —
+                # 이 런처가 띄운 B210 worker까지 고아로 남아 다음 세션의
+                # 경쟁 프로세스 검사를 막는다 (phase-g-service-20260901-013149
+                # 이후 spawn_main 하나가 38분 생존). 남은 자식에게 정리
+                # 기회를 준다.
+                try:
+                    import multiprocessing as _mp_exit
+
+                    for child in _mp_exit.active_children():
+                        try:
+                            child.terminate()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    for child in _mp_exit.active_children():
+                        try:
+                            child.join(timeout=2.0)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
                 # 4) 세션을 fail-closed로 끝낸다 — 코디네이터의 workload
                 #    quiescence가 launchers_alive로 잡는다. 재시작하지 않는다.
                 try:
