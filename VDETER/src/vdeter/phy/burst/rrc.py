@@ -27,6 +27,16 @@ RRC_TAPS = tuple(
 )
 SAMPLES_PER_SYMBOL = 4
 RRC_HALF_SPAN_SAMPLES = 20
+
+# numpy는 PHY·Radio 구현 단계에서 쓰도록 pyproject가 허용한다
+# (dsp = ["numpy>=1.24"]). 없으면 참조 구현이 그대로 동작한다.
+try:  # pragma: no cover - 환경 의존
+    import numpy as _numpy
+except ImportError:  # pragma: no cover
+    _numpy = None
+    _RRC_TAPS_ARRAY = None
+else:
+    _RRC_TAPS_ARRAY = _numpy.asarray(RRC_TAPS, dtype=_numpy.float64)
 RAMP_SAMPLES = 32
 BODY_SAMPLES = 1920
 GUARD_SAMPLES = 64
@@ -145,8 +155,9 @@ def from_test_iq_int16_le(data: bytes) -> tuple[complex, ...]:
     return tuple(complex(i / 32767.0, q / 32767.0) for i, q in struct.iter_unpack("<hh", data))
 
 
-def matched_filter(samples) -> tuple[complex, ...]:
-    source = tuple(complex(value) for value in samples)
+def _matched_filter_reference(source) -> tuple[complex, ...]:
+    """참조 구현. numpy가 없을 때 그대로 쓰인다."""
+
     output = []
     for n in range(len(source)):
         value = 0.0 + 0.0j
@@ -156,6 +167,37 @@ def matched_filter(samples) -> tuple[complex, ...]:
             value += source[source_index] * RRC_TAPS[n - source_index + RRC_HALF_SPAN_SAMPLES]
         output.append(value)
     return tuple(output)
+
+
+def matched_filter(samples) -> tuple[complex, ...]:
+    """RRC matched filter. 판정·탐색·출력 의미는 참조 구현과 같다.
+
+    `output[n] = sum_j TAPS[j] * source[n + H - j]` (H=RRC_HALF_SPAN_SAMPLES)
+    이고 범위 밖은 0으로 확장되므로 `numpy.convolve(source, TAPS)`의
+    `[H : H+len(source)]` 구간과 정확히 대응한다 — 참조 루프의
+    `max(0, ...)`·`min(len-1, ...)` 가드까지 같은 결과다.
+
+    Pi 5 프로파일에서 이 함수가 잡음 창 디코드 시간의 38%를 차지했다
+    (창당 ~17ms). 합산 순서가 달라 부동소수 반올림 차이가 생기지만
+    PHY 경계 출력은 float32라 전송선상 결과는 보존된다.
+    """
+
+    source = tuple(complex(value) for value in samples)
+    if _numpy is not None and source:
+        try:
+            array = _numpy.asarray(source, dtype=_numpy.complex128)
+            convolved = _numpy.convolve(array, _RRC_TAPS_ARRAY)
+            picked = convolved[
+                RRC_HALF_SPAN_SAMPLES:RRC_HALF_SPAN_SAMPLES + len(source)
+            ]
+            # tolist()로 파이썬 complex로 되돌린다. numpy 스칼라를 그대로
+            # 흘리면 하류의 conjugate/곱셈이 파이썬 complex보다 느려
+            # (Pi 프로파일: numpy.generic.conjugate 14,560회) 필터에서 아낀
+            # 시간을 도로 까먹는다.
+            return tuple(picked.tolist())
+        except Exception:  # noqa: BLE001 — 참조 경로로 안전 복귀
+            pass
+    return _matched_filter_reference(source)
 
 
 def cubic_interpolate(samples, position: float) -> complex:

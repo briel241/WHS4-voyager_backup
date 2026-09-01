@@ -191,7 +191,9 @@ def _decimate_slot_vectorized(samples: Sequence[complex]) -> tuple[complex, ...]
     if not array.any():
         return (0j,) * NATIVE_SLOT_SAMPLES
     convolved = _numpy.convolve(array, _DECIM_TAPS_ARRAY)
-    return tuple(convolved[_DECIM_PICK])
+    # tolist()로 파이썬 complex 복귀 — numpy 스칼라를 하류로 흘리면
+    # 이어지는 스칼라 연산이 오히려 느려진다.
+    return tuple(convolved[_DECIM_PICK].tolist())
 
 
 def decimate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
