@@ -1999,6 +1999,286 @@ def main(argv=None) -> int:
             except Exception:  # noqa: BLE001
                 pass
 
+        # ── 수신 PHY decode를 펌프 스레드 밖으로 (lane별 프로세스)
+        # phase-g-service-20260831-214853 실측: 펌프 drain 292.9초 중 창 완료가
+        # 283.1초(96.7%)를 먹고, 그 안은 리샘플 37.93ms + 디코드 48.76ms/창이다
+        # (표본 경로는 0.14ms/건). PHY는 순수 파이썬이라 GIL이 풀리지 않아
+        # 스레드로는 분리되지 않는다. 런처는 8곳에서 스레드를 쓰므로 fork는
+        # 위험하다 — spawn으로 띄운다.
+        _DECODE_JOB_QUEUE_MAX = 32
+        _DECODE_RESULT_QUEUE_MAX = 64
+        _DECODE_RESULT_DEADLINE_S = 30.0
+        _decode_pool_slot = {"pool": None}
+
+        class _DecodePool:
+            """lane별 decode worker 프로세스와 그 FIFO를 소유한다.
+
+            decode와 reset을 **한 큐**로 보낸다 — PHY stream은 기대 epoch
+            연속성으로 보존/폐기를 판정하므로 reset이 decode를 앞지르면 결과가
+            조용히 달라진다.
+
+            crash·큐 포화·응답 지연은 재시작하지 않고 세션을 fail-closed로
+            끝낸다. stream 연속성과 진단 기록이 사라진 뒤의 조용한 재기동은
+            정상 운전처럼 보이는 공백을 만든다.
+            """
+
+            def __init__(self, dispatcher, stacks, lane_generation, id_kind):
+                import multiprocessing as _mp
+                from vdeter.stage7 import rx_decode_worker as _w
+
+                self._w = _w
+                self._dispatcher = dispatcher
+                self._lane_generation = lane_generation
+                self._context = _mp.get_context("spawn")
+                self._jobs = []
+                self._results = []
+                self._procs = []
+                self._pending = {}
+                self._next_job_id = 0
+                self._fatal = None
+                for lane_index in range(len(stacks)):
+                    jobs = self._context.Queue(maxsize=_DECODE_JOB_QUEUE_MAX)
+                    results = self._context.Queue(
+                        maxsize=_DECODE_RESULT_QUEUE_MAX)
+                    process = self._context.Process(
+                        target=_w.run_worker, args=(jobs, results),
+                        kwargs=dict(lane_index=lane_index,
+                                    lane_generation=lane_generation,
+                                    id_source_kind=id_kind,
+                                    id_source_seed=0),
+                        daemon=True,
+                        name=f"stage7-rx-decode-lane{lane_index}",
+                    )
+                    process.start()
+                    self._jobs.append(jobs)
+                    self._results.append(results)
+                    self._procs.append(process)
+                print(
+                    "[launcher] rx-decode workers 기동 "
+                    f"lanes={len(self._procs)} "
+                    f"pids={[p.pid for p in self._procs]}",
+                    file=sys.stderr, flush=True,
+                )
+
+            # --- 제출 -------------------------------------------------------
+
+            def submit(self, lane_index, lane_generation, context,
+                       device_request, epoch_id, t0_ns):
+                """dispatcher의 decode executor. 펌프 스레드에서만 불린다."""
+
+                self._next_job_id += 1
+                job_id = self._next_job_id
+                self._pending[job_id] = (
+                    lane_index, lane_generation, context,
+                    _time.monotonic(),
+                )
+                _, rx_window_key = context
+                try:
+                    self._jobs[lane_index].put_nowait(
+                        (self._w.JOB_DECODE, job_id, lane_generation,
+                         rx_window_key, epoch_id, t0_ns, device_request)
+                    )
+                except Exception as error:  # noqa: BLE001 (queue.Full 포함)
+                    self._pending.pop(job_id, None)
+                    self.fail(f"decode job 큐 포화/전송 실패 lane={lane_index}: "
+                              f"{type(error).__name__}")
+
+            def reset_sink(self, lane_index):
+                """bridge의 native reset을 같은 FIFO로 보낸다."""
+
+                def _sink(channel):
+                    try:
+                        self._jobs[lane_index].put_nowait(
+                            (self._w.JOB_RESET, None, self._lane_generation,
+                             channel)
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        self.fail(
+                            f"reset 전달 실패 lane={lane_index}: "
+                            f"{type(error).__name__}")
+
+                return _sink
+
+            # --- 회수 -------------------------------------------------------
+
+            def pump_results(self):
+                """펌프 스레드에서 결과를 반영한다."""
+
+                if self._fatal is not None:
+                    return
+                for lane_index, results in enumerate(self._results):
+                    while True:
+                        try:
+                            message = results.get_nowait()
+                        except Exception:  # noqa: BLE001 (queue.Empty 포함)
+                            break
+                        self._apply(lane_index, message)
+                        if self._fatal is not None:
+                            return
+                self._check_liveness()
+
+            def _apply(self, lane_index, message):
+                kind = message[0]
+                if kind == self._w.RESULT_READY:
+                    return
+                if kind == self._w.RESULT_FATAL:
+                    self.fail(f"worker FATAL lane={lane_index}: "
+                              f"{str(message[3])[:400]}")
+                    return
+                job_id = message[1]
+                entry = self._pending.pop(job_id, None)
+                if entry is None:
+                    # generation 교체 등으로 이미 정리된 job이다.
+                    return
+                pending_lane, generation, context, _submitted = entry
+                try:
+                    if kind == self._w.RESULT_ERR:
+                        error = message[3]
+                        self._dispatcher.complete_decoded(
+                            generation, pending_lane, context,
+                            error=error, gapped=error is None,
+                            attempt_records=message[4],
+                        )
+                    else:
+                        self._dispatcher.complete_decoded(
+                            generation, pending_lane, context,
+                            result=message[3],
+                            attempt_records=message[4],
+                            received_at_ns=message[5],
+                        )
+                except Exception as error:  # noqa: BLE001
+                    self.fail(f"decode 결과 반영 실패 lane={pending_lane}: "
+                              f"{type(error).__name__}: {error}")
+
+            def _check_liveness(self):
+                for lane_index, process in enumerate(self._procs):
+                    if not process.is_alive():
+                        self.fail(
+                            f"worker 사망 lane={lane_index} "
+                            f"exitcode={process.exitcode}")
+                        return
+                if not self._pending:
+                    return
+                oldest = min(item[3] for item in self._pending.values())
+                waited = _time.monotonic() - oldest
+                if waited > _DECODE_RESULT_DEADLINE_S:
+                    self.fail(f"decode 결과 지연 {waited:.1f}초 "
+                              f"(pending={len(self._pending)})")
+
+            # --- fail-closed -------------------------------------------------
+
+            def fail(self, reason):
+                if self._fatal is not None:
+                    return
+                self._fatal = reason
+                print(f"[launcher] rx-decode FATAL — {reason}",
+                      file=sys.stderr, flush=True)
+                # 1) generation 무효화: 늦게 온 결과는 기존 stale 경로로 폐기된다.
+                try:
+                    self._dispatcher._lane_generation = -1
+                except Exception:  # noqa: BLE001
+                    pass
+                # 2) in-flight 창을 정의된 오류로 terminal 처리한다.
+                pending, self._pending = self._pending, {}
+                for lane_index, generation, context, _s in pending.values():
+                    try:
+                        window, _key = context
+                        self._dispatcher._lane_terminal(
+                            window, lane_index,
+                            error=_decode_fatal_error(reason),
+                            received_at_ns=None,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 3) 워커 회수 (상한 있음).
+                self.shutdown()
+                # 4) 세션을 fail-closed로 끝낸다 — 코디네이터의 workload
+                #    quiescence가 launchers_alive로 잡는다. 재시작하지 않는다.
+                try:
+                    sys.stderr.flush()
+                    sys.stdout.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+                _time.sleep(1.0)   # 증거 전달 유예 (상한)
+                os._exit(3)
+
+            def shutdown(self):
+                for jobs in self._jobs:
+                    try:
+                        jobs.put_nowait(None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                for process in self._procs:
+                    try:
+                        process.join(timeout=5.0)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(timeout=3.0)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(timeout=2.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        def _decode_fatal_error(reason):
+            from vdeter.common.errors import (
+                Details as _Det, ErrorCategory as _Cat, ErrorCode as _Code,
+                Layer as _Layer,
+            )
+            from vdeter.common.results import internal_error as _ie
+
+            return _ie(
+                _Layer.RUNTIME, _Code.PHY_INTERNAL_INVARIANT_BROKEN,
+                _Cat.INTERNAL,
+                "수신 decode worker가 fail-closed로 종료됐습니다",
+                details=_Det.of(reason=str(reason)[:200]),
+            ).error
+
+        _orig_dispatcher_init = _D7.__init__
+
+        def _dispatcher_init_with_decode_pool(self_d, support, stacks, *,
+                                              lane_generation):
+            _orig_dispatcher_init(self_d, support, stacks,
+                                  lane_generation=lane_generation)
+            if os.environ.get("STAGE7_RX_DECODE_WORKERS", "1") != "1":
+                return
+            try:
+                from vdeter.common.identifiers import Uuid4IdSource as _U4
+
+                id_kind = (
+                    "UUID4"
+                    if isinstance(getattr(stacks[0].facade, "_id_source", None),
+                                  _U4)
+                    else "DETERMINISTIC"
+                )
+                pool = _DecodePool(self_d, stacks, lane_generation, id_kind)
+            except Exception as error:  # noqa: BLE001
+                # 기동 실패는 조용히 동기 경로로 떨어지지 않는다 — 어느 경로로
+                # 돌았는지 모르는 evidence가 가장 나쁘다.
+                print(f"[launcher] rx-decode 기동 실패 — {type(error).__name__}: "
+                      f"{error}", file=sys.stderr, flush=True)
+                raise
+            self_d.set_decode_executor(pool.submit)
+            for lane_index, stack in enumerate(stacks):
+                stack.bridge.set_native_reset_sink(pool.reset_sink(lane_index))
+            previous = _decode_pool_slot.get("pool")
+            if previous is not None:
+                previous.shutdown()
+            _decode_pool_slot["pool"] = pool
+
+        _D7.__init__ = _dispatcher_init_with_decode_pool
+
+        def _pump_decode_results():
+            pool = _decode_pool_slot.get("pool")
+            if pool is None:
+                return
+            # 배송 3계열과 같은 락 아래에서 반영한다 — finalize_window·
+            # lane terminal이 register_window/observe와 같은 구조를 만진다.
+            # 락 순서(_dispatch_lock -> dispatcher._lock)는 동기 경로와 동일해
+            # 새 역전이 생기지 않는다.
+            with _dispatch_lock:
+                pool.pump_results()
+
         def _drain_dispatch_queue():
             # 항목당 처리(수신 디코드)가 ~140ms라 일괄 drain이 MAC 박동을
             # 초 단위로 멎게 한다 (svc-run-c 실측) — 항목 사이에 MAC
@@ -2015,6 +2295,9 @@ def main(argv=None) -> int:
             # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
             # 불변, 정지 상한만 도입.)
             _cost_report()
+            # worker 결과 반영은 반드시 펌프 스레드에서 한다 (MAC/dispatcher
+            # 상태 소유자). 큐를 비우는 것이 창 완료보다 우선이다.
+            _pump_decode_results()
             mac_cycle = getattr(main, "_mac_cycle", None)
             batch = []
             for _ in range(256):

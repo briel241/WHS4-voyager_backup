@@ -163,6 +163,82 @@ def test_stall_budget_is_preserved():
     assert "appendleft(leftover)" in body
 
 
+# ------------------------------------------------------ decode worker 경계
+
+def _pool_source():
+    source = _read(LAUNCHER)
+    start = source.index("class _DecodePool:")
+    return source[start:source.index("_D7.__init__ = ", start)]
+
+
+def test_decode_and_reset_share_one_fifo():
+    """PHY stream은 연속성으로 보존/폐기를 판정한다 — reset이 decode를
+    앞지르면 결과가 조용히 달라진다. 두 job은 같은 큐로 가야 한다."""
+    body = _pool_source()
+    assert "JOB_DECODE" in body and "JOB_RESET" in body
+    for marker in ('self._jobs[lane_index].put_nowait',):
+        assert body.count(marker) >= 2, (
+            "decode와 reset이 같은 lane 큐로 가지 않는다")
+
+
+def test_workers_are_spawned_not_forked():
+    """런처는 여러 스레드를 쓴다 — fork는 자식에서 교착할 수 있다."""
+    body = _pool_source()
+    assert 'get_context("spawn")' in body, "spawn이 아니다"
+    assert "fork" not in body
+
+
+def test_queues_are_bounded():
+    source = _read(LAUNCHER)
+    assert "_DECODE_JOB_QUEUE_MAX" in source
+    assert "_DECODE_RESULT_QUEUE_MAX" in source
+    body = _pool_source()
+    assert body.count("maxsize=") >= 2, "큐가 unbounded다"
+
+
+def test_failure_is_closed_and_never_restarts():
+    """crash·큐 포화·지연은 재시작하지 않고 세션을 끝낸다.
+
+    stream 연속성과 진단 기록이 사라진 뒤의 조용한 재기동은 정상 운전처럼
+    보이는 공백을 만든다.
+    """
+    body = _pool_source()
+    fail = body[body.index("def fail(self, reason):"):]
+    # generation 무효화가 in-flight terminal보다 먼저여야 늦게 온 결과가
+    # stale로 폐기된다.
+    assert fail.index("_lane_generation = -1") < fail.index("_lane_terminal")
+    assert "os._exit(3)" in fail, "세션을 fail-closed로 끝내지 않는다"
+    for banned in ("restart", "respawn", "_start_worker("):
+        assert banned not in body, f"자동 재시작 흔적: {banned}"
+
+
+def test_fatal_paths_are_not_silent():
+    """큐 포화·사망·지연·결과 반영 실패가 전부 fail()로 모여야 한다."""
+    body = _pool_source()
+    for marker in ("큐 포화", "worker 사망", "결과 지연", "worker FATAL"):
+        assert marker in body, f"{marker} 경로가 없다"
+
+
+def test_results_are_committed_on_the_pump_thread_under_dispatch_lock():
+    source = _read(LAUNCHER)
+    pump = source[source.index("def _pump_decode_results():"):]
+    pump = pump[:pump.index("def _drain_dispatch_queue():")]
+    assert "with _dispatch_lock:" in pump, (
+        "결과 반영이 배송 직렬화 락 밖에서 일어난다")
+    drain = _drain_source()
+    assert "_pump_decode_results()" in drain, (
+        "펌프 회전마다 결과를 반영하지 않는다")
+
+
+def test_startup_failure_does_not_fall_back_silently():
+    """워커 기동 실패 시 동기 경로로 조용히 떨어지면 어느 경로로 돌았는지
+    모르는 evidence가 남는다."""
+    source = _read(LAUNCHER)
+    init = source[source.index("def _dispatcher_init_with_decode_pool("):]
+    init = init[:init.index("_D7.__init__ = ")]
+    assert "raise" in init
+
+
 if __name__ == "__main__":
     for name, value in sorted(globals().items()):
         if name.startswith("test_") and callable(value):

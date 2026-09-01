@@ -104,7 +104,7 @@ class Stage7LaneRxDispatcher:
 
     __slots__ = (
         "_support", "_stacks", "_lock", "_windows", "_stale_events",
-        "_lane_generation", "_gate_state",
+        "_lane_generation", "_gate_state", "_decode_executor",
     )
 
     def __init__(self, support, stacks, *, lane_generation: int) -> None:
@@ -115,6 +115,27 @@ class Stage7LaneRxDispatcher:
         self._stale_events = []
         self._lane_generation = lane_generation
         self._gate_state = {}
+        self._decode_executor = None
+
+    def set_decode_executor(self, executor) -> None:
+        """리샘플·energy gate·디코드를 외부 실행기에 위임한다.
+
+        `on_lane_window_completed`의 무거운 구간(phase-g-service-20260831-214853
+        실측: 리샘플 37.93ms + 디코드 48.76ms = 창당 86.7ms, 펌프 drain의 96.7%)을
+        별도 프로세스로 옮기기 위한 seam이다. executor는
+
+            executor(lane_index, lane_generation, context, device_request,
+                     epoch_id, t0_hardware_ns)
+
+        형태로 호출되고, 결과가 준비되면 호출자가 **펌프 스레드에서**
+        `complete_decoded(...)`에 그 `context`를 그대로 돌려준다.
+
+        미설정(기본 None)이면 현행 동기 경로 그대로다 — 기존 호출자·시험의
+        동작은 변하지 않는다. ledger·논리창·generation·MAC 상태는 executor
+        유무와 무관하게 이 dispatcher와 펌프가 계속 소유한다.
+        """
+
+        self._decode_executor = executor
 
     def _energy_gate(self, lane_index, native_request):
         """잡음 바닥 창의 샘플을 0으로 치환해 frozen 조기 탈출로 보낸다.
@@ -311,7 +332,14 @@ class Stage7LaneRxDispatcher:
             completion.requested_start_at.total_nanoseconds(),
             completion.requested_duration_nanoseconds,
         )
-        prepared = stack.bridge.complete_window(completion)
+        executor = self._decode_executor
+        # executor가 있으면 리샘플 이전(device rate)에서 끊어 넘긴다. 없으면
+        # 합성 API를 그대로 부른다 — 두 경로의 반환 의미는 동일하다.
+        prepared = (
+            stack.bridge.complete_device_window(completion)
+            if executor is not None
+            else stack.bridge.complete_window(completion)
+        )
         if prepared.is_err:
             self._support.report_error(prepared.error)
             self._lane_terminal(window, lane_index, error=prepared.error, received_at_ns=None)
@@ -337,6 +365,12 @@ class Stage7LaneRxDispatcher:
             return
         segment, epoch_id = promoted.value
         t0 = stack.ingress.epoch_t0_hardware_ns(epoch_id)
+        if executor is not None:
+            # 여기서부터(리샘플·게이트·디코드)가 별도 프로세스로 나간다.
+            # 결과는 펌프 스레드가 complete_decoded로 되돌린다.
+            executor(lane_index, lane_generation, (window, rx_window_key),
+                     native_request, epoch_id, t0)
+            return
         native_request = self._energy_gate(lane_index, native_request)
         stack.facade.diagnostic_sink.begin_window(rx_window_key, epoch_id, t0)
         try:
@@ -352,6 +386,59 @@ class Stage7LaneRxDispatcher:
             window, lane_index, result=decoded.value,
             received_at_ns=native_request.samples.first_sample_at.total_nanoseconds(),
         )
+
+    def complete_decoded(self, lane_generation, lane_index, context, *,
+                         result=None, error=None, gapped=False,
+                         received_at_ns=None, attempt_records=()):
+        """외부 실행기의 decode 결과를 **펌프 스레드에서** 반영한다.
+
+        동기 경로의 decode 이후 구간(진단 기록 · finalize_window · lane
+        terminal)을 순서 그대로 수행한다. MAC/dispatcher 상태를 건드리는 것은
+        여기가 전부다.
+
+        늦게 도착한 결과(generation 교체·창 소멸·이미 terminal)는 기존
+        stale 경로로 폐기한다.
+        """
+
+        if lane_generation != self._lane_generation:
+            self._stale("decoded", lane_generation, lane_index)
+            return
+        window, rx_window_key = context
+        stack = self._stacks[lane_index]
+
+        if gapped:
+            # 동기 경로에서 native 변환이 Ok(None)을 낸 경우와 같은 처리다
+            # (promote/finalize 없이 결과 없음). complete_device_window가
+            # sample_count·continuity를 상수로 세우므로 실제로는 도달하지
+            # 않지만, frozen 분기를 그대로 보존한다.
+            self._lane_terminal(
+                window, lane_index,
+                error=_private_error(
+                    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                    "lane window가 완전한 연속 8,192 sample이 아닙니다",
+                ).error,
+                received_at_ns=None,
+            )
+            return
+
+        # 진단 기록은 decode 안에서 생성되므로(§9.3) 실행기에서 회수해 여기서
+        # 재생해야 evidence가 보존된다. 재생 실패가 수신 결과를 무효로 만들지는
+        # 않는다 — fail-open.
+        sink = stack.facade.diagnostic_sink
+        for record in attempt_records or ():
+            try:
+                sink.record(record)
+            except Exception:  # noqa: BLE001
+                pass
+
+        stack.ingress.finalize_window(rx_window_key)
+        if error is not None:
+            self._support.report_error(error)
+            self._lane_terminal(window, lane_index, error=error,
+                                received_at_ns=None)
+            return
+        self._lane_terminal(window, lane_index, result=result,
+                            received_at_ns=received_at_ns)
 
     def on_lane_error(self, lane_generation, lane_index, child_key, code, details):
         if lane_generation != self._lane_generation:
