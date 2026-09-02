@@ -50,6 +50,15 @@ _REQUEST_HEREDOC = "STAGE7_WORKLOAD_REQUEST_END"
 #: orchestration 계층 정책이며 PHY/MAC/TDMA/RF 는 불변이다.
 WORKLOAD_SETTLE_SECONDS = 30.0
 
+#: 정착 대기를 요구하는 **직전** 시나리오.
+#:
+#: 배압 덩어리 4개가 전부 SC-VDE-001 구간에서만 났다. SC-VDE-005/006 은
+#: 같은 유입 스파이크(31창/초)에서도 배압이 0회다 — 유입량이 아니라
+#: 실버스트 창의 복호 비용 차이다. 001 만 페이로드가 가장 크고(411B)
+#: 멱등성 재전송까지 해 실버스트 창이 가장 많다.
+#: 필요 없는 곳까지 기다리면 16 workload 기준 7.5분을 버린다.
+SETTLE_AFTER_SCENARIOS = frozenset({"SC-VDE-001"})
+
 
 class Stage7ServiceSession:
     """살아 있는 하드웨어 service session 하나. workload는 이 위에서만 돈다."""
@@ -85,6 +94,8 @@ class Stage7ServiceSession:
         self._counter = 0
         #: 직전 workload 종료 시각 (정착 대기 계산용).
         self._last_workload_end = None
+        #: 직전 workload 의 시나리오 (정착 필요 여부 판정용).
+        self._last_scenario_id = None
         self._started = clock()
         self.diagnostics = bool(diagnostics)
         if trace is None:
@@ -266,12 +277,14 @@ class Stage7ServiceSession:
 
         if self.status != "READY":
             raise ServiceSessionError(f"session이 READY가 아닙니다: {self.status}")
-        if self._last_workload_end is not None:
+        if (self._last_workload_end is not None
+                and self._last_scenario_id in SETTLE_AFTER_SCENARIOS):
             remaining = WORKLOAD_SETTLE_SECONDS - (
                 self.clock() - self._last_workload_end)
             if remaining > 0:
                 self.trace.emit("workload_settle",
                                 seconds=round(remaining, 1),
+                                after_scenario=self._last_scenario_id,
                                 reason="rx_pipeline_drain")
                 self.sleeper(remaining)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
@@ -334,6 +347,7 @@ class Stage7ServiceSession:
             self.status = "READY"
             self.trace.state("READY")
         self._last_workload_end = self.clock()
+        self._last_scenario_id = scenario_id
         return result
 
     # ---- 종료 (§10) ------------------------------------------------------

@@ -248,12 +248,13 @@ def test_hardware_lifecycle_runs_once_for_many_workloads():
         assert len(set(summary["workload_ids"])) == 4, "workload ID가 겹친다"
 
 
-def test_workloads_settle_the_rx_pipeline_between_runs():
-    """workload 사이에 정착 대기를 둔다 — 첫 회는 예외.
+def test_settle_waits_only_after_the_scenario_that_causes_backpressure():
+    """정착 대기는 직전이 SC-VDE-001 일 때만 — 005/006 뒤에는 기다리지 않는다.
 
-    근거: run 145556에서 SC-VDE-001 normal의 멱등성 재전송이 만든 배압이
-    다음 workload의 type-4를 늦춰(proc_lag 2,860~3,940ms) forged가 4/4
-    실패했다. 앞 workload가 끝난 뒤 큐가 빌 시간을 준다.
+    근거: run 145556 실측에서 배압 덩어리 4개가 전부 SC-VDE-001 구간에서만
+    났다. 005/006 은 같은 유입 스파이크(31창/초)에도 배압 0회다. 그 배압이
+    다음 workload 의 type-4 를 늦춰(proc_lag 2,860~3,940ms) forged 가 4/4
+    실패했다.
     """
 
     with tempfile.TemporaryDirectory(dir=_REPO) as tmp:
@@ -266,14 +267,19 @@ def test_workloads_settle_the_rx_pipeline_between_runs():
         session.run_workload("SC-VDE-005", "normal")
         assert slept == [], "첫 workload는 대기하지 않는다"
 
-        # 앞 workload 종료 직후 = 정착 시간 전부를 기다린다.
         session.run_workload("SC-VDE-006", "normal")
-        assert len(slept) == 1
-        assert slept[0] == stage7_session.WORKLOAD_SETTLE_SECONDS
+        assert slept == [], "005 뒤에는 배압이 없어 대기하지 않는다"
 
-        # 이미 그만큼 지났으면 더 기다리지 않는다.
-        now[0] += stage7_session.WORKLOAD_SETTLE_SECONDS + 5.0
         session.run_workload("SC-VDE-001", "normal")
+        assert slept == [], "006 뒤에도 대기하지 않는다"
+
+        # 직전이 001 — 배압이 나는 유일한 구간이라 정착을 기다린다.
+        session.run_workload("SC-VDE-001", "forged")
+        assert slept == [stage7_session.WORKLOAD_SETTLE_SECONDS]
+
+        # 이미 정착 시간이 지났으면 추가로 기다리지 않는다.
+        now[0] += stage7_session.WORKLOAD_SETTLE_SECONDS + 5.0
+        session.run_workload("SC-VDE-005", "normal")
         assert len(slept) == 1, "이미 정착했으면 추가 대기 없음"
 
 
