@@ -827,10 +827,17 @@ class MacCoordinator:
         )
         if existing is not None and existing.deadline_monotonic_nanoseconds <= deadline:
             return state, True
+        timer_id = f"horizon-{entry_utc_nanoseconds}"
+        if existing is not None and existing.timer_id == timer_id:
+            # 같은 horizon 진입의 wakeup이 이미 있다. UTC 재보정으로 환산
+            # deadline만 달라진 경우이며, 자기 교체는 command 계약이
+            # (`replaces_timer_id != timer_id`), 같은 id의 다른 deadline
+            # 재사용은 endpoint가 거부한다. 기존 스케줄을 유지한다 —
+            # 진입 시각 자체가 같으므로 의미 불변이다.
+            return state, True
         if existing is None and len(state.timers) >= Stage4Limits.ACTIVE_TIMERS:
             errors.append(self._horizon_timer_capacity_error())
             return state, False
-        timer_id = f"horizon-{entry_utc_nanoseconds}"
         commands.append(
             self._new_command(
                 causation_event_id,

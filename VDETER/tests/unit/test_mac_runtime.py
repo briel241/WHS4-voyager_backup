@@ -287,6 +287,78 @@ class Stage4RuntimeTest(unittest.TestCase):
                         for _code, _reason, details in support.health.entries()
                     ))
 
+    def test_horizon_rearm_same_entry_keeps_existing_timer_instead_of_self_replace(self):
+        """같은 horizon 진입이 더 이른 환산 deadline으로 재무장되면 기존 유지.
+
+        UTC 재보정 후 같은 entry의 monotonic 환산값이 이르어지면 종전엔
+        `replaces_timer_id == timer_id` 자기 교체로 `InvalidValueError`가 나
+        decode 반영 경로가 죽었다 (2026-09-02 정식 Phase G MASS-B 크래시).
+        """
+
+        clock, endpoints = build_stage4_software_group(with_type0=False)
+        mass = next(
+            endpoint
+            for endpoint in endpoints
+            if endpoint.dependencies.configuration.endpoint.station_id == MASS_A_STATION_ID
+        )
+        coordinator = mass.stage4.mac.coordinator
+        entry_utc = clock.now_utc().total_nanoseconds() + 2_000_000_000
+        now_monotonic = clock.now_monotonic().total_nanoseconds()
+        computed_deadline = now_monotonic + (
+            entry_utc - clock.now_utc().total_nanoseconds())
+        seeded = coordinator.state.evolve(
+            lifecycle=EndpointLifecycle.RUNNING
+        ).with_timer(TimerRecord(
+            timer_id=f"horizon-{entry_utc}",
+            purpose=TimerPurpose.RETRY,
+            deadline_monotonic_nanoseconds=computed_deadline + 5_000_000,
+        ))
+
+        commands: list = []
+        errors: list = []
+        # 수정 전엔 여기서 InvalidValueError가 났다.
+        next_state, ok = coordinator._arm_horizon_entry(
+            seeded,
+            entry_utc_nanoseconds=entry_utc,
+            causation_event_id="rearm-same-entry",
+            commands=commands,
+            errors=errors,
+        )
+        self.assertTrue(ok)
+        self.assertEqual([], errors)
+        self.assertEqual([], commands, "같은 진입 재무장은 새 command를 만들지 않는다")
+        kept = next(t for t in next_state.timers
+                    if t.purpose is TimerPurpose.RETRY)
+        self.assertEqual(f"horizon-{entry_utc}", kept.timer_id)
+        self.assertEqual(computed_deadline + 5_000_000,
+                         kept.deadline_monotonic_nanoseconds)
+
+        # 다른 진입의 느린 timer는 종전처럼 교체된다 (회귀 방지).
+        other_state = coordinator.state.evolve(
+            lifecycle=EndpointLifecycle.RUNNING
+        ).with_timer(TimerRecord(
+            timer_id="horizon-999",
+            purpose=TimerPurpose.RETRY,
+            deadline_monotonic_nanoseconds=computed_deadline + 5_000_000,
+        ))
+        commands2: list = []
+        replaced_state, ok2 = coordinator._arm_horizon_entry(
+            other_state,
+            entry_utc_nanoseconds=entry_utc,
+            causation_event_id="rearm-other-entry",
+            commands=commands2,
+            errors=errors,
+        )
+        self.assertTrue(ok2)
+        wakeup = next(c.payload for c in commands2
+                      if isinstance(c.payload, ScheduleWakeupCommand))
+        self.assertEqual("horizon-999", wakeup.replaces_timer_id)
+        self.assertNotEqual(wakeup.timer_id, wakeup.replaces_timer_id)
+        self.assertEqual(
+            {f"horizon-{entry_utc}"},
+            {t.timer_id for t in replaced_state.timers
+             if t.purpose is TimerPurpose.RETRY})
+
     def test_TC_MAC_001_commit_precedes_dispatch_and_failure_aborts_reservation(self):
         def facade_fixture(*, fail_commit=False):
             lock = RLock()
