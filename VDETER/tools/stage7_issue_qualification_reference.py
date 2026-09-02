@@ -672,7 +672,8 @@ def issue_profile(args) -> int:
         (args.gain_artifact_input_relpath, gain["artifact_input_sha256"],
          "artifact_input"),
     ):
-        local_path = os.path.join(os.path.dirname(ROOT), relpath)             if relpath.startswith(PREFIX) else os.path.join(ROOT, relpath)
+        # relpath는 repo 상대("VDETER/…")이며 ROOT가 이미 repo 루트다.
+        local_path = os.path.join(ROOT, relpath)
         actual = sha256_file(local_path)
         if actual != expected:
             raise IssueError(
