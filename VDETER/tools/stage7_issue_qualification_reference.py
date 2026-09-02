@@ -449,25 +449,53 @@ def validate_phase_f(evidence_dir: str, expect_commit: str | None) -> dict:
         raise IssueError("coordinator run_id 불일치: %s" % coordinator.get("run_id"))
 
     result = coordinator.get("phase_result") or {}
-    revalidate = _find(result, "revalidate_passed") or _find(result, "revalidate")
-    raw_phy_paths = _find(result, "raw_phy_paths")
-    skipped = _find(result, "skipped_past_due") or {}
-    wrong_bytes = _find(result, "wrong_bytes_total")
 
-    if isinstance(revalidate, dict):
-        failed = sorted(k for k, v in revalidate.items() if not v)
-        if failed:
-            raise IssueError("REVALIDATE 실패 경로: %s" % failed)
-    else:
-        raise IssueError("evidence 에서 revalidate 결과를 찾지 못했다 — 발급 중단")
-    if isinstance(raw_phy_paths, dict):
-        failed = sorted(k for k, v in raw_phy_paths.items() if v != "PASS")
-        if failed:
-            raise IssueError("raw PHY 실패 경로: %s" % failed)
-    else:
+    # raw PHY: phase_result.raw_phy 는 경로별 요약 목록이다 (C1..C6 각 2회).
+    raw_phy = result.get("raw_phy")
+    if not isinstance(raw_phy, list) or not raw_phy:
         raise IssueError("evidence 에서 raw PHY 결과를 찾지 못했다 — 발급 중단")
-    if wrong_bytes not in (0, None):
+    failed = sorted({e.get("path_id") for e in raw_phy if e.get("outcome") != "PASS"})
+    if failed:
+        raise IssueError("raw PHY 실패 경로: %s" % failed)
+    covered = {e.get("path_id") for e in raw_phy}
+    if covered != {"C1", "C2", "C3", "C4", "C5", "C6"}:
+        raise IssueError("raw PHY 경로 집합이 C1..C6 이 아니다: %s" % sorted(covered))
+    wrong_bytes = sum(int(e.get("wrong_bytes") or 0) for e in raw_phy)
+    if wrong_bytes != 0:
         raise IssueError("wrong_bytes_total=%s (0 이어야 한다)" % wrong_bytes)
+    raw_phy_paths = {path: "PASS" for path in sorted(covered)}
+
+    # REVALIDATE·skipped_past_due: endpoint runtime의 operations_evidence에서
+    # 추출한다 (phase-f-requal-20260831f finalize의 승인 추출법과 동일 위치,
+    # 경로 중복은 덮어쓰기 대신 AND 결합으로 강화).
+    revalidate: dict = {}
+    skipped_nonzero = []
+    for endpoint in ("MASS-A", "MASS-B", "ROC"):
+        runtime = _load(os.path.join(evidence_dir, endpoint + "-runtime.json"))
+        for item in runtime.get("operations_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("kind") == "gain_revalidate":
+                path = item.get("path_id")
+                revalidate[path] = revalidate.get(path, True) and bool(item.get("passed"))
+            past_due = item.get("skipped_past_due")
+            if past_due is not None and past_due != 0:
+                skipped_nonzero.append({
+                    "endpoint": endpoint, "kind": item.get("kind"),
+                    "path_id": item.get("path_id"),
+                    "skipped_past_due": past_due,
+                })
+    if sorted(revalidate) != ["C1", "C2", "C3", "C4", "C5", "C6"]:
+        raise IssueError(
+            "evidence 에서 revalidate 결과를 찾지 못했다 — 발급 중단 "
+            "(경로: %s)" % sorted(revalidate))
+    failed = sorted(k for k, v in revalidate.items() if not v)
+    if failed:
+        raise IssueError("REVALIDATE 실패 경로: %s" % failed)
+    if skipped_nonzero:
+        raise IssueError(
+            "skipped_past_due 불변식 위반: %s" % skipped_nonzero[:3])
+    skipped = {"nonzero_records": 0}
 
     return {
         "run_id": run_id, "phase": "rr-p1", "profile": "RESEARCH_READY_MINIMAL",
