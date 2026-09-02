@@ -46,12 +46,19 @@ def _latest_phase_g() -> str:
 
 
 def _profile_path() -> str:
+    # 발급 도구의 무덮어쓰기 금지 때문에 profile은 하위 profile/로 발행된다
+    # (phase-g-formal-20260902b부터). 구 배치도 계속 지원한다.
+    nested = os.path.join(_latest_phase_g(), "profile", "stage7-profile.json")
+    if os.path.isfile(nested):
+        return nested
     return os.path.join(_latest_phase_g(), "stage7-profile.json")
 
 
 def _load_profile_copy(tmp: str, *, mutate=None) -> str:
     """profile+reference+sidecar를 임시 디렉터리로 복사하고 선택적으로 변조한다."""
-    source_dir = _latest_phase_g()
+    # reference 본문·sidecar는 profile과 같은 디렉터리의 사본을 쓴다
+    # (로더가 qualification_reference.path를 profile 기준으로 풀기 때문).
+    source_dir = os.path.dirname(_profile_path())
     profile = json.load(open(_profile_path(), encoding="utf-8"))
     reference_raw = open(os.path.join(source_dir, "qualification-reference.json"),
                          "rb").read()

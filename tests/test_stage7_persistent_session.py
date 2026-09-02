@@ -44,6 +44,11 @@ def _profile_path() -> str:
                         if n.startswith("phase-g-")) if os.path.isdir(PHASE_G) else []
     if not candidates:
         raise AssertionError("phase-g reference 디렉터리가 없다")
+    # 발급 도구의 무덮어쓰기 금지 때문에 profile은 하위 profile/로 발행된다
+    # (phase-g-formal-20260902b부터). 구 배치도 계속 지원한다.
+    nested = os.path.join(candidates[-1], "profile", "stage7-profile.json")
+    if os.path.isfile(nested):
+        return nested
     return os.path.join(candidates[-1], "stage7-profile.json")
 
 
