@@ -436,7 +436,17 @@ def build_stage7_software_group(*, data_profile=DATA_PROFILE_17, run_id="stage7-
     software 판정용 `run_mode=OPERATIONAL` resolved run이다 (TX는 fake 매질).
     """
 
+    import os as _os
+
     from vdeter.stage7.configuration import Stage7OperationalGainInput
+
+    # RX 에너지 게이트는 lane별 **잡음 바닥** 10분위수로 문턴을 잡는다.
+    # fake 매질에는 잡음이 없어(침묵=0, 그 외=버스트) 워밍업 통계가
+    # 버스트 전력으로 채워져 문턴=버스트×8이 되고, 이후 버스트를
+    # 0-치환해 복호가 전면 중단된다 (numpy 없으면 게이트 import가
+    # 실패해 fail-open이라 그동안 숨어 있던 불일치). 공식 kill switch로
+    # 꼜 잡음 바닥 가정이 성립하는 RF 경로(Pi 실기 시험)에만 맡긴다.
+    _os.environ["STAGE7_RX_ENERGY_GATE"] = "0"
 
     operational_gain = Stage7OperationalGainInput(
         endpoint_common_rx_gain_db=0,
