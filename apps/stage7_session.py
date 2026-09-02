@@ -34,6 +34,21 @@ WORKLOAD_TIMEOUT_S = 900.0
 SESSION_CLOSE_TIMEOUT_S = 600.0
 
 _REQUEST_HEREDOC = "STAGE7_WORKLOAD_REQUEST_END"
+#: workload 사이 RX 파이프라인 정착 시간(초).
+#:
+#: 근거 — run phase-g-service-20260901-145556 실측(16 workload):
+#:   SC-VDE-001 normal 이 끝나며 멱등성 재전송을 하면 그 구간에서만
+#:   디코드 큐가 약 10초간 배압 상태가 된다(배압 104~157회, 미뤄진 job
+#:   5,740~10,063). 다음 workload 는 그 20초 뒤에 시작하므로 type-4 가
+#:   배압 꼬리에 정확히 착지해 proc_lag 2,860~3,940ms → frames_late=1
+#:   → LC 활성화 프레임 경과 → DC 수신 창 미계획 → 전송 timeout.
+#:   SC-VDE-001 forged 가 4/4 이 경로로 실패했다.
+#: 배압은 001 구간에서만 발생하고 005/006 은 같은 유입 스파이크(31/s)
+#: 에서도 발생하지 않는다 — 유입량이 아니라 실버스트 창의 복호 비용
+#: 차이다. 큐가 빈 뒤 다음 workload 를 시작하도록 유계 대기한다.
+#:
+#: orchestration 계층 정책이며 PHY/MAC/TDMA/RF 는 불변이다.
+WORKLOAD_SETTLE_SECONDS = 30.0
 
 
 class Stage7ServiceSession:
@@ -45,13 +60,15 @@ class Stage7ServiceSession:
               "QUIESCING", "STOPPING", "CLOSED", "FAILED")
 
     def __init__(self, profile: dict, *, session_id: str, session_dir: str,
-                 runner=subprocess.run, clock=time.time,
+                 runner=subprocess.run, clock=time.time, sleeper=time.sleep,
                  trace=None, diagnostics: bool = False) -> None:
         self.profile = profile
         self.session_id = session_id
         self.session_dir = session_dir
         self.runner = runner
         self.clock = clock
+        #: 정착 대기용 — 가짜 시계 하네스가 실제로 자지 않게 주입 가능.
+        self.sleeper = sleeper
         self.ready = None
         self.marks = {}
         self.workloads = []
@@ -66,6 +83,8 @@ class Stage7ServiceSession:
         self._coordinator_launch_attempted = False
         self._coordinator_spawned = False
         self._counter = 0
+        #: 직전 workload 종료 시각 (정착 대기 계산용).
+        self._last_workload_end = None
         self._started = clock()
         self.diagnostics = bool(diagnostics)
         if trace is None:
@@ -247,6 +266,14 @@ class Stage7ServiceSession:
 
         if self.status != "READY":
             raise ServiceSessionError(f"session이 READY가 아닙니다: {self.status}")
+        if self._last_workload_end is not None:
+            remaining = WORKLOAD_SETTLE_SECONDS - (
+                self.clock() - self._last_workload_end)
+            if remaining > 0:
+                self.trace.emit("workload_settle",
+                                seconds=round(remaining, 1),
+                                reason="rx_pipeline_drain")
+                self.sleeper(remaining)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         started = self.clock()
         request = {
@@ -306,6 +333,7 @@ class Stage7ServiceSession:
         else:
             self.status = "READY"
             self.trace.state("READY")
+        self._last_workload_end = self.clock()
         return result
 
     # ---- 종료 (§10) ------------------------------------------------------
@@ -539,6 +567,7 @@ class Stage7ServiceSession:
 def open_service_session(profile: dict, *, session_id: str | None = None,
                          evidence_root: str | None = None,
                          runner=subprocess.run, clock=time.time,
+                         sleeper=time.sleep,
                          diagnostics: bool = False) -> Stage7ServiceSession:
     """CLI 시작 시 하드웨어 session을 세운다 (§2)."""
     from apps.stage7_service_layer import ServiceSessionError
@@ -552,7 +581,8 @@ def open_service_session(profile: dict, *, session_id: str | None = None,
     os.makedirs(session_dir)
     session = Stage7ServiceSession(profile, session_id=session_id,
                                    session_dir=session_dir, runner=runner,
-                                   clock=clock, diagnostics=diagnostics)
+                                   clock=clock, sleeper=sleeper,
+                                   diagnostics=diagnostics)
     try:
         session.start()
     except Exception:

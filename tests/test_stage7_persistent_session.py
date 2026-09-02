@@ -219,6 +219,7 @@ def _session(tmp, pi, **kwargs):
         "local_dir": tmp,
         "metadata": {"run_id": run_id, "git_dirty": False, "git_commit": "abc"}}
     try:
+        kwargs.setdefault("sleeper", lambda _seconds: None)
         return stage7_session.open_service_session(
             profile, runner=pi, evidence_root=os.path.relpath(tmp, _REPO),
             **kwargs)
@@ -245,6 +246,35 @@ def test_hardware_lifecycle_runs_once_for_many_workloads():
         summary = session.summary()
         assert len(summary["workload_ids"]) == 4
         assert len(set(summary["workload_ids"])) == 4, "workload ID가 겹친다"
+
+
+def test_workloads_settle_the_rx_pipeline_between_runs():
+    """workload 사이에 정착 대기를 둔다 — 첫 회는 예외.
+
+    근거: run 145556에서 SC-VDE-001 normal의 멱등성 재전송이 만든 배압이
+    다음 workload의 type-4를 늦춰(proc_lag 2,860~3,940ms) forged가 4/4
+    실패했다. 앞 workload가 끝난 뒤 큐가 빌 시간을 준다.
+    """
+
+    with tempfile.TemporaryDirectory(dir=_REPO) as tmp:
+        pi = _FakePi()
+        slept = []
+        now = [1000.0]
+        session = _session(tmp, pi, clock=lambda: now[0],
+                           sleeper=lambda seconds: slept.append(seconds))
+
+        session.run_workload("SC-VDE-005", "normal")
+        assert slept == [], "첫 workload는 대기하지 않는다"
+
+        # 앞 workload 종료 직후 = 정착 시간 전부를 기다린다.
+        session.run_workload("SC-VDE-006", "normal")
+        assert len(slept) == 1
+        assert slept[0] == stage7_session.WORKLOAD_SETTLE_SECONDS
+
+        # 이미 그만큼 지났으면 더 기다리지 않는다.
+        now[0] += stage7_session.WORKLOAD_SETTLE_SECONDS + 5.0
+        session.run_workload("SC-VDE-001", "normal")
+        assert len(slept) == 1, "이미 정착했으면 추가 대기 없음"
 
 
 def test_workload_ids_bound_to_session_and_unique():
