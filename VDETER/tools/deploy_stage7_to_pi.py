@@ -1,8 +1,11 @@
 """Stage 7 Raspberry Pi 배포 도구 (`stage7` 규칙: 로컬 작업 트리 = 기준 소스).
 
-로컬 working tree의 Stage 7 대상 파일을 tar로 Pi에 배포하고, 배포한 tree의
-deployment manifest(파일별 SHA-256)와 그 digest를 기록한다. Pi에서 별도 독립
-소스 변경을 만들지 않는다.
+로컬 working tree의 Stage 7 대상을 **repo-shape**(`$root/VDETER/…` +
+최상위 `apps/`·`common/`·`MASS/`·`ROC/`)로 tar해 Pi에 배포하고, 배포한
+tree 전체의 deployment manifest(파일별 SHA-256)와 그 digest를 기록한다.
+(Phase G 이전의 VDETER-평탄 배포는 최상위 계층을 누락해 보충 복사가
+필요했다 — 본 판은 단일 manifest가 전체 배포를 덮는다.)
+Pi에서 별도 독립 소스 변경을 만들지 않는다.
 
 사용법:
     python tools/deploy_stage7_to_pi.py --host voyager3@192.168.0.179 \
@@ -22,16 +25,23 @@ import tempfile
 from datetime import datetime, timezone
 
 VDETER_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(VDETER_ROOT)
 
-#: 배포 대상 (VDETER 상대 경로 prefix).
+#: 배포 대상 (repo 상대 경로 prefix). Phase G 레이아웃:
+#: coordinator는 `$root/VDETER`에서 띄우고(mass-roc-service),
+#: 최상위 apps/common/MASS/ROC는 시나리오 계층이다.
 DEPLOY_PREFIXES = (
-    "src/vdeter",
+    "VDETER/src/vdeter",
+    "VDETER/apps",
+    "VDETER/tools",
+    "VDETER/tests",
+    "VDETER/configs",
+    "VDETER/pyproject.toml",
+    "VDETER/requirements.txt",
     "apps",
-    "tools",
-    "tests",
-    "configs",
-    "pyproject.toml",
-    "requirements.txt",
+    "common",
+    "MASS",
+    "ROC",
 )
 EXCLUDE_DIR_NAMES = {"__pycache__", ".pytest_cache", ".venv", "results"}
 
@@ -44,7 +54,7 @@ def _drop_gitignored(files: list) -> list:
     강제한다. git 판정 불가 시 배포를 중단한다(키가 실리는 방향의
     fail-open 금지)."""
     completed = subprocess.run(
-        ["git", "-C", VDETER_ROOT, "check-ignore", "--stdin"],
+        ["git", "-C", REPO_ROOT, "check-ignore", "--stdin"],
         input="\n".join(files), capture_output=True, text=True, timeout=60,
     )
     if completed.returncode not in (0, 1):  # 0=일부 무시됨, 1=없음
@@ -62,7 +72,7 @@ def _drop_gitignored(files: list) -> list:
 def collect_files() -> list:
     files = []
     for prefix in DEPLOY_PREFIXES:
-        path = os.path.join(VDETER_ROOT, prefix)
+        path = os.path.join(REPO_ROOT, prefix)
         if os.path.isfile(path):
             files.append(prefix.replace(os.sep, "/"))
             continue
@@ -72,7 +82,7 @@ def collect_files() -> list:
                 if name.endswith((".pyc", ".pyo")):
                     continue
                 full = os.path.join(root, name)
-                relative = os.path.relpath(full, VDETER_ROOT).replace(os.sep, "/")
+                relative = os.path.relpath(full, REPO_ROOT).replace(os.sep, "/")
                 files.append(relative)
     return _drop_gitignored(sorted(set(files)))
 
@@ -89,7 +99,7 @@ def git_describe() -> dict:
     def run(*args):
         completed = subprocess.run(
             ["git", *args], capture_output=True, text=True,
-            cwd=os.path.dirname(VDETER_ROOT), check=False,
+            cwd=REPO_ROOT, check=False,
         )
         return completed.stdout.strip() if completed.returncode == 0 else None
 
@@ -113,10 +123,11 @@ def main(argv=None) -> int:
         # tar는 LF 원본 그대로 배포한다 (Windows CRLF checkout 주의: Python은
         # 텍스트 그대로 복사하며 개행 변환 없음).
         manifest_files.append(
-            {"path": relative, "sha256": sha256_file(os.path.join(VDETER_ROOT, relative))}
+            {"path": relative, "sha256": sha256_file(os.path.join(REPO_ROOT, relative))}
         )
     manifest = {
         "manifest_type": "STAGE7_DEPLOYMENT_MANIFEST_V1",
+        "layout": "STAGE7_PHASE_G_REPO_SHAPE_V1",
         "run_id": arguments.run_id,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_host": os.environ.get("COMPUTERNAME") or os.uname().nodename,  # type: ignore[attr-defined]
@@ -142,7 +153,7 @@ def main(argv=None) -> int:
     try:
         with tarfile.open(archive_path, "w:gz") as archive:
             for relative in files:
-                archive.add(os.path.join(VDETER_ROOT, relative), arcname=relative)
+                archive.add(os.path.join(REPO_ROOT, relative), arcname=relative)
             info = tarfile.TarInfo("deployment_manifest.json")
             payload = encoded.encode("utf-8")
             info.size = len(payload)
@@ -168,7 +179,7 @@ def main(argv=None) -> int:
             [
                 "ssh", "-o", "BatchMode=yes", arguments.host,
                 f"cd {remote_dir} && sha256sum deployment_manifest.json | cut -d' ' -f1 "
-                f"&& find src apps tools tests configs -type f | wc -l",
+                f"&& find VDETER apps common MASS ROC -type f | wc -l",
             ],
             capture_output=True,
             text=True,
