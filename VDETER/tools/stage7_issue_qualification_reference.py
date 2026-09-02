@@ -323,8 +323,15 @@ def coordinator_binding(phase_f_sha) -> dict:
 
     functions, constants, imports = {}, {}, []
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions[node.name] = _segment_sha(source, node)
+        if isinstance(node, ast.FunctionDef):
+            # apps/stage7_service_layer.py 검증자와 정확히 같은 산정법 —
+            # 키 구조·해시 입력이 1비트라도 다르면 RF 접근이 거부된다.
+            functions[node.name] = {
+                "ast_sha256": hashlib.sha256(
+                    ast.dump(node).encode("utf-8")).hexdigest(),
+                "source_sha256": hashlib.sha256(
+                    ast.unparse(node).encode("utf-8")).hexdigest(),
+            }
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -345,29 +352,46 @@ def coordinator_binding(phase_f_sha) -> dict:
     }
 
 
-def _rr_phase_dispatch(tree, source: str) -> dict:
-    """`--phase X` 분기가 어떤 run_* 함수를 부르는지 정적으로 뽑는다."""
+#: 검증자(apps/stage7_service_layer.py)의 phase 이름 집합과 동일.
+_DISPATCH_PHASE_NAMES = frozenset({
+    "p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
+    "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17",
+    "rr-p3-soak-19", "mass-roc-service",
+})
 
-    lines = source.splitlines()
+
+def _rr_phase_dispatch(tree, source: str) -> dict:
+    """`--phase X` 분기가 어떤 run_* 함수를 부르는지 정적으로 뽑는다.
+
+    apps/stage7_service_layer.py의 검증 알고리즘을 그대로 미러한다 —
+    독자 해석(텍스트 창 등)은 expected≠actual 불일치로 RF 거부를 부른다.
+    """
+
+    main = next((node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)
+                 and node.name == "main"), None)
+    if main is None:
+        raise IssueError("coordinator 에 main 함수가 없다")
     dispatch: dict = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Compare):
+    for node in ast.walk(main):
+        if not isinstance(node, ast.If):
             continue
-        left = node.left
-        if not (isinstance(left, ast.Attribute) and left.attr == "phase"):
-            continue
-        for comparator in node.comparators:
-            if not (isinstance(comparator, ast.Constant)
-                    and isinstance(comparator.value, str)):
-                continue
-            window = lines[node.lineno - 1:node.lineno + 40]
-            names = sorted({
-                part.split("(")[0]
-                for line in window for part in line.replace("(", " (").split()
-                if part.startswith("run_")
-            })
-            if names:
-                dispatch.setdefault(comparator.value, names)
+        phases = [constant.value for constant in ast.walk(node.test)
+                  if isinstance(constant, ast.Constant)
+                  and isinstance(constant.value, str)
+                  and constant.value in _DISPATCH_PHASE_NAMES]
+        called = sorted({
+            call.func.id
+            for statement in node.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id.startswith("run_")
+        })
+        for phase in phases:
+            if called:
+                previous = dispatch.get(phase, [])
+                dispatch[phase] = sorted(set(previous + called))
     return dict(sorted(dispatch.items()))
 
 
