@@ -664,6 +664,21 @@ def issue_profile(args) -> int:
     template = _load(args.template_profile)
 
     gain = reference["gain"]
+
+    # gain 경로는 인자로 받되, 파일 실제 SHA가 reference의 값과 일치할
+    # 때만 기록한다 — 수기 전사 없이 경로↔내용 결속을 강제.
+    for relpath, expected, label in (
+        (args.gain_artifact_relpath, gain["artifact_sha256"], "artifact"),
+        (args.gain_artifact_input_relpath, gain["artifact_input_sha256"],
+         "artifact_input"),
+    ):
+        local_path = os.path.join(os.path.dirname(ROOT), relpath)             if relpath.startswith(PREFIX) else os.path.join(ROOT, relpath)
+        actual = sha256_file(local_path)
+        if actual != expected:
+            raise IssueError(
+                "gain %s 경로의 파일 SHA 불일치: %s (%s != %s)"
+                % (label, relpath, actual[:12], expected[:12]))
+
     profile = dict(template)
     profile["baseline_sha256"] = reference["baseline_sha256"]
     profile["qualification_reference"] = {
@@ -672,6 +687,8 @@ def issue_profile(args) -> int:
     profile["wiring_profile"] = reference["wiring_profile"]
     profile["evidence_root"] = args.evidence_root
     profile["gain"] = dict(template.get("gain") or {},
+                           artifact_path=args.gain_artifact_relpath,
+                           artifact_input_path=args.gain_artifact_input_relpath,
                            artifact_sha256=gain["artifact_sha256"],
                            artifact_input_sha256=gain["artifact_input_sha256"],
                            rx_gain_db=gain["endpoint_common_rx_gain_db"])
@@ -732,6 +749,10 @@ def main(argv=None) -> int:
     pro.add_argument("--phase-g-deploy-relpath", required=True)
     pro.add_argument("--phase-g-deploy-manifest", required=True)
     pro.add_argument("--evidence-root", required=True)
+    pro.add_argument("--gain-artifact-relpath", required=True,
+                     help="repo 상대 gain_artifact.json 경로 (SHA 교차 검증)")
+    pro.add_argument("--gain-artifact-input-relpath", required=True,
+                     help="repo 상대 gain_artifact_input.json 경로 (SHA 교차 검증)")
     pro.add_argument("--out-dir", required=True)
     pro.set_defaults(handler=issue_profile)
 
