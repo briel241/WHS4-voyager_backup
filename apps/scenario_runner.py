@@ -616,7 +616,8 @@ def _stage7_menu(args) -> int:
     session = None
     try:
         session = open_service_session(
-            profile, diagnostics=bool(getattr(args, "diagnostics", False)))
+            profile, diagnostics=bool(getattr(args, "diagnostics", False)),
+            live=not bool(getattr(args, "quiet", False)))
     except Exception as exc:  # noqa: BLE001 - 사유는 evidence에, 터미널은 요약
         print(f"\nservice session 시작 실패: {type(exc).__name__}: {exc}",
               file=sys.stderr)
@@ -809,6 +810,9 @@ def build_parser() -> argparse.ArgumentParser:
     menu_parser.add_argument(
         "--verbose", action="store_true",
         help="터미널에 상세를 출력한다 (기본은 상위 진행·판정·소요시간만)")
+    menu_parser.add_argument(
+        "--quiet", action="store_true",
+        help="진행 상황 실시간 출력을 끄고 판정만 낸다 (기본은 실시간 출력)")
     menu_parser.add_argument(
         "--diagnostics", action="store_true",
         help="evidence 계측 상세도를 높인다 (터미널 출력량은 늘리지 않는다)")

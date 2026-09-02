@@ -60,6 +60,40 @@ WORKLOAD_SETTLE_SECONDS = 30.0
 SETTLE_AFTER_SCENARIOS = frozenset({"SC-VDE-001"})
 
 
+def _render_trace_event(row: dict) -> str | None:
+    """workload-trace 이벤트 한 줄을 사람이 읽는 형태로 (없으면 None).
+
+    evidence 는 원본 JSON 이 그대로 남는다 — 이 출력은 진행 가시화 전용이다.
+    """
+
+    event = row.get("event")
+    step = row.get("step") or ""
+    if event == "submit":
+        sender = row.get("sender") or "?"
+        receiver = row.get("receiver") or "?"
+        return ("    %-16s 제출   %s  %s B%s"
+                % (sender + " -> " + receiver,
+                   row.get("payload_format") or "?",
+                   row.get("payload_len"),
+                   ("  [" + step + "]") if step else ""))
+    if event == "transfer_terminal":
+        return "    %-16s 전송   %s" % ("", row.get("terminal_state") or "?")
+    if event == "data_received":
+        receiver = row.get("receiver") or "?"
+        if not row.get("present", True):
+            return "    %-16s 수신   없음" % receiver
+        return ("    %-16s 수신   %s -> %s"
+                % (receiver, row.get("original_source"),
+                   row.get("original_destination")))
+    if event == "scenario_result":
+        steps = row.get("steps") or []
+        failed = [n for n, st in steps if st != "PASS"]
+        tail = ("  실패: " + ", ".join(failed)) if failed else ""
+        return ("    판정 %s  %s  %d단계%s"
+                % (row.get("status"), row.get("scenario") or "", len(steps), tail))
+    return None
+
+
 class Stage7ServiceSession:
     """살아 있는 하드웨어 service session 하나. workload는 이 위에서만 돈다."""
 
@@ -70,7 +104,8 @@ class Stage7ServiceSession:
 
     def __init__(self, profile: dict, *, session_id: str, session_dir: str,
                  runner=subprocess.run, clock=time.time, sleeper=time.sleep,
-                 trace=None, diagnostics: bool = False) -> None:
+                 trace=None, diagnostics: bool = False,
+                 live: bool = True) -> None:
         self.profile = profile
         self.session_id = session_id
         self.session_dir = session_dir
@@ -78,6 +113,9 @@ class Stage7ServiceSession:
         self.clock = clock
         #: 정착 대기용 — 가짜 시계 하네스가 실제로 자지 않게 주입 가능.
         self.sleeper = sleeper
+        #: 진행 상황을 터미널에 흘린다 (시연·긴 대기 가시화).
+        #: evidence 는 별도 파일이라 이 출력은 기록이 아니다.
+        self.live = bool(live)
         self.ready = None
         self.marks = {}
         self.workloads = []
@@ -128,6 +166,60 @@ class Stage7ServiceSession:
 
     def _mark(self, name):
         self.marks[name] = round(self.clock() - self._started, 1)
+
+    def _live(self, text: str) -> None:
+        """진행 상황 한 줄 (fail-open — 출력 실패가 세션을 깨지 않는다)."""
+
+        if not self.live:
+            return
+        try:
+            print(text, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _live_elapsed(self) -> str:
+        seconds = int(self.clock() - self._started)
+        return "%2d:%02d" % (seconds // 60, seconds % 60)
+
+    def _remote_bringup_stage(self):
+        """coordinator 콘솔의 마지막 단계 줄 (없으면 None)."""
+
+        if not self.live:
+            return None
+        try:
+            done = self._ssh(
+                "grep -F '[coordinator]' "
+                + self.remote_run_root + "/coordinator-console.log"
+                + " 2>/dev/null | tail -1 || true",
+                timeout=60.0, check=False)
+            line = (done.stdout or "").strip()
+            return line[len("[coordinator] "):] if line else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _remote_trace_tail(self, workload_id: str, seen: int):
+        """workload-trace.jsonl 의 새 줄만 가져온다 (증분 기록이다)."""
+
+        if not self.live:
+            return []
+        path = (self.remote_run_root + "/workloads/" + workload_id
+                + "/workload-trace.jsonl")
+        try:
+            done = self._ssh(
+                "tail -n +" + str(seen + 1) + " " + path + " 2>/dev/null || true",
+                timeout=60.0, check=False)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = []
+        for line in (done.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+        return rows
 
     def _remote_json(self, relpath):
         done = self._ssh(
@@ -234,6 +326,9 @@ class Stage7ServiceSession:
         self.trace.flush()
 
         deadline = self.clock() + SESSION_BRINGUP_TIMEOUT_S
+        #: 단계가 바뀔 때만 찍는다. 두 번에 한 번만 조회해 ssh 부담을 줄인다.
+        last_stage = None
+        poll = 0
         while self.clock() < deadline:
             ready = self._remote_json(SESSION_READY)
             if ready is not None:
@@ -248,6 +343,12 @@ class Stage7ServiceSession:
                 self.trace.state("READY")
                 self.trace.flush()
                 return ready
+            poll += 1
+            if poll % 2 == 0:
+                stage = self._remote_bringup_stage()
+                if stage and stage != last_stage:
+                    self._live("  [%s]  %s" % (self._live_elapsed(), stage))
+                    last_stage = stage
             if self._coordinator_exited():
                 self.trace.state("FAILED",
                                  reason="coordinator_exit_during_bringup",
@@ -286,6 +387,8 @@ class Stage7ServiceSession:
                                 seconds=round(remaining, 1),
                                 after_scenario=self._last_scenario_id,
                                 reason="rx_pipeline_drain")
+                self._live("  정착 대기 %.0f초 (직전 %s — RX 파이프라인 배수)"
+                           % (remaining, self._last_scenario_id))
                 self.sleeper(remaining)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         started = self.clock()
@@ -312,6 +415,7 @@ class Stage7ServiceSession:
 
         deadline = self.clock() + WORKLOAD_TIMEOUT_S
         result = None
+        seen_trace = 0
         while self.clock() < deadline:
             result = self._remote_json(SESSION_RESULTS + "/" + name)
             if result is not None:
@@ -320,7 +424,18 @@ class Stage7ServiceSession:
                 raise ServiceSessionError(
                     f"workload {workload_id} 중 session이 종료했습니다 "
                     f"(rc={self._coordinator_rc()})")
+            rows = self._remote_trace_tail(workload_id, seen_trace)
+            seen_trace += len(rows)
+            for row in rows:
+                line = _render_trace_event(row)
+                if line:
+                    self._live(line)
             time.sleep(3.0)
+        # 결과가 먼저 도착하면 남은 trace 를 마저 흘린다.
+        for row in self._remote_trace_tail(workload_id, seen_trace):
+            line = _render_trace_event(row)
+            if line:
+                self._live(line)
         if result is None:
             raise ServiceSessionError(f"workload {workload_id} timeout")
         result["wall_clock_s"] = round(self.clock() - started, 1)
@@ -581,7 +696,7 @@ class Stage7ServiceSession:
 def open_service_session(profile: dict, *, session_id: str | None = None,
                          evidence_root: str | None = None,
                          runner=subprocess.run, clock=time.time,
-                         sleeper=time.sleep,
+                         sleeper=time.sleep, live: bool = True,
                          diagnostics: bool = False) -> Stage7ServiceSession:
     """CLI 시작 시 하드웨어 session을 세운다 (§2)."""
     from apps.stage7_service_layer import ServiceSessionError
@@ -595,7 +710,7 @@ def open_service_session(profile: dict, *, session_id: str | None = None,
     os.makedirs(session_dir)
     session = Stage7ServiceSession(profile, session_id=session_id,
                                    session_dir=session_dir, runner=runner,
-                                   clock=clock, sleeper=sleeper,
+                                   clock=clock, sleeper=sleeper, live=live,
                                    diagnostics=diagnostics)
     try:
         session.start()

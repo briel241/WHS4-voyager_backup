@@ -220,6 +220,8 @@ def _session(tmp, pi, **kwargs):
         "metadata": {"run_id": run_id, "git_dirty": False, "git_commit": "abc"}}
     try:
         kwargs.setdefault("sleeper", lambda _seconds: None)
+        # 시험은 진행 출력을 끈다 — 판정만 본다.
+        kwargs.setdefault("live", False)
         return stage7_session.open_service_session(
             profile, runner=pi, evidence_root=os.path.relpath(tmp, _REPO),
             **kwargs)
@@ -281,6 +283,39 @@ def test_settle_waits_only_after_the_scenario_that_causes_backpressure():
         now[0] += stage7_session.WORKLOAD_SETTLE_SECONDS + 5.0
         session.run_workload("SC-VDE-005", "normal")
         assert len(slept) == 1, "이미 정착했으면 추가 대기 없음"
+
+
+def test_trace_events_render_for_the_operator():
+    """진행 출력은 workload-trace 이벤트를 사람이 읽는 줄로 바꾼다.
+
+    evidence 는 원본 JSON 이 그대로 남는다 — 이 출력은 가시화 전용이라
+    렌더에 실패해도 세션 판정에 영향이 없어야 한다.
+    """
+
+    render = stage7_session._render_trace_event
+    line = render({"event": "submit", "sender": "ROC", "receiver": "MASS-A",
+                   "payload_format": "x509.certificate_report",
+                   "payload_len": 413, "step": "001-certificate"})
+    assert "ROC" in line and "MASS-A" in line and "413" in line
+    assert "001-certificate" in line
+
+    assert "COMPLETED" in render({"event": "transfer_terminal",
+                                  "terminal_state": "COMPLETED"})
+
+    got = render({"event": "data_received", "receiver": "MASS-A",
+                  "original_source": 222222222,
+                  "original_destination": 111111111, "present": True})
+    assert "222222222" in got and "111111111" in got
+    assert "없음" in render({"event": "data_received", "receiver": "MASS-A",
+                             "present": False})
+
+    verdict = render({"event": "scenario_result", "status": "FAIL",
+                      "scenario": "SC-VDE-001[forged]",
+                      "steps": [["a", "PASS"], ["b", "FAIL"]]})
+    assert "FAIL" in verdict and "b" in verdict
+
+    # 관심 없는 이벤트는 줄을 만들지 않는다.
+    assert render({"event": "trace_closed"}) is None
 
 
 def test_workload_ids_bound_to_session_and_unique():
