@@ -164,6 +164,43 @@ def _layer_of(module_name: str) -> str | None:
     return parts[1]
 
 
+def _numpy_imports_all_guarded(path: str) -> bool:
+    """numpy import가 전부 try/except ImportError 본문 안에 있는지."""
+
+    with open(path, "r", encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+
+    def _is_numpy(node) -> bool:
+        if isinstance(node, ast.Import):
+            return any(alias.name.split(".")[0] == "numpy" for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            return (node.module or "").split(".")[0] == "numpy"
+        return False
+
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        names = []
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name):
+                names.append(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                names.extend(e.id for e in handler.type.elts
+                             if isinstance(e, ast.Name))
+        if "ImportError" not in names:
+            continue
+        for statement in node.body:
+            for child in ast.walk(statement):
+                if _is_numpy(child):
+                    guarded.add(id(child))
+    return all(
+        id(node) in guarded
+        for node in ast.walk(tree) if _is_numpy(node)
+    )
+
+
+
 class TargetPackageImportTest(unittest.TestCase):
     """TC-ARCH-001: 전체 목표 package·module import와 외부 의존성 부재."""
 
@@ -306,8 +343,20 @@ class ForbiddenImportTest(unittest.TestCase):
             "격리한 임시 BPSK 보관본이 legacy/에 없습니다",
         )
 
+    #: numpy 허용 모듈 — 파일 단위 한정 (phy 계층 포괄 허용 아님).
+    #: pyproject가 numpy를 기본 의존이 아닌 `dsp` 선택 의존으로 두고
+    #: "PHY·Radio 구현 단계에서 사용한다"고 선언하므로, 검사 범위를 그
+    #: 기존 설계 계약과 일치시킨다 (시험 완화가 아니다 — 2026-09-02 사용자
+    #: 승인). 허용 모듈은 ImportError 가드와 순수 Python 폴백이 강제되며,
+    #: 폴백 동작·규격 판정·복호 동치는 `tests/unit/test_phy_numpy_optional.py`가
+    #: 고정한다.
+    NUMPY_ALLOWED_MODULES = frozenset({
+        "vdeter.phy.resampling",
+        "vdeter.phy.burst.rrc",
+    })
+
     def test_TC_ARCH_002_no_external_radio_dependency_in_core_layers(self):
-        forbidden_roots = ("gnuradio", "uhd", "pmt", "numpy")
+        device_roots = ("gnuradio", "uhd", "pmt")
         for path in _iter_source_files():
             module_name = _module_name(path)
             layer = _layer_of(module_name)
@@ -317,9 +366,27 @@ class ForbiddenImportTest(unittest.TestCase):
                 root = imported.split(".")[0]
                 self.assertNotIn(
                     root,
-                    forbidden_roots,
+                    device_roots,
                     f"{module_name}이 {imported}를 import합니다",
                 )
+                if root != "numpy":
+                    continue
+                self.assertIn(
+                    module_name,
+                    self.NUMPY_ALLOWED_MODULES,
+                    f"{module_name}이 {imported}를 import합니다 — "
+                    "numpy는 허용 목록 모듈에서만 쓸 수 있습니다",
+                )
+
+    def test_TC_ARCH_002_numpy_allowed_modules_keep_the_import_guarded(self):
+        for module_name in sorted(self.NUMPY_ALLOWED_MODULES):
+            path = os.path.join(
+                SRC_ROOT, *module_name.split(".")) + ".py"
+            self.assertTrue(
+                _numpy_imports_all_guarded(path),
+                f"{module_name}의 numpy import가 try/except ImportError "
+                "가드 밖에 있습니다 — 순수 Python 폴백 강제 위반",
+            )
 
     def test_TC_ARCH_002_radio_skeletons_have_no_module_level_device_import(self):
         for relative in ("radio/software/__init__.py", "radio/b210/__init__.py"):
