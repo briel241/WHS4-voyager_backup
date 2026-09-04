@@ -157,6 +157,12 @@ make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이�
 - `baseline_sha256`는 자격이 승계할 **이력 metadata**다. 일반 실행·qualify는
   Markdown을 다시 읽거나 SHA를 재계산하지 않는다. 문서 실물 대조는 문서가
   존재하는 host 감사 환경(audit)에서만 수행한다 (결정 8·20-2).
+- **배포 패키지**(V2 b안): `VDETER/tools/deploy_standalone_to_pi.py`가 지정
+  commit의 추적 파일(`git archive` 원본) + 생성된 binding + 자기 기술
+  manifest를 하나로 묶어 SSH/SCP **1회**로 전송하고 원격에서 전수 SHA·
+  binding head를 대조한다. results/·var/·identity/·hardware.toml·.git 제외.
+  전송 뒤 setup·qualify·run은 host 없이 동작한다 — 그것이 standalone 기준.
+  binding은 커밋하지 않는다(커밋하면 HEAD가 바뀌어 source_head와 어긋난다).
 - 확인 실측(2026-09-04): 현행 `docs/core/stage7_b210_system_baseline.md`
   SHA-256 = 위 값과 정확 일치 (v0.9.23 자격 결속값 그대로).
 

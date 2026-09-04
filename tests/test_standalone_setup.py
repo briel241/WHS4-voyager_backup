@@ -361,6 +361,34 @@ def test_corrupted_manifest_invalidates_qualification():
         assert loaded is not None
 
 
+def test_setup_reexec_when_cryptography_missing_in_interpreter():
+    """시스템 python3에 cryptography가 없고 venv가 준비됐으면 재실행 신호."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = make_mini_root(tmp)
+        paths = state.StatePaths(root)
+        venv_py = setup_cmd.venv_python(paths)
+        venv_py.parent.mkdir(parents=True, exist_ok=True)
+        venv_py.write_text("", encoding="ascii")  # venv 존재 모사
+        try:
+            setup_cmd.run_setup(paths, runner=lambda argv, **kw: Done(0),
+                                usb_probe=lambda: {}, apt_install=False,
+                                make_venv=False,
+                                crypto_available=lambda: False)
+            raise AssertionError("재실행 신호가 나지 않았다")
+        except setup_cmd.SetupReexec as reexec:
+            assert reexec.venv_python == str(venv_py)
+        # venv도 없으면 조치 안내와 함께 실패.
+        venv_py.unlink()
+        try:
+            setup_cmd.run_setup(paths, runner=lambda argv, **kw: Done(0),
+                                usb_probe=lambda: {}, apt_install=False,
+                                make_venv=False,
+                                crypto_available=lambda: False)
+            raise AssertionError("실패하지 않았다")
+        except setup_cmd.SetupError as exc:
+            assert "cryptography" in str(exc)
+
+
 def test_apt_plan_includes_python3_venv():
     assert "python3-venv" in setup_cmd.REQUIRED_APT_PACKAGES
 

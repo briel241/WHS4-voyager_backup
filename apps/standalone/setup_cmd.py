@@ -46,6 +46,21 @@ class SetupError(RuntimeError):
     """setup 단계 실패 — 메시지는 조치 가능해야 한다."""
 
 
+class SetupReexec(Exception):
+    """identity 생성에 필요한 cryptography가 현재 인터프리터에 없다 —
+    방금 만든 var/venv(lock으로 cryptography 설치됨)로 setup을 재실행하라.
+    CLI가 `os.execv`로 처리한다. 앞 단계는 멱등이라 재실행이 안전하다."""
+
+    def __init__(self, venv_python) -> None:
+        super().__init__(f"re-exec under {venv_python}")
+        self.venv_python = str(venv_python)
+
+
+def _cryptography_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("cryptography") is not None
+
+
 # ------------------------------------------------------------ apt
 
 def plan_apt(*, runner=subprocess.run) -> dict:
@@ -169,7 +184,7 @@ def draft_hardware_declaration(paths: StatePaths, observed: dict) -> dict:
 def run_setup(paths: StatePaths, *, runner=subprocess.run,
               usb_probe=None, apt_install: bool = True,
               make_venv: bool = True, regenerate_identity: bool = False,
-              now=None) -> dict:
+              now=None, crypto_available=_cryptography_available) -> dict:
     """setup 전체 — 단계별 결과를 모아 report로 돌려준다.
 
     실패한 단계에서 중단한다 (부분 성공 상태도 멱등 재실행으로 이어진다).
@@ -196,6 +211,15 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
         report["steps"]["venv"] = ensure_venv(paths, runner=runner)
         report["steps"]["wrapper"] = write_wrapper(paths)
 
+    # identity 생성은 cryptography가 필요하다. 깨끗한 Ubuntu의 시스템
+    # python3에는 없을 수 있다 — venv(lock)가 준비됐으면 그 인터프리터로
+    # 재실행해 나머지 단계를 마친다 (첫 실행 부트스트랩).
+    if not crypto_available():
+        if venv_python(paths).exists():
+            raise SetupReexec(venv_python(paths))
+        raise SetupError(
+            "cryptography를 import할 수 없고 var/venv도 없습니다 — venv "
+            "생성 단계가 실패했는지 확인한 뒤 setup을 재실행하십시오")
     if regenerate_identity:
         report["steps"]["identity"] = identity.new_identity(paths)
     else:

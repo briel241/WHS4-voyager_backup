@@ -9,3 +9,10 @@
 # 변경 시 해당 환경은 UNQUALIFIED로 시작하며 재자격이 필요하다 (결정 10·13).
 cryptography==50.0.1
 tomli==2.0.1 ; python_version < "3.11"
+# qualify의 verification bundle(unit+contract·integration 로그)이 pytest로
+# 돈다. Pi 실측(2026-09-04)에서 기존 venv에 pytest가 없어 lock에 둔다.
+# 9.x는 subtests를 내장한다 (dev venv와 동일 판; Phase H 회귀도 9.1.1).
+pytest==9.1.1
+pluggy==1.6.0
+iniconfig==2.3.0
+packaging==26.3

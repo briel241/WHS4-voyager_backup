@@ -87,6 +87,18 @@ def _cmd_setup(args, paths: StatePaths, out) -> int:
         report = setup_cmd.run_setup(
             paths, apt_install=not args.no_apt,
             regenerate_identity=args.new_identity)
+    except setup_cmd.SetupReexec as reexec:
+        # 첫 실행 부트스트랩: 시스템 python3에 cryptography가 없으면 방금
+        # 만든 var/venv로 같은 명령을 재실행한다 (앞 단계는 멱등).
+        out("re-executing setup under %s (cryptography from the lock)"
+            % reexec.venv_python)
+        argv = [reexec.venv_python, os.path.abspath(__file__), "setup"]
+        if args.new_identity:
+            argv.append("--new-identity")
+        if args.no_apt:
+            argv.append("--no-apt")
+        os.execv(reexec.venv_python, argv)
+        return EXIT_INTERNAL  # execv가 돌아오지 않는다 — 방어적
     except setup_cmd.SetupError as exc:
         out("setup failed: %s" % exc)
         return EXIT_INTERNAL
