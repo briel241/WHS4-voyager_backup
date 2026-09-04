@@ -637,6 +637,30 @@ def test_cli_parser_and_dispatch_without_rf():
                         input_fn=lambda prompt: "no")
         assert code == cli.EXIT_CONFIG
         assert any("aborted (no RF action taken)" in l for l in lines)
+        # 확인 프롬프트는 [y/N] 관례: 빈 입력·n·no 는 중단, y·yes 만 진행.
+        from unittest import mock
+        from apps.standalone import qualify_cmd
+        for answer in ("", "n", "N", "NO"):
+            lines = []
+            code = cli.main(["qualify"], paths=paths, out=lines.append,
+                            input_fn=lambda prompt, _a=answer: _a)
+            assert code == cli.EXIT_CONFIG
+            assert any("aborted (no RF action taken)" in l for l in lines)
+        for answer in ("y", "Y", "yes"):
+            prompts, lines = [], []
+
+            def _input(prompt, _a=answer):
+                prompts.append(prompt)
+                return _a
+            with mock.patch.object(
+                    qualify_cmd, "run_qualify",
+                    side_effect=qualify_cmd.QualifyError("stub (no RF)")):
+                code = cli.main(["qualify"], paths=paths, out=lines.append,
+                                input_fn=_input)
+            assert prompts == ["proceed with RF qualification? [y/N] > "]
+            assert code == cli.EXIT_CONFIG
+            assert not any("aborted" in l for l in lines)
+            assert any("qualify refused: stub (no RF)" in l for l in lines)
 
 
 if __name__ == "__main__":

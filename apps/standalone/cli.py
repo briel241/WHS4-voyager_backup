@@ -212,10 +212,10 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
                 existing.get("_reference_sha256") or "")[:12])
     if not args.yes:
         try:
-            answer = input_fn("proceed with RF qualification? [yes/NO] > ")
+            answer = input_fn("proceed with RF qualification? [y/N] > ")
         except EOFError:
             answer = ""
-        if answer.strip().lower() != "yes":
+        if answer.strip().lower() not in ("y", "yes"):
             out("aborted (no RF action taken)")
             return EXIT_CONFIG
     reporter = progress_module.make_reporter(
