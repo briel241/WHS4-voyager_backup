@@ -293,9 +293,10 @@ class ProgressReporter:
         if line is None:
             return
         text = self.render_plain(line, heartbeat=heartbeat)
+        # 상태(status)는 키에 넣지 않는다 — 단계 완료(done)가 값 변화 없이
+        # 같은 퍼센트·필드를 반복 출력하지 않게 (FAILED/INTERRUPTED는 force).
         key = (line["label"], line["mode"], self._percent(line),
-               tuple(sorted((k, str(v)) for k, v in line["fields"].items())),
-               line["status"])
+               tuple(sorted((k, str(v)) for k, v in line["fields"].items())))
         now = self.clock()
         if not force and not heartbeat:
             if key == self._last_emit_key:
@@ -364,7 +365,8 @@ class ProgressReporter:
                 self.stream.flush()
                 self._write_evidence(self.render_plain(self._line))
             else:
-                self._emit_plain(force=True)
+                # done은 값이 바뀌었을 때만(중복 억제), 실패·중단은 항상 기록.
+                self._emit_plain(force=(status != "done"))
 
     def log(self, text: str) -> None:
         """진행바와 섞이지 않는 일반 출력 (Ctrl+C·cleanup 메시지 포함)."""
