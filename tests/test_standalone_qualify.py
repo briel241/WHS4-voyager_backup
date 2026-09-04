@@ -1097,6 +1097,146 @@ def test_evidence_reuse_refused_when_config_binding_mismatch():
         assert qualify_cmd.load_active_reference(paths) is None
 
 
+# ---------------- critical endpoint 스키마 {serial, speed_class} (2026-09-05 조건 1~5)
+
+def test_critical_endpoints_common_function_schema_and_metadata():
+    critical, observations = qualify_cmd.critical_endpoints_from_preflight(
+        fake_preflight())
+    # critical 스키마는 정확히 {serial, speed_class}, usb_path/speed_mbps는 분리.
+    for role, entry in critical.items():
+        assert set(entry) == {"serial", "speed_class"}, (role, entry)
+        assert entry["speed_class"] in qualify_cmd.CRITICAL_SPEED_CLASSES
+        assert set(observations[role]) == {"usb_path", "speed_mbps"}
+    assert critical["MASS-A"] == {"serial": "34D03DD", "speed_class": "super"}
+    assert critical["MASS-B"] == {"serial": "3515425", "speed_class": "high"}
+    assert observations["MASS-B"] == {"usb_path": "4-2", "speed_mbps": 480}
+
+
+def test_critical_endpoints_refuse_missing_or_unqualified_speed_class():
+    for bad in (None, "other", "unknown", ""):
+        pf = fake_preflight()
+        pf["checks"]["b210"]["observed_by_role"]["ROC"]["speed_class"] = bad
+        try:
+            qualify_cmd.critical_endpoints_from_preflight(pf)
+            raise AssertionError(f"speed_class={bad!r}가 거부되지 않았다")
+        except qualify_cmd.QualifyError as exc:
+            assert "ROC" in str(exc) and "speed_class" in str(exc)
+
+
+def _issue_kwargs(**over):
+    base = dict(
+        ladder_id="qual-X", binding=BINDING, deploy_sha256="d" * 64,
+        deploy_files={"a": "1"}, tc_results={"TC-STAGE7-RR-001": "PASS"},
+        endpoints_observed={"MASS-A": {"serial": "34D03DD",
+                                       "speed_class": "super"}},
+        platform_profile="pi", identity_fingerprint="abc",
+        gain={"endpoint_common_rx_gain_db": {"MASS-A": 69}},
+        environment_manifest=dict(ENV_MANIFEST),
+        environment_manifest_sha256="e" * 64, phase_run_ids={})
+    base.update(over)
+    return base
+
+
+def test_issue_reference_refuses_endpoints_without_valid_speed_class():
+    # 조건 2: 발급 시점 검증 — 어느 경로든 누락/비허용이면 거부.
+    for endpoints in (
+        {"MASS-A": {"serial": "34D03DD"}},                      # 누락
+        {"MASS-A": {"serial": "34D03DD", "speed_class": "other"}},
+        {"MASS-A": {"serial": "34D03DD", "usb_path": "3-1",
+                    "speed_mbps": 5000}},                         # 옛 결함 스키마
+        {},
+    ):
+        try:
+            qualify_cmd.issue_reference(
+                **_issue_kwargs(endpoints_observed=endpoints))
+            raise AssertionError(f"{endpoints}가 발급 거부되지 않았다")
+        except qualify_cmd.QualifyError as exc:
+            assert "critical endpoint" in str(exc)
+    # 정상 스키마는 발급된다.
+    ref = qualify_cmd.issue_reference(**_issue_kwargs())
+    assert ref["standalone_critical"]["endpoints"]["MASS-A"] == {
+        "serial": "34D03DD", "speed_class": "super"}
+
+
+def _compare_critical_against(paths, reference):
+    """발급된 reference를 **실제 run 경로 대조(run_cmd.compare_critical)** 에
+    넣는다 — 조건 4."""
+    from apps.standalone import run_cmd
+    _, manifest_sha = deploy_manifest.load_manifest(
+        paths.var_dir / "deploy-manifest.json")
+    fingerprint = identity.check_identity_consistency(paths)["fingerprint"]
+    return run_cmd.compare_critical(
+        reference, deploy_sha256=manifest_sha, hardware=HARDWARE,
+        preflight=fake_preflight(), identity_fingerprint=fingerprint,
+        environment_manifest=dict(ENV_MANIFEST))
+
+
+def test_full_ladder_reference_passes_real_compare_critical():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp)
+        assert report["status"] == "QUALIFIED"
+        active = qualify_cmd.load_active_reference(paths)
+        cmp = _compare_critical_against(paths, active)
+        assert cmp["pass"], cmp["mismatches"]
+        ep = active["standalone_critical"]["endpoints"]
+        assert all(set(v) == {"serial", "speed_class"} for v in ep.values())
+        # 관측 metadata는 critical 밖에 별도 보존(조건 3).
+        obs = active["endpoint_observations"]["endpoints"]
+        assert obs["MASS-A"] == {"usb_path": "3-1", "speed_mbps": 5000}
+
+
+def test_reuse_reference_passes_real_compare_critical():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
+        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        assert report["status"] == "QUALIFIED"
+        active = qualify_cmd.load_active_reference(paths)
+        cmp = _compare_critical_against(paths, active)
+        assert cmp["pass"], cmp["mismatches"]
+        ep = active["standalone_critical"]["endpoints"]
+        assert all(set(v) == {"serial", "speed_class"} for v in ep.values())
+        assert active["endpoint_observations"]["endpoints"]["ROC"] == {
+            "usb_path": "5-1", "speed_mbps": 5000}
+
+
+def test_reuse_supersede_keeps_previous_release_and_records_it():
+    """조건 5: 재발급은 새 release id로 승격하고 이전 release·reference를
+    삭제하지 않으며 supersedes를 기록한다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
+        first = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        assert first["status"] == "QUALIFIED"
+        old_sha = first["reference"]["sha256"]
+        old_dir = paths.qualification_releases / "qual-PRIOR"
+        assert old_dir.is_dir()
+        # 같은 release id로는 재승격 불가(기존 보존) → 새 id + supersedes.
+        second = _reuse(
+            paths, tmp, baseline_path, "qual-PRIOR",
+            release_id="qual-PRIOR-r2",
+            supersedes={"reference_sha256": old_sha,
+                        "release": "qual-PRIOR",
+                        "reason": "issuance bug: endpoints lacked speed_class"})
+        assert second["status"] == "QUALIFIED"
+        assert second["release_id"] == "qual-PRIOR-r2"
+        assert second["reference"]["previous_release"] == "qual-PRIOR"
+        assert old_dir.is_dir()  # 삭제 안 됨
+        assert (old_dir / qualify_cmd.REFERENCE_BASENAME).is_file()
+        active = qualify_cmd.load_active_reference(paths)
+        assert active["evidence_reuse"]["supersedes"]["reference_sha256"] == old_sha
+        assert active["evidence_reuse"]["release_id"] == "qual-PRIOR-r2"
+        assert active["qualification"]["run_id"] == "qual-PRIOR"  # RF 출처 유지
+        pointer = json.loads(paths.active_pointer.read_bytes())
+        assert pointer["release"] == "qual-PRIOR-r2"
+        assert pointer["previous_release"] == "qual-PRIOR"
+
+
 if __name__ == "__main__":
     import unittest as _unittest
     for name, value in sorted(globals().items()):

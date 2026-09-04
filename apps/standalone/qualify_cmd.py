@@ -427,6 +427,63 @@ def write_verification_bundle(repo_root: Path, out_dir: Path, binding: dict,
 
 # ------------------------------------------------------------ reference
 
+#: critical endpoint 스키마의 speed_class 허용값. 출처는
+#: local_preflight.speed_class(super=USB3 5000+, high=480; 그 외 other/unknown)
+#: 와 ROLE_SPEED_CLASS — 자격은 super/high만 허용한다. (local_preflight는
+#: operation 결속 파일이라 수정하지 않고 여기(tooling)에 고정한다.)
+CRITICAL_SPEED_CLASSES = frozenset({"super", "high"})
+
+
+def critical_endpoints_from_preflight(preflight: dict) -> tuple:
+    """필수 preflight 관측 → (critical endpoints, 관측 metadata).
+
+    **full ladder와 evidence reuse가 공유하는 단일 함수**(2026-09-05 사용자
+    조건 1). critical 스키마는 정확히 ``{serial, speed_class}`` — run 경로의
+    ``run_cmd.compare_critical``이 대조하는 필드와 일치한다. ``usb_path``·
+    ``speed_mbps``는 관측용 metadata로만 분리 반환하며(조건 3) critical
+    스키마를 대체하지 않는다. speed_class가 허용값이 아니면 발급을 거부한다
+    (조건 2)."""
+    observed = (preflight.get("checks") or {}).get("b210", {}).get(
+        "observed_by_role") or {}
+    critical, observations = {}, {}
+    problems = []
+    for role, info in sorted(observed.items()):
+        if info is None:
+            problems.append(f"{role}: device not observed")
+            continue
+        serial = info.get("serial")
+        cls = info.get("speed_class")
+        if not serial:
+            problems.append(f"{role}: serial 없음")
+        if cls not in CRITICAL_SPEED_CLASSES:
+            problems.append(f"{role}: speed_class {cls!r} 허용값 아님 "
+                            f"({sorted(CRITICAL_SPEED_CLASSES)})")
+        critical[role] = {"serial": serial, "speed_class": cls}
+        observations[role] = {"usb_path": info.get("usb_path"),
+                              "speed_mbps": info.get("speed_mbps")}
+    if problems:
+        raise QualifyError("critical endpoint 생성 거부: " + "; ".join(problems))
+    return critical, observations
+
+
+def _validate_critical_endpoints(endpoints: dict) -> None:
+    """발급 시점 검증(조건 2): 모든 endpoint에 serial과 허용 speed_class가
+    있어야 한다. 어느 발급 경로든 여기서 막힌다."""
+    problems = []
+    for role, entry in sorted((endpoints or {}).items()):
+        if not isinstance(entry, dict) or not entry.get("serial"):
+            problems.append(f"{role}: serial 없음")
+        if (entry or {}).get("speed_class") not in CRITICAL_SPEED_CLASSES:
+            problems.append(
+                f"{role}: speed_class {(entry or {}).get('speed_class')!r} "
+                f"허용값 아님 ({sorted(CRITICAL_SPEED_CLASSES)})")
+    if not endpoints:
+        problems.append("endpoints 비어 있음")
+    if problems:
+        raise QualifyError("reference 발급 거부 — critical endpoint 스키마 위반: "
+                           + "; ".join(problems))
+
+
 def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
                     deploy_files: dict, tc_results: dict,
                     endpoints_observed: dict, platform_profile: str,
@@ -439,7 +496,8 @@ def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
                     final_result_sha256: str | None = None,
                     qualification_method: str = "full_ladder",
                     binding_domains: dict | None = None,
-                    evidence_reuse: dict | None = None) -> dict:
+                    evidence_reuse: dict | None = None,
+                    endpoint_observations: dict | None = None) -> dict:
     """로컬 reference 조립 — 기존 스키마(STAGE7_QUALIFICATION_REFERENCE v1)
     + standalone critical subset (README §8).
 
@@ -451,6 +509,9 @@ def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
     `binding_domains`(rf_evidence/operation/qualification_tool 3영역 manifest)와
     `evidence_reuse`(이전 ladder·재사용 사유·가드 결과)를 기록한다. RF/operation
     핵심 파일이 다르면 발급 자체가 이뤄지지 않는다(호출부가 거부)."""
+    # 조건 2: critical endpoint 스키마({serial, speed_class ∈ 허용값}) 검증 —
+    # 누락·비허용이면 어느 경로든 발급 거부.
+    _validate_critical_endpoints(endpoints_observed)
     versions = {name: environment_manifest.get(f"{name}_version")
                 for name in local_config.CRITICAL_LIBRARIES}
     reference = {
@@ -495,6 +556,13 @@ def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
     if evidence_reuse is not None:
         # 요구사항 5: qualification_method=evidence_reuse + 재사용 사유·가드.
         reference["evidence_reuse"] = evidence_reuse
+    if endpoint_observations is not None:
+        # 조건 3: usb_path·speed_mbps는 관측 metadata로만 보존 — critical
+        # 스키마(standalone_critical.endpoints)와 분리, 대조 대상 아님.
+        reference["endpoint_observations"] = {
+            "note": "observation metadata only (usb_path, speed_mbps); "
+                    "not part of the qualification-critical comparison",
+            "endpoints": endpoint_observations}
     return reference
 
 
@@ -732,13 +800,9 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
         if not preflight["pass"]:
             raise QualifyError(
                 "필수 preflight 실패: " + "; ".join(preflight["failures"]))
-        endpoints_observed = {
-            role: {"serial": info["serial"],
-                   "speed_class": info["speed_class"]}
-            for role, info in
-            preflight["checks"]["b210"]["observed_by_role"].items()
-            if info is not None
-        }
+        # 조건 1: full ladder·evidence reuse 공통 함수로 {serial, speed_class}.
+        endpoints_observed, endpoint_observations = (
+            critical_endpoints_from_preflight(preflight))
 
         # candidate는 새 사다리마다 비운 뒤 시작한다 (승격 전 scratch).
         for entry in paths.qualification_candidate.iterdir():
@@ -892,6 +956,7 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                                   for e in manifest["files"]},
                     tc_results=dict(tc_results),
                     endpoints_observed=endpoints_observed,
+                    endpoint_observations=endpoint_observations,
                     platform_profile=hardware["platform_profile"],
                     identity_fingerprint=identity_check["fingerprint"],
                     gain=gain_record,
@@ -944,6 +1009,7 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                           for e in manifest["files"]},
             tc_results=dict(tc_results),
             endpoints_observed=endpoints_observed,
+            endpoint_observations=endpoint_observations,
             platform_profile=hardware["platform_profile"],
             identity_fingerprint=identity_check["fingerprint"],
             gain=gain_record,
@@ -1059,7 +1125,9 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                       suite_runner=subprocess.run,
                       preflight_fn=None, residual_probe=None,
                       environment_manifest: dict | None = None,
-                      final_builder_module=None) -> dict:
+                      final_builder_module=None,
+                      release_id: str | None = None,
+                      supersedes: dict | None = None) -> dict:
     """RF 사다리 재실행 없이 기존 RF evidence를 재사용해 승격 (2026-09-05 승인,
     보완 반영).
 
@@ -1077,6 +1145,11 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     report = {"status": "FAIL", "qualification_method": "evidence_reuse",
               "prior_ladder_id": prior_ladder_id, "errors": []}
+    # release 디렉터리 id — 재발급(supersede) 시 기존 release를 지우지 않고
+    # 새 id로 승격한다(조건 5). qualification.run_id는 RF evidence 출처인
+    # prior ladder를 그대로 가리킨다.
+    release = release_id or prior_ladder_id
+    report["release_id"] = release
 
     lock = SingleInstanceLock(paths.lock_path)
     lock.acquire(diagnostics={"command": "qualify-reuse"})
@@ -1127,11 +1200,10 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
         if not preflight["pass"]:
             raise QualifyError("필수 preflight 실패: "
                                + "; ".join(preflight["failures"]))
-        endpoints_observed = {
-            role: {"serial": obs["serial"], "usb_path": obs["usb_path"],
-                   "speed_mbps": obs["speed_mbps"]}
-            for role, obs in
-            preflight["checks"]["b210"]["observed_by_role"].items()}
+        # 조건 1: full ladder와 동일한 공통 함수 — critical은 {serial,
+        # speed_class}, usb_path/speed_mbps는 관측 metadata로만 분리.
+        endpoints_observed, endpoint_observations = (
+            critical_endpoints_from_preflight(preflight))
 
         environment_manifest = (environment_manifest
                                 or local_config.build_environment_manifest())
@@ -1236,6 +1308,9 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
         evidence_reuse = {
             "reason": reason,
             "prior_ladder_id": prior_ladder_id,
+            "release_id": release,
+            # 조건 5: 발급 결함으로 대체된 이전 reference 기록(삭제 없음).
+            "supersedes": supersedes,
             "rf_evidence_manifest_sha256": prior_manifest_sha,
             "current_deploy_manifest_sha256": current_manifest_sha,
             "rf_identical": reuse["rf_identical"],
@@ -1256,6 +1331,7 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                           for e in current_manifest["files"]},
             tc_results=dict(tc_results),
             endpoints_observed=endpoints_observed,
+            endpoint_observations=endpoint_observations,
             platform_profile=hardware["platform_profile"],
             identity_fingerprint=identity_check["fingerprint"],
             gain=gain_record,
@@ -1268,11 +1344,11 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
             binding_domains=binding_domains,
             evidence_reuse=evidence_reuse)
         final_info = write_reference(paths.qualification_candidate, reference)
-        promotion = promote_candidate(paths, release_id=prior_ladder_id)
+        promotion = promote_candidate(paths, release_id=release)
         report["reference"] = {
             "sha256": final_info["sha256"],
             "release": promotion["release"],
-            "path": str(paths.qualification_releases / prior_ladder_id
+            "path": str(paths.qualification_releases / release
                         / REFERENCE_BASENAME),
             "previous_release": promotion["previous_release"]}
         report["status"] = "QUALIFIED"
