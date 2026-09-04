@@ -58,6 +58,16 @@ reference는 과거 evidence 조회용으로 계속 읽힌다. coordinator 계�
 (v2)을 additive로 함께 쓴다.
 `baseline_sha256` 인자는 커밋 상수 pin(`provenance.STAGE7_BASELINE_PIN`)이다.
 
+**검증 범위 (2026-09-05 clean checkout 실측)** — ignored 산출물이 없는 새
+checkout에서 root 시험(standalone·MASS/ROC·host/v1 계약) 260 passed·2 skipped
+(POSIX 전용), integration `-k stage7` 10 passed. 반면 `VDETER/tests` unit+
+contract는 13건이 실패하는데, 이는 standalone 기능이 아니라 과거 evidence
+(`VDETER/results/runs/…`)·`VDETER/legacy`·docs/core 같은 저장소 외부 자료를
+요구하는 governance 시험이다(standalone bundle은 그중 6 node-id를 명시
+deselect). 따라서 **"전체 저장소의 모든 시험이 clean clone에서 통과한다"고는
+말할 수 없다**. standalone 동결의 blocker는 아니며, VDETER 시험 인프라 정리
+(fixture화 또는 governance 표시)를 후속 항목으로 남긴다.
+
 **진행 표시(presentation)** — `progress.py`(표준 라이브러리). setup·qualify·
 run bring-up: TTY 20칸 유니코드 바(불가 시 ASCII), 같은 줄 갱신, 단계 전환
 시 확정; non-TTY/nohup/redirect: CR·ANSI 없는 UTC 줄 로그, 상태 변화·30초
@@ -235,26 +245,20 @@ make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이�
 
 ## 6. git_state.json 호환 생성 (승인 조건 1)
 
-> **v2**: `git_commit`/`git_branch`/`git_dirty`는 **항상 null**이다(실행
-> 환경에서 git 명령도 `.git` 읽기도 하지 않음). coordinator는 대조하지 않는다.
-> 결속값은 additive 필드 `installation_sha256`·`rf/operation/tooling_manifest_
-> sha256`·`installation_verified`(및 별도 `installation-state.json`)이고,
-> `baseline_version/sha256`은 커밋 상수 pin이다. 표의 "standalone-binding
-> 승계" 출처는 v1 이력이다.
-
 coordinator `_load_run_metadata`/`validate_rr_binding`은 configs-dir의
-`git_state.json`을 읽는다. **파일명·스키마를 유지**하되 내용은 host Git·
-Markdown 없이 구성한다. 필드별 출처:
+`git_state.json`을 읽는다. **파일명·스키마를 유지**하되 내용은 Git·Markdown
+없이 구성한다. 필드별 출처 (v2 현행; "기존" 열은 host prepare 도구의 v1
+이력이다):
 
-| 필드 | 기존(host prepare) 출처 | standalone 출처 |
+| 필드 | 기존(host prepare, v1) 출처 | standalone v2 출처 |
 |---|---|---|
 | `run_id` | 요청 run-id | 동일 (현재 run) |
 | `qualification_profile` | `"RESEARCH_READY_MINIMAL"` | 동일 상수 |
 | `rr_phase` | profile 지정 | run: `"rr-p2-17"` (서비스 workload 결속 규약 유지) / qualify: 해당 RR phase |
 | `data_link_id` | phase 말미 17/19 | 동일 규칙 |
-| `baseline_version` / `baseline_sha256` | host Markdown 재해시 | **standalone-binding 승계** |
-| `git_commit` | host `git rev-parse` | **standalone-binding `source_head`** |
-| `git_dirty` | host `git status` | 배포 tree 무결 검증(§9) 통과 시 `false`, 미통과면 run 자체를 거부 |
+| `baseline_version` / `baseline_sha256` | host Markdown 재해시 | **커밋 상수 pin `provenance.STAGE7_BASELINE_PIN`** (문서를 읽지 않음; RR evidence 계약용 참고값) |
+| `git_commit` / `git_branch` / `git_dirty` | host `git rev-parse`·`git status` | **항상 null** — 실행 환경에서 git 명령도 `.git` 읽기도 하지 않으며 coordinator는 대조하지 않는다 |
+| 무결성 결속 (additive) | 없음 | `installation_sha256`·`rf/operation/tooling_manifest_sha256`·`installation_verified` (= `var/installation/` manifest 재측정 통과) + 별도 `installation-state.json`; 미통과면 config 생성 자체를 거부 |
 | `environment_manifest_sha256` | SSH probe | 로컬 환경 probe 실측 |
 | `hardware` | SSH probe usb_devices | 로컬 sysfs 실측 |
 | `implicit_retry` | `0` | 동일 상수 (coordinator가 0 강제) |
@@ -268,7 +272,7 @@ coordinator 검증 계약 (실측, 무수정 준수 대상):
 - RR phase: 위에 더해 `rr_phase == phase`, p2는 link 결속(17/19),
   `phase_deadlines_s[phase] == 실행기 정본` 대조.
 
-`--baseline-sha256` 인자에는 binding의 `baseline_sha256`을 넘긴다.
+`--baseline-sha256` 인자에는 `STAGE7_BASELINE_PIN["sha256"]`을 넘긴다.
 run·qualify 공통 config 생성기(`local_config.py`)가 이 표를 구현한다.
 fixtures(start-*/submit-*/stop)는 기존 prepare 도구와 동일 규칙·동일
 canonical JSON으로 로컬 생성한다.
