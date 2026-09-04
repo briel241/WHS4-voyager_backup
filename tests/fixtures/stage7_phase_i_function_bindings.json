@@ -1,0 +1,19 @@
+{
+ "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V1",
+ "approved_utc": "2026-09-04",
+ "policy": "Phase I (standalone) approved change: run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). This fixture pins the completed implementation by AST and source SHA-256 so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
+ "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
+ "functions": {
+  "run_rr_p3_fault": {
+   "ast_sha256": "df8ad6de57d7d74509afc1c5c481bb41ae1a794cd60c87c7ec4ff76607507ae0",
+   "source_sha256": "39d83fb2d3dbcb88d2688a8dd61a29c0395774e5c959120b9aa8138a97b7ab78"
+  }
+ },
+ "added_functions": [
+  "_p3_fault_status"
+ ],
+ "expected_changed_vs_qualified_commit": [
+  "run_mass_roc_session",
+  "run_rr_p3_fault"
+ ]
+}

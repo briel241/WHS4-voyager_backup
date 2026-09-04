@@ -266,7 +266,7 @@ _COMMON_SECTION_KEYS = {
     "test": frozenset({"peer_station_id"}),
 }
 _REQUIRED_COMMON_SECTIONS = ("endpoint", "service", "link", "mac", "phy")
-_DATA_PROFILE_KEYS = frozenset({"data_link_id", "data_session_enabled"})
+_DATA_PROFILE_KEYS = frozenset({"data_link_id"})
 
 MAX_U63 = (1 << 63) - 1
 MAX_U31 = (1 << 31) - 1
@@ -537,7 +537,6 @@ class Stage7ResolvedConfiguration:
     lower_rf_tune_hz: int
     upper_rf_tune_hz: int
     data_link_id: int
-    data_session_enabled: bool
     phy_facade: str
     timing_status_projection: str
     deployment_manifest_relpath: str
@@ -572,7 +571,6 @@ def _resolved_json_value(
     time_plan: Stage7TimePlan,
     lanes,
     data_link_id: int,
-    data_session_enabled: bool,
     deployment_manifest_relpath: str,
     deployment_manifest_sha256: str,
     endpoint_common_rx_gain_db: int,
@@ -660,7 +658,6 @@ def _resolved_json_value(
         },
         "lanes": [lane.as_json_value() for lane in lanes],
         "data_link_id": data_link_id,
-        "data_session_enabled": data_session_enabled,
         "endpoint_common_rx_gain_db": endpoint_common_rx_gain_db,
         "source_gain_artifact_sha256": source_gain_artifact_sha256,
         "source_sha256": source_sha256,
@@ -668,8 +665,8 @@ def _resolved_json_value(
     }
 
 
-def _parse_data_profile(text: str):
-    """단일 Stage 7 data profile의 immutable capability를 해석한다."""
+def load_data_profile(text: str):
+    """단일 `data-profile.toml`을 해석한다. `data_link_id`는 17 또는 19만 허용한다."""
 
     if _toml is None:  # pragma: no cover - 환경 의존
         return _error(ErrorCode.CONFIG_PARSE_FAILED, "TOML parser가 없습니다")
@@ -680,31 +677,15 @@ def _parse_data_profile(text: str):
     unknown = _check_unknown("<data-profile>", data, _DATA_PROFILE_KEYS)
     if unknown is not None:
         return unknown
-    for key in _DATA_PROFILE_KEYS:
-        missing = _require_key("<data-profile>", data, key)
-        if missing is not None:
-            return missing
-    link_id = data["data_link_id"]
-    if isinstance(link_id, bool) or not isinstance(link_id, int) or link_id not in (17, 19):
+    missing = _require_key("<data-profile>", data, "data_link_id")
+    if missing is not None:
+        return missing
+    value = data["data_link_id"]
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (17, 19):
         return _semantic_error(
-            "data_link_id는 17 또는 19만 허용합니다", data_link_id=str(link_id)
+            "data_link_id는 17 또는 19만 허용합니다", data_link_id=str(value)
         )
-    data_session_enabled = data["data_session_enabled"]
-    if not isinstance(data_session_enabled, bool):
-        return _semantic_error(
-            "data_session_enabled는 bool이어야 합니다",
-            data_session_enabled=str(data_session_enabled),
-        )
-    return Ok((link_id, data_session_enabled))
-
-
-def load_data_profile(text: str):
-    """data profile을 검증하고 기존 공개 결과인 selected Link ID를 반환한다."""
-
-    parsed = _parse_data_profile(text)
-    if parsed.is_err:
-        return parsed
-    return Ok(parsed.value[0])
+    return Ok(value)
 
 
 class Stage7ConfigurationLoader:
@@ -726,10 +707,10 @@ class Stage7ConfigurationLoader:
             return _error(ErrorCode.CONFIG_PARSE_FAILED, "TOML parser가 없습니다")
         if not is_valid_run_id(run_id):
             return _semantic_error("run_id 형식이 잘못되었습니다", run_id=str(run_id))
-        data_profile = _parse_data_profile(data_profile_text)
-        if data_profile.is_err:
-            return data_profile
-        data_link_id, data_session_enabled = data_profile.value
+        data_link = load_data_profile(data_profile_text)
+        if data_link.is_err:
+            return data_link
+        data_link_id = data_link.value
         try:
             data = _toml.loads(text)
         except Exception as error:  # noqa: BLE001
@@ -1275,7 +1256,6 @@ class Stage7ConfigurationLoader:
             time_plan=time_plan,
             lanes=lanes,
             data_link_id=data_link_id,
-            data_session_enabled=data_session_enabled,
             deployment_manifest_relpath=stage7_section["deployment_manifest_relpath"],
             deployment_manifest_sha256=stage7_section["deployment_manifest_sha256"],
             endpoint_common_rx_gain_db=common_gain,
@@ -1301,7 +1281,6 @@ class Stage7ConfigurationLoader:
                 lower_rf_tune_hz=LOWER_RF_TUNE_HZ,
                 upper_rf_tune_hz=UPPER_RF_TUNE_HZ,
                 data_link_id=data_link_id,
-                data_session_enabled=data_session_enabled,
                 phy_facade=STAGE7_PHY_FACADE,
                 timing_status_projection=STAGE7_TIMING_STATUS_PROJECTION,
                 deployment_manifest_relpath=stage7_section["deployment_manifest_relpath"],

@@ -105,6 +105,53 @@ class Stage7ScenarioController:
         )
         return response
 
+    def invoke_service_inline(
+        self,
+        endpoint_id: str,
+        *,
+        scenario_id: str,
+        step_id: str,
+        service_operation: str,
+        request: dict,
+        trigger_host_raw_ns: int | None = None,
+    ) -> dict:
+        """§16.2 최소 확장 — canonical inline 값으로 SUBMIT/STATUS를 시킨다.
+
+        adapter가 inline 값으로 public request DTO를 만들어 실제
+        `service.submit()`/`service.status()`를 호출하고, 응답 body에 public
+        transfer_id/transfer_state만 담아 돌려준다.
+        """
+        message = self._command(
+            endpoint_id,
+            "invoke_service_inline",
+            {
+                "scenario_id": scenario_id,
+                "step_id": step_id,
+                "service_operation": service_operation,
+                "request": dict(request),
+                "trigger_host_raw_ns": (
+                    trigger_host_raw_ns
+                    if trigger_host_raw_ns is not None
+                    else int(self._host_raw_clock())
+                ),
+            },
+        )
+        response = self._channels[endpoint_id].request(message)
+        body = response.get("body") or {}
+        self.command_log.append(
+            {
+                "endpoint_id": endpoint_id,
+                "command": "invoke_service_inline",
+                "step_id": step_id,
+                "service_operation": service_operation,
+                "status": response.get("status"),
+                "call_outcome": body.get("call_outcome"),
+                "transfer_id": body.get("transfer_id"),
+                "transfer_state": body.get("transfer_state"),
+            }
+        )
+        return response
+
     def inject_test_fault(
         self,
         endpoint_id: str,

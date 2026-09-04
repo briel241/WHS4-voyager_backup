@@ -6,15 +6,30 @@
     python3 apps/scenario_runner.py list       # 목록만 출력
     python3 apps/scenario_runner.py run SC-VDE-001
     python3 apps/scenario_runner.py run SC-VDE-001 --json
+    python3 apps/scenario_runner.py run all                       # 전체 비대화형
+    python3 apps/scenario_runner.py run SC-VDE-005 --transport software
+    python3 apps/scenario_runner.py run SC-VDE-005 --transport stage7 \\
+        --run-id sc005-rf-001 --configs-dir <resolved-configs>
 
 서브명령 없이 실행하면 대화형 메뉴로 들어간다. 메뉴에서 번호(1·2·3)나 시나리오
 ID를 입력하면 즉시 실행하고 타임라인·판정을 보여준 뒤 다시 메뉴로 돌아온다.
 `a`=전체 실행, `q`=종료. 실행할 때마다 로그가 results/에 JSON으로 저장된다.
 
-각 시나리오는 작업 A~C 에서 만든 함수를 호출하는 **얇은 어댑터**다. 실행은
-현재 모의(in-process)다 — 링크(VDE-TER)를 타지 않는다. 통합 시
-``SCENARIOS`` dict 의 실행 함수만 실제 ``RocAgent``/``MassAgent`` 호출로
-갈아끼우면 되고, 로그·판정 계층은 그대로 재사용된다.
+전송 경로(`--transport`)
+    direct(기본)  기존 in-process 논리 재현 — 링크(VDE-TER)를 타지 않는다.
+                  기존 호출(`run SC-VDE-005`)과 출력·로그·판정 동작을 보존한다.
+    software      실제 VdeService 소프트웨어 무선 경로. 실제 RocAgent/MassAgent/
+                  cert_flow가 public Service API로 payload를 왕복한다
+                  (`apps/mass_roc_software.py`).
+    stage7        별도 process Stage 7 coordinator·launcher·B210 경로
+                  (`apps/stage7_run.py` → coordinator --workload mass-roc →
+                  `apps/stage7_mass_roc_controller.py`). `--run-id`·
+                  `--configs-dir`가 필수이며, 조립·연결 실패는 명시적 FAIL이다
+                  — direct/software로 fallback하지 않는다.
+
+인증서 분기(`--certificate-case normal|forged|both`, software/stage7 전용):
+단독 SC-VDE-001 기본값은 normal, `run all` 기본값은 both(정상·위조 각각
+별도 결과)다.
 
 표준 라이브러리 ``argparse`` 만 사용한다.
 """
@@ -40,7 +55,10 @@ from common.messages import route_json_bridge as bridge
 from common.observe.scenario_analysis import analyze, to_json, to_text
 from common.observe.scenario_log import ScenarioRun
 from common.security import certificate as cert
-from common.security.cert_flow import mass_receive_certificate, roc_issue_certificate
+from common.security.cert_flow import (
+    mass_receive_certificate_report,
+    roc_issue_certificate_report,
+)
 from common.security.trust_store import TrustStore
 
 RESULTS_DIR = os.path.join(
@@ -56,13 +74,20 @@ ROC_ID = 1
 # --------------------------------------------------------------------------
 
 def run_certificate_scenario(now: float) -> tuple[ScenarioRun, dict]:
-    """[보존된 모의 — 운영 미지원] 인증서 발급·검증·저장 흐름의 응용 계층 모의.
+    """인증서 발급·전송·검증·저장 흐름의 응용 계층 재현.
 
-    ⚠ 여기의 링크 분할·ACK은 크기로 흉내낸 것일 뿐, 실제 VDE-TER Data Session이
-      아니다. 인증서 Data Session은 링크 계층에서 미완성이라
-      (data_session_enabled=false) 운영 실행 경로에서는 이 시나리오를
-      **미지원**으로 처리한다 — `UNSUPPORTED_SCENARIOS` 참조. 응용 코드·코덱
-      검증용 참고 모의로만 보존한다.
+    **모의하지 않는 것 — 링크 분할·재조립.** 예전에는 payload를 128 byte씩
+    잘라 fragment 번호와 ACK을 로그에 남기고 그 개수를 판정 항목으로 썼다.
+    그 숫자는 어떤 링크 규격에서도 나오지 않는 값이라, 실제 Data Session이
+    무엇을 하는지 오해하게 만든다. 분할·재조립·전송 ACK은 전부 VDE-TER
+    Service 내부 일이므로(가이드 §4.2) 여기서는 흉내내지 않고, 응용이 실제로
+    책임지는 것 — **어떤 bytes를 넘겼고, 받아서 검증·저장이 규칙대로 됐는가** —
+    만 기록한다.
+
+    **payload는 전선 형식과 같다.** 응용이 넘기는 것은 bare DER이 아니라 R1027
+    Certificate Report 본문이다(`payload_format=x509.certificate_report`).
+    `tools/make_stage7_fixtures.py`가 실장비에 넣는 것과 같은 구성이라야 여기서
+    보는 크기가 링크 팀에 보고한 크기와 일치한다.
     """
     run = ScenarioRun(scenario_id="SC-VDE-001", started=now)
 
@@ -83,70 +108,64 @@ def run_certificate_scenario(now: float) -> tuple[ScenarioRun, dict]:
 
     backend_note = "표준 ECDSA P-256" if cert.is_standard_backend() \
         else "대체 HMAC 백엔드 — 실제 공개키 암호 아님"
-    run.record(now, "ROC->MASS", "note",
-               f"인증서 준비 완료 ({len(vessel_der)} byte, {backend_note})")
 
-    outbound = roc_issue_certificate(vessel_der, mass_id=MASS_ID)
-
-    # --- 링크 분할 모의 -----------------------------------------------------
-    # 실제 분할·재조립은 VDE-TER Service 내부 일이다(지시서 4.2). 여기서는
-    # 로그에 fragment 번호를 남기기 위해 크기만으로 나눠 흉내낸다.
-    fragment_size = 128
+    # 전선에 실리는 것은 bare DER이 아니라 Certificate Report 본문이다.
+    outbound = roc_issue_certificate_report(vessel_der, mass_id=MASS_ID)
     payload = outbound.payload
-    fragments = [payload[i:i + fragment_size]
-                 for i in range(0, len(payload), fragment_size)]
-    total = len(fragments)
 
-    clock = now
-    for index, chunk in enumerate(fragments, start=1):
-        clock += 0.4
-        run.record(clock, "ROC->MASS", "send",
-                   f"X509 cert frag {index}/{total}",
-                   corr=f"frag-{index}", source_id=ROC_ID, destination_id=MASS_ID,
-                   fragment=index, fragment_total=total, bytes=len(chunk),
-                   data_type=outbound.data_type)
-        clock += 0.25
-        run.record(clock, "MASS->ROC", "ack",
-                   f"frag {index} ACK",
-                   corr=f"frag-{index}", source_id=MASS_ID, destination_id=ROC_ID,
-                   status=4)
+    run.record(now, "ROC->MASS", "note",
+               f"인증서 준비 완료 — DER {len(vessel_der)} byte, "
+               f"Certificate Report 본문 {len(payload)} byte ({backend_note})")
 
-    reassembled = b"".join(fragments)
-    clock += 0.1
-    run.record(clock, "MASS->ROC", "recv", "인증서 재조립 완료",
-               source_id=MASS_ID, fragment_total=total,
-               payload_sha256=hashlib.sha256(reassembled).hexdigest())
+    # --- 응용이 넘기는 것 ---------------------------------------------------
+    # 분할·재조립·전송 ACK은 링크(Data Session) 소관이라 여기서 흉내내지 않는다.
+    # 응용은 payload 한 덩어리를 넘기고, 반대편에서 같은 bytes를 받는다.
+    digest = hashlib.sha256(payload).hexdigest()
+    clock = now + 0.4
+    run.record(clock, "ROC->MASS", "send",
+               f"Certificate Report 본문 {len(payload)} byte 전달",
+               corr="cert-1", source_id=ROC_ID, destination_id=MASS_ID,
+               bytes=len(payload), data_type=outbound.data_type,
+               payload_sha256=digest)
+
+    clock += 0.3
+    run.record(clock, "MASS->ROC", "recv", "본문 수신 (분할·재조립은 링크 소관)",
+               corr="cert-1", source_id=MASS_ID, payload_sha256=digest)
 
     # --- MASS: 검증 후에만 저장 --------------------------------------------
     trust = TrustStore()
     clock += 0.2
-    ok, reason = mass_receive_certificate(reassembled, trust, ca_der, now)
-    fingerprint = cert.fingerprint_of(reassembled)
+    results = mass_receive_certificate_report(payload, trust, ca_der, now)
+    ok, reason = results[0][1], results[0][2]
+    fingerprint = cert.fingerprint_of(vessel_der)
     run.record(clock, "MASS->ROC", "verify", f"인증서 검증: {reason}",
                ok=ok, reason=reason, stored=ok,
                fingerprint=fingerprint.hex(),
-               payload_sha256=hashlib.sha256(reassembled).hexdigest(),
+               payload_sha256=digest,
                trust_store_size=len(trust))
 
     # 같은 인증서 재수신 → 멱등이어야 한다 (저장소 크기 불변)
     clock += 0.2
-    ok_again, reason_again = mass_receive_certificate(reassembled, trust, ca_der, now)
+    again = mass_receive_certificate_report(payload, trust, ca_der, now)
     run.record(clock, "MASS->ROC", "verify", "동일 인증서 재수신 (멱등 확인)",
-               ok=ok_again, reason=reason_again,
+               ok=again[0][1], reason=again[0][2],
                stored=False, trust_store_size=len(trust))
+
+    clock += 0.2
+    run.record(clock, "MASS->ROC", "ack", "응용 수락 (Acknowledged)",
+               corr="cert-1", source_id=MASS_ID, destination_id=ROC_ID, status=4)
 
     clock += 0.2
     run.record(clock, "MASS->ROC", "note",
                f"신뢰 저장소 {len(trust)}건 (재수신 후에도 불변)")
     run.finish(clock)
 
+    # fragments·all_fragments_acked는 더 이상 판정하지 않는다. 링크가 무엇을
+    # 하는지 모르는 채로 개수를 세면 판정이 아니라 자작한 숫자를 확인하는 것이다.
     expected = {
         "scenario_id": "SC-VDE-001",
         "signature_verified": True,
-        "payload_sha256": hashlib.sha256(payload).hexdigest(),
-        "fragments": total,
-        "all_fragments_acked": True,
-        "max_retransmissions": 0,
+        "payload_sha256": digest,
         "ack_status": 4,
         "max_latency_seconds": 2.0,
         "no_duplicate_store": True,
@@ -356,33 +375,10 @@ def run_control_scenario(now: float) -> tuple[ScenarioRun, dict]:
 # --------------------------------------------------------------------------
 
 SCENARIOS = {
+    "SC-VDE-001": ("X.509 인증서 송수신", run_certificate_scenario),
     "SC-VDE-005": ("S-421 노선 계획 교환", run_route_scenario),
     "SC-VDE-006": ("MASS-ROC 원격 조종", run_control_scenario),
 }
-
-#: 응용 코드는 보존되어 있으나 운영 실행을 지원하지 않는 시나리오.
-#: 실행을 요청하면 시뮬레이션 대신 구조화된 미지원 결과를 돌려준다.
-UNSUPPORTED_SCENARIOS = {
-    "SC-VDE-001": (
-        "X.509 인증서 송수신",
-        "인증서 Data Session이 링크 계층에서 미완성이다(data_session_enabled=false). "
-        "응용 코드·인증서 생성·검증·코덱과 단위시험(tests/test_certificate*.py)은 "
-        "보존되어 있으며, Data Session 완성 전까지 운영 실행은 지원하지 않는다.",
-    ),
-}
-
-
-def unsupported_result(scenario_id: str, now: float) -> dict:
-    """미지원 시나리오 실행 요청에 대한 구조화된 결과."""
-    name, reason = UNSUPPORTED_SCENARIOS[scenario_id]
-    return {
-        "scenario_id": scenario_id,
-        "name": name,
-        "status": "unsupported",
-        "supported": False,
-        "reason": reason,
-        "requested_at": now,
-    }
 
 
 # --------------------------------------------------------------------------
@@ -392,38 +388,12 @@ def unsupported_result(scenario_id: str, now: float) -> dict:
 def command_list(_args) -> int:
     for scenario_id, (name, _) in SCENARIOS.items():
         print(f"  {scenario_id}  {name}")
-    for scenario_id, (name, _reason) in UNSUPPORTED_SCENARIOS.items():
-        print(f"  {scenario_id}  {name}  [현재 미지원 — Data Session 미완성]")
-    return 0
-
-
-def _report_unsupported(scenario_id: str, *, now, as_json, save) -> int:
-    """미지원 시나리오 실행 요청 — 모의 실행 대신 구조화된 결과를 낸다."""
-    result = unsupported_result(scenario_id, now)
-    if as_json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(f"시나리오 {scenario_id} — {result['name']}")
-        print()
-        print("  현재 미지원: 실행하지 않았습니다.")
-        print(f"  사유: {result['reason']}")
-
-    if save:
-        os.makedirs(RESULTS_DIR, exist_ok=True)
-        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
-        path = os.path.join(RESULTS_DIR, f"{scenario_id}_{stamp}_unsupported.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(result, ensure_ascii=False, indent=2))
-        if not as_json:
-            print(f"\n결과 저장: {path}")
     return 0
 
 
 def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> int:
     """시나리오 하나를 실행하고 타임라인·판정을 출력, results/에 로그 저장."""
     now = time.time() if now is None else float(now)
-    if scenario_id in UNSUPPORTED_SCENARIOS:
-        return _report_unsupported(scenario_id, now=now, as_json=as_json, save=save)
     name, runner = SCENARIOS[scenario_id]
 
     run, expected = runner(now)
@@ -455,30 +425,343 @@ def _run_and_report(scenario_id: str, *, now=None, as_json=False, save=True) -> 
     return 0 if summary["passed"] else 1
 
 
-def command_run(args) -> int:
-    scenario_id = args.scenario_id
-    if scenario_id not in SCENARIOS and scenario_id not in UNSUPPORTED_SCENARIOS:
-        print(f"알 수 없는 시나리오: {scenario_id}", file=sys.stderr)
+def _resolve_certificate_case(args) -> str:
+    """service backend(software/stage7)의 인증서 분기 기본값을 정한다.
+
+    단독 SC-VDE-001 실행 기본값은 normal, `run all`은 정상·위조를 각각 별도
+    결과로 실행(both)한다. `--certificate-case`로 명시하면 그 값을 쓴다.
+    """
+    if args.certificate_case is not None:
+        return args.certificate_case
+    return "both" if args.scenario_id == "all" else "normal"
+
+
+def _run_direct(args) -> int:
+    """기존 direct(논리 재현) 경로 — 동작 완전 보존 + `run all` 비대화형."""
+    if args.certificate_case is not None:
+        print("--certificate-case는 software/stage7 전용이다 (direct 논리 "
+              "재현에는 위조 분기가 없다)", file=sys.stderr)
+        return 2
+    if args.scenario_id == "all":
+        exit_code = 0
+        for scenario_id in sorted(SCENARIOS):
+            print("\n" + "=" * 60)
+            exit_code = max(exit_code, _run_and_report(
+                scenario_id, now=args.now, as_json=args.json,
+                save=not args.no_save))
+        return exit_code
+    if args.scenario_id not in SCENARIOS:
+        print(f"알 수 없는 시나리오: {args.scenario_id}", file=sys.stderr)
         print("사용 가능한 목록은 'list' 명령으로 확인하라.", file=sys.stderr)
         return 2
-    return _run_and_report(scenario_id, now=args.now, as_json=args.json,
+    return _run_and_report(args.scenario_id, now=args.now, as_json=args.json,
                            save=not args.no_save)
+
+
+_SERVICE_SCENARIO_IDS = ("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all")
+
+
+def _summarize_service_results(results: dict) -> bool:
+    """software/stage7 결과 dict를 사람이 읽게 요약하고 전체 성패를 돌려준다."""
+    from apps.stage7_mass_roc_controller import _result_ok
+
+    overall = True
+    for scenario_id, payload in sorted(results.items()):
+        ok = _result_ok(payload)
+        overall = overall and ok
+        body = payload.get("result", payload)
+        steps = body.get("steps") or []
+        failed = [s["name"] for s in steps if s.get("status") != "PASS"]
+        line = f"  {scenario_id}: {'PASS' if ok else 'FAIL'} ({len(steps)}단계"
+        if body.get("reason"):
+            line += f", 사유: {body['reason']}"
+        if failed:
+            line += f", 실패 단계: {', '.join(failed)}"
+        print(line + ")")
+        pre = payload.get("precondition")
+        if pre is not None:
+            print(f"    사전 조건 SC-VDE-005: {pre.get('status')}")
+    return overall
+
+
+def _run_software(args) -> int:
+    """software backend — 실제 VdeService 소프트웨어 무선 경로 + 실제 행위자."""
+    from apps.mass_roc_software import (
+        SoftwareHarnessUnavailable,
+        build_software_scenario_controller,
+    )
+    from apps.stage7_mass_roc_controller import run_scenarios
+
+    certificate_case = _resolve_certificate_case(args)
+
+    # run-id를 쓰면 결과 디렉터리 중복을 실행 전에 거부한다 (stage7과 동일 규칙).
+    run_dir = None
+    if args.run_id and not args.no_save:
+        from apps.stage7_run import runs_root
+        run_dir = os.path.join(runs_root(), args.run_id)
+        if os.path.exists(run_dir):
+            print(f"run-id {args.run_id!r}가 이미 존재한다: {run_dir}",
+                  file=sys.stderr)
+            return 2
+
+    try:
+        harness, controller = build_software_scenario_controller()
+    except SoftwareHarnessUnavailable as exc:
+        # 조립 실패는 명시적 FAIL — direct로 내려가지 않는다.
+        print(f"software 전송 조립 실패: {exc}", file=sys.stderr)
+        return 1
+    try:
+        results = run_scenarios(controller, args.scenario_id, certificate_case)
+    finally:
+        harness.close()
+
+    print(f"시나리오 {args.scenario_id} — software (VDETER 소프트웨어 무선)")
+    overall = _summarize_service_results(results)
+
+    if args.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+
+    if not args.no_save:
+        payload = {
+            "transport": "software",
+            "scenario_id": args.scenario_id,
+            "certificate_case": certificate_case,
+            "status": "PASS" if overall else "FAIL",
+            "results": results,
+        }
+        if run_dir is not None:
+            os.makedirs(run_dir)
+            path = os.path.join(run_dir, "final-result.json")
+        else:
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+            path = os.path.join(
+                RESULTS_DIR, f"{args.scenario_id.replace('-', '')}_software_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(f"\n로그 저장: {path}")
+    return 0 if overall else 1
+
+
+def _run_stage7(args) -> int:
+    """stage7 backend — 별도 process coordinator·launcher·B210 경로.
+
+    조립·연결 실패는 명시적 FAIL이며 direct/software로 fallback하지 않는다.
+    """
+    from apps.stage7_run import Stage7RequestError, run_stage7
+
+    if not args.run_id or not args.configs_dir:
+        print("stage7 전송에는 --run-id와 --configs-dir이 필수다",
+              file=sys.stderr)
+        return 2
+    try:
+        return run_stage7(
+            scenario_id=args.scenario_id,
+            run_id=args.run_id,
+            configs_dir=args.configs_dir,
+            certificate_case=_resolve_certificate_case(args),
+        )
+    except Stage7RequestError as exc:
+        print(f"stage7 실행 거부: {exc}", file=sys.stderr)
+        return 2
+
+
+def command_run(args) -> int:
+    if args.transport != "stage7" and args.configs_dir:
+        print("--configs-dir은 stage7 전용이다", file=sys.stderr)
+        return 2
+    if args.transport == "direct":
+        return _run_direct(args)
+    if args.scenario_id not in _SERVICE_SCENARIO_IDS:
+        print(f"{args.transport} 전송이 지원하는 시나리오: "
+              f"{', '.join(_SERVICE_SCENARIO_IDS)}", file=sys.stderr)
+        return 2
+    if args.transport == "software":
+        return _run_software(args)
+    return _run_stage7(args)
+
+
+def _stage7_menu(args) -> int:
+    """Stage 7 대화형 메뉴 — bounded persistent service session (Phase G).
+
+    CLI 시작 시 하드웨어 session을 **한 번** 세우고(B210 acquire·endpoint START·
+    C1~C6 RF-time PRE/POST·HOST_TIME_LOCKED·admission·TBB·publish), 메뉴 선택
+    마다 **application workload child만** 새로 만든다. `q`나 fault에서 한 번만
+    전체 cleanup을 수행한다.
+
+    터미널에는 상위 진행 상태·PASS/FAIL·간단한 사유·소요시간·evidence 경로만
+    출력한다. 상세 event/transfer/quiescence/traceback은 evidence 파일에만
+    남는다 (`--verbose`가 있어야 터미널 상세가 늘어난다).
+    """
+    from apps import stage7_profile
+    from apps.stage7_run import open_service_session
+
+    verbose = bool(getattr(args, "verbose", False))
+
+    try:
+        profile = stage7_profile.load_profile(args.profile)
+        checks = stage7_profile.validate_local_bindings(profile)
+    except stage7_profile.ProfileError as exc:
+        print(f"Stage 7 profile 거부: {exc}", file=sys.stderr)
+        return 2
+
+    print("=== MASS/ROC 시나리오 (Stage 7 실장비) ===")
+    print(f"Stage 7 환경 검증: profile·qualification reference 결속 통과 "
+          f"({len(checks)}개 항목)")
+    for line in stage7_profile.summary_lines(profile):
+        print("  " + line)
+
+    print("\n하드웨어 service session 준비 중 — B210 acquire·endpoint START·"
+          "C1~C6 RF-time·time-lock·admission (약 21~22분, session당 1회)")
+    session = None
+    try:
+        session = open_service_session(
+            profile, diagnostics=bool(getattr(args, "diagnostics", False)),
+            live=not bool(getattr(args, "quiet", False)))
+    except Exception as exc:  # noqa: BLE001 - 사유는 evidence에, 터미널은 요약
+        print(f"\nservice session 시작 실패: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        if session is not None:
+            print(f"evidence: {os.path.relpath(session.session_dir, RESULTS_DIR + os.sep + '..')}",
+                  file=sys.stderr)
+        return 1
+
+    ready = session.ready or {}
+    print(f"\nsession READY — id={session.session_id} "
+          f"({session.marks.get('session_ready', '?')}초)")
+    if verbose:
+        print(f"  bring-up 구간: {ready.get('phase_elapsed_s')}")
+    print(f"  evidence: {os.path.relpath(session.session_dir, os.path.dirname(RESULTS_DIR))}")
+    print("  이후 시나리오 선택은 application state만 새로 만듭니다 "
+          "(하드웨어 재기동 없음).")
+
+    ordered = sorted(SCENARIOS)
+
+    def report(result):
+        status = result.get("status")
+        quiescence = result.get("quiescence") or {}
+        print(f"\n  결과: {status}  workload={result.get('workload_id')}")
+        scenario = result.get("scenario") or {}
+        if status != "PASS":
+            reason = (scenario.get("error")
+                      or result.get("error")
+                      or ("quiescence 실패" if not quiescence.get("pass") else ""))
+            if reason:
+                print(f"  사유: {str(reason)[:200]}")
+        print(f"  소요: {result.get('wall_clock_s')}초 · "
+              f"quiescence={'PASS' if quiescence.get('pass') else 'FAIL'}")
+        if verbose:
+            print(f"  quiescence 상세: {quiescence}")
+
+    def run_one(scenario_id, certificate_case):
+        print(f"\n{'=' * 60}\n  workload 실행: {scenario_id}"
+              + (f" ({certificate_case})" if scenario_id == "SC-VDE-001" else ""))
+        result = session.run_workload(scenario_id, certificate_case)
+        report(result)
+        return result
+
+    exit_code = 0
+    try:
+        while True:
+            if session.status not in ("READY",):
+                print(f"\nsession이 더 이상 workload를 받을 수 없습니다 "
+                      f"(status={session.status}) — 정리하고 종료합니다.")
+                exit_code = 1
+                break
+            print()
+            for index, scenario_id in enumerate(ordered, 1):
+                print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+            print("  a) 전체 실행 (독립 workload 4회: 005 → 006 → 001 정상 → 001 위조)")
+            print("  q) 종료 (session cleanup)")
+            try:
+                choice = input("\n선택 > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not choice:
+                continue
+            lowered = choice.lower()
+            if lowered in ("q", "quit", "exit", "종료"):
+                break
+
+            if lowered in ("a", "all", "전체"):
+                from apps.stage7_service_layer import DEFAULT_BATCH_PLAN
+                for scenario_id, certificate_case in DEFAULT_BATCH_PLAN:
+                    result = run_one(scenario_id, certificate_case)
+                    if result.get("status") != "PASS":
+                        exit_code = 1
+                        break
+                    if session.status != "READY":
+                        exit_code = 1
+                        break
+                continue
+
+            if choice.isdigit() and 1 <= int(choice) <= len(ordered):
+                scenario_id = ordered[int(choice) - 1]
+            elif choice.upper() in SCENARIOS:
+                scenario_id = choice.upper()
+            else:
+                print(f"  알 수 없는 선택: {choice!r} (RF 실행하지 않음)")
+                continue
+
+            certificate_case = "normal"
+            if scenario_id == "SC-VDE-001":
+                try:
+                    answer = input(
+                        "  인증서 case [normal/forged] (기본 normal) > ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                answer = answer.lower() or "normal"
+                if answer not in ("normal", "forged"):
+                    print(f"  알 수 없는 인증서 case: {answer!r} (RF 실행하지 않음)")
+                    continue
+                certificate_case = answer
+
+            result = run_one(scenario_id, certificate_case)
+            if result.get("status") != "PASS":
+                exit_code = 1
+    except Exception as exc:  # noqa: BLE001 - 어떤 예외에서도 cleanup은 돈다
+        print(f"\nsession 오류: {type(exc).__name__}: {exc}", file=sys.stderr)
+        session.error = f"{type(exc).__name__}: {exc}"
+        exit_code = 1
+    finally:
+        print("\nsession cleanup 중 (endpoint STOP·B210 반환)...")
+        closed = session.close()
+        summary = session.summary()
+        summary_path = os.path.join(session.session_dir, "session-summary.json")
+        with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=1,
+                      sort_keys=True)
+        cleanup = (closed or {}).get("cleanup") or {}
+        print(f"cleanup: {'PASS' if cleanup.get('pass') else 'FAIL'} "
+              f"· session status={session.status}")
+        if verbose:
+            print(f"  cleanup 상세: {cleanup}")
+        print(f"evidence: {os.path.relpath(session.session_dir, os.path.dirname(RESULTS_DIR))}")
+        if session.status != "PASS" or not cleanup.get("pass"):
+            exit_code = exit_code or 1
+    return exit_code
 
 
 def command_interactive(args) -> int:
     """대화형 메뉴 — 번호나 ID를 고르면 바로 실행한다."""
-    ordered = sorted(SCENARIOS) + sorted(UNSUPPORTED_SCENARIOS)
+    if getattr(args, "transport", "direct") == "stage7":
+        if not getattr(args, "profile", None):
+            print("stage7 대화형 메뉴에는 --profile이 필요하다", file=sys.stderr)
+            return 2
+        return _stage7_menu(args)
+    if getattr(args, "profile", None):
+        print("--profile은 --transport stage7 전용이다", file=sys.stderr)
+        return 2
+
+    ordered = sorted(SCENARIOS)
     print("=== MASS/ROC 시나리오 재현 (대화형) ===")
     print("번호나 시나리오 ID를 입력하면 바로 실행합니다.\n")
     while True:
         for index, scenario_id in enumerate(ordered, 1):
-            if scenario_id in UNSUPPORTED_SCENARIOS:
-                name = UNSUPPORTED_SCENARIOS[scenario_id][0]
-                print(f"  {index}) {scenario_id}  {name}"
-                      "  [현재 미지원 — Data Session 미완성]")
-            else:
-                print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
-        print("  a) 전체 실행 (미지원 시나리오는 미지원 결과만 출력)")
+            print(f"  {index}) {scenario_id}  {SCENARIOS[scenario_id][0]}")
+        print("  a) 전체 실행")
         print("  q) 종료")
         try:
             choice = input("\n선택 > ").strip()
@@ -496,7 +779,7 @@ def command_interactive(args) -> int:
             targets = ordered
         elif choice.isdigit() and 1 <= int(choice) <= len(ordered):
             targets = [ordered[int(choice) - 1]]
-        elif choice.upper() in SCENARIOS or choice.upper() in UNSUPPORTED_SCENARIOS:
+        elif choice.upper() in SCENARIOS:
             targets = [choice.upper()]
         else:
             print(f"  알 수 없는 선택: {choice!r}\n")
@@ -516,19 +799,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(handler=command_interactive)
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("menu", help="대화형 메뉴로 골라 실행(기본)").set_defaults(
-        handler=command_interactive)
+    menu_parser = subparsers.add_parser("menu", help="대화형 메뉴로 골라 실행(기본)")
+    menu_parser.add_argument(
+        "--transport", choices=("direct", "stage7"), default="direct",
+        help="direct(기본): 기존 논리 재현 메뉴. stage7: 실장비 메뉴 — 시나리오마다 "
+             "독립 service session(새 run-id·새 config·별도 START/STOP)")
+    menu_parser.add_argument(
+        "--profile", default=None,
+        help="stage7 필수: Stage 7 실행 profile JSON (qualification reference 결속)")
+    menu_parser.add_argument(
+        "--verbose", action="store_true",
+        help="터미널에 상세를 출력한다 (기본은 상위 진행·판정·소요시간만)")
+    menu_parser.add_argument(
+        "--quiet", action="store_true",
+        help="진행 상황 실시간 출력을 끄고 판정만 낸다 (기본은 실시간 출력)")
+    menu_parser.add_argument(
+        "--diagnostics", action="store_true",
+        help="evidence 계측 상세도를 높인다 (터미널 출력량은 늘리지 않는다)")
+    menu_parser.set_defaults(handler=command_interactive)
     subparsers.add_parser("list", help="시나리오 목록").set_defaults(
         handler=command_list)
 
     run_parser = subparsers.add_parser("run", help="시나리오 실행")
-    run_parser.add_argument("scenario_id", help="예: SC-VDE-001")
+    run_parser.add_argument("scenario_id",
+                            help="예: SC-VDE-001. 'all'은 전체를 비대화형으로 실행")
     run_parser.add_argument("--json", action="store_true",
                             help="로그·판정을 JSON 으로 출력")
     run_parser.add_argument("--now", type=float, default=None,
                             help="기준 시각(epoch). 재현용 고정값")
     run_parser.add_argument("--no-save", action="store_true",
                             help="results/ 에 저장하지 않는다")
+    run_parser.add_argument(
+        "--transport", choices=("direct", "software", "stage7"),
+        default="direct",
+        help="direct(기본): 기존 논리 재현. software: 실제 VdeService 소프트웨어 "
+             "무선. stage7: 별도 process Stage 7 coordinator·launcher·B210 — "
+             "조립 실패는 명시적 FAIL이며 direct로 fallback하지 않는다")
+    run_parser.add_argument(
+        "--run-id", default=None,
+        help="stage7 필수(software 선택): 결과 디렉터리 results/runs/<run-id>. "
+             "이미 존재하면 시작 전에 거부한다")
+    run_parser.add_argument(
+        "--configs-dir", default=None,
+        help="stage7 필수: prepare 도구가 만든 resolved config 디렉터리 "
+             "(metadata run-id가 --run-id와 일치해야 한다)")
+    run_parser.add_argument(
+        "--certificate-case", choices=("normal", "forged", "both"), default=None,
+        help="SC-VDE-001 인증서 분기 (software/stage7 전용). 기본: 단독 실행은 "
+             "normal, 'run all'은 both(정상·위조 각각 별도 결과)")
     run_parser.set_defaults(handler=command_run)
 
     return parser

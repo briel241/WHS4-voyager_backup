@@ -96,6 +96,23 @@ class ApplicationAck:
         return REASON_NAMES.get(self.reason, f"reserved({self.reason})")
 
 
+# 필드가 전선에 실을 수 있는 값인지 본다. 위반이면 사유 문자열, 아니면 None.
+#
+# 승인된 SC-VDE codec이 보는 허용 집합과 같은 규칙이다
+# (VDETER `sc_vde_route_control.py` `_validate_ack_fields`).
+#
+# 예약 Status를 받아들이면 무효한 응답 한 건이 대기 중인 명령을 종결시킨다 —
+# 발신 측은 답을 받았다고 보는데 무슨 답인지는 정의되어 있지 않은 상태가 된다.
+# Linkage ID는 10 bit 전 범위가 유효하므로 여기서 보지 않는다(0은 not available이며,
+# 그 상관 판정은 RocAgent가 한다).
+def canonical_violation(message: ApplicationAck) -> str | None:
+    if message.status not in STATUS_NAMES:
+        return f"Status {message.status} ({sorted(STATUS_NAMES)}만 허용)"
+    if message.reason not in REASON_NAMES:
+        return f"Reason {message.reason} ({sorted(REASON_NAMES)}만 허용)"
+    return None
+
+
 # 본문 bit를 writer에 이어 붙인다.
 def write_body(writer: BitWriter, message: ApplicationAck) -> None:
     writer.write_uint(message.linkage_id, LINKAGE_ID_BITS, "Message Linkage ID")

@@ -280,7 +280,9 @@ class Stage7PiOperations:
 
         return _restore
 
-    def _plan_times_to_hardware(self, worker, entry_value) -> tuple:
+    def _plan_times_to_hardware(
+        self, worker, entry_value, phase: str = "PRE_CORRECTION"
+    ) -> tuple:
         """plan 항목의 시각들을 이 endpoint의 hardware 시각으로 변환한다.
 
         `scheduled_host_raw_ns`(공통 host monotonic raw — 세 endpoint가 같은 Pi
@@ -288,6 +290,13 @@ class Stage7PiOperations:
         사용한다(software harness 하위호환). bridge 이전 단계(CFO)에서는 순간
         offset 변환만 가능하며 §9.3 gate는 주파수 기반이므로 timing 정밀도
         요구가 없다.
+
+        `phase`는 `_host_raw_to_hardware`에 그대로 전달돼 correction 적용 여부를
+        정한다. 기본 PRE_CORRECTION은 correction을 적용하지 않는다(bridge 이전
+        CFO·gain·rf-time PRE). RAW_PHY는 active bridge 뒤에 실행되므로 TX 방사와
+        RX 캡처가 같은 phase·같은 변환 함수로 endpoint correction을 적용해야
+        서로 정렬된다 — 임의 상수 가산 없이 rf-time POST와 동일한 시각 기준을
+        재사용한다.
         """
 
         if "scheduled_host_raw_ns" in entry_value:
@@ -301,7 +310,7 @@ class Stage7PiOperations:
             # 순간 변환을 유지한다(§9.3은 주파수 기반이라 무해).
             if self.provisional_fit is not None:
                 return tuple(
-                    self._host_raw_to_hardware(int(value), "PRE_CORRECTION")
+                    self._host_raw_to_hardware(int(value), phase)
                     for value in entry_value["scheduled_host_raw_ns"]
                 )
             from .hw_operations import read_monotonic_raw_ns
@@ -575,7 +584,7 @@ class Stage7PiOperations:
     def _gain_rx_run(
         self, worker, stack, lane, path, gain_steps, phase_label, expected_digest,
         judge_from: int = 0, judge_all: bool = False,
-        deadline_host_raw_ns=None,
+        deadline_host_raw_ns=None, time_phase: str = "PRE_CORRECTION",
     ):
         """§9.2 RX 측정 기계: gain_steps를 캡처 스레드+소비자 파이프라인으로
         판정한다. `judge_from` 앞의 slot들은 warm-up으로 캡처만 하고 판정에서
@@ -583,8 +592,10 @@ class Stage7PiOperations:
         metric 실패가 있어도 decode를 수행하고 첫 decode 실패에서 중단하지
         않는다. `deadline_host_raw_ns`가 주어지면 각 step 캡처 시작 전에
         plan-결속 deadline을 확인하고 지났으면 잔여 step을 버린다 (§17A.5:
-        같은 run 내 재시도·연장 없음). 반환 (candidate, overload,
-        step_summaries)."""
+        같은 run 내 재시도·연장 없음). `time_phase`는 캡처 슬롯 격자 변환에
+        쓰는 시각 phase다 — 기본 PRE_CORRECTION(bridge 이전 gain search).
+        RAW_PHY는 active bridge 뒤라 correction을 적용해 TX 격자와 정렬한다.
+        반환 (candidate, overload, step_summaries)."""
 
         import queue as _queue
         import threading as _threading
@@ -635,7 +646,9 @@ class Stage7PiOperations:
                         break
                     gain_db = int(gain_step["gain_db"])
                     applied = worker.set_rx_gain(lane, gain_db)
-                    hw_times = self._plan_times_to_hardware(worker, gain_step)
+                    hw_times = self._plan_times_to_hardware(
+                        worker, gain_step, time_phase
+                    )
                     spacing_ns = hw_times[1] - hw_times[0]
                     spacing_samples = (
                         spacing_ns * DEVICE_RATE // 1_000_000_000
@@ -1060,8 +1073,17 @@ class Stage7PiOperations:
 
     # --- RF timestamp (§13.3) ------------------------------------------------------
 
+    #: active bridge 설치 뒤 실행되는 phase — TX 방사와 RX 캡처 슬롯 격자가
+    #:모두 endpoint별 RF correction으로 변환돼야 두 endpoint의 RF 시각이
+    #: 정렬된다. rf-time POST_CORRECTION(후측정)과 RAW_PHY(§9.1 D항 100-burst
+    #: 실측)가 여기 해당한다. rf-time PRE_CORRECTION과 bridge 이전 phase
+    #: (CFO·gain search)는 active_correction이 없어 (0,1)로 남는다. TX와 RX가
+    #: 같은 변환 함수(`_host_raw_to_hardware`)·같은 phase를 쓰므로 correction은
+    #: 정확히 한 번만 적용된다(이중 적용 없음).
+    _CORRECTED_TIME_PHASES = ("POST_CORRECTION", "RAW_PHY")
+
     def _rf_time_correction(self, phase: str) -> tuple[int, int]:
-        if phase == "POST_CORRECTION" and self.active_correction is not None:
+        if phase in self._CORRECTED_TIME_PHASES and self.active_correction is not None:
             return self.active_correction
         return (0, 1)
 
@@ -1199,7 +1221,7 @@ class Stage7PiOperations:
         evidence_mark = len(self.evidence)
         candidate, overload, steps = self._gain_rx_run(
             worker, stack, lane, entry, (step,), "RAW_PHY", expected_digest,
-            judge_from=warm, judge_all=True,
+            judge_from=warm, judge_all=True, time_phase="RAW_PHY",
         )
         summary_step = steps[-1] if steps else {}
         # v0.9.3: digest 게이트가 거부한 FEC 오복원은 결손(no_decode)으로

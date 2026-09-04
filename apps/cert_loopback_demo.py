@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""SC-VDE-001 인증서 — VDETER 소프트웨어 무선 loopback 시연 (운영 미지원 참고).
+"""SC-VDE-001 인증서 — VDETER 소프트웨어 무선 loopback 시연.
 
-⚠ 이것은 **소프트웨어 무선 loopback**이다. SC-VDE-001의 실제 운영 경로인
-  인증서 **Data Session은 링크 계층에서 미완성**(data_session_enabled=false)이라
-  현재 미지원이며, 이 데모의 통과를 Data Session 종단 완료로 읽으면 안 된다.
-  응용 코드·코덱 검증용 참고 시연으로 보존한다.
+이 시연은 하드웨어를 사용하지 않는 **소프트웨어 무선 loopback** 검증이다.
 
 우리 인증서 payload가 실제 VDETER 소프트웨어 스택(Presentation → Link → PHY →
 소프트웨어 무선 매체 → 수신 복원)을 지나 반대편 endpoint에 byte 그대로 도착하고,
@@ -211,7 +208,7 @@ def main() -> int:
     assert bad["trust_size"] == 0, "위조 인증서가 신뢰저장소에 남으면 안 됨"
 
     print("PASS: 인증서가 소프트웨어 무선 스택을 왕복하고, 응용 검증이 정상/위조를 가름")
-    print("주의: 소프트웨어 loopback 결과다. 인증서 Data Session(운영 경로)은 미완성·미지원이다.")
+    print("주의: 소프트웨어 loopback 결과이며 B210 실물 경로 검증과는 구분한다.")
     return 0
 
 

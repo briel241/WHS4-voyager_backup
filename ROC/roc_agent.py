@@ -34,6 +34,13 @@ from common.outbound import DATA_TYPE_AIS_AUTH_INTEGRITY, Outbound
 _LINKAGE_ID_MIN = 1
 _LINKAGE_ID_MAX = 1023
 
+# 메시지 종류별 canonical 검사. 각 메시지 모듈이 자기 규칙을 갖는다.
+_CANONICAL_CHECKS = {
+    pos.PositionReport: pos.canonical_violation,
+    ack.ApplicationAck: ack.canonical_violation,
+    route.RouteInstruction: route.canonical_violation,
+}
+
 
 # 한 선박에 대해 마지막으로 관측한 상태
 @dataclass
@@ -74,6 +81,8 @@ class RocAgent:
         self.commands: dict[int, PendingCommand] = {}
         self._next_linkage_id = _LINKAGE_ID_MIN
         self.ignored_count = 0
+        # 해석은 됐지만 전선에 실을 수 없는 값이라 버린 수.
+        self.rejected_count = 0
         # 명령 수신자가 아닌 국에서 온 ACK 수. 오귀속·위조 관찰용.
         self.mismatched_ack_count = 0
         self._lost: set[int] = set()
@@ -87,6 +96,19 @@ class RocAgent:
             message = decode(payload)
         except ValueError:
             self.ignored_count += 1
+            return []
+
+        # 전선에 실을 수 없는 값이면 관측에도 상관에도 쓰지 않는다.
+        #
+        # 관측만 하는 쪽에도 필요하다. 위도 raw 60,000,000은 100도가 되어 해도에
+        # 그려지고, 그 해도가 육상 운영자의 상황 인식 수단이다. 예약 Status를 받으면
+        # 무효한 응답 한 건이 대기 중인 명령을 종결시킨다.
+        #
+        # 검사 규칙은 승인된 SC-VDE codec과 같다. 그 codec은 무선 경로만 막으므로
+        # 직결 전송·시험 주입은 여기서 걸러야 한다 (M.2092-2 §A4-4.15).
+        check = _CANONICAL_CHECKS.get(type(message))
+        if check is not None and check(message) is not None:
+            self.rejected_count += 1
             return []
 
         if isinstance(message, pos.PositionReport):

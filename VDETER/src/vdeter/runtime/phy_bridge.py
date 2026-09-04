@@ -115,6 +115,7 @@ class RuntimePhyRadioBridge:
         "_generation",
         "_buffer_budget_bytes",
         "_native_reset_count",
+        "_native_reset_sink",
     )
 
     def __init__(self, native_phy, *, buffer_budget_bytes=None) -> None:
@@ -123,6 +124,15 @@ class RuntimePhyRadioBridge:
         self._generation = 1
         self._buffer_budget_bytes = buffer_budget_bytes
         self._native_reset_count = 0
+        self._native_reset_sink = None
+
+    def set_native_reset_sink(self, sink) -> None:
+        """native PHY reset을 `sink(channel)`에 위임한다 (미설정 시 현행대로).
+
+        ledger는 sink 유무와 무관하게 이 bridge가 비운다.
+        """
+
+        self._native_reset_sink = sink
 
     # --- TX ----------------------------------------------------------------
 
@@ -402,7 +412,22 @@ class RuntimePhyRadioBridge:
         return Ok(None)
 
     def complete_window(self, completion):
-        """성공 terminal: CLEAN·완전한 한 연속 block일 때만 native 요청을 만든다."""
+        """성공 terminal: CLEAN·완전한 한 연속 block일 때만 native 요청을 만든다.
+
+        `complete_device_window` + `to_native_decode_request`의 합성이며
+        반환 의미는 분리 전과 같다.
+        """
+
+        prepared = self.complete_device_window(completion)
+        if prepared.is_err or prepared.value is None:
+            return prepared
+        return self.to_native_decode_request(prepared.value)
+
+    def complete_device_window(self, completion):
+        """성공 terminal을 device-rate PhyDecodeRequest까지만 만든다 (리샘플 제외).
+
+        이 bridge가 소유한 상태를 건드리는 구간은 여기까지다.
+        """
 
         key = (
             completion.configure_generation,
@@ -454,7 +479,7 @@ class RuntimePhyRadioBridge:
             samples=window_block,
             allowed_link_ids=tuple(LinkId(value) for value in entry.allowed),
         )
-        return self.to_native_decode_request(request)
+        return Ok(request)
 
     def ledger_snapshot(self) -> tuple:
         """진단·시험용 ledger 상태 (공개 DTO가 아니다)."""
@@ -520,9 +545,13 @@ class RuntimePhyRadioBridge:
         self.reset_stream(channel)
 
     def reset_stream(self, channel=None) -> None:
-        reset = getattr(self._native_phy, "reset_stream", None)
-        if reset is not None:
-            reset(channel)
+        sink = self._native_reset_sink
+        if sink is not None:
+            sink(channel)
+        else:
+            reset = getattr(self._native_phy, "reset_stream", None)
+            if reset is not None:
+                reset(channel)
         if channel is None:
             self._ledger.clear()
 

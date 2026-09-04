@@ -1,0 +1,482 @@
+"""Stage 7 host-side fail-closed regression tests (SSH/RF 없음)."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from apps import stage7_service_layer, stage7_session
+from apps.stage7_trace import NullTrace
+
+
+class _Completed:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+_BOUND_SOURCE = """\
+def run_rr_p1():
+    pass
+
+def main():
+    if args.phase == "rr-p1":
+        run_rr_p1()
+"""
+
+
+def _function_hash(source, name):
+    tree = ast.parse(source)
+    node = next(item for item in tree.body
+                if isinstance(item, ast.FunctionDef) and item.name == name)
+    return {
+        "ast_sha256": hashlib.sha256(
+            ast.dump(node).encode("utf-8")).hexdigest(),
+        "source_sha256": hashlib.sha256(
+            ast.unparse(node).encode("utf-8")).hexdigest(),
+    }
+
+
+def _bound_profile(**overrides):
+    spec = {
+        "phase_f_file_sha256": "f" * 64,
+        "phase_g_file_sha256": hashlib.sha256(
+            _BOUND_SOURCE.encode("utf-8")).hexdigest(),
+        "qualified_functions": {
+            "run_rr_p1": _function_hash(_BOUND_SOURCE, "run_rr_p1"),
+        },
+        "rr_phase_dispatch": {"rr-p1": ["run_rr_p1"]},
+    }
+    spec.update(overrides)
+    return {
+        "pi": {"host": "fake"},
+        "_reference": {
+            "qualification_critical_manifest": {
+                "function_bound_files": {"VDETER/apps/coordinator.py": spec},
+            },
+        },
+    }
+
+
+def _source_runner(command, **_kwargs):
+    assert command[0] == "ssh" and command[-1].startswith("cat ")
+    return _Completed(_BOUND_SOURCE)
+
+
+def test_function_bound_rejects_remote_phase_g_file_mismatch():
+    profile = _bound_profile(phase_g_file_sha256="0" * 64)
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _source_runner)
+        raise AssertionError("원격 coordinator 전체 파일 불일치가 통과했다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        assert "전체 파일" in str(exc)
+
+
+def test_function_bound_rejects_dispatch_mismatch():
+    profile = _bound_profile(
+        rr_phase_dispatch={"rr-p1": ["run_unqualified_path"]})
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _source_runner)
+        raise AssertionError("RR dispatch 불일치가 통과했다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        assert "dispatch_mismatch" in str(exc)
+
+
+def test_function_bound_requires_all_binding_fields():
+    profile = _bound_profile()
+    spec = (profile["_reference"]["qualification_critical_manifest"]
+            ["function_bound_files"]["VDETER/apps/coordinator.py"])
+    del spec["phase_g_file_sha256"]
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _source_runner)
+        raise AssertionError("누락된 전체 파일 결속이 통과했다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        assert "phase_g_file_sha256" in str(exc)
+
+
+def test_function_bound_accepts_complete_matching_reference():
+    report = stage7_service_layer._verify_function_bound(
+        _bound_profile(), "$HOME/deploy", _source_runner)
+    item = report["VDETER/apps/coordinator.py"]
+    assert item["pass"] is True
+    assert item["dispatch_changed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase I 조건부 승인(2026-09-04) — 실제 Phase G 결속 vs 현재 coordinator.
+# 계약 A: 패치하지 않은 진짜 Phase G reference는 변경된 coordinator를 RF 접근
+#         전에 거부해야 한다 (production `_verify_function_bound` 무수정).
+# 계약 B: synthetic Phase I 재결속(고정 해시) fixture에서만 통과하고, 다른
+#         qualification 함수 변조·run_rr_p3_fault 추가 변경은 다시 거부된다.
+# ---------------------------------------------------------------------------
+
+_COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
+
+
+def _phase_g_profile_copy():
+    """실제 Phase G profile을 적재한 in-memory 사본 (파일 무수정)."""
+    import copy
+    import glob
+
+    from apps import stage7_profile
+    candidates = sorted(glob.glob(os.path.join(
+        _REPO, "VDETER", "results", "phase-g", "phase-g-*")))
+    if not candidates:
+        raise AssertionError("phase-g reference 디렉터리가 없다")
+    nested = os.path.join(candidates[-1], "profile", "stage7-profile.json")
+    path = nested if os.path.isfile(nested) else os.path.join(
+        candidates[-1], "stage7-profile.json")
+    return copy.deepcopy(stage7_profile.load_profile(path))
+
+
+def _current_coordinator_source() -> str:
+    with open(os.path.join(_REPO, _COORDINATOR_REL), encoding="utf-8") as h:
+        return h.read()
+
+
+def _serving_runner(source: str):
+    def runner(command, **_kwargs):
+        assert command[0] == "ssh" and command[-1].startswith("cat ")
+        return _Completed(source)
+    return runner
+
+
+def _mutate_function(source: str, name: str) -> str:
+    tree = ast.parse(source)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    lines = source.splitlines(keepends=True)
+    first = node.body[0].lineno - 1
+    indent = len(lines[first]) - len(lines[first].lstrip())
+    lines.insert(first, " " * indent + "_phase_i_mutation_probe = 1\n")
+    return "".join(lines)
+
+
+def _phase_i_pinned() -> dict:
+    with open(os.path.join(_REPO, "tests", "fixtures",
+                           "stage7_phase_i_function_bindings.json"),
+              encoding="utf-8") as handle:
+        return json.load(handle)["functions"]
+
+
+def _rebind_for_phase_i(profile: dict, source: str, *,
+                        pin_run_rr_p3_fault: bool = True) -> dict:
+    """synthetic 재결속: 전체 file SHA(항상) + run_rr_p3_fault 고정 해시(선택)."""
+    spec = profile["_reference"]["qualification_critical_manifest"][
+        "function_bound_files"][_COORDINATOR_REL]
+    spec["phase_g_file_sha256"] = hashlib.sha256(
+        source.encode("utf-8")).hexdigest()
+    if pin_run_rr_p3_fault:
+        for name, pinned in _phase_i_pinned().items():
+            spec["qualified_functions"][name] = dict(pinned)
+    return profile
+
+
+def test_real_phase_g_binding_rejects_current_coordinator():
+    """계약 A: 패치 없는 실제 Phase G 결속은 현재 coordinator를 거부한다 —
+    사유는 전체 file SHA 불일치(첫 게이트)."""
+    profile = _phase_g_profile_copy()
+    source = _current_coordinator_source()
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _serving_runner(source))
+        raise AssertionError("실제 Phase G 결속이 변경된 coordinator를 통과시켰다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        text = str(exc)
+        assert "run_rr_p3_fault" in text or "전체 파일" in text, text
+
+
+def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
+    """계약 A(함수 단위): 전체 file SHA만 현재값으로 맞추고 함수 해시는 실제
+    Phase G 값 그대로면 changed=['run_rr_p3_fault']로 거부된다 — 즉 변경된
+    함수가 정확히 하나이고 그것이 승인 대상임을 실제 결속으로 확인."""
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(),
+                                  _current_coordinator_source(),
+                                  pin_run_rr_p3_fault=False)
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy",
+            _serving_runner(_current_coordinator_source()))
+        raise AssertionError("함수 해시 불일치가 거부되지 않았다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        text = str(exc)
+        assert "run_rr_p3_fault" in text, text
+        assert "changed=['run_rr_p3_fault']" in text, text
+
+
+def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():
+    """계약 B: synthetic Phase I 재결속 fixture에서만 통과. 다른 qualification
+    함수 변조(run_rr_p1)나 run_rr_p3_fault 추가 변경은 다시 거부된다."""
+    source = _current_coordinator_source()
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
+    report = stage7_service_layer._verify_function_bound(
+        profile, "$HOME/deploy", _serving_runner(source))
+    item = report[_COORDINATOR_REL]
+    assert item["pass"] is True and item["changed"] == []
+
+    for target in ("run_rr_p1", "run_rr_p3_fault"):
+        mutated = _mutate_function(source, target)
+        # 전체 file SHA는 변조본에 맞추되 함수 고정 해시는 승인값 그대로 —
+        # 함수 단위 가드가 변조를 잡아야 한다.
+        profile2 = _rebind_for_phase_i(_phase_g_profile_copy(), mutated)
+        try:
+            stage7_service_layer._verify_function_bound(
+                profile2, "$HOME/deploy", _serving_runner(mutated))
+            raise AssertionError(f"{target} 변조가 거부되지 않았다")
+        except stage7_service_layer.ServiceSessionError as exc:
+            assert f"changed=['{target}']" in str(exc), str(exc)
+
+
+def _preflight_profile():
+    endpoints = {
+        "MASS-A": {"serial": "A", "usb_path": "3-1", "speed_mbps": 5000},
+        "MASS-B": {"serial": "B", "usb_path": "4-2", "speed_mbps": 480},
+        "ROC": {"serial": "C", "usb_path": "5-1", "speed_mbps": 5000},
+    }
+    return {
+        "pi": {"host": "fake", "deploy_relpath": "vdeter-stage7/fake"},
+        "endpoints": endpoints,
+        "trust": {
+            "certificate_path": "cert.pem",
+            "trust_store_path": "trust.pem",
+            "private_key_path": "signer.pem",
+            "private_key_required_mode": "600",
+        },
+        "_reference": {
+            "qualification_critical_manifest": {
+                "strict_files": {}, "function_bound_files": {},
+            },
+        },
+    }
+
+
+def _process_runner(process_line, scripts):
+    def run(command, **_kwargs):
+        script = command[-1]
+        scripts.append(script)
+        if "STAGE7_CRITICAL_LIST_END" in script:
+            return _Completed("")
+        return _Completed("\n".join([
+            "##USB", "3-1 A 5000", "4-2 B 480", "5-1 C 5000",
+            "##PROC", process_line,
+            "##THROTTLE", "throttled=0x0",
+            "##TRUST", "cert.pem 644", "trust.pem 644", "signer.pem 600",
+            "##KEYCERT", "match=true",
+        ]))
+    return run
+
+
+def _assert_process_is_rejected(process_line):
+    scripts = []
+    try:
+        stage7_service_layer.verify_remote_environment(
+            _preflight_profile(),
+            runner=_process_runner(process_line, scripts))
+        raise AssertionError("경쟁 process가 통과했다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        assert "프로세스" in str(exc)
+    process_script = next(script for script in scripts if "##PROC" in script)
+    assert "stage7_mass_roc_controller" in process_script
+    assert "multiprocessing\\.spawn" in process_script
+    assert "spawn_main" in process_script
+
+
+def test_preflight_rejects_mass_roc_controller_process():
+    _assert_process_is_rejected(
+        "101 python3 apps/stage7_mass_roc_controller.py --run-id stale")
+
+
+def test_preflight_rejects_spawned_b210_worker_process():
+    _assert_process_is_rejected(
+        "102 python3 -c from multiprocessing.spawn import spawn_main; "
+        "spawn_main(pipe_handle=1) --multiprocessing-fork")
+
+
+def _session_profile():
+    return {
+        "profile_id": "test-profile",
+        "pi": {"host": "fake", "deploy_relpath": "vdeter-stage7/fake"},
+        "_reference": {"qualification": {"run_id": "qualified"},
+                       "_reference_sha256": "r" * 64},
+    }
+
+
+class _CloseRunner:
+    def __init__(self, *, exited=True, shutdown_rc=0, scp_rc=0):
+        self.exited = exited
+        self.shutdown_rc = shutdown_rc
+        self.scp_rc = scp_rc
+
+    def __call__(self, command, **_kwargs):
+        if command[0] == "scp":
+            return _Completed(stderr="copy failed", returncode=self.scp_rc)
+        script = command[-1]
+        if "touch" in script and "shutdown" in script:
+            return _Completed(returncode=self.shutdown_rc)
+        if script.startswith("test -f") and "done.rc" in script:
+            return _Completed("yes" if self.exited else "no")
+        if script.startswith("cat ") and "done.rc" in script:
+            return _Completed("0" if self.exited else "")
+        if script.startswith("cat ") and "closed.json" in script:
+            return _Completed(json.dumps({
+                "artifact_type": "STAGE7_OPERATIONAL_SERVICE_SESSION_RESULT_V1",
+                "status": "PASS", "cleanup": {"pass": True},
+            }))
+        return _Completed()
+
+
+def _new_session(tmp, runner):
+    session = stage7_session.Stage7ServiceSession(
+        _session_profile(), session_id="session-test", session_dir=tmp,
+        runner=runner, trace=NullTrace())
+    session.status = "READY"
+    session._coordinator_launch_attempted = True
+    session._coordinator_spawned = True
+    return session
+
+
+def test_collect_evidence_rejects_scp_failure():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, _CloseRunner(scp_rc=7))
+        try:
+            session.collect_evidence()
+            raise AssertionError("scp 실패가 성공으로 처리됐다")
+        except stage7_service_layer.ServiceSessionError as exc:
+            assert "scp 실패" in str(exc) and "rc=7" in str(exc)
+
+
+def test_collect_evidence_revalidates_existing_target():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, _CloseRunner())
+        target = os.path.join(tmp, "remote-run")
+        os.makedirs(target)
+        try:
+            session.collect_evidence()
+            raise AssertionError("빈 기존 evidence target이 재사용됐다")
+        except stage7_service_layer.ServiceSessionError as exc:
+            assert "비어" in str(exc)
+
+        session.ready = {"run_id": session.session_id}
+        session.closed = {
+            "artifact_type": "STAGE7_OPERATIONAL_SERVICE_SESSION_RESULT_V1",
+            "run_id": session.session_id,
+            "status": "PASS", "coordinator_rc": 0,
+        }
+        session_dir = os.path.join(target, "session")
+        os.makedirs(session_dir)
+        for name, payload in (("ready.json", session.ready),
+                              ("closed.json", session.closed)):
+            with open(os.path.join(session_dir, name), "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+        with open(os.path.join(target, "done.rc"), "w", encoding="utf-8") as handle:
+            handle.write("0\n")
+        result = session.collect_evidence()
+        assert result["pass"] is True and result["reused"] is True
+
+
+def test_collect_evidence_validates_fresh_scp_target():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, None)
+        session.ready = {"run_id": session.session_id}
+        session.closed = {
+            "artifact_type": "STAGE7_OPERATIONAL_SERVICE_SESSION_RESULT_V1",
+            "run_id": session.session_id,
+            "status": "PASS", "coordinator_rc": 0,
+        }
+
+        def runner(command, **_kwargs):
+            assert command[0] == "scp"
+            target = command[-1]
+            session_dir = os.path.join(target, "session")
+            os.makedirs(session_dir)
+            for name, payload in (("ready.json", session.ready),
+                                  ("closed.json", session.closed)):
+                with open(os.path.join(session_dir, name), "w",
+                          encoding="utf-8") as handle:
+                    json.dump(payload, handle)
+            with open(os.path.join(target, "done.rc"), "w",
+                      encoding="utf-8") as handle:
+                handle.write("0\n")
+            return _Completed(returncode=0)
+
+        session.runner = runner
+        result = session.collect_evidence()
+        assert result["pass"] is True
+        assert result["reused"] is False
+        assert result["scp_returncode"] == 0
+        assert result["file_count"] == 3
+
+
+def test_close_before_coordinator_spawn_skips_exit_wait():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, _CloseRunner(scp_rc=8))
+        session._coordinator_launch_attempted = False
+        session._coordinator_spawned = False
+        exit_checks = []
+
+        def coordinator_exited():
+            exit_checks.append(True)
+            return False
+
+        session._coordinator_exited = coordinator_exited
+        result = session.close()
+        assert exit_checks == []
+        assert result["status"] == "FAIL"
+        assert result["bounded_close"]["coordinator_may_be_running"] is False
+
+
+def test_close_unconfirmed_launch_attempt_is_treated_as_maybe_running():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, _CloseRunner(exited=False, scp_rc=8))
+        session._coordinator_spawned = False
+        previous = stage7_session.SESSION_CLOSE_TIMEOUT_S
+        stage7_session.SESSION_CLOSE_TIMEOUT_S = 0.0
+        try:
+            result = session.close()
+        finally:
+            stage7_session.SESSION_CLOSE_TIMEOUT_S = previous
+        assert result["status"] == "FAIL"
+        assert result["bounded_close"]["launch_attempted"] is True
+        assert result["bounded_close"]["spawn_confirmed"] is False
+        assert result["bounded_close"]["coordinator_may_be_running"] is True
+
+
+def test_close_timeout_reports_coordinator_may_still_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(tmp, _CloseRunner(exited=False))
+        previous = stage7_session.SESSION_CLOSE_TIMEOUT_S
+        stage7_session.SESSION_CLOSE_TIMEOUT_S = 0.0
+        try:
+            result = session.close()
+        finally:
+            stage7_session.SESSION_CLOSE_TIMEOUT_S = previous
+        assert result["status"] == "FAIL"
+        assert result["bounded_close"]["pass"] is False
+        assert result["bounded_close"]["coordinator_exited"] is False
+        assert result["bounded_close"]["coordinator_may_be_running"] is True
+        assert session.status == "FAIL"
+
+
+def test_close_shutdown_or_evidence_failure_is_explicit_fail():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _new_session(
+            tmp, _CloseRunner(exited=True, shutdown_rc=9, scp_rc=8))
+        result = session.close()
+        assert result["status"] == "FAIL"
+        assert result["bounded_close"]["shutdown_request_returncode"] == 9
+        assert session.evidence_collection["pass"] is False
+        assert "evidence 수집 실패" in result["error"]
+        assert session.summary()["status"] == "FAIL"

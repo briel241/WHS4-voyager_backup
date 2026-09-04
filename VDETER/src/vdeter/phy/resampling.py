@@ -99,6 +99,22 @@ def _decimation_taps() -> tuple[float, ...]:
 _INTERP_BRANCHES = _interpolation_branches()
 _DECIM_TAPS = _decimation_taps()
 
+# numpy는 PHY·Radio 구현 단계에서 쓰도록 pyproject가 이미 허용한다
+# (`dsp = ["numpy>=1.24"]`). 없으면 참조 구현이 그대로 동작한다.
+try:  # pragma: no cover - 환경 의존
+    import numpy as _numpy
+except ImportError:  # pragma: no cover
+    _numpy = None
+    _DECIM_TAPS_ARRAY = None
+    _DECIM_PICK = None
+else:
+    _DECIM_TAPS_ARRAY = _numpy.asarray(_DECIM_TAPS, dtype=_numpy.float64)
+    #: convolve 결과에서 뽑을 위치 = RATE_FACTOR*i + 군지연.
+    _DECIM_PICK = (
+        RATE_FACTOR * _numpy.arange(NATIVE_SLOT_SAMPLES)
+        + PROTOTYPE_GROUP_DELAY_DEVICE_SAMPLES
+    )
+
 
 def _validated(samples: Sequence[complex], expected: int, direction: str) -> tuple[complex, ...]:
     values = tuple(complex(value) for value in samples)
@@ -133,12 +149,11 @@ def interpolate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
     return tuple(output)
 
 
-def decimate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
-    """device 8,192 @307,200 -> native 2,048 @76,800, 군지연 보상 포함."""
+def _decimate_slot_reference(
+    values: tuple[complex, ...],
+) -> tuple[complex, ...]:
+    """§13.5 참조 구현. numpy가 없을 때 그대로 쓰인다."""
 
-    values = _validated(samples, DEVICE_SLOT_SAMPLES, "device-to-native")
-    if not any(value != 0j for value in values):
-        return (0j,) * NATIVE_SLOT_SAMPLES
     length = DEVICE_SLOT_SAMPLES
     taps = _DECIM_TAPS
     delay = PROTOTYPE_GROUP_DELAY_DEVICE_SAMPLES
@@ -152,3 +167,49 @@ def decimate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
                 accumulator += taps[tap_index] * values[source]
         output[native_index] = accumulator
     return tuple(output)
+
+
+def _decimate_slot_vectorized(samples: Sequence[complex]) -> tuple[complex, ...]:
+    """참조 구현과 같은 연산·같은 검증을 numpy로 수행한다.
+
+    `convolve(x, taps)[RATE_FACTOR*i + delay]`가 참조 루프의 zero-extension
+    가드까지 그대로 대응한다.
+    """
+
+    array = _numpy.asarray(samples, dtype=_numpy.complex128)
+    if array.ndim != 1 or array.size != DEVICE_SLOT_SAMPLES:
+        raise ValueError(
+            f"device-to-native conversion requires exactly {DEVICE_SLOT_SAMPLES} "
+            f"samples, got {array.size}"
+        )
+    if not bool(_numpy.isfinite(array).all()):
+        raise ValueError(
+            "device-to-native conversion input contains non-finite sample"
+        )
+    if not array.any():
+        return (0j,) * NATIVE_SLOT_SAMPLES
+    convolved = _numpy.convolve(array, _DECIM_TAPS_ARRAY)
+    # tolist()로 파이썬 complex 복귀 — numpy 스칼라를 하류로 흘리면
+    # 이어지는 스칼라 연산이 오히려 느려진다.
+    return tuple(convolved[_DECIM_PICK].tolist())
+
+
+def decimate_slot(samples: Sequence[complex]) -> tuple[complex, ...]:
+    """device 8,192 @307,200 -> native 2,048 @76,800, 군지연 보상 포함.
+
+    numpy가 있으면 벡터 경로를, 없으면 참조 구현을 쓴다. 합산 순서가 달라
+    반올림이 1e-15 상대 수준으로 갈리지만 PHY 경계 출력(cf32le float32)은
+    같다.
+    """
+
+    if _numpy is not None:
+        try:
+            return _decimate_slot_vectorized(samples)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 — 참조 경로로 안전 복귀
+            pass
+    values = _validated(samples, DEVICE_SLOT_SAMPLES, "device-to-native")
+    if not any(value != 0j for value in values):
+        return (0j,) * NATIVE_SLOT_SAMPLES
+    return _decimate_slot_reference(values)

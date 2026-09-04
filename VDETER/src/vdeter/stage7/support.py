@@ -102,7 +102,10 @@ class _LogicalWindow:
 class Stage7LaneRxDispatcher:
     """adapter private child event를 lane stack에 결속하고 merge를 소유한다."""
 
-    __slots__ = ("_support", "_stacks", "_lock", "_windows", "_stale_events", "_lane_generation")
+    __slots__ = (
+        "_support", "_stacks", "_lock", "_windows", "_stale_events",
+        "_lane_generation", "_gate_state", "_decode_executor",
+    )
 
     def __init__(self, support, stacks, *, lane_generation: int) -> None:
         self._support = support
@@ -111,6 +114,124 @@ class Stage7LaneRxDispatcher:
         self._windows = {}
         self._stale_events = []
         self._lane_generation = lane_generation
+        self._gate_state = {}
+        self._decode_executor = None
+
+    def set_decode_executor(self, executor) -> None:
+        """리샘플·energy gate·디코드를 외부 실행기에 위임한다.
+
+        `executor(lane_index, lane_generation, context, device_request,
+        epoch_id, t0_hardware_ns)`로 호출되고, 결과는 호출자가 **펌프
+        스레드에서** `complete_decoded(...)`에 같은 `context`로 돌려준다.
+        미설정(기본)이면 현행 동기 경로 그대로다.
+        """
+
+        self._decode_executor = executor
+
+    def _energy_gate(self, lane_index, native_request):
+        """잡음 바닥 창의 샘플을 0으로 치환해 frozen 조기 탈출로 보낸다.
+
+        Pi 실측: 무음(zeros) 창 디코드 4.9ms, 잡음 창은 레벨 무관
+        ~106ms(상관 풀 탐색) — 창 완료 수요가 처리 용량을 넘어 pending
+        장부 상시 포화(svc-run-f), 청취 창 기아의 뿌리. 문턱은 lane별
+        잡음 전력 10분위수 ×8: 워밍업 60창 동안 통계 수집(10창 이후
+        임시 문턱으로 잡음 창 선별 0-치환), 이상·실패 시 원 요청 그대로(fail-open). 치환은
+        디코드 입력 사본에만 적용되고 관측 계약(진단 싱크·ingress·
+        결과 타입)은 frozen 경로 그대로다. STAGE7_RX_ENERGY_GATE=0
+        으로 비활성.
+        """
+        import os as _os
+
+        if _os.environ.get("STAGE7_RX_ENERGY_GATE", "1") != "1":
+            return native_request
+        try:
+            import dataclasses as _dc
+            import sys as _sys
+
+            import numpy as _np
+
+            samples = native_request.samples
+            if not samples.data:
+                return native_request
+            arr = _np.frombuffer(samples.data, dtype=_np.complex64)
+            if arr.size == 0:
+                return native_request
+            power = float(_np.vdot(arr, arr).real) / arr.size
+            state = self._gate_state.setdefault(
+                lane_index,
+                {"warm": [], "med": None, "gated": 0, "passed": 0},
+            )
+            if state["med"] is None:
+                if power > 0.0:
+                    state["warm"].append(power)
+                # 워밍업 다이어트 (svc-run-p 부검: 워밍업 300창×2레인
+                # 전량 풀디코드가 첫 30초에 큐 백로그 ~465항목을 만들고,
+                # 이후 수요≈용량이라 영구 잔존 → 장부 한도 고착·청취
+                # 확률화의 발원지). 워밍업 60창으로 단축하고, 10창
+                # 이후부터는 관측 최솟값(잡음 바닥의 상계)×8 임시 문턱
+                # 으로 잡음 창을 선별 0-치환 — 버스트(잡음 대비 +20dB)
+                # 는 임시 문턱도 항상 통과하므로 TBB 획득 무영향.
+                if len(state["warm"]) >= 10:
+                    provisional = min(state["warm"]) * 8.0
+                    if 0.0 < power < provisional:
+                        zero_block = _dc.replace(
+                            samples, data=b"\x00" * len(samples.data)
+                        )
+                        if len(state["warm"]) < 60:
+                            return _dc.replace(
+                                native_request, samples=zero_block
+                            )
+                if len(state["warm"]) >= 60:
+                    warm = sorted(state["warm"])
+                    # 잡음 추정 = 10분위수 (svc-run-k 실측: 버스트 빈번
+                    # 레인(ROC 하부 — 함정 TBB·DSCH ACK)에서 중앙값이
+                    # 신호 전력으로 오염 → 문턱이 버스트×8로 치솟아
+                    # ACK까지 전면 차단, passed 3/3000. 하위 10%는
+                    # 버스트가 절반 섞여도 잡음 바닥을 유지한다.)
+                    state["med"] = warm[len(warm) // 10]
+                    state["warm"] = []
+                    print(
+                        f"[launcher] rx-gate armed lane={lane_index} "
+                        f"noise_p10={state['med']:.3e} "
+                        f"p50={warm[len(warm) // 2]:.3e}",
+                        file=_sys.stderr, flush=True,
+                    )
+                return native_request
+            if state["med"] <= 0.0 or power >= state["med"] * 8.0:
+                state["passed"] += 1
+                # 통과 이벤트 관측 (svc-run-l2 부검: ROC lane0의 유일
+                # 버스트(ACK)가 무음 소실 — 창 미무장/게이트/디코드 3분기
+                # 판별용. 통과가 드문 레인에서 특히 유효.)
+                if state["passed"] <= 30 or state["passed"] % 200 == 1:
+                    print(
+                        f"[launcher] rx-gate pass lane={lane_index} "
+                        f"n={state['passed']} power={power:.3e} "
+                        f"thr={state['med'] * 8.0:.3e}",
+                        file=_sys.stderr, flush=True,
+                    )
+                return native_request
+            state["gated"] += 1
+            if state["gated"] % 1000 == 1:
+                print(
+                    f"[launcher] rx-gate lane={lane_index} "
+                    f"gated={state['gated']} passed={state['passed']}",
+                    file=_sys.stderr, flush=True,
+                )
+            zero_block = _dc.replace(
+                samples, data=b"\x00" * len(samples.data)
+            )
+            return _dc.replace(native_request, samples=zero_block)
+        except Exception as exc:  # noqa: BLE001 - 게이트 실패 시 원 요청으로 디코드
+            # 무음 전면 비활성 금지: 여기서 조용히 낙하하면 106ms/창
+            # 전량 상관 부하가 로그 한 줄 없이 재귀한다 — 1회성 경고 (0.9.22).
+            if not self._gate_state.get("_fail_warned"):
+                self._gate_state["_fail_warned"] = True
+                print(
+                    f"[launcher] rx-gate 예외 → 게이트 무효(전량 디코드): "
+                    f"{type(exc).__name__}: {exc}",
+                    file=_sys.stderr, flush=True,
+                )
+            return native_request
 
     @property
     def stacks(self) -> tuple:
@@ -202,7 +323,14 @@ class Stage7LaneRxDispatcher:
             completion.requested_start_at.total_nanoseconds(),
             completion.requested_duration_nanoseconds,
         )
-        prepared = stack.bridge.complete_window(completion)
+        executor = self._decode_executor
+        # executor가 있으면 리샘플 이전(device rate)에서 끊어 넘긴다. 없으면
+        # 합성 API를 그대로 부른다 — 두 경로의 반환 의미는 동일하다.
+        prepared = (
+            stack.bridge.complete_device_window(completion)
+            if executor is not None
+            else stack.bridge.complete_window(completion)
+        )
         if prepared.is_err:
             self._support.report_error(prepared.error)
             self._lane_terminal(window, lane_index, error=prepared.error, received_at_ns=None)
@@ -228,6 +356,13 @@ class Stage7LaneRxDispatcher:
             return
         segment, epoch_id = promoted.value
         t0 = stack.ingress.epoch_t0_hardware_ns(epoch_id)
+        if executor is not None:
+            # 여기서부터(리샘플·게이트·디코드)가 별도 프로세스로 나간다.
+            # 결과는 펌프 스레드가 complete_decoded로 되돌린다.
+            executor(lane_index, lane_generation, (window, rx_window_key),
+                     native_request, epoch_id, t0)
+            return
+        native_request = self._energy_gate(lane_index, native_request)
         stack.facade.diagnostic_sink.begin_window(rx_window_key, epoch_id, t0)
         try:
             decoded = stack.facade.decode_samples(native_request)
@@ -242,6 +377,55 @@ class Stage7LaneRxDispatcher:
             window, lane_index, result=decoded.value,
             received_at_ns=native_request.samples.first_sample_at.total_nanoseconds(),
         )
+
+    def complete_decoded(self, lane_generation, lane_index, context, *,
+                         result=None, error=None, gapped=False,
+                         received_at_ns=None, attempt_records=()):
+        """외부 실행기의 decode 결과를 **펌프 스레드에서** 반영한다.
+
+        동기 경로의 decode 이후 구간(진단 기록·finalize_window·lane terminal)을
+        순서 그대로 수행하고, 늦게 온 결과는 기존 stale 경로로 폐기한다.
+        """
+
+        if lane_generation != self._lane_generation:
+            self._stale("decoded", lane_generation, lane_index)
+            return
+        window, rx_window_key = context
+        stack = self._stacks[lane_index]
+
+        if gapped:
+            # 동기 경로에서 native 변환이 Ok(None)을 낸 경우와 같은 처리다
+            # (promote/finalize 없이 결과 없음). complete_device_window가
+            # sample_count·continuity를 상수로 세우므로 실제로는 도달하지
+            # 않지만, frozen 분기를 그대로 보존한다.
+            self._lane_terminal(
+                window, lane_index,
+                error=_private_error(
+                    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                    "lane window가 완전한 연속 8,192 sample이 아닙니다",
+                ).error,
+                received_at_ns=None,
+            )
+            return
+
+        # 진단 기록은 decode 안에서 생성되므로(§9.3) 실행기에서 회수해 여기서
+        # 재생해야 evidence가 보존된다. 재생 실패가 수신 결과를 무효로 만들지는
+        # 않는다 — fail-open.
+        sink = stack.facade.diagnostic_sink
+        for record in attempt_records or ():
+            try:
+                sink.record(record)
+            except Exception:  # noqa: BLE001
+                pass
+
+        stack.ingress.finalize_window(rx_window_key)
+        if error is not None:
+            self._support.report_error(error)
+            self._lane_terminal(window, lane_index, error=error,
+                                received_at_ns=None)
+            return
+        self._lane_terminal(window, lane_index, result=result,
+                            received_at_ns=received_at_ns)
 
     def on_lane_error(self, lane_generation, lane_index, child_key, code, details):
         if lane_generation != self._lane_generation:

@@ -4,13 +4,18 @@ Runtime Coordinator가 Pi에서 endpoint별로 spawn하는 process다. resolved
 endpoint config를 적재하고 `Stage7Endpoint`+`Stage7B210RadioAdapter`를 조립한
 뒤 `SOCK_SEQPACKET` socket에서 coordinator command를 처리한다.
 
-TBB 신뢰자료는 `configs/stage7/trust/`의 provisioned TEST identity를 쓴다.
+TBB 신뢰자료는 기본적으로 `configs/stage7/trust/`의 provisioned TEST
+identity를 쓴다. standalone 실행(Phase I)은 환경변수
+`VDETER_STANDALONE_IDENTITY_ROOT`로 배포 tree 밖 identity 저장소를 명시
+전달한다 — 미지정이면 기존 host 경로 동작이 그대로 보존된다.
 private key 내용은 어떤 log/evidence에도 기록하지 않는다.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -36,6 +41,27 @@ class _StaticTrustStore:
         return Ok(self._certificates)
 
 
+def _trust_material_paths(root: str) -> tuple:
+    """(trust_store_path, signer_key_path).
+
+    `VDETER_STANDALONE_IDENTITY_ROOT`가 지정되면 standalone identity
+    저장소(개인키는 `private/`, trust store는 `trust/` — 배포 tree 밖)를
+    쓴다. 미지정이면 기존 `configs/stage7/trust/` 경로 그대로다 —
+    Phase F~H host 실행 경로의 동작 보존.
+    """
+    identity_root = os.environ.get("VDETER_STANDALONE_IDENTITY_ROOT")
+    if identity_root:
+        return (
+            os.path.join(identity_root, "trust", "tbb_trust_store.pem"),
+            os.path.join(identity_root, "private", "roc_tbb_signer_key.pem"),
+        )
+    trust_dir = os.path.join(root, "configs", "stage7", "trust")
+    return (
+        os.path.join(trust_dir, "tbb_trust_store.pem"),
+        os.path.join(trust_dir, "roc_tbb_signer_key.pem"),
+    )
+
+
 def _load_trust(root: str, *, is_control: bool):
     """(crypto_dependencies, expected_fingerprint_bytes)를 만든다."""
 
@@ -49,8 +75,8 @@ def _load_trust(root: str, *, is_control: bool):
         create_cryptography_tbb_signer,
     )
 
-    trust_dir = os.path.join(root, "configs", "stage7", "trust")
-    with open(os.path.join(trust_dir, "tbb_trust_store.pem"), "rb") as handle:
+    store_path, key_path = _trust_material_paths(root)
+    with open(store_path, "rb") as handle:
         certificate = load_pem_x509_certificate(handle.read())
     certificate_der = certificate.public_bytes(serialization.Encoding.DER)
     fingerprint = certificate_fingerprint(certificate_der)
@@ -58,7 +84,6 @@ def _load_trust(root: str, *, is_control: bool):
         raise SystemExit(f"trust store fingerprint 계산 실패: {fingerprint.error}")
     signer = None
     if is_control:
-        key_path = os.path.join(trust_dir, "roc_tbb_signer_key.pem")
         with open(key_path, "rb") as handle:
             key = serialization.load_pem_private_key(handle.read(), password=None)
         private_der = key.private_bytes(
@@ -75,6 +100,140 @@ def _load_trust(root: str, *, is_control: bool):
         LinkCryptoDependencies(tbb_signer=signer, tbb_trust_store=store),
         fingerprint.value,
     )
+
+
+def service_event_record(event, *, mono_clock=time.monotonic) -> dict:
+    """public ServiceEvent 하나를 event JSONL record(dict)로 만든다.
+
+    기존 필드(t_mono·event_type·transfer_id·transfer_state·error_*·
+    payload_sha256·payload_len·source)는 그대로 유지해 기존 RR controller가
+    계속 동작한다. DATA_RECEIVED에는 응용 판정에 필요한 public 필드를
+    보탠다: payload_base64(원문 application bytes)·payload_format·
+    original_source·original_destination·received_at_ns.
+
+    - `source`는 예전에 `received.source`를 조회해 사실상 항상 누락됐다.
+      실제 public DTO 필드는 `received.original_source`다 — 그것으로 채운다.
+    - application bytes만 기록한다. RF frame·Link/MAC/PHY 내부 객체는
+      여기 오지 않는다(ReceivedApplicationData가 이미 응용 계층 DTO다).
+    - private key는 어떤 경로로도 기록하지 않는다.
+    """
+
+    record = {
+        "t_mono": round(mono_clock(), 3),
+        "event_type": getattr(
+            getattr(event, "event_type", None), "value",
+            str(getattr(event, "event_type", None)),
+        ),
+        "transfer_id": getattr(
+            getattr(event, "transfer_id", None), "value", None
+        ),
+        "transfer_state": getattr(
+            getattr(event, "transfer_state", None), "value", None
+        ),
+        "error_code": getattr(getattr(event, "error", None), "code", None),
+    }
+    error_object = getattr(event, "error", None)
+    if error_object is not None:
+        record["error_message"] = str(getattr(error_object, "message", ""))[:200]
+        error_details = getattr(error_object, "details", None)
+        if error_details is not None:
+            record["error_details"] = str(error_details)[:300]
+    received = getattr(event, "received_data", None)
+    if received is not None:
+        payload = getattr(received, "payload", b"") or b""
+        record["payload_sha256"] = hashlib.sha256(payload).hexdigest()
+        record["payload_len"] = len(payload)
+        record["payload_base64"] = base64.b64encode(payload).decode("ascii")
+        record["payload_format"] = getattr(
+            getattr(received, "payload_format", None), "value", None
+        )
+        source = getattr(received, "original_source", None)
+        record["source"] = getattr(source, "value", None)
+        record["original_source"] = record["source"]
+        destination = getattr(received, "original_destination", None)
+        if destination is not None and getattr(destination, "is_broadcast", False):
+            record["original_destination"] = "BROADCAST"
+        else:
+            record["original_destination"] = getattr(
+                getattr(destination, "station_id", None), "value", None
+            )
+        received_at = getattr(received, "received_at", None)
+        if received_at is not None:
+            try:
+                record["received_at_ns"] = int(received_at.total_nanoseconds())
+            except Exception:  # noqa: BLE001 - 시각 부재는 기록 생략
+                pass
+    return record
+
+
+def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event):
+    """Serve one TEST-adapter peer at a time, accepting the next after EOF.
+
+    A persistent hardware session uses separate controller processes for
+    session-start, each workload, and session-stop. Each process therefore
+    opens a fresh connection to the same endpoint socket. Keep the listener
+    alive across peer EOF while retaining the per-accept UID check and never
+    accepting a second peer until the current one has disconnected.
+    """
+
+    while not stop_event.is_set():
+        try:
+            test_server.accept(
+                expected_pid=None,
+                expected_uid=expected_uid,
+                # 유계 대기여야 stop_event를 실제로 관측한다. teardown의
+                # test_server.close()가 blocking accept를 깨운다는 전제는
+                # Linux에서 거짓이다 — CPython 타임아웃 소켓은 poll()에 들어간
+                # 뒤 다른 스레드의 close()로 깨어나지 않는다. 3600초로 두면
+                # join(2.0)이 매번 만료된다.
+                # RF-time 지터 우려는 근거가 없다: rr-p1은 is_rr_service가
+                # 아니라 test_plan_sha=None이므로 이 스레드가 아예 생성되지
+                # 않는다(자격 구간에서 실행 0). Phase G에서도 초당 1회 미만
+                # 깨어남은 20Hz 펌프 대비 측정 불가하다.
+                timeout=5.0,
+            )
+        except TimeoutError:
+            continue
+        except OSError:
+            if stop_event.is_set():
+                return
+            raise
+
+        try:
+            while not stop_event.is_set():
+                # Same per-peer timeout as the pre-reconnect implementation.
+                message = test_server.recv_message(timeout=5.0)
+                if message is None:
+                    continue
+                response = adapter.handle_command(
+                    message, peer=(expected_uid,)
+                )
+                test_server.send_message(response)
+        except ConnectionError:
+            # Normal peer teardown: close only this accepted connection, then
+            # return to accept() without closing/unlinking the listener.
+            pass
+        except Exception as error:  # noqa: BLE001
+            # 피어 하나의 실패로 리스너를 잃지 않는다. 상주 세션에서는 이
+            # 소켓에 START 대행·workload 4개·STOP 대행이 차례로 붙으므로,
+            # 스레드가 죽으면 이후 전부가 300초 타임아웃으로 무너지고
+            # bring-up 25~30분까지 통째로 버려진다. fail-close 단위는
+            # 리스너가 아니라 피어여야 한다.
+            # 특히 send_message는 recv_message가 걸어둔 5초 타임아웃 소켓에
+            # sendall하므로 socket.timeout(=OSError, ConnectionError 아님)이
+            # 날 수 있다.
+            print(f"[launcher] test adapter peer 오류(다음 피어 계속): "
+                  f"{type(error).__name__}: {error}",
+                  file=sys.stderr, flush=True)
+        finally:
+            connection = getattr(test_server, "_connection", None)
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+            test_server._connection = None
+            test_server._peer = None
 
 
 def main(argv=None) -> int:
@@ -230,6 +389,17 @@ def main(argv=None) -> int:
                 utc_q, ClockDomain.UTC, self._utc_clock_id
             )
 
+    _launcher_clock = _AnchoredSystemTimeSource()
+
+    #: 창 추적: native 첫 표본 ns -> (submit까지 ms, commit까지 ms).
+    #: proc_lag_ms는 단일 사건인데 lat.* 는 세션 평균이라 서로 뺄 수 없다.
+    #: type-4를 실은 그 창 하나를 끝까지 따라가 "런처 도달 전"과 "런처 안"을
+    #: 가른다. 계측 전용이며 fail-open이다.
+    _win_trace = {}
+
+    def _utc_ns():
+        return _launcher_clock.now_utc().total_nanoseconds()
+
     built = build_stage7_b210_endpoint(
         resolved,
         deployment,
@@ -237,7 +407,7 @@ def main(argv=None) -> int:
         intent_notifier=intent_notifier,
         host_raw_clock=read_monotonic_raw_ns,
         monitor_enabled=True,
-        time_source_override=_AnchoredSystemTimeSource(),
+        time_source_override=_launcher_clock,
     )
     if built.is_err:
         print(f"[launcher] endpoint 조립 실패: {built.error}", file=sys.stderr)
@@ -275,6 +445,30 @@ def main(argv=None) -> int:
     # 서비스 MAC이 어떤 radio 명령도 내지 못했다(svc-tx/rx 0건 실측 —
     # TBB 방송·RX 창 전무의 근본 원인). 여기서 50ms 주기로 구동한다.
     _pump_stop = _threading.Event()
+
+    #: 실시간 펌프를 돌리는 endpoint 상태 (§16.1 서비스 구간).
+    #: 그 앞의 RF qualification 구간(CONFIGURED·RX_READY·CFO_*·HOST_TIME_*·
+    #: RF_GAIN_*)에서는 Stage7PiOperations가 radio를 독점해야 한다.
+    #:
+    #: TBB_ACTIVE/TBB_ACQUIRING 누락은 자기 교착이었다 (2026-08-31 실측):
+    #: ROC는 방송자라 수신 없이 self-activation으로 TBB_ACTIVE가 되는데, 그
+    #: 순간 자기 펌프가 멈춰 TBB 방송 fragment 순환(1주기 1개, 완료 관측이
+    #: radio.poll_once 의존)이 첫 조각에서 끊긴다. MASS-A/B는 조립할 TBB가
+    #: 공중에 없어 SERVICE_START_STAGED에 영구 정체하고, publish는 MASS 획득을
+    #: 기다리므로 펌프도 영영 재개되지 않는다.
+    #: 증거 — phase-g-service-20260831-050301: ROC rx-gate 0줄(펌프 정지),
+    #: MASS-A 9줄/MASS-B 26줄, 최종 ROC=TBB_ACTIVE·MASS=SERVICE_START_STAGED.
+    #: 대조 rr-p2-17-20260830j/k(게이트 도입 전): ROC 82/64줄로 세 노드 균등,
+    #: admission→publish 9.9~11.8s.
+    #: 서비스 구간 안의 상태만 더한다 — RF qualification 사다리 제외는 그대로라
+    #: c063d0d가 막은 rr-p1 skipped_past_due 회귀는 계속 보호된다.
+    _PUMP_ACTIVE_STATES = (
+        "SERVICE_ADMISSION_READY",
+        "SERVICE_START_STAGED",
+        "TBB_ACQUIRING",
+        "TBB_ACTIVE",
+        "RUNNING",
+    )
 
     def _pump_loop():
         # MAC 주기 40ms: 시계 20ms 양자화(_AnchoredSystemTimeSource)가
@@ -325,12 +519,52 @@ def main(argv=None) -> int:
         main._mac_cycle = _mac_cycle
 
         while not _pump_stop.is_set():
+            # 서비스 phase 한정 (rr-p1 회귀 봉합, 2026-08-31 실측 근거):
+            # 이 펌프는 rr-p2 서비스 구간(svc-run-*)에서 frozen 런타임의
+            # radio.poll_once/MAC 박동을 대신 돌리려고 도입됐다. 그런데
+            # RF qualification 사다리(CFO·adaptive gain·rf_time)는 같은
+            # B210을 Stage7PiOperations가 직접 시분할로 몰아 쓰는 구간이라,
+            # 50ms 주기의 poll_once가 그 위에 겹치면 revalidate 버스트가
+            # 송신 시한을 넘겨 통째로 스킵된다 (mass-roc-rr-p1-20260831a/b
+            # 실측: skipped_past_due C2=19·6, C4=3, C6=1 → REVALIDATE 불합격.
+            # 펌프 도입 전 11개 rr-p1 run은 전부 skipped_past_due=0).
+            # 서비스 admission 이후에만 돌려 두 구간을 분리한다 — rr-p2
+            # 서비스 경로의 동작은 그대로다.
+            client_ref = progress_client_slot["client"]
+            if client_ref is None or client_ref.state not in _PUMP_ACTIVE_STATES:
+                _pump_stop.wait(0.05)
+                continue
             try:
+                # 지연 해부 (svc-run-n 이후: 게이트 후에도 완료 처리
+                # 지연 ~15-19s 잔존, mac-gap ~1s × 171 — 어느 구간이
+                # 먹는지 구간별 실측. DIAG 게이트, 300ms 초과만 출력.)
+                _t0 = _time.monotonic()
                 endpoint.dependencies.radio.poll_once()
+                _t1 = _time.monotonic()
                 _mac_cycle()
+                _t2 = _time.monotonic()
                 drain = getattr(main, "_drain_dispatch_queue", None)
                 if drain is not None:
                     drain()
+                _t3 = _time.monotonic()
+                if (
+                    _t3 - _t0 > 0.3
+                    and os.environ.get("STAGE7_DIAG", "0") == "1"
+                ):
+                    try:
+                        ingress = getattr(endpoint.stage4, "ingress", None)
+                        depth = len(getattr(ingress, "_events", ()) or ())
+                        dq = getattr(main, "_dispatch_queue_ref", None)
+                        print(
+                            f"[diag] pump-slow poll={(_t1 - _t0) * 1e3:.0f} "
+                            f"mac1={(_t2 - _t1) * 1e3:.0f} "
+                            f"drain={(_t3 - _t2) * 1e3:.0f}ms "
+                            f"qlen={'?' if dq is None else len(dq)} "
+                            f"ingress={depth} t={_t3:.3f}",
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 support = endpoint.stage4
                 if support is not None:
                     cycle_started = _time.monotonic()
@@ -457,8 +691,18 @@ def main(argv=None) -> int:
                 try:
                     state = endpoint.stage4.mac.state
                     pend = getattr(state, "delivery_pending", ()) or ()
-                    deps = getattr(state, "pending_dependencies", None)
-                    dep_n = len(deps) if deps is not None else "?"
+                    # svc-run-p 부검 D항: 실제 접근자는 pending_commands
+                    # (부류 계수는 pending_count) — '?' 사각 제거.
+                    try:
+                        from vdeter.mac.models import (
+                            PendingCommandClass as _PCCc,
+                        )
+                        dep_n = (
+                            f"rx={state.pending_count(_PCCc.RX)}"
+                            f"/all={len(state.pending_commands)}"
+                        )
+                    except Exception:  # noqa: BLE001
+                        dep_n = "?"
                     ledger = getattr(state, "delivery_ledger", ()) or ()
                     # C6: 수신 세션 잔류 감시 (감사③ — 회수 부재로 영구
                     # 잔류하면 해당 LC가 블랙홀化).
@@ -720,6 +964,39 @@ def main(argv=None) -> int:
                 return _diag_orig_rec(self_e, event_type, *a, **k)
 
             _DVE._record = _diag_rec
+
+            # ROC측: 자원할당(type 4) body 생성 시각. MASS의 type4-rx와
+            # 짝지으면 "ROC가 늦게 보냈나 / MASS가 늦게 처리했나"가 갈린다.
+            try:
+                from vdeter.mac import resources as _t4res
+
+                _diag_orig_build = _t4res.build_allocation_body
+
+                def _diag_build(*a, **k):
+                    body = _diag_orig_build(*a, **k)
+                    try:
+                        print(
+                            f"[diag] type4-build lc_tx={body.logical_channel_tx} "
+                            f"lc_rx={body.logical_channel_rx} "
+                            f"frame_delay={body.tdma_frame_delay} "
+                            f"t={_time.monotonic():.3f}",
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return body
+
+                _t4res.build_allocation_body = _diag_build
+                # coordinator가 모듈 참조로 부르므로 그쪽도 같이 바꾼다.
+                _DMC_mod = sys.modules.get(_DMC.__module__)
+                if _DMC_mod is not None:
+                    _rm = getattr(_DMC_mod, "resource_module", None)
+                    if _rm is not None:
+                        _rm.build_allocation_body = _diag_build
+            except Exception as _be:  # noqa: BLE001
+                print(f"[diag] type4-build 훅 미적용: {_be}",
+                      file=sys.stderr, flush=True)
+
             _diag_orig_t4 = _DMC._receive_type4
 
             def _diag_t4(self_c, state, *a, **k):
@@ -729,15 +1006,130 @@ def main(argv=None) -> int:
                     after_n = len(
                         getattr(out_state, "lc_allocations", ()) or ()
                     )
+                    # 활성화 프레임은 **RF 수신 시각** 기준으로 정해진다
+                    # (_receive_type4: transmit_frame = frame(received),
+                    #  활성화 = transmit_frame + CANONICAL_TDMA_FRAME_DELAY).
+                    # 처리가 늦어 활성화 프레임이 이미 지나갔으면 그 프레임의
+                    # DC 창은 계획되지 않는다 — 그 지각을 직접 잰다.
+                    from vdeter.mac.tdma import (
+                        frame_ordinal_at_nanoseconds as _t4_fo,
+                    )
+
+                    decoded = k.get("decoded")
+                    recv_ns = None
+                    if decoded is not None:
+                        recv_ns = decoded.received_at.total_nanoseconds()
+                    now_ns = self_c._now_utc_nanoseconds()
+                    recv_frame = _t4_fo(recv_ns) if recv_ns else None
+                    now_frame = _t4_fo(now_ns)
+                    allocs = [
+                        (al.logical_channel_rx,
+                         al.activation_frame_ordinal - now_frame,
+                         al.last_valid_frame_ordinal - now_frame)
+                        for al in (getattr(out_state, "lc_allocations", ())
+                                   or ())
+                    ]
+                    # 이 type-4를 실은 창 하나의 실제 분해. 세션 평균이 아니라
+                    # 같은 사건이라 proc_lag에서 그대로 뺄 수 있다.
+                    #
+                    # recv_ns는 창의 첫 표본이 아니라 **버스트 검출 시각**이다
+                    # (_merge_results가 min(packet.received_at)을 쓴다). 창
+                    # 첫 표본을 키로 잡아 정확 일치를 노리면 빗나가므로, 그
+                    # 시각을 담은 창을 고른다. win_offset_ms가 창 길이보다
+                    # 크면 해당 창이 이미 밀려난 것이니 그것도 보인다.
+                    trace = None
+                    offset_ms = 0.0
+                    starts = [k for k in _win_trace if k <= recv_ns]
+                    if starts:
+                        window_first_ns = max(starts)
+                        trace = _win_trace[window_first_ns]
+                        offset_ms = (recv_ns - window_first_ns) / 1e6
+                    if trace is None:
+                        span = "trace=없음"
+                    else:
+                        to_submit, to_commit = trace
+                        # 세 구간을 recv_ns 기준으로 옮긴다 —
+                        # pre + worker + post = proc_lag_ms 가 되게.
+                        span = (
+                            f"win_offset_ms={offset_ms:.0f} "
+                            f"pre_ms={to_submit - offset_ms:.0f} "
+                            f"worker_ms={to_commit - to_submit:.0f} "
+                            f"post_ms="
+                            f"{(now_ns - recv_ns) / 1e6 - to_commit + offset_ms:.0f}"
+                        )
                     print(
-                        f"[diag] type4-rx allocs {before_n}->{after_n}",
+                        f"[diag] type4-rx allocs {before_n}->{after_n} "
+                        f"recv_ns={recv_ns} "
+                        f"proc_lag_ms={(now_ns - recv_ns) / 1e6:.0f} "
+                        f"recv_frame={recv_frame} now_frame={now_frame} "
+                        f"frames_late={now_frame - recv_frame if recv_frame else '?'} "
+                        f"{span} "
+                        f"allocs(lc,act-now,last-now)={allocs}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception as _t4_err:  # noqa: BLE001
+                    print(f"[diag] type4-rx probe 오류: {_t4_err}",
+                          file=sys.stderr, flush=True)
+                return out_state
+
+            _DMC._receive_type4 = _diag_t4
+
+            # C9: ACK(Type13) 수신 매칭 관측 (svc-run-l2: ROC가 ACK를
+            # 받고도 무음 무시했는지/미도달인지 로그로 구분 불가했다 —
+            # _receive_type13/_apply_session_ack 전 경로가 무프린트).
+            _diag_orig_t13 = _DMC._receive_type13
+
+            def _diag_t13(self_c, state, body, **kwargs):
+                try:
+                    masks = getattr(body, "ack_nack_masks", None)
+                    print(
+                        f"[diag] type13-rx src={getattr(body.source_id, 'value', '?')} "
+                        f"dst={getattr(getattr(body.destination, 'station_id', None), 'value', '?')} "
+                        f"masks={masks}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                out_state = _diag_orig_t13(self_c, state, body, **kwargs)
+                try:
+                    changed = out_state is not state
+                    print(
+                        f"[diag] type13-post state_changed={changed}",
                         file=sys.stderr, flush=True,
                     )
                 except Exception:  # noqa: BLE001
                     pass
                 return out_state
 
-            _DMC._receive_type4 = _diag_t4
+            _DMC._receive_type13 = _diag_t13
+            _diag_orig_asa = _DMC._apply_session_ack
+
+            def _diag_asa(self_c, state, context, body, *a, **k):
+                try:
+                    ledger = tuple(context.frame_ledger)
+                    eligible_n = sum(
+                        1 for entry in ledger
+                        if not any(
+                            pid in context.pending_packet_ids
+                            for pid in entry.packet_ids
+                        )
+                        and not any(
+                            fi == entry.session_frame_index
+                            for fi, _p in context.retry_fragment_keys
+                        )
+                    )
+                    print(
+                        f"[diag] ack-apply xfer={context.transfer_id.value[:8]} "
+                        f"ledger={len(ledger)} eligible={eligible_n} "
+                        f"sfi={[e.session_frame_index for e in ledger]} "
+                        f"conf={[list(e.confirmed_positions) for e in ledger]}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return _diag_orig_asa(self_c, state, context, body, *a, **k)
+
+            _DMC._apply_session_ack = _diag_asa
 
             # C4: 재조립기 내부
             from vdeter.link.data_session.reassembly import (
@@ -927,7 +1319,7 @@ def main(argv=None) -> int:
 
         # 해제검사 완화 (근거: frozen 규칙은 계획·해제가
         # 같은 lead라 최조기 슬롯 의도가 다음 해제 평가(≤40ms 뒤)에서
-        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 120ms 완화해
+        # SLOT_MISSED — 데이터 전송 확정 실패. 해제측만 200ms 완화해(바닥 100ms)
         # 슬랙을 보장한다. 늦은 제출의 물리 방어는 어댑터 _LEAD_NS
         # 100ms가 계속 수행. 계획·창·방송 경로는 불변.)
         import dataclasses as _dc_rel
@@ -1121,6 +1513,24 @@ def main(argv=None) -> int:
                     None,
                 )
                 if link11 is None or not link11.short_data_eligible:
+                    # 파편 상한 3 명시 강제 (0.9.15/0.9.20 m9, 0.9.22 경계
+                    # 정정): frozen 산식은 세그먼트 = 헤더 4B + presentation
+                    # (link/transfer.py SEGMENT_HEADER_SIZE)이므로 3조각
+                    # 용량 645B(세그먼트) = presentation 641B. 641B 초과는
+                    # 승격하지 않고 원 단문 경로로 낙하 → frozen의 설계된
+                    # 거부(LINK_TRANSFER_SIZE_UNSUPPORTED)로 즉시 실패한다.
+                    # 검증 보증 구간(≤426B=2조각, 상한 3조각) 밖의 무음
+                    # 진입을 차단하는 게이트.
+                    if requirement.presentation_size > 3 * 215 - 4:
+                        print(
+                            "[launcher] 승격 거부 — 파편 상한 3 초과 "
+                            f"(presentation={requirement.presentation_size}"
+                            " > 641, 세그먼트 > 645)",
+                            file=sys.stderr, flush=True,
+                        )
+                        return _orig_submit_short(
+                            self_c, state, requirement, causation_event_id
+                        )
                     print(
                         "[launcher] short->session 승격 "
                         f"(link11 미적합, size="
@@ -1252,6 +1662,64 @@ def main(argv=None) -> int:
 
         _MC._on_dependency_failed = _odf_recover
 
+        # D-18 최종형: 데이터 세션 ACK 대기의 전송별 벽시계 결정 하한
+        # 65s (svc-run-m/rr-g/h 실측: 성공 ACK가 frozen 한도 7.2s는
+        # 물론, 중간형이던 계수-스킵 대기(전역 위상 따라 실대기
+        # 43~62s 요동)보다도 늦게 도착 — WAITING_ACK 진입 시각을
+        # 직접 기록해 65s 전에는 부재 계수를 아예 전달하지 않는다.
+        # 부재 계수 전용 함수라 재전송 계획·ACK 도착 처리 무관여,
+        # LOCAL_DATA_SESSION 역할 한정. 재현 전용 시험대 보정 —
+        # 실물급에서는 원 규칙 복원(§25.1 D-18).)
+        _orig_ack_to = _MC._on_data_ack_timeout
+        # 키 = (컨트롤러 인스턴스 id, transfer id): 클래스 패치의 클로저
+        # 공유 상태라 한 프로세스에 컨트롤러가 2개면 서로의 타이머를
+        # 청소하는 간섭이 생김 — 인스턴스 스코프로 격리 (0.9.22).
+        _ack_wait_started: dict = {}
+        _ack_patient_warned: list = []
+
+        def _ack_patient(self_c, state, causation_event_id, commands):
+            # 결정적 벽시계 대기 (rr-g/h 실측: 계수-스킵 방식은 전역
+            # 위상에 따라 실대기가 43~62s로 요동 — 명목 65s에도 짧은
+            # 시도가 회신(~53~58s)보다 먼저 끊김. 전송별 WAITING 진입
+            # 시각을 직접 기록해 65s 경과 전에는 부재 계수를 아예
+            # 전달하지 않는다 → 실대기 하한 65s 보장, 위상 복권 소멸.
+            # 유예는 동시 대기 전체 단위: 하나라도 65s 미만이면 이번
+            # 계수 전체를 유예한다(판정 구간은 동시 세션 1개라 동치).)
+            try:
+                now_w = _time.monotonic()
+                waiting = [
+                    (id(self_c), c.transfer_id.value)
+                    for c in state.transfers
+                    if getattr(getattr(c, "role", None), "name", "")
+                    == "LOCAL_DATA_SESSION"
+                    and getattr(getattr(c, "phase", None), "name", "")
+                    == "WAITING_ACK"
+                ]
+                for known in list(_ack_wait_started):
+                    if known[0] == id(self_c) and known not in waiting:
+                        del _ack_wait_started[known]
+                if waiting:
+                    ripe = all(
+                        now_w - _ack_wait_started.setdefault(x, now_w)
+                        >= 65.0
+                        for x in waiting
+                    )
+                    if not ripe:
+                        return state
+            except Exception as exc:  # noqa: BLE001 - 실패 시 원 경로
+                # 무음 복귀 금지: frozen 7.2s 규칙으로 낙하하면 데이터
+                # 시나리오가 원인 표식 없이 깨진다 — 1회성 경고 (0.9.22).
+                if not _ack_patient_warned:
+                    _ack_patient_warned.append(True)
+                    print(
+                        f"[launcher] D-18 ack-patient 예외 → 원 경로 낙하: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr, flush=True,
+                    )
+            return _orig_ack_to(self_c, state, causation_event_id, commands)
+
+        _MC._on_data_ack_timeout = _ack_patient
+
         # F-release (svc-run-b 실측: 유예 해제 트리거가 ClockAdvanced/타이머
         # 뿐인데 ROC 펌프 회전이 0.5~2.1s로 성겨서, 유예 intent의 직행
         # 대역 [floor 100ms, horizon−슬롯 ≈680ms]를 "이번 해제 땐 이르고
@@ -1343,6 +1811,20 @@ def main(argv=None) -> int:
         from vdeter.mac.models import (
             PendingCommandClass as _PCC,
             Stage4Limits as _S4L,
+        )
+
+        # D-19: pending quota 상향 (svc-run-j 실측: 에너지 게이트 후에도
+        # 장부 수위가 ~65에 상시 고착 — 처리 지연이 아니라 계획 선행분
+        # (미래 창 ~2프레임 × 창 수)의 구조적 점유. 원 한도 68은 이 바닥
+        # 대비 여유가 3뿐이라 shed가 창 계획을 상습 연기 → 청취 확률화
+        # (run F 1/6, H 0/6, J 0/6). 바닥+프레임 배치(~30)+여유로 상향.
+        # shed·마진은 폭주 안전판으로 유지. 런타임 클래스 패치(svcdbg66
+        # 전례), frozen 파일 0수정.
+        _S4L.PENDING_DEPENDENCY_RX = 128
+        _S4L.PENDING_DEPENDENCY_TOTAL = 160
+        print(
+            "[launcher] pending-quota RX=128 TOTAL=160 (D-19)",
+            file=sys.stderr, flush=True,
         )
 
         _orig_pfw = _MC.plan_frame_windows
@@ -1540,11 +2022,28 @@ def main(argv=None) -> int:
         _dispatch_queue = _deque()
 
         def _q_samples(self_d, lane_generation, lane_index, child_key, received):
+            _decode_pool_slot["dispatcher_seen"] = self_d
             _dispatch_queue.append(
                 ("s", self_d, lane_generation, lane_index, child_key, received)
             )
 
+        #: 창 완료의 큐 적재 시각 (id(completion) -> monotonic). drain에서 뺀다.
+        _c_stamp = {}
+
         def _q_completed(self_d, lane_generation, lane_index, child_key, completion):
+            _decode_pool_slot["dispatcher_seen"] = self_d
+            # 지연 해부: proc_lag_ms 1.7~2.3초가 큐 앞쪽인지 뒤쪽인지 가른다.
+            # completed_at은 adapter가 self._time_source.now_monotonic()으로
+            # 채우므로 같은 프로세스 monotonic과 직접 비교된다.
+            try:
+                now_m = _time.monotonic()
+                if len(_c_stamp) > 4096:
+                    _c_stamp.clear()
+                _c_stamp[id(completion)] = now_m
+                done_ns = completion.completed_at.total_nanoseconds()
+                _cost_add("lat.radio2launcher", now_m - done_ns / 1e9)
+            except Exception:  # noqa: BLE001
+                pass
             _dispatch_queue.append(
                 ("c", self_d, lane_generation, lane_index, child_key, completion)
             )
@@ -1553,6 +2052,528 @@ def main(argv=None) -> int:
             _dispatch_queue.append(
                 ("e", self_d, lane_generation, lane_index, child_key, code, details)
             )
+
+        # ── 병목 해부 계측 (조사 전용, STAGE7_DIAG=1에서만 활성)
+        # phase-g-service-20260831-202830 실측: drain 총 296s 중 PHY 디코드는
+        # 55.9s(19%)뿐 — 나머지 81%의 귀속처가 미상이다. drain을 항목 종류로,
+        # 그 안을 구간별로 쪼개 누적한다. 계측은 전부 fail-open이며 원본
+        # 호출 순서·인자·반환을 바꾸지 않는다. PHY/MAC/TDMA/RF는 불변.
+        _COST = {}
+        _COST_LAST = [_time.monotonic()]
+
+        def _cost_add(label, elapsed):
+            slot = _COST.get(label)
+            if slot is None:
+                _COST[label] = [1, elapsed]
+            else:
+                slot[0] += 1
+                slot[1] += elapsed
+
+        def _cost_wrap(owner, name, label):
+            """owner.name을 시간 계측으로 감싼다 (fail-open)."""
+
+            try:
+                original = getattr(owner, name)
+            except Exception:  # noqa: BLE001
+                return
+
+            def _wrapped(*args, **kwargs):
+                _started = _time.monotonic()
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    try:
+                        _cost_add(label, _time.monotonic() - _started)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            try:
+                setattr(owner, name, _wrapped)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if os.environ.get("STAGE7_DIAG", "0") == "1":
+            try:
+                from vdeter.phy.multilink import MultiRatePhy as _MRP_c
+                from vdeter.runtime.phy_bridge import (
+                    RuntimePhyRadioBridge as _BRG_c,
+                )
+                from vdeter.stage7.phy_facade import (
+                    Stage7LaneRxIngress as _ING_c,
+                )
+
+                _cost_wrap(_ING_c, "observe_block", "ingress.observe_block")
+                _cost_wrap(_ING_c, "promote_window", "ingress.promote")
+                _cost_wrap(_ING_c, "finalize_window", "ingress.finalize")
+                _cost_wrap(_BRG_c, "observe_samples", "bridge.observe_samples")
+                _cost_wrap(_BRG_c, "complete_window", "bridge.complete_window")
+                _cost_wrap(_MRP_c, "decode_samples", "phy.decode")
+                _cost_wrap(_D7, "_energy_gate", "gate")
+                _cost_wrap(_D7, "_lane_terminal", "lane_terminal")
+                # register_window는 아래에서 _reg_locked로 재대입되므로
+                # 여기서 감싸면 덮인다 — 재대입 뒤에 감싼다.
+            except Exception as _cost_error:  # noqa: BLE001
+                print(
+                    f"[launcher] cost-instrument 미적용: {_cost_error}",
+                    file=sys.stderr, flush=True,
+                )
+
+        def _cost_report():
+            """10초마다 누적 비용을 한 줄로 낸다 (fail-open)."""
+
+            try:
+                if os.environ.get("STAGE7_DIAG", "0") != "1" or not _COST:
+                    return
+                now = _time.monotonic()
+                if now - _COST_LAST[0] < 10.0:
+                    return
+                _COST_LAST[0] = now
+                parts = [
+                    f"{label}={slot[0]}/{slot[1] * 1e3:.0f}ms"
+                    for label, slot in sorted(
+                        _COST.items(), key=lambda kv: -kv[1][1]
+                    )
+                ]
+                print(
+                    "[diag] cost " + " ".join(parts),
+                    file=sys.stderr, flush=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── 수신 PHY decode를 펌프 스레드 밖으로 (lane별 프로세스)
+        # phase-g-service-20260831-214853 실측: 펌프 drain 292.9초 중 창 완료가
+        # 283.1초(96.7%)를 먹고, 그 안은 리샘플 37.93ms + 디코드 48.76ms/창이다
+        # (표본 경로는 0.14ms/건). PHY는 순수 파이썬이라 GIL이 풀리지 않아
+        # 스레드로는 분리되지 않는다. 런처는 8곳에서 스레드를 쓰므로 fork는
+        # 위험하다 — spawn으로 띄운다.
+        _DECODE_JOB_QUEUE_MAX = 64
+        _DECODE_RESULT_QUEUE_MAX = 64
+        _DECODE_RESULT_DEADLINE_S = 30.0
+        #: reset은 순서를 지켜야 해 미룰 수 없다 — 자리가 날 때까지 기다린다.
+        _DECODE_RESET_ENQUEUE_TIMEOUT_S = 15.0
+        _decode_pool_slot = {"pool": None}
+
+        class _DecodePool:
+            """lane별 decode worker 프로세스와 그 FIFO를 소유한다.
+
+            decode와 reset을 **한 큐**로 보낸다 — PHY stream은 기대 epoch
+            연속성으로 보존/폐기를 판정하므로 reset이 decode를 앞지르면 결과가
+            조용히 달라진다.
+
+            crash·큐 포화·응답 지연은 재시작하지 않고 세션을 fail-closed로
+            끝낸다. stream 연속성과 진단 기록이 사라진 뒤의 조용한 재기동은
+            정상 운전처럼 보이는 공백을 만든다.
+            """
+
+            def __init__(self, dispatcher, stacks, lane_generation, id_kind):
+                import multiprocessing as _mp
+                from vdeter.stage7 import rx_decode_worker as _w
+
+                self._w = _w
+                self._dispatcher = dispatcher
+                self._lane_generation = lane_generation
+                # forkserver: spawn 자식의 cmdline은 `spawn_main`을 담아
+                # 코디네이터의 B210 worker 계수(pgrep -fc "spawn_mai[n]")에
+                # 잡힌다 — phase-g-service-20260901-005253에서 workers_running
+                # 9(3+6)로 session health gate가 불합격했다. forkserver
+                # 자식은 forkserver.main cmdline을 상속해 걸리지 않는다.
+                # fork도 스레드가 많은 런처가 아니라 깨끗이 exec된 서버
+                # 프로세스에서 일어나므로 안전하다.
+                self._context = _mp.get_context("forkserver")
+                try:
+                    self._context.set_forkserver_preload(
+                        ["vdeter.stage7.rx_decode_worker"])
+                except Exception:  # noqa: BLE001
+                    pass
+                self._jobs = []
+                self._results = []
+                self._procs = []
+                self._pending = {}
+                self._next_job_id = 0
+                #: job_id -> 제출 UTC ns (창 추적용, 계측 전용).
+                self._submit_utc = {}
+                self._fatal = None
+                for lane_index in range(len(stacks)):
+                    jobs = self._context.Queue(maxsize=_DECODE_JOB_QUEUE_MAX)
+                    results = self._context.Queue(
+                        maxsize=_DECODE_RESULT_QUEUE_MAX)
+                    process = self._context.Process(
+                        target=_w.run_worker, args=(jobs, results),
+                        kwargs=dict(lane_index=lane_index,
+                                    lane_generation=lane_generation,
+                                    id_source_kind=id_kind,
+                                    id_source_seed=0),
+                        daemon=True,
+                        name=f"stage7-rx-decode-lane{lane_index}",
+                    )
+                    process.start()
+                    self._jobs.append(jobs)
+                    self._results.append(results)
+                    self._procs.append(process)
+                self._ready = set()
+                #: lane별 워커에 나가 있는 job 수 (제출 +1, 결과 -1).
+                self._inflight = [0] * len(self._procs)
+                print(
+                    "[launcher] rx-decode workers 기동 "
+                    f"lanes={len(self._procs)} "
+                    f"pids={[p.pid for p in self._procs]}",
+                    file=sys.stderr, flush=True,
+                )
+
+            def poll_ready(self):
+                """모든 lane이 READY일 때만 True. 그 전에는 동기 경로가 돈다.
+
+                워커 6개가 동시에 기동하면 Pi가 잠시 포화된다 — 그 사이
+                제출하면 job 큐가 찬다 (phase-g-service-20260901-005253:
+                MASS-B lane0 Full). READY 이후에만 executor를 건다.
+                """
+
+                if len(self._ready) == len(self._procs):
+                    return True
+                for lane_index, results in enumerate(self._results):
+                    while True:
+                        try:
+                            message = results.get_nowait()
+                        except Exception:  # noqa: BLE001
+                            break
+                        if message[0] == self._w.RESULT_READY:
+                            self._ready.add(lane_index)
+                        elif message[0] == self._w.RESULT_FATAL:
+                            self.fail(f"worker 기동 FATAL lane={lane_index}: "
+                                      f"{str(message[3])[:400]}")
+                            return False
+                for lane_index, process in enumerate(self._procs):
+                    if not process.is_alive() and lane_index not in self._ready:
+                        self.fail(f"worker 기동 중 사망 lane={lane_index} "
+                                  f"exitcode={process.exitcode}")
+                        return False
+                return len(self._ready) == len(self._procs)
+
+            def can_accept(self, lane_index):
+                """이 lane의 job 큐에 여유가 있는가 (역압 판단용).
+
+                큐가 차는 것은 워커가 죽은 게 아니라 잠시 밀린 것이다 —
+                admission 직후 6개 워커가 동시에 데워지는 구간에서 디코드가
+                건당 111ms -> 687ms로 느려진다 (phase-g-service-20260901-013149
+                실측). 그때 치명 처리하면 회복 가능한 혼잡에 세션을 버린다.
+                여유가 없으면 이 회전에서 창 완료를 미루고 다음에 잇는다.
+                """
+
+                try:
+                    return not self._jobs[lane_index].full()
+                except Exception:  # noqa: BLE001
+                    return True
+
+            # --- 제출 -------------------------------------------------------
+
+            def submit(self, lane_index, lane_generation, context,
+                       device_request, epoch_id, t0_ns):
+                """dispatcher의 decode executor. 펌프 스레드에서만 불린다."""
+
+                self._next_job_id += 1
+                job_id = self._next_job_id
+                self._pending[job_id] = (
+                    lane_index, lane_generation, context,
+                    _time.monotonic(),
+                )
+                try:
+                    if len(self._submit_utc) > 4096:
+                        self._submit_utc.clear()
+                    self._submit_utc[job_id] = _utc_ns()
+                except Exception:  # noqa: BLE001
+                    pass
+                _, rx_window_key = context
+                try:
+                    self._inflight[lane_index] += 1
+                    _cost_add("depth.inflight", self._inflight[lane_index])
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self._jobs[lane_index].put_nowait(
+                        (self._w.JOB_DECODE, job_id, lane_generation,
+                         rx_window_key, epoch_id, t0_ns, device_request)
+                    )
+                except Exception as error:  # noqa: BLE001 (queue.Full 포함)
+                    self._pending.pop(job_id, None)
+                    self.fail(f"decode job 큐 포화/전송 실패 lane={lane_index}: "
+                              f"{type(error).__name__}")
+
+            def reset_sink(self, lane_index):
+                """bridge의 native reset을 같은 FIFO로 보낸다."""
+
+                def _sink(channel):
+                    # reset은 미루거나 버릴 수 없다 — decode와의 순서가
+                    # PHY stream 연속성 판정을 좌우한다. 역압으로 큐가 차
+                    # 있는 것이 정상 상태이므로 put_nowait은 곧바로 Full이
+                    # 된다 (phase-g-service-20260901-021201: MASS-A가
+                    # "reset 전달 실패 lane=0: Full"로 죽었다). 자리가 날
+                    # 때까지 기다리되 상한을 둔다.
+                    try:
+                        self._jobs[lane_index].put(
+                            (self._w.JOB_RESET, None, self._lane_generation,
+                             channel),
+                            timeout=_DECODE_RESET_ENQUEUE_TIMEOUT_S,
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        self.fail(
+                            f"reset 전달 실패 lane={lane_index}: "
+                            f"{type(error).__name__}")
+
+                return _sink
+
+            # --- 회수 -------------------------------------------------------
+
+            def pump_results(self):
+                """펌프 스레드에서 결과를 반영한다."""
+
+                if self._fatal is not None:
+                    return
+                for lane_index, results in enumerate(self._results):
+                    while True:
+                        try:
+                            message = results.get_nowait()
+                        except Exception:  # noqa: BLE001 (queue.Empty 포함)
+                            break
+                        self._apply(lane_index, message)
+                        if self._fatal is not None:
+                            return
+                self._check_liveness()
+
+            def _apply(self, lane_index, message):
+                kind = message[0]
+                if kind == self._w.RESULT_READY:
+                    return
+                if kind == self._w.RESULT_FATAL:
+                    self.fail(f"worker FATAL lane={lane_index}: "
+                              f"{str(message[3])[:400]}")
+                    return
+                job_id = message[1]
+                entry = self._pending.pop(job_id, None)
+                if entry is None:
+                    # generation 교체 등으로 이미 정리된 job이다.
+                    return
+                pending_lane, generation, context, _submitted = entry
+                try:
+                    self._inflight[pending_lane] = max(
+                        0, self._inflight[pending_lane] - 1)
+                    round_trip = _time.monotonic() - _submitted
+                    _cost_add("lat.worker", round_trip)
+                    # 워커가 실은 실제 계산 시간 (마지막 원소).
+                    decode_s = message[-1]
+                    if isinstance(decode_s, float):
+                        _cost_add("lat.decode", decode_s)
+                        _cost_add("lat.jobwait", max(0.0, round_trip - decode_s))
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    if kind == self._w.RESULT_ERR:
+                        error = message[3]
+                        self._dispatcher.complete_decoded(
+                            generation, pending_lane, context,
+                            error=error, gapped=error is None,
+                            attempt_records=message[4],
+                        )
+                    else:
+                        try:
+                            first_ns = message[5]
+                            sent = self._submit_utc.pop(message[1], None)
+                            if first_ns and sent:
+                                if len(_win_trace) > 4096:
+                                    _win_trace.clear()
+                                _win_trace[first_ns] = (
+                                    (sent - first_ns) / 1e6,
+                                    (_utc_ns() - first_ns) / 1e6,
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._dispatcher.complete_decoded(
+                            generation, pending_lane, context,
+                            result=message[3],
+                            attempt_records=message[4],
+                            received_at_ns=message[5],
+                        )
+                except Exception as error:  # noqa: BLE001
+                    self.fail(f"decode 결과 반영 실패 lane={pending_lane}: "
+                              f"{type(error).__name__}: {error}")
+
+            def _check_liveness(self):
+                for lane_index, process in enumerate(self._procs):
+                    if not process.is_alive():
+                        self.fail(
+                            f"worker 사망 lane={lane_index} "
+                            f"exitcode={process.exitcode}")
+                        return
+                if not self._pending:
+                    return
+                oldest = min(item[3] for item in self._pending.values())
+                waited = _time.monotonic() - oldest
+                if waited > _DECODE_RESULT_DEADLINE_S:
+                    self.fail(f"decode 결과 지연 {waited:.1f}초 "
+                              f"(pending={len(self._pending)})")
+
+            # --- fail-closed -------------------------------------------------
+
+            def fail(self, reason):
+                if self._fatal is not None:
+                    return
+                self._fatal = reason
+                print(f"[launcher] rx-decode FATAL — {reason}",
+                      file=sys.stderr, flush=True)
+                # 1) generation 무효화: 늦게 온 결과는 기존 stale 경로로 폐기된다.
+                try:
+                    self._dispatcher._lane_generation = -1
+                except Exception:  # noqa: BLE001
+                    pass
+                # 2) in-flight 창을 정의된 오류로 terminal 처리한다.
+                pending, self._pending = self._pending, {}
+                for lane_index, generation, context, _s in pending.values():
+                    try:
+                        window, _key = context
+                        self._dispatcher._lane_terminal(
+                            window, lane_index,
+                            error=_decode_fatal_error(reason),
+                            received_at_ns=None,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 3) 워커 회수 (상한 있음).
+                self.shutdown()
+                # os._exit는 multiprocessing의 atexit 정리를 건너뛴다 —
+                # 이 런처가 띄운 B210 worker까지 고아로 남아 다음 세션의
+                # 경쟁 프로세스 검사를 막는다 (phase-g-service-20260901-013149
+                # 이후 spawn_main 하나가 38분 생존). 남은 자식에게 정리
+                # 기회를 준다.
+                try:
+                    import multiprocessing as _mp_exit
+
+                    for child in _mp_exit.active_children():
+                        try:
+                            child.terminate()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    for child in _mp_exit.active_children():
+                        try:
+                            child.join(timeout=2.0)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
+                # 4) 세션을 fail-closed로 끝낸다 — 코디네이터의 workload
+                #    quiescence가 launchers_alive로 잡는다. 재시작하지 않는다.
+                try:
+                    sys.stderr.flush()
+                    sys.stdout.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+                _time.sleep(1.0)   # 증거 전달 유예 (상한)
+                os._exit(3)
+
+            def shutdown(self):
+                for jobs in self._jobs:
+                    try:
+                        jobs.put_nowait(None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                for process in self._procs:
+                    try:
+                        process.join(timeout=5.0)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(timeout=3.0)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(timeout=2.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        def _decode_fatal_error(reason):
+            from vdeter.common.errors import (
+                Details as _Det, ErrorCategory as _Cat, ErrorCode as _Code,
+                Layer as _Layer,
+            )
+            from vdeter.common.results import internal_error as _ie
+
+            return _ie(
+                _Layer.RUNTIME, _Code.PHY_INTERNAL_INVARIANT_BROKEN,
+                _Cat.INTERNAL,
+                "수신 decode worker가 fail-closed로 종료됐습니다",
+                details=_Det.of(reason=str(reason)[:200]),
+            ).error
+
+        def _ensure_decode_pool():
+            """dispatcher가 보이면 executor를 건다 (펌프 스레드에서만).
+
+            `_D7.__init__`을 패치하는 방법은 쓸 수 없다 — dispatcher는 런처의
+            monkeypatch 블록보다 **먼저** 생성돼 있어서 `__init__` 패치가
+            영영 실행되지 않는다(phase-g-service-20260901-001527 실측: 워커가
+            실행 끝에서야 떴고 전 구간이 동기 경로로 돌았다). 클래스 메서드
+            패치는 기존 인스턴스에도 먹지만 `__init__`은 그렇지 않다.
+
+            그래서 dispatch 항목이 실어 나르는 dispatcher 참조를 보고 첫
+            drain에서 건다. 세대가 바뀌어 dispatcher가 교체되면 다시 건다.
+            """
+
+            if os.environ.get("STAGE7_RX_DECODE_WORKERS", "1") != "1":
+                return
+            dispatcher = _decode_pool_slot.get("dispatcher_seen")
+            if dispatcher is None:
+                return
+            pool = _decode_pool_slot.get("pool")
+            if pool is not None and _decode_pool_slot.get("bound") is dispatcher:
+                return
+            if pool is not None and _decode_pool_slot.get("owner") is dispatcher:
+                # 이미 만들어 둔 pool이 READY가 되면 그때 건다.
+                if not pool.poll_ready():
+                    return
+                dispatcher.set_decode_executor(pool.submit)
+                for lane_index, stack in enumerate(dispatcher._stacks):
+                    stack.bridge.set_native_reset_sink(
+                        pool.reset_sink(lane_index))
+                _decode_pool_slot["bound"] = dispatcher
+                print("[launcher] rx-decode executor 결속 완료",
+                      file=sys.stderr, flush=True)
+                return
+            try:
+                from vdeter.common.identifiers import Uuid4IdSource as _U4
+
+                stacks = dispatcher._stacks
+                lane_generation = dispatcher._lane_generation
+                id_kind = (
+                    "UUID4"
+                    if isinstance(getattr(stacks[0].facade, "_id_source", None),
+                                  _U4)
+                    else "DETERMINISTIC"
+                )
+                fresh = _DecodePool(dispatcher, stacks, lane_generation, id_kind)
+            except Exception as error:  # noqa: BLE001
+                # 조용히 동기 경로로 떨어지지 않는다 — 어느 경로로 돌았는지
+                # 모르는 evidence가 가장 나쁘다.
+                print(f"[launcher] rx-decode 기동 실패 — {type(error).__name__}: "
+                      f"{error}", file=sys.stderr, flush=True)
+                raise
+            if pool is not None:
+                pool.shutdown()
+            _decode_pool_slot["pool"] = fresh
+            _decode_pool_slot["owner"] = dispatcher
+            _decode_pool_slot["bound"] = None
+
+        def _decode_can_accept(lane_index):
+            pool = _decode_pool_slot.get("pool")
+            if pool is None or _decode_pool_slot.get("bound") is None:
+                return True
+            return pool.can_accept(lane_index)
+
+        def _pump_decode_results():
+            pool = _decode_pool_slot.get("pool")
+            if pool is None:
+                return
+            # 배송 3계열과 같은 락 아래에서 반영한다 — finalize_window·
+            # lane terminal이 register_window/observe와 같은 구조를 만진다.
+            # 락 순서(_dispatch_lock -> dispatcher._lock)는 동기 경로와 동일해
+            # 새 역전이 생기지 않는다.
+            with _dispatch_lock:
+                pool.pump_results()
 
         def _drain_dispatch_queue():
             # 항목당 처리(수신 디코드)가 ~140ms라 일괄 drain이 MAC 박동을
@@ -1563,6 +2584,17 @@ def main(argv=None) -> int:
             # 청취 창을 굶긴다 — 같은 창의 표본이 이번 배치에 없는 완료
             # 항목만 앞으로 빼서 장부를 즉시 비운다 (같은 창의 표본→완료
             # 순서는 보존).
+            # 시간 분할 (svc-run-o pump-slow 실측: 실버스트 디코드가 한
+            # drain에 뭉치면 871~1685ms 정지 → 완료 반영·창 계획이 초
+            # 단위로 밀리는 머리막힘이 완료 지연 ~15-19s·장부 포화·청취
+            # 확률화의 잔존 뿌리. 300ms 예산 초과 시 남은 항목을 큐
+            # 앞머리에 원순서로 되돌리고 다음 회전에 잇는다 — 처리량
+            # 불변, 정지 상한만 도입.)
+            _cost_report()
+            _ensure_decode_pool()
+            # worker 결과 반영은 반드시 펌프 스레드에서 한다 (MAC/dispatcher
+            # 상태 소유자). 큐를 비우는 것이 창 완료보다 우선이다.
+            _pump_decode_results()
             mac_cycle = getattr(main, "_mac_cycle", None)
             batch = []
             for _ in range(256):
@@ -1584,8 +2616,28 @@ def main(argv=None) -> int:
                 item for item in batch
                 if not (item[0] == "c" and tuple(item[1:4]) not in sample_keys)
             ]
-            for item in ordered:
+            drain_started = _time.monotonic()
+            for index, item in enumerate(ordered):
                 kind = item[0]
+                # 역압: 워커가 밀렸으면 창 완료를 미루고 다음 회전에 잇는다.
+                # 300ms 예산 초과와 같은 방식(원순서로 앞머리 복귀)이며
+                # 처리량은 불변, 정지 상한만 유지된다.
+                if kind == "c" and not _decode_can_accept(item[3]):
+                    for leftover in reversed(ordered[index:]):
+                        _dispatch_queue.appendleft(leftover)
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(f"[diag] decode-backpressure done={index} "
+                              f"deferred={len(ordered) - index}",
+                              file=sys.stderr, flush=True)
+                    return
+                _item_started = _time.monotonic()
+                if kind == "c":
+                    try:
+                        _q_at = _c_stamp.pop(id(item[5]), None)
+                        if _q_at is not None:
+                            _cost_add("lat.queue", _item_started - _q_at)
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     if kind == "s":
                         _samples_locked(*item[1:])
@@ -1596,16 +2648,40 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[launcher] dispatch-drain 오류: {error}",
                           file=sys.stderr, flush=True)
+                try:
+                    _cost_add("drain." + kind, _time.monotonic() - _item_started)
+                except Exception:  # noqa: BLE001
+                    pass
                 if promoted > 0:
                     promoted -= 1
-                    continue  # 앞줄 완료 항목은 싸서 미니사이클 생략
-                if mac_cycle is not None:
+                elif mac_cycle is not None:
+                    _mac_started = _time.monotonic()
                     try:
                         mac_cycle()
                     except Exception:  # noqa: BLE001
                         pass
+                    try:
+                        _cost_add(
+                            "drain.mac_cycle", _time.monotonic() - _mac_started
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                if (
+                    _time.monotonic() - drain_started > 0.3
+                    and index + 1 < len(ordered)
+                ):
+                    for leftover in reversed(ordered[index + 1:]):
+                        _dispatch_queue.appendleft(leftover)
+                    if os.environ.get("STAGE7_DIAG", "0") == "1":
+                        print(
+                            f"[diag] drain-slice done={index + 1} "
+                            f"deferred={len(ordered) - index - 1}",
+                            file=sys.stderr, flush=True,
+                        )
+                    return
 
         main._drain_dispatch_queue = _drain_dispatch_queue
+        main._dispatch_queue_ref = _dispatch_queue
         _orig_completed = _D7.on_lane_window_completed
 
         def _completed_locked(self_d, lane_generation, lane_index, child_key, completion):
@@ -1617,6 +2693,8 @@ def main(argv=None) -> int:
         _D7.register_window = _reg_locked
         _D7.on_lane_samples = _q_samples
         _D7.on_lane_window_completed = _q_completed
+        # 재대입 뒤에 감싸야 계측이 살아남는다 (fail-open).
+        _cost_wrap(_D7, "register_window", "dispatcher.register")
     except Exception as error:  # noqa: BLE001
         print(f"[launcher] 런타임 배선 실패: {error}", flush=True)
         raise
@@ -1676,6 +2754,7 @@ def main(argv=None) -> int:
 
     # --- v0.9.1 G항: RR TEST adapter 스레드 + public event JSONL ------------------
     test_threads = []
+    test_server = None
     if arguments.test_plan_sha:
         import glob as _glob
         import json as _json_local
@@ -1699,21 +2778,20 @@ def main(argv=None) -> int:
 
         def _adapter_loop():
             try:
-                test_server.accept(
-                    expected_pid=None,
+                _serve_test_adapter_peers(
+                    test_server,
+                    adapter,
                     expected_uid=os.getuid(),  # type: ignore[attr-defined]
-                    timeout=3600.0,
+                    stop_event=_pump_stop,
                 )
-                while True:
-                    message = test_server.recv_message(timeout=5.0)
-                    if message is None:
-                        continue
-                    response = adapter.handle_command(
-                        message, peer=(os.getuid(),)  # type: ignore[attr-defined]
-                    )
-                    test_server.send_message(response)
-            except (ConnectionError, OSError):
-                return
+            except BaseException as error:  # noqa: BLE001
+                # 스레드가 조용히 죽으면 리스너만 남아 controller가 응답 없이
+                # 매달린다 — coordinator에는 아무 신호도 가지 않는다.
+                # 최소한 흔적은 반드시 남긴다.
+                if not _pump_stop.is_set():
+                    print(f"[launcher] test adapter 스레드 종료: "
+                          f"{type(error).__name__}: {error}",
+                          file=sys.stderr, flush=True)
 
         def _event_jsonl_loop():
             events_dir = os.path.join(arguments.run_root, "evidence", "service_events")
@@ -1724,56 +2802,30 @@ def main(argv=None) -> int:
             if not os.path.exists(path):
                 open(path, "a", encoding="utf-8").close()
             seen = 0
-            while True:
+            events_warned = False
+            while not _pump_stop.is_set():
                 try:
                     sink = endpoint.start_gate.application_sink
                     events = tuple(sink.events())
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    # 무음 금지 (0.9.22): 영구 실패면 배달 증거 JSONL이
+                    # 조용히 멎는다 — 1회성 경고로 관측 가능하게.
+                    if not events_warned:
+                        events_warned = True
+                        print(
+                            f"[launcher] service_events 수집 실패(계속 재시도): "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr, flush=True,
+                        )
                     events = ()
                 if len(events) > seen:
                     with open(path, "a", encoding="utf-8") as handle:
                         for event in events[seen:]:
-                            record = {
-                                "t_mono": round(time.monotonic(), 3),
-                                "event_type": getattr(
-                                    getattr(event, "event_type", None), "value",
-                                    str(getattr(event, "event_type", None)),
-                                ),
-                                "transfer_id": getattr(
-                                    getattr(event, "transfer_id", None), "value",
-                                    None,
-                                ),
-                                "transfer_state": getattr(
-                                    getattr(event, "transfer_state", None), "value",
-                                    None,
-                                ),
-                                "error_code": getattr(
-                                    getattr(event, "error", None), "code", None
-                                ),
-                            }
-                            error_object = getattr(event, "error", None)
-                            if error_object is not None:
-                                record["error_message"] = str(
-                                    getattr(error_object, "message", "")
-                                )[:200]
-                                error_details = getattr(error_object, "details", None)
-                                if error_details is not None:
-                                    record["error_details"] = str(error_details)[:300]
-                            received = getattr(event, "received_data", None)
-                            if received is not None:
-                                payload = getattr(received, "payload", b"") or b""
-                                record["payload_sha256"] = (
-                                    _hashlib.sha256(payload).hexdigest()
-                                )
-                                record["payload_len"] = len(payload)
-                                source = getattr(received, "source", None)
-                                record["source"] = getattr(
-                                    getattr(source, "station_id", None), "value", None
-                                )
+                            record = service_event_record(event)
                             handle.write(_json_local.dumps(record, ensure_ascii=True))
                             handle.write("\n")
                     seen = len(events)
-                time.sleep(0.5)
+                _pump_stop.wait(0.5)
 
         for target in (_adapter_loop, _event_jsonl_loop):
             thread = _threading.Thread(target=target, daemon=True)
@@ -1785,7 +2837,16 @@ def main(argv=None) -> int:
     tbb_emitted = False
     try:
         while True:
-            watching_tbb = client.state == "SERVICE_START_STAGED" and not tbb_emitted
+            # emit_tbb_active는 state를 먼저 TBB_ACTIVE로 바꾼 뒤 이벤트를
+            # 보낸다(runtime_client.py:165-166). 전송이 실패하면 tbb_emitted는
+            # False인데 state는 이미 바뀌어 있어, SERVICE_START_STAGED만 보면
+            # 재시도가 영영 일어나지 않는다 — 90초 TBB 창을 그대로 놓친다.
+            # TBB_ACTIVE도 감시 대상에 넣어 재시도 경로를 연다. publish로
+            # RUNNING이 되면 자동으로 꺼진다.
+            watching_tbb = (
+                client.state in ("SERVICE_START_STAGED", "TBB_ACTIVE")
+                and not tbb_emitted
+            )
             message = server.recv_message(timeout=0.5 if watching_tbb else 120.0)
             if message is None:
                 if watching_tbb:
@@ -1806,6 +2867,12 @@ def main(argv=None) -> int:
     except SystemExit as stop_signal:
         exit_code = int(stop_signal.code or 0)
     finally:
+        _pump_stop.set()
+        if test_server is not None:
+            test_server.close()
+        for thread in test_threads:
+            thread.join(timeout=2.0)
+        _pump_thread.join(timeout=2.0)
         try:
             endpoint.dependencies.radio.close_qualification_lease()
         except Exception:  # noqa: BLE001 - 종료 경로 최선 노력

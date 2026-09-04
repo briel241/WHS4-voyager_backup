@@ -222,8 +222,82 @@ try:
         cert_size > 400,
         "400 B 이하로 내려갔다면 링크 팀 보고를 갱신해야 한다",
     )
+
+    # 정본 시나리오와 fixture가 **같은 형식**을 내야 한다. 예전에 정본이 bare
+    # DER을 쓰는 바람에 링크 팀에 보고한 크기와 다른 숫자가 나왔다.
+    from common.messages import certificate_report as certrep
+    from apps.scenario_runner import run_certificate_scenario
+
+    scenario_run, _ = run_certificate_scenario(1_767_225_600.0)
+    note = scenario_run.ordered()[0].message
+    entries = certrep.parse_report(certificate_report())
+    check(
+        "정본 시나리오가 Certificate Report 본문을 쓴다",
+        "Certificate Report 본문" in note,
+        f"첫 note: {note}",
+    )
+    check(
+        "fixture 본문이 항목 1개짜리 Certificate Report",
+        len(entries) == 1 and entries[0].certificate_type == certrep.CERT_TYPE_X509,
+    )
+    # ECDSA 서명 DER 길이가 실행마다 ±3 B 흔들리므로 범위로 비교한다.
+    scenario_size = int(note.split("Certificate Report 본문 ")[1].split(" byte")[0])
+    check(
+        f"정본({scenario_size} B)과 fixture({cert_size} B)가 같은 크기대",
+        abs(scenario_size - cert_size) <= 6,
+        "형식이 갈라졌다면 링크 팀 보고와도 어긋난다",
+    )
 except Exception as exc:  # pragma: no cover - cryptography 없는 환경
-    check("SC-VDE-001 인증서 크기", True, f"SKIP: {exc}")
+    # 통과가 아니라 **건너뛴 것**임이 출력에 드러나야 한다. 대체 백엔드에서는
+    # 인증서 크기가 실제와 달라 크기 검사가 성립하지 않는다.
+    check(f"SC-VDE-001 인증서 크기 — SKIP ({type(exc).__name__})", True)
+
+
+# --------------------------------------------- 4c. 문서에 적은 "표준 대비 차이"
+#
+# docs/인수인계.md §5.1이 표준과 다른 점을 모아 놓았다. 그 서술이 계속 사실인지
+# 본다. 차이가 해소되면(예: Start Date/Time을 실제로 읽게 되면) 여기서 걸리고,
+# 그때 문서를 고치면 된다.
+
+print("\n[표준 대비 차이 — 문서 서술이 아직 사실인가]")
+
+# O-1 유효기간 기준 시각: 항법이 Start Date/Time을 읽지 않는다.
+_mass_source = read("MASS/mass_agent.py")
+_start_fields = ("start_month", "start_day", "start_hour", "start_minute")
+_read_start = [f for f in _start_fields if f"message.{f}" in _mass_source]
+check(
+    "Start Date/Time을 항법에 쓰지 않는다 (인수인계 §5.1-1 · SC-VDE-005 §8.3)",
+    not _read_start,
+    f"이제 {_read_start}를 읽는다면 두 문서를 갱신해야 한다",
+)
+
+# O-4 X.509 검증 범위: 문서가 나열한 실패 사유가 실재해야 한다.
+_cert_source = read("common/security/certificate.py")
+_flow_source = read("common/security/cert_flow.py")
+DOCUMENTED_REASONS = [
+    "bad-signature", "not-yet-valid", "expired", "issuer-mismatch",
+    "anchor-not-ca", "too-large", "parse-error",
+]
+_missing = [r for r in DOCUMENTED_REASONS if f'"{r}"' not in _cert_source]
+check(
+    f"인증서 실패 사유 {len(DOCUMENTED_REASONS)}종이 실재 (SC-VDE-001 §6.3)",
+    not _missing,
+    f"문서에만 있고 코드에 없다: {_missing}",
+)
+check(
+    "CRL은 적용하지 않고 crl-not-handled로 남긴다 (SC-VDE-001 §6.3)",
+    '"crl-not-handled"' in _flow_source,
+)
+
+# O-3 위치보고 범위: 행위자는 표준대로 broadcast로 만들고, 브리지가 막는다.
+check(
+    "위치보고를 행위자는 broadcast로 만든다 (SC-VDE-005 §9.2)",
+    "destination_id=BROADCAST_ID" in _mass_source,
+)
+check(
+    "브리지가 TEST scope broadcast를 거부한다 (SC-VDE-005 §9.2)",
+    "addressed 전용입니다" in read("common/vdeter_bridge.py"),
+)
 
 
 # -------------------------------------------------------------- 5. 참조·명령

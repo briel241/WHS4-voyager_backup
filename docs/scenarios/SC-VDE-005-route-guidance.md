@@ -295,7 +295,7 @@ if decision.accept:
 
 **인증은 나중에 `_evaluate()` 안에 들어간다.** 자리가 이미 마련되어 있다.
 
-### 8.2 전선에 실을 수 없는 값은 본선이 직접 거른다
+### 8.2 전선에 실을 수 없는 값은 받는 쪽이 직접 거른다
 
 부호화 폭이 담을 수 있는 값이 유효 범위보다 넓은 필드가 있다. Heading Setpoint는
 12 bit라 4095까지 담기지만 유효한 값은 3600까지다. 거르지 않으면 4000이 400.0도가
@@ -314,12 +314,37 @@ if decision.accept:
 | Longitude / Latitude | ±180° / ±90° 또는 N/A(181° / 91°) |
 | Leg Geometry | 0 · 1 · 2 |
 
+**받는 쪽 양쪽 모두**가 같은 규칙을 쓴다. 노선·조종은 본선(`MassAgent._evaluate`)이,
+위치보고·응용 ACK은 육상(`RocAgent.receive`)이 본다.
+
+| 메시지 | 받는 쪽 | 규칙 함수 | 위반 시 |
+| --- | --- | --- | --- |
+| 노선·조종 (MF 2) | MASS | `route_instruction.canonical_violation` | `errors` / route unsuitable |
+| 위치보고 (MF 1) | ROC | `position_report.canonical_violation` | 항적에 반영하지 않음 (`rejected_count`) |
+| 응용 ACK (MF 3) | ROC | `application_ack.canonical_violation` | 명령을 종결시키지 않음 (`rejected_count`) |
+
+위치보고·ACK의 허용 값은 이렇다.
+
+| 필드 | 허용 |
+| --- | --- |
+| Navigation Status | 0..8 · 11 · 12 · 14 · 15 (9 · 10 · 13은 예약) |
+| Maneuver Indicator | 0 · 1 · 2 |
+| Autonomy Mode | 0..3 |
+| COG | 0..3599 또는 3600(N/A) |
+| True Heading | 0..359 또는 511(N/A) |
+| ACK Status | 0 · 4 · 7 · 8 · 9 |
+| ACK Reason | 0..3 |
+
 **왜 응용이 또 보는가** — 링크 codec은 **무선 경로만** 막는다. 콘솔 기본값(`direct`
 전송)·loopback 데모·공격 실험의 주입 지점은 codec을 지나지 않는다. 응용이 같은
-규칙을 지켜야 무선을 타든 안 타든 배가 똑같이 행동한다.
+규칙을 지켜야 무선을 타든 안 타든 똑같이 행동한다.
+
+관측만 하는 쪽에도 필요하다. 위도 raw 60,000,000은 **100도**가 되어 해도에 그려지고,
+그 해도가 육상 운영자의 상황 인식 수단이다. 예약 Status ACK을 받아들이면 무효한
+응답 한 건이 대기 중인 명령을 종결시킨다.
 
 두 판정이 갈리지 않는지는 [`tests/test_route_conformance.py`](../../tests/test_route_conformance.py)가
-링크 codec을 직접 불러 대조한다.
+링크 codec을 직접 불러 대조한다 (노선 20건 · 위치보고 15건 · ACK 128조합).
 
 ### 8.3 유효기간 실측
 
@@ -328,6 +353,23 @@ duration = 1분 지시
    30s 경과 → 항로 유지
    61s 경과 → 항로 자동 해제
 ```
+
+**표준과 다른 점 — 기준 시각.** Table 13.2는 유효기간을 **Start Date/Time
+(Month·Day·Hour·Minute)부터** 센다. 본 구현은 그 네 필드를 전선에 싣기만 하고
+읽지 않으며, Duration을 **지시를 수락한 시각부터** 센다.
+
+| | Table 13.2 | 본 구현 |
+| --- | --- | --- |
+| 기준 시각 | Start Date/Time | 지시 수락 시각 |
+| Start 필드 | 유효 시작을 지정 | 전선에는 싣되 항법에 쓰지 않음 (기본 N/A `0/0/24/60`) |
+
+행위자가 UTC 절대시각을 다루지 않고 `tick(now)`로 주입받은 경과 초만 쓰기
+때문이다(시험을 결정적으로 만들려는 선택). 그래서 **미래에 시작하는 항로를
+미리 보내 두는 것**이 지금은 안 된다 — 받는 즉시 유효해진다.
+
+실장비에서 UTC를 다루게 되면 `MassAgent._apply_route`가 Start Date/Time을
+읽도록 바꾼다. 전선 형식은 이미 그 필드를 나르고 있고, 승인된 codec도 혼합
+N/A를 거부하므로(§8.2) 형식 쪽 준비는 끝나 있다.
 
 ---
 
@@ -356,7 +398,27 @@ duration = 1분 지시
 | 1 | ~~`data_type` 미배정~~ | ✅ **해결** — `sc_vde.route_control.command` / `.ack` / `sc_vde.position_report`이 VDE-TER registry에 등록됐다(TEST scope). 응용은 `DATA_TYPE_ROUTE_CONTROL_COMMAND` 등으로 보낸다 |
 | 2 | 검증 결과 전달 경로 | 미해결 — 링크 계층이 서명을 검증해도 그 결과가 응용에 오지 않는다. 다만 현재 SC-VDE 형식은 unsigned Segment Type 0이라 검증할 서명 자체가 없다 |
 | 3 | 링크 ACK 미구현 | 지금은 응용 ACK만 있다. 링크 ACK·재전송은 링크 계층 몫 |
-| 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 |
+| 4 | **위치보고가 addressed** | AIS는 브로드캐스트인데 VDE-TER이 MASS-originated broadcast를 지원하지 않아 addressed로 승인됐다(`DR-PAYLOAD-016`). 주변 선박이 함께 듣는 상황이 재현되지 않는다 — 아래 9.2 |
+
+### 9.2 위치보고의 broadcast ↔ addressed
+
+표준과 프로파일이 갈리는 지점이라, **어디서 바뀌는지**를 적어 둔다.
+
+| 계층 | 무엇을 하는가 | 근거 |
+| --- | --- | --- |
+| `MassAgent.tick()` | `destination_id=BROADCAST_ID`로 만든다 | AIS 위치보고는 브로드캐스트다 (M.1371) |
+| 구동기 (`console_server._deliver_to_roc`) | 수신처를 ROC로 지정해 보낸다 | `sc_vde.position_report`는 addressed 전용 (`DR-PAYLOAD-016`) |
+| `vdeter_bridge.to_submit_request` | broadcast면 거부한다 | 계약 위반을 링크에 넘기지 않는다 |
+
+행위자는 **표준대로** 두고 프로파일 제약은 구동기가 흡수한다. 표준이 바뀌거나
+링크가 MASS-originated broadcast를 지원하면 구동기 한 줄만 되돌리면 된다.
+
+실수로 broadcast가 새어 나가는 일은 없다. `to_submit_request`가 막고, 그보다
+앞서 `Outbound`가 `ack_required=True`인 broadcast를 생성 단계에서 거부한다
+(M.2092-2 Table 40 — Type 92 본문에 broadcast 수신처를 넣을 수 없다).
+
+**재현되지 않는 것**: 주변 선박이 같은 보고를 함께 듣는 상황. 도청·상황인식
+공유를 다루는 실험은 이 제약 위에서 설계해야 한다.
 
 ---
 

@@ -80,6 +80,17 @@ COG_MODULO = 3600          # 0..3599
 SOG_MAX = 1022             # 102.2 knots or higher
 TRUE_HEADING_MODULO = 360  # 0..359
 
+# 쓸 수 있는 Navigation Status (ITU-R M.1371 Table 45).
+#
+# 9·10·13은 예약값이다(9=HSC, 10=WIG 장래 배정분, 13=예약). 14는 AIS-SART·MOB·
+# EPIRB의 능동 신호, 15는 undefined(기본값)로 둘 다 쓸 수 있다.
+ALLOWED_NAVIGATION_STATUSES = frozenset(
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15}
+)
+
+# Maneuver Indicator (M.1371) — 0=not available, 1=no special, 2=special. 3은 예약.
+ALLOWED_MANEUVER_INDICATORS = frozenset({0, 1, 2})
+
 # Autonomy Mode - 본 프로젝트 정의. 표준 근거 없음.
 # 값은 docs/mass_roc_background.md 2.5의 상태 모델과 맞춘다.
 AUTONOMY_UNKNOWN = 0
@@ -175,6 +186,38 @@ def from_measurements(
         raim=raim,
         autonomy_mode=autonomy_mode,
     )
+
+
+# 필드가 전선에 실을 수 있는 값인지 본다. 위반이면 사유 문자열, 아니면 None.
+#
+# 승인된 SC-VDE codec이 보는 canonical raw 허용 집합과 같은 규칙이다
+# (VDETER `sc_vde_position_report.py` `_validate_position_fields`).
+#
+# 관측만 하는 쪽에도 필요하다. 위도 raw 60,000,000은 100도가 되어 해도에 그려지고,
+# 그 해도가 육상 운영자의 상황 인식 수단이다. ROT·SOG·Position Accuracy·
+# Timestamp·RAIM은 부호화 폭이 곧 상한이라 모든 raw 값이 유효하므로 보지 않는다.
+def canonical_violation(message: PositionReport) -> str | None:
+    if message.navigation_status not in ALLOWED_NAVIGATION_STATUSES:
+        return f"Navigation Status {message.navigation_status} (9·10·13은 예약)"
+    if not coordinates.longitude_raw_ok(message.longitude):
+        return f"Longitude raw {message.longitude} (범위 밖)"
+    if not coordinates.latitude_raw_ok(message.latitude):
+        return f"Latitude raw {message.latitude} (범위 밖)"
+    if message.cog > COG_NOT_AVAILABLE:
+        return f"COG {message.cog} (0..{COG_MODULO - 1} 또는 {COG_NOT_AVAILABLE}(N/A))"
+    if (
+        message.true_heading > TRUE_HEADING_MODULO - 1
+        and message.true_heading != TRUE_HEADING_NOT_AVAILABLE
+    ):
+        return (
+            f"True Heading {message.true_heading} "
+            f"(0..{TRUE_HEADING_MODULO - 1} 또는 {TRUE_HEADING_NOT_AVAILABLE}(N/A))"
+        )
+    if message.maneuver_indicator not in ALLOWED_MANEUVER_INDICATORS:
+        return f"Maneuver Indicator {message.maneuver_indicator} (3은 예약)"
+    if message.autonomy_mode not in AUTONOMY_MODE_NAMES:
+        return f"Autonomy Mode {message.autonomy_mode} (4..7은 예약)"
+    return None
 
 
 # 본문 bit를 writer에 이어 붙인다. 봉투(VPFI/Message ID)는 codec이 담당한다.

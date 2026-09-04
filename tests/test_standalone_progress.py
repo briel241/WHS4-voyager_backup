@@ -1,0 +1,418 @@
+"""진행 표시·시나리오 추적(presentation) 시험 — 판정 무관, 표준 라이브러리.
+
+필수 시험(사용자 지정 12항): TTY 같은 줄 갱신, 20칸 유니코드 바, ASCII
+fallback, non-TTY 줄 로그(CR·ANSI 없음), 단계 변경/30초 heartbeat, 진행률
+후퇴 없음, estimated 표기, waiting, exact에는 estimated 없음, 시나리오 구간
+퍼센트 바 없음, run all [n/4], transfer·ACK 출력, 실패 계층/reason/evidence,
+secret 미출력, 표시 on/off와 무관한 동일 판정.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
+from apps.standalone import progress as pg  # noqa: E402
+
+
+class Clock:
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class TtyStream(io.StringIO):
+    encoding = "utf-8"
+
+    def isatty(self):
+        return True
+
+    def fileno(self):
+        raise OSError("no fileno")
+
+
+def _reporter(*, tty, unicode=True, sink=None, clock=None, evidence=None):
+    clock = clock or Clock()
+    stream = TtyStream() if tty else io.StringIO()
+    reporter = pg.ProgressReporter(sink, stream=stream, tty=tty,
+                                   unicode=unicode, scope="BRINGUP",
+                                   clock=clock, wallclock=lambda: 1_800_000_000,
+                                   evidence_log=evidence, ticker=False)
+    return reporter, stream, clock
+
+
+def test_bar_is_exactly_twenty_cells_unicode_and_ascii():
+    for fraction, filled in ((0.0, 0), (0.48, 10), (0.7, 14), (1.0, 20)):
+        bar = pg.render_bar(fraction, unicode=True)
+        assert bar[0] == "[" and bar[-1] == "]" and len(bar) == 22
+        assert bar.count("█") == filled and bar.count("░") == 20 - filled
+        ascii_bar = pg.render_bar(fraction, unicode=False)
+        assert ascii_bar.count("#") == filled and ascii_bar.count("-") == 20 - filled
+        assert "█" not in ascii_bar and "░" not in ascii_bar
+
+
+def test_tty_updates_same_line_and_finalizes_on_phase_change():
+    reporter, stream, clock = _reporter(tty=True)
+    reporter.phase("Endpoint startup", mode=pg.MODE_EXACT, fraction=0.0, ready="0/3")
+    reporter.update(fraction=2 / 3, ready="2/3")
+    text = stream.getvalue()
+    assert "\r" in text and "\n" not in text          # 같은 줄 덮어쓰기
+    assert "\x1b" not in text                          # ANSI 없음
+    assert "ready=2/3" in text and " 66%" in text and "estimated" not in text
+    reporter.phase("Host-time acquisition", mode=pg.MODE_WAITING, hold_fraction=0.2)
+    text = stream.getvalue()
+    assert text.count("\n") == 1                       # 이전 줄 확정
+    finalized = text.split("\n")[0].split("\r")[-1]
+    assert "Endpoint startup" in finalized and " 66%" in finalized
+    last = text.split("\n")[-1]
+    assert "waiting" in last and "%" not in last.split("]")[1].split("Host")[0]
+    reporter.finish("FAILED")
+    assert "FAILED" in stream.getvalue().split("\n")[-2]
+    reporter.close()
+
+
+def test_ascii_fallback_when_stream_cannot_encode_unicode():
+    class LatinStream(io.StringIO):
+        encoding = "latin-1"
+
+        def isatty(self):
+            return True
+
+    stream = LatinStream()
+    reporter = pg.ProgressReporter(None, stream=stream, tty=True, ticker=False)
+    assert reporter.unicode is False
+    reporter.phase("x", mode=pg.MODE_ESTIMATED, fraction=0.48)
+    assert "[##########----------]" in stream.getvalue()
+    assert "48% estimated" in stream.getvalue()
+    reporter.close()
+
+
+def test_non_tty_writes_plain_lines_without_cr_or_ansi_and_heartbeats():
+    lines = []
+    reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+    reporter.phase("Host-time acquisition", mode=pg.MODE_WAITING, endpoint="MASS-B")
+    assert lines
+    first = lines[-1]
+    assert first[4] == "-" and first.endswith("Z") is False and "T" in first[:20]
+    assert "[BRINGUP] waiting Host-time acquisition endpoint=MASS-B elapsed=00:00" in first
+    assert "\r" not in first and "\x1b" not in first
+    # 같은 값 반복은 억제된다.
+    reporter.update(endpoint="MASS-B")
+    reporter.tick()
+    assert len(lines) == 1
+    # 30초 무이벤트 → heartbeat 줄(경과시간 갱신).
+    clock.advance(31)
+    reporter.tick()
+    assert len(lines) == 2 and "elapsed=00:31" in lines[-1] and "heartbeat=1" in lines[-1]
+    # 의미 있는 변화(관측값) → 새 줄 (최소 간격 뒤).
+    clock.advance(6)
+    reporter.update(observations=184)
+    assert len(lines) == 3 and "observations=184" in lines[-1]
+    # 단계 변경 → 새 줄, 퍼센트·estimated 표기.
+    reporter.phase("RF-time PRE validation", mode=pg.MODE_ESTIMATED, fraction=0.48)
+    assert "48% estimated RF-time PRE validation" in lines[-1]
+    assert stream.getvalue() == ""  # non-TTY는 stream에 바를 그리지 않는다
+    reporter.close()
+
+
+def test_percent_never_goes_backwards_and_waiting_holds():
+    reporter, stream, clock = _reporter(tty=True)
+    reporter.phase("A", mode=pg.MODE_ESTIMATED, fraction=0.5)
+    reporter.update(fraction=0.3)                 # 뒤로 가려는 값
+    assert " 50% estimated" in stream.getvalue().split("\r")[-1]
+    reporter.phase("B", mode=pg.MODE_WAITING, hold_fraction=0.1)
+    reporter.update(events=5)
+    last = stream.getvalue().split("\r")[-1]
+    assert "waiting" in last and "events=5" in last
+    reporter.finish("done")
+    reporter.close()
+
+
+def test_exact_has_no_estimated_and_estimated_is_marked():
+    assert pg.status_column(pg.MODE_EXACT, 70).strip() == "70%"
+    assert pg.status_column(pg.MODE_ESTIMATED, 48).strip() == "48% estimated"
+    assert pg.status_column(pg.MODE_WAITING, None).strip() == "waiting"
+    assert pg.status_column(pg.MODE_EXACT, 100).strip() == "100%"
+    assert len(pg.status_column(pg.MODE_ESTIMATED, 5)) == pg.STATUS_COLUMN_WIDTH
+
+
+def test_evidence_log_mirrors_progress_and_scrubs_secrets():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "presentation" / "progress.log"
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append,
+                                            evidence=log)
+        reporter.phase("Preflight", mode=pg.MODE_EXACT, fraction=0.0)
+        reporter.log("key material -----BEGIN EC PRIVATE KEY----- MIGH... "
+                     "password=hunter2 end")
+        reporter.finish("done")
+        text = log.read_text("utf-8")
+        assert "Preflight" in text and "[BRINGUP]" in text
+        joined = "\n".join(lines)
+        assert "BEGIN EC PRIVATE KEY" not in joined and "hunter2" not in joined
+        assert "<redacted>" in joined
+        reporter.close()
+
+
+def _console_lines():
+    return [
+        "[coordinator] MASS-A 연결됨", "[coordinator] MASS-B 연결됨",
+        "[coordinator] ROC 연결됨",
+        "[coordinator] prepare/configure/arm_rx COMPLETED",
+        "[guard:MASS-ROC-SESSION] progress #20 terminal:acquire_host_time",
+        "[guard:MASS-ROC-SESSION] progress #21 terminal:acquire_host_time",
+        "[coordinator] acquire_host_time COMPLETED",
+        "[guard:MASS-ROC-SESSION] progress #64 terminal:validate_rf_time",
+        "[coordinator] validate_rf_time PRE COMPLETED",
+        "[guard:MASS-ROC-SESSION] progress #95 terminal:prepare_active_bridge",
+        "[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED",
+        "[guard:MASS-ROC-SESSION] progress #133 terminal:open_service_admission",
+        "[coordinator] publish_service_start COMPLETED — RUNNING",
+    ]
+
+
+def test_bringup_tracker_phases_exact_waiting_estimated_ready():
+    with tempfile.TemporaryDirectory() as tmp:
+        console = Path(tmp) / "coordinator-console.log"
+        console.write_text("", encoding="utf-8")
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+        tracker = pg.BringupTracker(reporter, console_log=console, clock=clock)
+        assert "Endpoint startup" in lines[-1] and "ready=0/3" in lines[-1]
+
+        def feed(n):
+            with open(console, "a", encoding="utf-8") as handle:
+                for line in _console_lines()[n:n + 1]:
+                    handle.write(line + "\n")
+            clock.advance(6)
+            tracker.poll()
+
+        feed(0); feed(1)
+        assert "ready=2/3" in lines[-1] and "estimated" not in lines[-1]
+        feed(2); feed(3)
+        assert "waiting Host-time acquisition" in lines[-1]
+        feed(4); feed(5)
+        assert "events=2" in lines[-1] and "waiting" in lines[-1]
+        feed(6)
+        assert "RF-time PRE validation" in lines[-1] and "estimated" in lines[-1]
+        clock.advance(200); tracker.poll()
+        pre = [l for l in lines if "RF-time PRE" in l][-1]
+        assert "estimated" in pre
+        feed(8); feed(9); feed(10); feed(11); feed(12)
+        tracker.ready()
+        assert "Service session READY" in lines[-1] and "100%" in lines[-1]
+        assert "total=" in lines[-1]
+        # 퍼센트가 뒤로 간 줄이 없다.
+        percents = []
+        for line in lines:
+            token = line.split("] ")[1].split(" ")[0] if "] " in line else ""
+            if token.endswith("%"):
+                percents.append(int(token[:-1]))
+        assert percents == sorted(percents)
+        reporter.close()
+
+
+def test_bringup_failure_lines_have_layer_reason_and_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        run_root = Path(tmp) / "run-x"
+        (run_root / "evidence").mkdir(parents=True)
+        (run_root / "evidence" / "MASS-B-runtime.json").write_text(json.dumps({
+            "endpoint_id": "MASS-B", "operations_evidence": [
+                {"kind": "host_time_restarts", "restarts": [
+                    {"discarded": 148, "reason": "bracket width"},
+                    {"discarded": 77, "reason": "bracket width"}]}]}))
+        detail = pg.host_time_detail_from_evidence(run_root)
+        assert detail == {"endpoint": "MASS-B", "restart_count": 2,
+                          "observations_discarded": 225, "reason": "bracket width"}
+        lines = pg.bringup_failure_lines(
+            phase_label="Host-time acquisition",
+            finalize_summary={"closed": {"cleanup": {"pass": True},
+                                         "duration_s": 600.0},
+                              "residual_processes": []},
+            classification={"transient_host_time": True, "reasons": []},
+            console_text="MASS-B host affine fit FAIL", run_root=run_root,
+            attempt=1, max_attempts=2, declared_serials=["a", "b", "c"],
+            usb_observed={"a": {}, "b": {}, "c": {}}, host_time_detail=detail)
+        joined = "\n".join(lines)
+        for needle in ("layer=ORCHESTRATION", "endpoint=MASS-B",
+                       "reason=HOST_AFFINE_FIT_FAILED",
+                       "observations_discarded=225", "restart_count=2",
+                       "elapsed=10:00", "cleanup=PASS", "residual_processes=0",
+                       "b210_rediscovered=3/3", "retry_eligible=true",
+                       "attempt=1/2", "evidence=%s" % run_root):
+            assert needle in joined, needle
+
+
+def _service_event(**fields):
+    base = {"t_mono": 100.0, "event_type": "TRANSFER_STATE_CHANGED",
+            "transfer_id": None, "transfer_state": None, "error_code": None}
+    base.update(fields)
+    return json.dumps(base, ensure_ascii=False) + "\n"
+
+
+def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
+    with tempfile.TemporaryDirectory() as tmp:
+        run_root = Path(tmp) / "run-1"
+        events = run_root / "evidence" / "service_events"
+        events.mkdir(parents=True)
+        for ep in ("MASS-A", "MASS-B", "ROC"):
+            (events / f"{ep}.jsonl").write_text("", encoding="utf-8")
+        lines = []
+        tracer = pg.ScenarioTracer(lines.append, run_root=run_root,
+                                   clock=Clock(), wallclock=lambda: 1_800_000_000)
+        tracer.start_workload(index=2, total=4, scenario_id="SC-VDE-006",
+                              certificate_case="normal",
+                              workload_id="run-1-sc006-002", run_id="run-1")
+        assert lines[0] == "[2/4] SC-VDE-006"
+        tid = "8f73c821-0000-4000-8000-000000000001"
+        with open(events / "ROC.jsonl", "a", encoding="utf-8") as h:
+            h.write(_service_event(transfer_id=tid, transfer_state="QUEUED", t_mono=100.0))
+            h.write(_service_event(transfer_id=tid, transfer_state="TRANSMITTING", t_mono=103.5))
+            h.write(_service_event(transfer_id=tid, transfer_state="WAITING_ACK", t_mono=104.0))
+        with open(events / "MASS-A.jsonl", "a", encoding="utf-8") as h:
+            h.write(_service_event(event_type="DATA_RECEIVED", t_mono=104.2,
+                                   payload_sha256="9b28d774" + "0" * 56,
+                                   payload_len=29,
+                                   payload_format="sc_vde.route_control.command",
+                                   source=222222222, original_source=222222222,
+                                   original_destination=111111111))
+        with open(events / "ROC.jsonl", "a", encoding="utf-8") as h:
+            h.write(_service_event(event_type="DATA_RECEIVED", t_mono=110.0,
+                                   payload_sha256="2b657b49" + "0" * 56,
+                                   payload_len=3,
+                                   payload_format="sc_vde.route_control.ack",
+                                   source=111111111, original_source=111111111,
+                                   original_destination=222222222))
+            h.write(_service_event(transfer_id=tid, transfer_state="COMPLETED", t_mono=112.0))
+        tracer.poll()
+        joined = "\n".join(lines)
+        assert "[TX] QUEUED  endpoint=ROC  transfer_id=8f73c821…" in joined
+        assert "[TX] TRANSMITTING" in joined and "since_queued=3.500s derived=true" in joined
+        assert ("[RX] DATA_RECEIVED  endpoint=MASS-A  payload_format=sc_vde.route_control.command"
+                "  application_bytes=29  payload_sha256=9b28d7740000…  src=ROC(222222222)"
+                "  dst=MASS-A(111111111)") in joined
+        assert "[TX] COMPLETED" in joined and "ack_correlation=derived" in joined
+        assert "ack_latency=6.000s" in joined
+        # 종료 시 workload trace·result 상세.
+        tracer.on_trace_row({"event": "submit", "step": "006-steering-command",
+                             "t_utc": "2026-09-05T12:25:14Z", "transfer_id": tid,
+                             "sender": "ROC", "receiver": "MASS-A",
+                             "source_station": 222222222,
+                             "destination_station": 111111111,
+                             "payload_format": "sc_vde.route_control.command",
+                             "payload_len": 29, "payload_sha256": "9b28d774" + "0" * 56,
+                             "ack_required": True})
+        tracer.on_trace_row({"event": "scenario_result", "status": "PASS",
+                             "steps": [{"name": "006-steering-transfer", "status": "PASS",
+                                        "state": "COMPLETED", "transfer_id": tid,
+                                        "received_checks": {"byte_exact": True,
+                                                            "payload_sha256": True}}],
+                             "counters": {"duplicates": 0, "mismatched_ack": 0,
+                                          "transfers_completed": 1,
+                                          "transfers_failed": 0,
+                                          "wrong_destination": 0}})
+        tracer.finish_workload({"status": "PASS", "wall_clock_s": 75.2,
+                                "quiescence": {"pass": True, "non_terminal_transfers": 0,
+                                               "transfers_observed": 5}},
+                               evidence_dir=run_root / "workloads" / "x")
+        joined = "\n".join(lines)
+        assert "[STEP 1/1] 006-steering-transfer  PASS  transfer_id=8f73c821…  state=COMPLETED  byte_exact=true" in joined
+        assert "counters: transfers_completed=1" in joined
+        assert "quiescence=PASS" in joined and "evidence=" in joined
+        # 시나리오 구간에는 퍼센트 바가 없다.
+        assert "%" not in joined.replace("100%", "")  # 퍼센트 문자 자체가 없다
+        assert "█" not in joined and "[#" not in joined
+
+
+def test_scenario_tracer_failure_block_has_layer_reason_and_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        run_root = Path(tmp) / "run-2"
+        (run_root / "evidence" / "service_events").mkdir(parents=True)
+        lines = []
+        tracer = pg.ScenarioTracer(lines.append, run_root=run_root, clock=Clock())
+        tracer.start_workload(index=1, total=1, scenario_id="SC-VDE-005",
+                              certificate_case="normal", workload_id="w1",
+                              run_id="run-2")
+        assert lines[0] == "SC-VDE-005"   # 단일 시나리오는 [n/N] 없음
+        tracer.finish_workload({
+            "status": "FAIL", "wall_clock_s": 12.0,
+            "quiescence": {"pass": False, "non_terminal_transfers": 1},
+            "scenario": {"error": "ack timeout", "results": {"SC-VDE-005": {
+                "result": {"status": "FAIL", "reason": "ack timeout",
+                           "steps": [{"name": "005-command-transfer",
+                                      "status": "FAIL", "state": "WAITING_ACK",
+                                      "transfer_id": "b3ecf409-1"}]}}}}},
+            evidence_dir=run_root / "workloads" / "w1")
+        joined = "\n".join(lines)
+        assert "[FAIL] layer=MAC" in joined
+        assert "error=ack timeout" in joined
+        assert "failed_step=005-command-transfer state=WAITING_ACK" in joined
+        assert "evidence=" in joined and "elapsed_since_workload_start" in joined
+
+
+def test_qualify_progress_exact_faults_and_pytest_percent():
+    with tempfile.TemporaryDirectory() as tmp:
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+        qp = pg.QualifyProgress(reporter, clock=clock)
+        run_root = Path(tmp) / "rr-p3"
+        run_root.mkdir()
+        console = run_root / "coordinator-console.log"
+        console.write_text("", encoding="utf-8")
+        qp.phase_started("rr-p3-fault", 4, 4, run_root)
+        assert "RR-P3-FAULT 4/4" in lines[-1] and "estimated" in lines[-1]
+        with open(console, "a", encoding="utf-8") as h:
+            h.write("[coordinator] fault stale-generation-command: PASS {}\n")
+        clock.advance(6); qp.tick()
+        assert "subcases=1/6" in lines[-1] and "estimated" not in lines[-1]
+        with open(console, "a", encoding="utf-8") as h:
+            h.write("[coordinator] fault worker-kill: PASS {}\n")
+        clock.advance(6); qp.tick()
+        assert "subcases=2/6" in lines[-1] and "estimated" not in lines[-1]
+        # 5초 안에 연속 변화가 오면 마지막 상태가 간격 뒤 tick에서 나온다.
+        with open(console, "a", encoding="utf-8") as h:
+            h.write("[coordinator] fault coordinator-ipc-loss: PASS {}\n")
+            h.write("[coordinator] fault restart-generation-fencing: PASS {}\n")
+        clock.advance(6); qp.tick()
+        clock.advance(6); qp.tick()
+        assert "subcases=4/6" in lines[-1]
+        qp.phase_finished("rr-p3-fault", "PASS")
+        assert "result=PASS" in lines[-1]
+        # software suite: pytest -q 퍼센트 → exact.
+        log = Path(tmp) / "unit-contract.log"
+        log.write_text("", encoding="utf-8")
+        qp.bundle_started()
+        qp.suite_started("unit-contract.log", log)
+        assert "Software suite 1/2" in lines[-1]
+        with open(log, "a", encoding="utf-8") as h:
+            h.write("........ [ 62%]\n")
+        clock.advance(6); qp.tick()
+        assert "tests=62%" in lines[-1] and "estimated" not in lines[-1]
+        qp.suite_finished("unit-contract.log", True)
+        assert "tests=100%" in lines[-1]
+        reporter.close()
+
+
+def test_progress_toggle_does_not_change_outcome_of_run_flow():
+    """표시 on/off와 무관하게 판정·evidence가 동일 — run 흐름 시험은
+    test_standalone_run_cli.test_progress_toggle_keeps_judgement_and_evidence_identical
+    이 progress on/off 두 경로로 실행한다."""
+    source = (Path(_REPO) / "tests" / "test_standalone_run_cli.py").read_text("utf-8")
+    assert "def test_progress_toggle_keeps_judgement_and_evidence_identical" in source

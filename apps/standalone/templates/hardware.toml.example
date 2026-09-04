@@ -1,0 +1,35 @@
+# VDETER standalone — 사용자 하드웨어 선언 (hardware.toml)
+#
+# 이 파일은 사용자가 승인한 환경 "의도"만 담는다. USB 포트 경로·실측 속도
+# 같은 관측값은 여기 쓰지 않는다 — qualification 산물에 자동 기록된다.
+#
+# `vdeter setup`이 장비 탐지로 이 파일의 초안을 만들 수 있지만,
+# [wiring].approved = true 는 사용자가 직접 기록해야 한다. 승인 전에는
+# qualify/run이 시작을 거부한다.
+
+schema_version = 1
+
+# 검사 프로파일: "pi" (Raspberry Pi — vcgencmd 스로틀 검사 필수)
+#             | "generic-pc" (일반 Ubuntu PC — governor/thermal 기록)
+platform_profile = "pi"
+
+[endpoints.MASS-A]
+# 이 serial의 B210이 MASS-A(SHIP) 역할을 맡는다. USB super-speed 포트 필요.
+serial = "34D03DD"
+
+[endpoints.MASS-B]
+# MASS-B(SHIP)는 외부 전원 구동. USB high-speed(480M) 연결.
+serial = "3515425"
+# 외부 전원 물리 자산 ID — 사용자만 제공할 수 있다 (전기적 probe 불가).
+external_power_asset = "AT2024T"
+
+[endpoints.ROC]
+# ROC(CONTROL). USB super-speed 포트 필요.
+serial = "34D03E8"
+
+[wiring]
+# 승인된 C1~C6 배선 profile 식별자. 배선 실물 정합은 bring-up의 RF-time
+# 경로 검증이 fail-closed로 확인한다 (틀리면 RF 본 실행 전 실패).
+profile = "C1-C6-STANDARD"
+# 사용자 승인: "현재 물리 배선이 위 선언대로 연결되어 있다".
+approved = false
