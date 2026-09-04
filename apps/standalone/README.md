@@ -228,6 +228,12 @@ canonical JSON으로 로컬 생성한다.
 
 - RR-P3-soak(RR-008)은 범위 제외. 어느 단계든 실패 시 candidate 미승격,
   기존 active reference 유지.
+- **phase별 run_mode는 명시 고정**(`qualify_cmd.PHASE_RUN_MODE`, 2026-09-04
+  승인): rr-p0 = RF_OFF_QUALIFICATION, **rr-p1 = GAIN_CALIBRATION**(gain
+  입력 없음, 새 gain artifact 산출), rr-p2-17/19·rr-p3-fault = OPERATIONAL
+  (rr-p1 산출 gain 결속). 1차 RF qualification이 rr-p1을 template 기본값
+  (RF_OFF)으로 생성해 `calibrate_rf PREPARE REJECTED`로 실패한 뒤 고정했다
+  — endpoint runtime은 GAIN_CALIBRATION에서만 gain 탐색을 수락한다.
 - final builder 판정 필수 TC = RR-001~005 + RR-007 (`stage7_rr_final_builder.
   REQUIRED_TCS` 실측). 사다리는 이를 정확히 산출하며 RR-006은 기록 전용.
 - gain 재측정 결과는 기록·비교한다. ROC lane1 75dB가 지속되면 기존 관찰·

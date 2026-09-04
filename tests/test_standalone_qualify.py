@@ -337,6 +337,91 @@ def test_qualify_end_to_end_promotes_real_validated_reference():
         assert final["final_status"] == "RESEARCH_READY"
 
 
+def test_phase_run_mode_mapping_is_fixed():
+    """phase별 run_mode 매핑이 승인값과 정확히 일치한다 — 달라지면 실패.
+
+    1차 RF qualification 실패 원인(rr-p1 RF_OFF → calibrate_rf REJECTED)의
+    재발 방지 계약 (2026-09-04 사용자 승인 매핑)."""
+    assert qualify_cmd.PHASE_RUN_MODE == {
+        "rr-p0": "RF_OFF_QUALIFICATION",
+        "rr-p1": "GAIN_CALIBRATION",
+        "rr-p2-17": "OPERATIONAL",
+        "rr-p2-19": "OPERATIONAL",
+        "rr-p3-fault": "OPERATIONAL",
+    }
+    assert set(qualify_cmd.PHASE_RUN_MODE) == set(qualify_cmd.LADDER_PHASES)
+    assert qualify_cmd.GAIN_CONSUMING_PHASES == (
+        "rr-p2-17", "rr-p2-19", "rr-p3-fault")
+    assert all(qualify_cmd.PHASE_RUN_MODE[p] == "OPERATIONAL"
+               for p in qualify_cmd.GAIN_CONSUMING_PHASES)
+    # runtime 계약과의 정합: 세 값은 loader가 허용하는 RUN_MODES 안이다.
+    from vdeter.stage7.configuration import RUN_MODES
+    assert set(qualify_cmd.PHASE_RUN_MODE.values()) <= set(RUN_MODES)
+
+
+def test_rr_p1_gain_calibration_config_passes_real_loader():
+    """rr-p1 + GAIN_CALIBRATION + gain 입력 없음 → 실제 loader PASS,
+    rr-p0는 RF_OFF 유지."""
+    from apps.standalone import local_config
+    hardware = {
+        "platform_profile": "pi",
+        "endpoints": {"MASS-A": {"serial": "34D03DD"},
+                      "MASS-B": {"serial": "3515425",
+                                 "external_power_asset": "AT2024T"},
+                      "ROC": {"serial": "34D03E8"}},
+        "wiring": {"profile": "C1-C6-STANDARD", "approved": True}}
+    for phase, expected in (("rr-p1", "GAIN_CALIBRATION"),
+                            ("rr-p0", "RF_OFF_QUALIFICATION")):
+        with tempfile.TemporaryDirectory() as tmp:
+            generated = local_config.generate_run_configs(
+                repo_root=_REPO, run_root=Path(tmp) / "r", run_id="r",
+                rr_phase=phase, hardware=hardware, binding=BINDING,
+                deployment_manifest_relpath="var/deploy-manifest.json",
+                deployment_manifest_sha256="cd" * 32, deploy_verified=True,
+                run_mode=qualify_cmd.PHASE_RUN_MODE[phase], gain_input=None,
+                environment_manifest=dict(ENV_MANIFEST))
+            for endpoint in ("mass-a", "mass-b", "roc"):
+                text = (Path(generated["configs_dir"]) / "endpoints"
+                        / f"{endpoint}.toml").read_text("utf-8")
+                assert f'run_mode = "{expected}"' in text, (phase, endpoint)
+
+
+def test_qualify_ladder_applies_run_modes_and_gain_flow():
+    """실제 사다리에서 각 phase의 resolved config run_mode와 gain 입력 흐름:
+    p0 RF_OFF / p1 GAIN_CALIBRATION(gain 입력 없음) / p2·p3 OPERATIONAL이
+    rr-p1 산출 gain_artifact_input.json을 결속한다."""
+    contexts = []
+
+    def recording_runner(context):
+        contexts.append(dict(context))
+        return fabricating_phase_runner(context)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp, phase_runner=recording_runner)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        by_phase = {c["phase"]: c for c in contexts}
+        assert list(by_phase) == list(qualify_cmd.LADDER_PHASES)
+        for phase, expected in qualify_cmd.PHASE_RUN_MODE.items():
+            text = (Path(by_phase[phase]["configs_dir"]) / "endpoints"
+                    / "mass-a.toml").read_text("utf-8")
+            assert f'run_mode = "{expected}"' in text, phase
+        # p0·p1은 gain 입력 없음; p2/p3는 rr-p1 evidence의 gain 입력을 쓴다.
+        assert by_phase["rr-p0"]["gain_artifact"] is None
+        assert by_phase["rr-p1"]["gain_artifact"] is None
+        p1_gain = (Path(by_phase["rr-p1"]["run_root"]) / "evidence"
+                   / "gain_artifact_input.json")
+        assert p1_gain.is_file()
+        for phase in qualify_cmd.GAIN_CONSUMING_PHASES:
+            assert Path(by_phase[phase]["gain_artifact"]) == p1_gain, phase
+            p1_values = json.loads(p1_gain.read_bytes())[
+                "endpoint_common_rx_gain_db"]
+            text = (Path(by_phase[phase]["configs_dir"]) / "endpoints"
+                    / "mass-a.toml").read_text("utf-8")
+            assert 'run_mode = "OPERATIONAL"' in text
+            assert p1_values  # 결속된 gain은 rr-p1 산출값이다
+
+
 def test_qualify_phase_failure_preserves_active_pointer():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)

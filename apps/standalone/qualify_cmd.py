@@ -58,6 +58,29 @@ PHASE_EXPECTED_TCS = {
     "rr-p3-fault": ("TC-STAGE7-RR-007",),
 }
 
+#: phase별 resolved config run_mode — **명시 고정** (2026-09-04 사용자 승인).
+#:
+#: 1차 RF qualification(ladder qual-20260904-053720)이 RR-P1에서
+#: `calibrate_rf PREPARE REJECTED`로 실패한 원인: rr-p1을 template 기본값
+#: (RF_OFF_QUALIFICATION)으로 생성했는데 endpoint runtime의
+#: `pi_runtime.check_calibrate`는 탐색 모드 gain 측정을 run_mode ==
+#: GAIN_CALIBRATION에서만 수락한다 (Phase F rr-p1 evidence도 전부
+#: GAIN_CALIBRATION). RF·장비·배선 문제가 아닌 orchestrator 결함이었다.
+#:
+#:   rr-p0        RF_OFF_QUALIFICATION  — RF-off 생애주기, TX 0
+#:   rr-p1        GAIN_CALIBRATION      — gain 입력 없음; 새 gain artifact 산출
+#:   rr-p2-17/19  OPERATIONAL           — rr-p1 산출 gain을 결속(loader 계약)
+#:   rr-p3-fault  OPERATIONAL           — 동일
+PHASE_RUN_MODE = {
+    "rr-p0": "RF_OFF_QUALIFICATION",
+    "rr-p1": "GAIN_CALIBRATION",
+    "rr-p2-17": "OPERATIONAL",
+    "rr-p2-19": "OPERATIONAL",
+    "rr-p3-fault": "OPERATIONAL",
+}
+#: rr-p1이 산출한 gain artifact를 결속하는 phase (= OPERATIONAL phase).
+GAIN_CONSUMING_PHASES = ("rr-p2-17", "rr-p2-19", "rr-p3-fault")
+
 #: coordinator deadline + 회수·정리 여유.
 PHASE_TIMEOUT_MARGIN_S = 900
 
@@ -654,8 +677,11 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
             run_id, run_root = allocate_run_dir(paths.runs_dir, run_id)
             phase_run_ids[phase] = run_id
             gain_input = None
-            run_mode = None  # p0/p1: template 기본(RF_OFF_QUALIFICATION)
-            if phase in ("rr-p2-17", "rr-p2-19", "rr-p3-fault"):
+            # run_mode는 PHASE_RUN_MODE로 명시 고정한다 — template 기본값에
+            # 기대지 않는다 (1차 실패 원인). rr-p1은 gain 입력 없이
+            # GAIN_CALIBRATION으로 새 gain artifact를 산출한다.
+            run_mode = PHASE_RUN_MODE[phase]
+            if phase in GAIN_CONSUMING_PHASES:
                 if gain_artifact_path is None:
                     raise QualifyError(
                         f"{phase}: gain artifact가 없습니다 — rr-p1이 "
@@ -664,7 +690,7 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                     Path(gain_artifact_path).read_bytes())
                 # loader 계약: gain artifact 결속은 OPERATIONAL run에서만
                 # 허용된다 (RF-off/gain-calibration run 결속은 거부).
-                run_mode = "OPERATIONAL"
+                assert run_mode == "OPERATIONAL", phase
             generated = local_config.generate_run_configs(
                 repo_root=repo_root, run_root=run_root, run_id=run_id,
                 rr_phase=phase, hardware=hardware, binding=binding,
