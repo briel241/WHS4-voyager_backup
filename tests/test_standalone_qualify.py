@@ -878,18 +878,24 @@ def test_qualify_refuses_identity_mismatch_and_missing_manifest():
 
 # ------------------------------- evidence 재사용 (RF 재실행 없이 승격, 3영역 결속)
 
-def _seed_prior_reuse(paths, tmp, prior_ladder_id, *, mutate):
+def _seed_prior_reuse(paths, tmp, prior_ladder_id, *,
+                      mutate_manifest=None, mutate_symbols=None):
     """이전 RF evidence(4 phase)+resolved-config(prior manifest 결속)를 심고,
-    현재 manifest에서 mutate로 파생한 '이전 manifest'를 파일로 쓴다.
-    반환 (prior_manifest_path, prior_manifest_sha256)."""
-    current, _ = deploy_manifest.load_manifest(
-        paths.var_dir / "deploy-manifest.json")
-    prior = copy.deepcopy(current)
-    mutate(prior)
-    prior_path = Path(tmp) / f"prior-{prior_ladder_id}.json"
-    prior_path.write_bytes(json.dumps(
-        prior, ensure_ascii=True, sort_keys=True, indent=1).encode())
-    _, prior_sha = deploy_manifest.load_manifest(prior_path)
+    현재 배포에서 파생한 '이전 baseline'(manifest + RF-critical 심볼)을 파일로
+    쓴다. mutate_manifest는 파일 sha를, mutate_symbols는 RF 심볼 해시를 바꿔
+    '이전 대비 현재 변경'을 모델링한다. 반환 (baseline_path, prior_manifest_sha)."""
+    baseline = qualify_cmd.capture_reuse_baseline(
+        _REPO, paths.var_dir / "deploy-manifest.json")
+    if mutate_manifest:
+        mutate_manifest(baseline["deploy_manifest"])
+    baseline["deploy_manifest_sha256"] = deploy_manifest.manifest_sha256(
+        baseline["deploy_manifest"])
+    if mutate_symbols:
+        mutate_symbols(baseline["rf_critical_symbols"])
+    prior_sha = baseline["deploy_manifest_sha256"]
+    baseline_path = Path(tmp) / f"baseline-{prior_ladder_id}.json"
+    baseline_path.write_text(json.dumps(
+        baseline, ensure_ascii=True, sort_keys=True, indent=1), encoding="utf-8")
     for phase in qualify_cmd.LADDER_PHASES:
         run_id = f"{prior_ladder_id}-{phase}"
         run_root = paths.runs_dir / run_id
@@ -903,7 +909,7 @@ def _seed_prior_reuse(paths, tmp, prior_ladder_id, *, mutate):
                 'run_mode = "GAIN_CALIBRATION"\n'
                 f'deployment_manifest_sha256 = "{prior_sha}"\n',
                 encoding="utf-8")
-    return prior_path, prior_sha
+    return baseline_path, prior_sha
 
 
 def _fake_builder(status="RESEARCH_READY"):
@@ -918,11 +924,11 @@ def _fake_builder(status="RESEARCH_READY"):
     return module
 
 
-def _reuse(paths, tmp, prior_path, prior_ladder_id, **overrides):
+def _reuse(paths, tmp, baseline_path, prior_ladder_id, **overrides):
     binding_path = Path(tmp) / "standalone-binding.json"
     binding_path.write_text(json.dumps(BINDING), encoding="utf-8")
     kwargs = dict(
-        prior_ladder_id=prior_ladder_id, prior_manifest_path=prior_path,
+        prior_ladder_id=prior_ladder_id, prior_baseline_path=baseline_path,
         reason="governance bundle-scope fix (qualification tooling only)",
         hardware_path=Path(tmp) / "hardware.toml", repo_root=_REPO,
         binding_path=binding_path,
@@ -934,64 +940,148 @@ def _reuse(paths, tmp, prior_path, prior_ladder_id, **overrides):
     return qualify_cmd.run_qualify_reuse(paths, **kwargs)
 
 
-def _mutate_file_sha(target):
+def _set_file_sha(target, value="0" * 64):
     def mutate(manifest):
         hit = False
         for entry in manifest["files"]:
             if entry["path"] == target:
-                entry["sha256"] = "0" * 64
+                entry["sha256"] = value
                 hit = True
         assert hit, f"{target} manifest에 없음"
     return mutate
 
 
-def test_evidence_reuse_promotes_on_tooling_only_change():
+def _bump_rf_symbol(symbol):
+    def mutate(symbols):
+        symbols["apps/standalone/qualify_cmd.py"][symbol] = ["MUT", "MUT"]
+    return mutate
+
+
+def test_evidence_reuse_promotes_on_governance_deselect_only_change():
+    """governance deselect(=qualify_cmd tooling 부분)만 변경 → RF 재사용 허용."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        prior_path, prior_sha = _seed_prior_reuse(
+        baseline_path, prior_sha = _seed_prior_reuse(
             paths, tmp, "qual-PRIOR",
-            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
-        report = _reuse(paths, tmp, prior_path, "qual-PRIOR")
+            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
+        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
         assert report["status"] == "QUALIFIED"
         assert report["qualification_method"] == "evidence_reuse"
         ev = report["reuse_evaluation"]
         assert ev["eligible"] and ev["tooling_changed"]
-        assert ev["rf_identical"] and ev["operation_identical"]
-        assert report["rf_resolved_config_binding"]["pass"]
-        # 승격된 active reference에 3영역 manifest·method·사유가 기록된다.
+        assert ev["rf_files_identical"] and ev["rf_symbols_identical"]
+        assert ev["operation_identical"]
         active = qualify_cmd.load_active_reference(paths)
         assert active["qualification_method"] == "evidence_reuse"
         assert set(active["binding_domains"]) == {
             "rf_evidence", "operation", "qualification_tool"}
         assert active["binding_domains"]["rf_evidence"][
             "manifest_sha256"] == prior_sha
+        assert "rf_critical_symbols" in active["binding_domains"]["rf_evidence"]
         er = active["evidence_reuse"]
         assert er["reason"] and er["prior_ladder_id"] == "qual-PRIOR"
-        assert er["rf_identical"] and er["tooling_changed"]
+        assert er["rf_symbols_identical"]
 
 
-def test_evidence_reuse_refused_on_rf_core_change():
+def test_evidence_reuse_refused_on_rr_p1_run_mode_change():
+    """qualify_cmd의 RR-P1 run mode(PHASE_RUN_MODE) 변경 → RF 재사용 거부."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        prior_path, _ = _seed_prior_reuse(
+        baseline_path, _ = _seed_prior_reuse(
             paths, tmp, "qual-PRIOR",
-            mutate=_mutate_file_sha("VDETER/src/vdeter/stage7/pi_runtime.py"))
+            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"),
+            mutate_symbols=_bump_rf_symbol("PHASE_RUN_MODE"))
         try:
-            _reuse(paths, tmp, prior_path, "qual-PRIOR")
+            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            raise AssertionError("run mode 변경인데 재사용이 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "RF 심볼" in str(exc) or "핵심" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
+
+
+def test_evidence_reuse_refused_on_rf_core_file_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha(
+                "VDETER/src/vdeter/stage7/pi_runtime.py"))
+        try:
+            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
             raise AssertionError("rf 핵심 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "핵심" in str(exc) or "rf" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
+def test_evidence_reuse_refused_on_operation_change():
+    """operation 파일 변경 → 현 정책에서 재사용 거부(byte-identical만 허용)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha("apps/standalone/cli.py"))
+        try:
+            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            raise AssertionError("operation 변경인데 재사용이 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "operation" in str(exc) or "핵심" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
+
+
+def test_evidence_reuse_allows_qualification_test_file_change():
+    """qualification 시험 파일 변경 → RF 재실행 불요, software bundle 재실행 통과."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha(
+                "VDETER/tests/unit/test_multirate_phy.py"))
+        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        assert report["status"] == "QUALIFIED"
+        assert report["reuse_evaluation"]["tooling_changed"] is True
+        assert report["verification"]["software_ok"] is True
+
+
+def test_evidence_reuse_test_file_change_refused_when_bundle_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate_manifest=_set_file_sha(
+                "VDETER/tests/unit/test_multirate_phy.py"))
+        try:
+            _reuse(paths, tmp, baseline_path, "qual-PRIOR",
+                   suite_runner=lambda argv, **kw: Done(1))
+            raise AssertionError("bundle 실패인데 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "software" in str(exc) or "verification" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
+
+
+def test_evidence_reuse_doc_only_change_promotes():
+    """문서(.md)만 변경 → 자격 무영향, 재사용 승격."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        cur, _ = deploy_manifest.load_manifest(
+            paths.var_dir / "deploy-manifest.json")
+        md = next((e["path"] for e in cur["files"]
+                   if e["path"].endswith(".md")), None)
+        assert md, "배포에 .md 문서가 없다"
+        baseline_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR", mutate_manifest=_set_file_sha(md))
+        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        assert report["status"] == "QUALIFIED"
+        assert report["reuse_evaluation"]["test_doc_changed"] is True
+
+
 def test_evidence_reuse_refused_when_config_binding_mismatch():
     """RF resolved config가 이전 manifest에 결속되지 않으면 거부."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        prior_path, prior_sha = _seed_prior_reuse(
+        baseline_path, prior_sha = _seed_prior_reuse(
             paths, tmp, "qual-PRIOR",
-            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
-        # resolved config의 결속 sha를 엉뚱한 값으로 덮어써 mismatch 유발.
+            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
         for phase in qualify_cmd.LADDER_PHASES:
             cfg = (paths.runs_dir / f"qual-PRIOR-{phase}"
                    / "resolved-configs" / "endpoints")
@@ -1000,25 +1090,10 @@ def test_evidence_reuse_refused_when_config_binding_mismatch():
                     f'deployment_manifest_sha256 = "{"1" * 64}"\n',
                     encoding="utf-8")
         try:
-            _reuse(paths, tmp, prior_path, "qual-PRIOR")
+            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
             raise AssertionError("config 결속 불일치인데 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "결속" in str(exc)
-        assert qualify_cmd.load_active_reference(paths) is None
-
-
-def test_evidence_reuse_refused_when_bundle_software_fails():
-    with tempfile.TemporaryDirectory() as tmp:
-        paths = prepare_environment(tmp)
-        prior_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
-        try:
-            _reuse(paths, tmp, prior_path, "qual-PRIOR",
-                   suite_runner=lambda argv, **kw: Done(1))  # bundle 실패
-            raise AssertionError("bundle 실패인데 승격됐다")
-        except qualify_cmd.QualifyError as exc:
-            assert "software" in str(exc) or "verification" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 

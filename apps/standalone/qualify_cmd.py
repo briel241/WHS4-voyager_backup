@@ -1005,8 +1005,54 @@ def _rf_resolved_config_bound_to(prior_ladder_id: str, paths: StatePaths,
             "checked": checked, "mismatch": mismatch}
 
 
+REUSE_BASELINE_TYPE = "STAGE7_STANDALONE_REUSE_BASELINE_V1"
+
+
+def _read_rf_critical_symbol_baseline(repo_root: Path | str) -> dict:
+    """현재 배포 트리에서 RF-critical 심볼 소스를 읽어 함수 단위 해시 baseline."""
+    sources = {}
+    for relpath in domains.RF_CRITICAL_QUALIFY_SYMBOLS:
+        sources[relpath] = (Path(repo_root) / relpath).read_text(
+            encoding="utf-8")
+    return domains.rf_critical_symbol_baseline(sources)
+
+
+def capture_reuse_baseline(repo_root: Path | str,
+                           manifest_path: Path | str) -> dict:
+    """재사용 baseline: 이 시점 배포 manifest + RF-critical 심볼 해시.
+
+    **수정 배포 전에** 호출해 이전(RF 실행) 트리 상태를 고정한다. RF evidence를
+    재사용하려면 배포 후 이 baseline과 대조한다."""
+    manifest, manifest_sha = deploy_manifest.load_manifest(manifest_path)
+    if manifest is None:
+        raise QualifyError(f"deploy manifest 없음: {manifest_path}")
+    return {
+        "artifact_type": REUSE_BASELINE_TYPE,
+        "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "deploy_manifest": manifest,
+        "deploy_manifest_sha256": manifest_sha,
+        "rf_critical_symbols": _read_rf_critical_symbol_baseline(repo_root),
+    }
+
+
+def write_reuse_baseline(repo_root: Path | str, manifest_path: Path | str,
+                         out_path: Path | str) -> dict:
+    baseline = capture_reuse_baseline(repo_root, manifest_path)
+    Path(out_path).write_text(
+        json.dumps(baseline, ensure_ascii=True, sort_keys=True, indent=1),
+        encoding="utf-8")
+    return baseline
+
+
+def load_reuse_baseline(path: Path | str) -> dict:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if data.get("artifact_type") != REUSE_BASELINE_TYPE:
+        raise QualifyError(f"reuse baseline 형식이 아닙니다: {path}")
+    return data
+
+
 def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
-                      prior_manifest_path: Path | str, reason: str,
+                      prior_baseline_path: Path | str, reason: str,
                       hardware_path: Path | str | None = None,
                       repo_root: Path | str | None = None,
                       binding_path: Path | str | None = None,
@@ -1014,14 +1060,17 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                       preflight_fn=None, residual_probe=None,
                       environment_manifest: dict | None = None,
                       final_builder_module=None) -> dict:
-    """RF 사다리 재실행 없이 기존 RF evidence를 재사용해 승격 (2026-09-05 승인).
+    """RF 사다리 재실행 없이 기존 RF evidence를 재사용해 승격 (2026-09-05 승인,
+    보완 반영).
 
-    가드(사용자 지정): ① rf 영역 파일이 이전 manifest와 byte-identical, ②
-    operation 영역이 동일하거나 verification bundle(=operation 회귀) 통과, ③
-    변경된 tooling에 대해 수정된 bundle 재실행, ④ reference에 rf_evidence/
-    operation/qualification_tool manifest 각각 기록, ⑤ qualification_method=
-    evidence_reuse + 사유, ⑥ rf/operation 핵심 파일 하나라도 다르면 거부, ⑦
-    test/doc 변경만으로는 무효화 안 됨, ⑧ 해시 임의 패치·기존 결과 변경 금지.
+    가드: ① rf 영역 파일 byte-identical + RF-critical 심볼(run mode·phase 순서·
+    phase 인자 등) 함수 단위 byte-identical, ② operation 영역 byte-identical(현
+    정책: 회귀 기반 재사용 불허), ③ 변경된 tooling(qualify_cmd governance/bundle,
+    VDETER/tools, qualification 시험)에 수정된 verification bundle 재실행, ④
+    reference에 rf_evidence/operation/qualification_tool manifest + RF 심볼 각각
+    기록, ⑤ qualification_method=evidence_reuse + 사유, ⑥ rf/operation 핵심
+    파일·RF 심볼 하나라도 다르면 거부, ⑦ 문서 변경만으로는 무효화 안 됨, ⑧ 해시
+    임의 패치·기존 결과 변경 금지(읽기만).
 
     RF 사다리 phase는 실행하지 않는다 — 이전 phase evidence(PASS)만 재사용한다.
     """
@@ -1054,11 +1103,11 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                 f"mismatch={deploy_check['mismatch'][:3]}, "
                 f"untracked={deploy_check['untracked'][:3]})")
 
-        prior_manifest, prior_manifest_sha = deploy_manifest.load_manifest(
-            prior_manifest_path)
-        if prior_manifest is None:
-            raise QualifyError(
-                f"이전 RF evidence manifest를 읽을 수 없습니다: {prior_manifest_path}")
+        baseline = load_reuse_baseline(prior_baseline_path)
+        prior_manifest = baseline["deploy_manifest"]
+        prior_manifest_sha = baseline["deploy_manifest_sha256"]
+        prior_rf_symbols = baseline["rf_critical_symbols"]
+        current_rf_symbols = _read_rf_critical_symbol_baseline(repo_root)
         report["rf_evidence_manifest_sha256"] = prior_manifest_sha
         report["current_deploy_manifest_sha256"] = current_manifest_sha
 
@@ -1132,19 +1181,21 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
         if not bundle["software_ok"]:
             raise QualifyError("verification bundle software 검증 실패 — 승격 불가")
 
-        # --- 요구사항 1·2·6: 3영역 재사용 판정 (rf byte-identical, operation
-        #     동일 or 회귀[bundle software_ok] 통과) ---
+        # --- 재사용 판정: rf 파일+RF-critical 심볼 byte-identical,
+        #     operation byte-identical (현 정책). 아니면 거부. ---
         reuse = domains.evaluate_reuse(
             prior_manifest, current_manifest,
-            operation_regression_passed=bundle["software_ok"])
+            prior_rf_symbols=prior_rf_symbols,
+            current_rf_symbols=current_rf_symbols)
         report["reuse_evaluation"] = {
             k: reuse[k] for k in
-            ("eligible", "rf_identical", "operation_identical",
-             "operation_ok", "tooling_changed", "test_doc_changed",
+            ("eligible", "rf_identical", "rf_files_identical",
+             "rf_symbols_identical", "rf_symbols_changed",
+             "operation_identical", "tooling_changed", "test_doc_changed",
              "blocking_files")}
         if not reuse["eligible"]:
             raise QualifyError(
-                "evidence 재사용 거부 — rf/operation 핵심 파일 변경: "
+                "evidence 재사용 거부 — rf/operation 핵심 또는 RF 심볼 변경: "
                 + "; ".join(reuse["blocking_files"][:5]))
 
         # --- final builder (이전 RF evidence roots) -----------------------
@@ -1170,12 +1221,13 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
             raise QualifyError(
                 f"final builder: {final_result['final_status']} — 승격 불가")
 
-        # --- 요구사항 4·5: 3영역 manifest + evidence_reuse 기록 -----------
+        # --- 3영역 manifest + RF-critical 심볼 + evidence_reuse 기록 -------
         binding_domains = {
             "rf_evidence": {
                 **_domain_manifest_record(prior_manifest, domains.RF,
                                           source=f"prior_ladder:{prior_ladder_id}"),
-                "manifest_sha256": prior_manifest_sha},
+                "manifest_sha256": prior_manifest_sha,
+                "rf_critical_symbols": prior_rf_symbols},
             "operation": _domain_manifest_record(
                 current_manifest, domains.OPERATION, source="current_deploy"),
             "qualification_tool": _domain_manifest_record(
@@ -1187,8 +1239,9 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
             "rf_evidence_manifest_sha256": prior_manifest_sha,
             "current_deploy_manifest_sha256": current_manifest_sha,
             "rf_identical": reuse["rf_identical"],
+            "rf_files_identical": reuse["rf_files_identical"],
+            "rf_symbols_identical": reuse["rf_symbols_identical"],
             "operation_identical": reuse["operation_identical"],
-            "operation_regression_passed": bundle["software_ok"],
             "tooling_changed": reuse["tooling_changed"],
             "test_doc_changed": reuse["test_doc_changed"],
             "rf_resolved_config_binding_pass": cfg_bound["pass"],
