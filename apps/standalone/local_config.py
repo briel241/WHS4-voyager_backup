@@ -8,9 +8,10 @@ template·같은 loader·같은 fixture 규칙을 쓰되, 출처를 바꾼다:
     scp 배포                           →  로컬 디렉터리 기록
 
 git_state.json은 **파일명·스키마를 유지**한다 (coordinator
-`_load_run_metadata`/`validate_rr_binding` 무수정 호환). v2에서 git 필드는
-참고 provenance이며(`.git` 파일 읽기, git 명령 없음; 없으면 null) 판정에
-쓰이지 않는다 — coordinator는 git_commit/git_dirty를 대조하지 않는다.
+`_load_run_metadata`/`validate_rr_binding` 무수정 호환). v2에서 git 필드
+(`git_commit`·`git_branch`·`git_dirty`)는 **항상 null**이다 — 실행 환경에서
+Git을 실행하지도 `.git`을 읽지도 않으며, coordinator는 이 필드를 대조하지
+않는다.
 결속값은 **installation digest**로 대체하고, 같은 값을 additive
 `installation-state.json`(v2)에도 기록한다. `deployment_manifest_sha256`
 config 필드에는 installation digest를 넣는다(위장이 아니라 그 필드의 의미가
@@ -337,7 +338,6 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     deployment_manifest_relpath = INSTALLATION_MANIFEST_RELPATH
     deployment_manifest_sha256 = installation_sha256
     provenance = provenance or {}
-    git_info = provenance.get("git") or {}
 
     _ensure_vdeter_importable(repo_root)
     from vdeter.stage7.canonical_json import encode_canonical_json
@@ -423,13 +423,14 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     data_link_id = (int(rr_phase[-2:])
                     if rr_phase.endswith(("17", "19")) else None)
     git_state = {
-        # 참고 provenance (informational only). git 부재면 null — coordinator는
-        # 이 두 필드를 대조하지 않는다. installation digest로 위장하지 않는다.
-        "git_commit": git_info.get("commit"),
-        "git_branch": git_info.get("branch"),
-        "git_dirty": git_info.get("dirty"),
-        "provenance_note": ("git fields are informational only; the binding "
-                            "is the installation digest below"),
+        # Git 정보는 실행 환경에서 관측하지 않는다 — 항상 null (coordinator는
+        # 이 필드를 대조하지 않는다). installation digest로 위장하지 않는다.
+        "git_commit": None,
+        "git_branch": None,
+        "git_dirty": None,
+        "provenance_note": ("git is neither executed nor observed on the "
+                            "target machine; the binding is the installation "
+                            "digest below"),
         # RR evidence 계약 상수 pin (Markdown 미독).
         "baseline_version": STAGE7_BASELINE_PIN["version"],
         "baseline_sha256": STAGE7_BASELINE_PIN["sha256"],

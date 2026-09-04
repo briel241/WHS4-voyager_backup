@@ -127,18 +127,15 @@ _COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
 
 
 def _phase_g_profile_copy():
-    """실제 Phase G profile을 적재한 in-memory 사본 (파일 무수정)."""
+    """Phase G profile(tracked fixture — reference byte-identical 사본)을 적재한
+    in-memory 사본 (파일 무수정). 로컬 evidence에 의존하지 않는다."""
     import copy
-    import glob
 
     from apps import stage7_profile
-    candidates = sorted(glob.glob(os.path.join(
-        _REPO, "VDETER", "results", "phase-g", "phase-g-*")))
-    if not candidates:
-        raise AssertionError("phase-g reference 디렉터리가 없다")
-    nested = os.path.join(candidates[-1], "profile", "stage7-profile.json")
-    path = nested if os.path.isfile(nested) else os.path.join(
-        candidates[-1], "stage7-profile.json")
+    path = os.path.join(_REPO, "tests", "fixtures", "phase-g-reference",
+                        "stage7-profile.json")
+    if not os.path.isfile(path):
+        raise AssertionError("phase-g reference fixture가 없다: " + path)
     return copy.deepcopy(stage7_profile.load_profile(path))
 
 

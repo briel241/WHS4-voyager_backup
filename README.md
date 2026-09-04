@@ -38,7 +38,9 @@ vdeter results                # run 목록과 요약
 ```
 
 - 새 기계, 새 설치본, 새 identity, 라이브러리 버전 변경은 모두 UNQUALIFIED로
-  시작하며 `vdeter qualify`를 통과해야 `vdeter run`이 가능하다.
+  시작하며 `vdeter qualify`를 통과해야 `vdeter run`이 가능하다. 이미 자격을
+  받은 기계라도 설치 파일을 이 버전으로 갱신하면(현재 Pi 설치본 포함) 기존
+  reference로는 실행이 거부되므로 `vdeter qualify`를 다시 통과해야 한다.
 - 자격은 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격이다.
 - amd64 Ubuntu 지원 코드는 구현돼 있으나 실제 amd64 환경 시험은 장비 부재로
   유보됐다.

@@ -36,20 +36,17 @@ import apps.stage7_trace as stage7_trace
 
 COORDINATOR = os.path.join(_REPO, "VDETER", "apps", "stage7_coordinator_main.py")
 CONTROLLER = os.path.join(_REPO, "apps", "stage7_mass_roc_controller.py")
-PHASE_G = os.path.join(_REPO, "VDETER", "results", "phase-g")
+#: Phase G reference의 tracked fixture (tests/fixtures/phase-g-reference —
+#: phase-g-formal-20260902b 사본, reference byte-identical, profile 익명화).
+#: 로컬 evidence(VDETER/results/phase-g)에 의존하지 않는다.
+PHASE_G_FIXTURE = os.path.join(_REPO, "tests", "fixtures", "phase-g-reference")
 
 
 def _profile_path() -> str:
-    candidates = sorted(os.path.join(PHASE_G, n) for n in os.listdir(PHASE_G)
-                        if n.startswith("phase-g-")) if os.path.isdir(PHASE_G) else []
-    if not candidates:
-        raise AssertionError("phase-g reference 디렉터리가 없다")
-    # 발급 도구의 무덮어쓰기 금지 때문에 profile은 하위 profile/로 발행된다
-    # (phase-g-formal-20260902b부터). 구 배치도 계속 지원한다.
-    nested = os.path.join(candidates[-1], "profile", "stage7-profile.json")
-    if os.path.isfile(nested):
-        return nested
-    return os.path.join(candidates[-1], "stage7-profile.json")
+    path = os.path.join(PHASE_G_FIXTURE, "stage7-profile.json")
+    if not os.path.isfile(path):
+        raise AssertionError("phase-g reference fixture가 없다: " + path)
+    return path
 
 
 # ---------------------------------------------------------------- 계측 모듈
