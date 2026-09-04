@@ -4,7 +4,10 @@ Runtime Coordinator가 Pi에서 endpoint별로 spawn하는 process다. resolved
 endpoint config를 적재하고 `Stage7Endpoint`+`Stage7B210RadioAdapter`를 조립한
 뒤 `SOCK_SEQPACKET` socket에서 coordinator command를 처리한다.
 
-TBB 신뢰자료는 `configs/stage7/trust/`의 provisioned TEST identity를 쓴다.
+TBB 신뢰자료는 기본적으로 `configs/stage7/trust/`의 provisioned TEST
+identity를 쓴다. standalone 실행(Phase I)은 환경변수
+`VDETER_STANDALONE_IDENTITY_ROOT`로 배포 tree 밖 identity 저장소를 명시
+전달한다 — 미지정이면 기존 host 경로 동작이 그대로 보존된다.
 private key 내용은 어떤 log/evidence에도 기록하지 않는다.
 """
 
@@ -38,6 +41,27 @@ class _StaticTrustStore:
         return Ok(self._certificates)
 
 
+def _trust_material_paths(root: str) -> tuple:
+    """(trust_store_path, signer_key_path).
+
+    `VDETER_STANDALONE_IDENTITY_ROOT`가 지정되면 standalone identity
+    저장소(개인키는 `private/`, trust store는 `trust/` — 배포 tree 밖)를
+    쓴다. 미지정이면 기존 `configs/stage7/trust/` 경로 그대로다 —
+    Phase F~H host 실행 경로의 동작 보존.
+    """
+    identity_root = os.environ.get("VDETER_STANDALONE_IDENTITY_ROOT")
+    if identity_root:
+        return (
+            os.path.join(identity_root, "trust", "tbb_trust_store.pem"),
+            os.path.join(identity_root, "private", "roc_tbb_signer_key.pem"),
+        )
+    trust_dir = os.path.join(root, "configs", "stage7", "trust")
+    return (
+        os.path.join(trust_dir, "tbb_trust_store.pem"),
+        os.path.join(trust_dir, "roc_tbb_signer_key.pem"),
+    )
+
+
 def _load_trust(root: str, *, is_control: bool):
     """(crypto_dependencies, expected_fingerprint_bytes)를 만든다."""
 
@@ -51,8 +75,8 @@ def _load_trust(root: str, *, is_control: bool):
         create_cryptography_tbb_signer,
     )
 
-    trust_dir = os.path.join(root, "configs", "stage7", "trust")
-    with open(os.path.join(trust_dir, "tbb_trust_store.pem"), "rb") as handle:
+    store_path, key_path = _trust_material_paths(root)
+    with open(store_path, "rb") as handle:
         certificate = load_pem_x509_certificate(handle.read())
     certificate_der = certificate.public_bytes(serialization.Encoding.DER)
     fingerprint = certificate_fingerprint(certificate_der)
@@ -60,7 +84,6 @@ def _load_trust(root: str, *, is_control: bool):
         raise SystemExit(f"trust store fingerprint 계산 실패: {fingerprint.error}")
     signer = None
     if is_control:
-        key_path = os.path.join(trust_dir, "roc_tbb_signer_key.pem")
         with open(key_path, "rb") as handle:
             key = serialization.load_pem_private_key(handle.read(), password=None)
         private_der = key.private_bytes(
