@@ -110,18 +110,28 @@ def parse_hardware_declaration(path: Path | str) -> dict:
     if declaration.get("platform_profile") not in ("pi", "generic-pc"):
         errors.append("platform_profile은 'pi' 또는 'generic-pc'여야 합니다")
     endpoints = declaration.get("endpoints") or {}
+    unfilled = []
     for role in ("MASS-A", "MASS-B", "ROC"):
         serial = (endpoints.get(role) or {}).get("serial")
         if not serial or not isinstance(serial, str):
             errors.append(f"endpoints.{role}.serial이 없습니다")
-    if not (endpoints.get("MASS-B") or {}).get("external_power_asset"):
+        elif serial == "REQUIRED_FILL":
+            unfilled.append(role)
+    if unfilled:
+        # setup 초안 그대로 — 중복 오류 대신 기입 안내를 낸다 (Pi 실측 UX).
+        errors.append(f"endpoints.{'/'.join(unfilled)}.serial이 초안 값"
+                      "(REQUIRED_FILL)입니다 — 각 역할의 B210 serial을 "
+                      "기입하십시오 (초안 주석의 탐지 목록 참조)")
+    asset = (endpoints.get("MASS-B") or {}).get("external_power_asset")
+    if not asset or asset == "REQUIRED_FILL":
         errors.append("endpoints.MASS-B.external_power_asset이 없습니다 "
                       "(사용자만 제공할 수 있는 물리 자산 ID)")
     serials = [
         (endpoints.get(role) or {}).get("serial")
         for role in ("MASS-A", "MASS-B", "ROC")
     ]
-    if len(set(filter(None, serials))) != len(list(filter(None, serials))):
+    filled = [s for s in serials if s and s != "REQUIRED_FILL"]
+    if len(set(filled)) != len(filled):
         errors.append("역할별 serial이 중복됩니다")
     wiring = declaration.get("wiring") or {}
     if not wiring.get("profile"):

@@ -56,9 +56,19 @@ class SetupReexec(Exception):
         self.venv_python = str(venv_python)
 
 
-def _cryptography_available() -> bool:
-    import importlib.util
-    return importlib.util.find_spec("cryptography") is not None
+def _cryptography_available(paths: StatePaths) -> bool:
+    """runtime이 실제로 쓸 수 있는 cryptography인가 — TBB 서명 계층의 판정
+    (`vdeter.link.tbb.crypto._crypto_modules`: major 50 요구)을 단일 출처로
+    재사용한다. Pi 실측(2026-09-04): 시스템 python3의 41.0.7은 import는 되나
+    runtime 요구를 못 맞춰 identity 생성이 실패했다 — import 가능 여부만
+    보던 검사는 fail-open이었다."""
+    from apps.standalone.identity import _ensure_vdeter_importable
+    _ensure_vdeter_importable(paths.root)
+    try:
+        from vdeter.link.tbb.crypto import _crypto_modules
+    except ImportError:
+        return False
+    return not _crypto_modules().is_err
 
 
 # ------------------------------------------------------------ apt
@@ -214,12 +224,13 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
     # identity 생성은 cryptography가 필요하다. 깨끗한 Ubuntu의 시스템
     # python3에는 없을 수 있다 — venv(lock)가 준비됐으면 그 인터프리터로
     # 재실행해 나머지 단계를 마친다 (첫 실행 부트스트랩).
-    if not crypto_available():
+    if not crypto_available(paths):
         if venv_python(paths).exists():
             raise SetupReexec(venv_python(paths))
         raise SetupError(
-            "cryptography를 import할 수 없고 var/venv도 없습니다 — venv "
-            "생성 단계가 실패했는지 확인한 뒤 setup을 재실행하십시오")
+            "runtime이 요구하는 cryptography(major 50)를 현재 인터프리터에서 "
+            "쓸 수 없고 var/venv도 없습니다 — venv 생성 단계가 실패했는지 "
+            "확인한 뒤 setup을 재실행하십시오")
     if regenerate_identity:
         report["steps"]["identity"] = identity.new_identity(paths)
     else:

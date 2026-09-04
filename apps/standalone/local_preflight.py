@@ -57,6 +57,10 @@ def probe_usb_serials(sysfs_root: str = "/sys/bus/usb/devices") -> dict:
     if not root.is_dir():
         return observed
     for device_dir in sorted(root.iterdir()):
+        # 루트 허브(usb1, usb3 …)도 serial 파일을 갖는다(xhci-hcd.0 등) —
+        # 장치가 아니므로 제외한다 (Pi 실측 2026-09-04: 초안 주석 오염).
+        if device_dir.name.startswith("usb"):
+            continue
         serial_file = device_dir / "serial"
         if not serial_file.is_file():
             continue

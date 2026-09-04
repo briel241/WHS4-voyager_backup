@@ -157,14 +157,22 @@ def build_package(head: str, binding_path: str, *,
 
 
 def transfer_and_verify(archive: bytes, *, host: str, remote_root: str,
-                        runner=subprocess.run) -> dict:
-    """원격 경로 부재 확인 → 생성 → 추출 → 전수 SHA·binding head 검증."""
+                        runner=subprocess.run, update: bool = False) -> dict:
+    """원격 경로 부재 확인 → 생성 → 추출 → 전수 SHA·binding head 검증.
+
+    `update=True`는 기존 설치 root 위에 코드 파일만 덮어쓴다 — 패키지에는
+    var/·identity/·hardware.toml이 없으므로 영속 state는 건드리지 않는다
+    (결정 15). 코드가 바뀌면 다음 `vdeter setup`이 manifest를 재발급하고
+    qualification_invalidated를 보고한다."""
     probe = runner(["ssh", "-o", "BatchMode=yes", host,
                     f"test -e {remote_root} && echo exists || echo absent"],
                    capture_output=True, text=True, timeout=60)
-    if "exists" in (probe.stdout or ""):
+    exists = "exists" in (probe.stdout or "")
+    if exists and not update:
         raise DeployError(f"원격 경로가 이미 있습니다: {host}:{remote_root} — "
-                          "다른 경로를 쓰거나 수동으로 정리한 뒤 재시도")
+                          "코드 갱신이면 --update, 아니면 다른 경로를 쓰십시오")
+    if update and not exists:
+        raise DeployError(f"--update인데 원격 경로가 없습니다: {remote_root}")
     runner(["ssh", "-o", "BatchMode=yes", host, f"mkdir -p {remote_root}"],
            check=True, timeout=60)
     done = runner(["ssh", "-o", "BatchMode=yes", host,
@@ -195,6 +203,9 @@ def main(argv=None) -> int:
                         help="로컬 evidence 디렉터리 (기본 VDETER/results/"
                              "phase-i/deploy-<시각>)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--update", action="store_true",
+                        help="기존 설치 root 위에 코드 파일만 갱신 "
+                             "(var/·identity/·hardware.toml 불변)")
     arguments = parser.parse_args(argv)
 
     try:
@@ -223,7 +234,8 @@ def main(argv=None) -> int:
 
     try:
         report = transfer_and_verify(archive, host=arguments.host,
-                                     remote_root=arguments.remote_root)
+                                     remote_root=arguments.remote_root,
+                                     update=arguments.update)
     except (DeployError, subprocess.SubprocessError) as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 1

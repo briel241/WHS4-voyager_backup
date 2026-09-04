@@ -373,7 +373,7 @@ def test_setup_reexec_when_cryptography_missing_in_interpreter():
             setup_cmd.run_setup(paths, runner=lambda argv, **kw: Done(0),
                                 usb_probe=lambda: {}, apt_install=False,
                                 make_venv=False,
-                                crypto_available=lambda: False)
+                                crypto_available=lambda p: False)
             raise AssertionError("재실행 신호가 나지 않았다")
         except setup_cmd.SetupReexec as reexec:
             assert reexec.venv_python == str(venv_py)
@@ -383,10 +383,17 @@ def test_setup_reexec_when_cryptography_missing_in_interpreter():
             setup_cmd.run_setup(paths, runner=lambda argv, **kw: Done(0),
                                 usb_probe=lambda: {}, apt_install=False,
                                 make_venv=False,
-                                crypto_available=lambda: False)
+                                crypto_available=lambda p: False)
             raise AssertionError("실패하지 않았다")
         except setup_cmd.SetupError as exc:
             assert "cryptography" in str(exc)
+
+    # 기본 판정은 runtime의 _crypto_modules를 쓴다 — dev venv(50.x)에서 True,
+    # 그리고 import 가능하지만 major≠50인 환경은 False가 나와야 한다.
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = state.StatePaths(tmp)
+        paths.root = Path(_REPO)
+        assert setup_cmd._cryptography_available(paths) is True
 
 
 def test_apt_plan_includes_python3_venv():

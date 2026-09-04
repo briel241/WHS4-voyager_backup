@@ -86,6 +86,30 @@ def test_build_package_contents_and_exclusions():
             binding_path.read_bytes()).hexdigest()
 
 
+def test_transfer_update_flag_semantics():
+    """--update 없이 기존 root면 거부, --update인데 root 부재면 거부."""
+    tool = _load_tool()
+
+    class Done:
+        def __init__(self, stdout=""):
+            self.returncode, self.stdout, self.stderr = 0, stdout, b""
+
+    def runner_exists(argv, **kwargs):
+        return Done("exists\n")
+
+    def runner_absent(argv, **kwargs):
+        return Done("absent\n")
+
+    for runner, update, needle in ((runner_exists, False, "--update"),
+                                   (runner_absent, True, "없습니다")):
+        try:
+            tool.transfer_and_verify(b"", host="h", remote_root="~/x",
+                                     runner=runner, update=update)
+            raise AssertionError("거부되지 않았다")
+        except tool.DeployError as exc:
+            assert needle in str(exc)
+
+
 def test_preconditions_reject_wrong_commit_and_binding_head():
     tool = _load_tool()
     head = _head()

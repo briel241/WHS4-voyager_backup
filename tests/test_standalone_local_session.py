@@ -431,7 +431,11 @@ def test_close_graceful_writes_done_rc_and_passes():
 def test_close_escalates_and_reports_honest_failure():
     with tempfile.TemporaryDirectory() as tmp:
         ft = FakeTime()
-        session = make_session(tmp, ft, residual_probe=lambda: ["stray-worker"])
+        # 단일 프로세스 에스컬레이션 경로를 검증한다 — POSIX 기본값(process
+        # group)에서는 가짜 pid에 killpg가 실패하므로 명시적으로 끈다
+        # (group 경로는 test_escalation_targets_process_group_on_linux).
+        session = make_session(tmp, ft, residual_probe=lambda: ["stray-worker"],
+                               use_process_group=False)
         session.start()
         # shutdown 요청에 반응하지 않는 coordinator — kill에서만 죽는다
         # (FakeProcess.kill이 rc=-9 설정).
