@@ -67,7 +67,12 @@ INTEGRATION_TARGETS = ("VDETER/tests/integration",)
 #: suite 실행 상한 (W5 보완 1 — Phase H 실측: unit+contract ~4분,
 #: integration stage7 부분집합 여유 포함).
 UNIT_CONTRACT_TIMEOUT_S = 1800
-INTEGRATION_TIMEOUT_S = 5400
+#: 2026-09-04 사용자 승인(V2 착수 직전): 5400→14400초. integration 전체가
+#: Windows 데스크톱에서 1시간 07분~19분이고 Pi 5 소요는 미측정이라, RF
+#: 사다리 완주 뒤 소프트웨어 검증이 상한 초과로 승격을 막는 낭비를 막기
+#: 위한 **실행 안전 상한 확장**이다. 시험 PASS 기준·필수 TC·RR phase
+#: deadline·RF threshold는 바뀌지 않는다.
+INTEGRATION_TIMEOUT_S = 14400
 
 #: 강제 정리 대기 (TERM 후 / KILL 후).
 ESCALATE_TERM_WAIT_S = 30.0
