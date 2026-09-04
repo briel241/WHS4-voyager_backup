@@ -18,11 +18,13 @@ evidence 계약(write_rr_evidence 스키마·index·원본 결속·gain artifact
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -872,6 +874,152 @@ def test_qualify_refuses_identity_mismatch_and_missing_manifest():
             raise AssertionError("manifest 부재가 거부되지 않았다")
         except qualify_cmd.QualifyError as exc:
             assert "vdeter setup" in str(exc)
+
+
+# ------------------------------- evidence 재사용 (RF 재실행 없이 승격, 3영역 결속)
+
+def _seed_prior_reuse(paths, tmp, prior_ladder_id, *, mutate):
+    """이전 RF evidence(4 phase)+resolved-config(prior manifest 결속)를 심고,
+    현재 manifest에서 mutate로 파생한 '이전 manifest'를 파일로 쓴다.
+    반환 (prior_manifest_path, prior_manifest_sha256)."""
+    current, _ = deploy_manifest.load_manifest(
+        paths.var_dir / "deploy-manifest.json")
+    prior = copy.deepcopy(current)
+    mutate(prior)
+    prior_path = Path(tmp) / f"prior-{prior_ladder_id}.json"
+    prior_path.write_bytes(json.dumps(
+        prior, ensure_ascii=True, sort_keys=True, indent=1).encode())
+    _, prior_sha = deploy_manifest.load_manifest(prior_path)
+    for phase in qualify_cmd.LADDER_PHASES:
+        run_id = f"{prior_ladder_id}-{phase}"
+        run_root = paths.runs_dir / run_id
+        run_root.mkdir(parents=True, exist_ok=True)
+        fabricating_phase_runner(
+            {"run_root": str(run_root), "phase": phase, "run_id": run_id})
+        cfg = run_root / "resolved-configs" / "endpoints"
+        cfg.mkdir(parents=True, exist_ok=True)
+        for endpoint in ("mass-a", "mass-b", "roc"):
+            (cfg / f"{endpoint}.toml").write_text(
+                'run_mode = "GAIN_CALIBRATION"\n'
+                f'deployment_manifest_sha256 = "{prior_sha}"\n',
+                encoding="utf-8")
+    return prior_path, prior_sha
+
+
+def _fake_builder(status="RESEARCH_READY"):
+    module = types.SimpleNamespace()
+
+    def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
+              verification_root=None, head_provider=None):
+        result = {"final_status": status, "consistency_problems": []}
+        Path(out_path).write_text(json.dumps(result), encoding="utf-8")
+        return result
+    module.build = build
+    return module
+
+
+def _reuse(paths, tmp, prior_path, prior_ladder_id, **overrides):
+    binding_path = Path(tmp) / "standalone-binding.json"
+    binding_path.write_text(json.dumps(BINDING), encoding="utf-8")
+    kwargs = dict(
+        prior_ladder_id=prior_ladder_id, prior_manifest_path=prior_path,
+        reason="governance bundle-scope fix (qualification tooling only)",
+        hardware_path=Path(tmp) / "hardware.toml", repo_root=_REPO,
+        binding_path=binding_path,
+        suite_runner=lambda argv, **kw: Done(0),
+        preflight_fn=fake_preflight, residual_probe=lambda: [],
+        environment_manifest=dict(ENV_MANIFEST),
+        final_builder_module=_fake_builder())
+    kwargs.update(overrides)
+    return qualify_cmd.run_qualify_reuse(paths, **kwargs)
+
+
+def _mutate_file_sha(target):
+    def mutate(manifest):
+        hit = False
+        for entry in manifest["files"]:
+            if entry["path"] == target:
+                entry["sha256"] = "0" * 64
+                hit = True
+        assert hit, f"{target} manifest에 없음"
+    return mutate
+
+
+def test_evidence_reuse_promotes_on_tooling_only_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        prior_path, prior_sha = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
+        report = _reuse(paths, tmp, prior_path, "qual-PRIOR")
+        assert report["status"] == "QUALIFIED"
+        assert report["qualification_method"] == "evidence_reuse"
+        ev = report["reuse_evaluation"]
+        assert ev["eligible"] and ev["tooling_changed"]
+        assert ev["rf_identical"] and ev["operation_identical"]
+        assert report["rf_resolved_config_binding"]["pass"]
+        # 승격된 active reference에 3영역 manifest·method·사유가 기록된다.
+        active = qualify_cmd.load_active_reference(paths)
+        assert active["qualification_method"] == "evidence_reuse"
+        assert set(active["binding_domains"]) == {
+            "rf_evidence", "operation", "qualification_tool"}
+        assert active["binding_domains"]["rf_evidence"][
+            "manifest_sha256"] == prior_sha
+        er = active["evidence_reuse"]
+        assert er["reason"] and er["prior_ladder_id"] == "qual-PRIOR"
+        assert er["rf_identical"] and er["tooling_changed"]
+
+
+def test_evidence_reuse_refused_on_rf_core_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        prior_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate=_mutate_file_sha("VDETER/src/vdeter/stage7/pi_runtime.py"))
+        try:
+            _reuse(paths, tmp, prior_path, "qual-PRIOR")
+            raise AssertionError("rf 핵심 변경인데 재사용이 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "핵심" in str(exc) or "rf" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
+
+
+def test_evidence_reuse_refused_when_config_binding_mismatch():
+    """RF resolved config가 이전 manifest에 결속되지 않으면 거부."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        prior_path, prior_sha = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
+        # resolved config의 결속 sha를 엉뚱한 값으로 덮어써 mismatch 유발.
+        for phase in qualify_cmd.LADDER_PHASES:
+            cfg = (paths.runs_dir / f"qual-PRIOR-{phase}"
+                   / "resolved-configs" / "endpoints")
+            for toml_path in cfg.glob("*.toml"):
+                toml_path.write_text(
+                    f'deployment_manifest_sha256 = "{"1" * 64}"\n',
+                    encoding="utf-8")
+        try:
+            _reuse(paths, tmp, prior_path, "qual-PRIOR")
+            raise AssertionError("config 결속 불일치인데 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "결속" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
+
+
+def test_evidence_reuse_refused_when_bundle_software_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        prior_path, _ = _seed_prior_reuse(
+            paths, tmp, "qual-PRIOR",
+            mutate=_mutate_file_sha("apps/standalone/qualify_cmd.py"))
+        try:
+            _reuse(paths, tmp, prior_path, "qual-PRIOR",
+                   suite_runner=lambda argv, **kw: Done(1))  # bundle 실패
+            raise AssertionError("bundle 실패인데 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "software" in str(exc) or "verification" in str(exc)
+        assert qualify_cmd.load_active_reference(paths) is None
 
 
 if __name__ == "__main__":
