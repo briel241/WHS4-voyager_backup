@@ -21,13 +21,22 @@ from pathlib import Path
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _entry in (_REPO, _HERE):
+for _entry in (_REPO, _HERE, os.path.join(_REPO, "VDETER"),
+               os.path.join(_REPO, "VDETER", "src")):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
 from common.textout import ensure_utf8_output
 
 ensure_utf8_output()
+
+# `vdeter` 패키지를 **영속 저장소 트리**에서 먼저 적재한다. 아래 시험은 임시
+# 복사본(setup 시 sys.path에 삽입됨)에서 identity를 만드는데, 그 복사본이
+# 삭제된 뒤 다른 시험이 `vdeter.stage7`를 처음 import하면 캐시된 패키지
+# 경로가 사라져 ModuleNotFoundError가 난다 (Pi clean-clone 시험에서 실측).
+import vdeter.link.tbb.crypto  # noqa: E402,F401
+import vdeter.stage7.canonical_json  # noqa: E402,F401
+import vdeter.stage7.configuration  # noqa: E402,F401
 
 from standalone_v2_fixtures import (  # noqa: E402
     ENV_MANIFEST,
