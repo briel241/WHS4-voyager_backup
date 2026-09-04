@@ -648,6 +648,45 @@ def test_verification_suite_receives_timeout():
                         qualify_cmd.INTEGRATION_TIMEOUT_S]
 
 
+def test_verification_bundle_deselects_only_governance_from_unit_contract():
+    """계약: governance/architecture 감사만 명시 node-id로 unit-contract에서
+    분리하고(광범위 --ignore 아님), integration에는 적용하지 않으며, 제외
+    목록·사유를 evidence로 남긴다."""
+    seen = []
+
+    def suite_runner(argv, **kwargs):
+        seen.append(list(argv))
+        return Done(0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "verification"
+        qualify_cmd.write_verification_bundle(
+            Path(_REPO), out, BINDING, deploy_verify_pass=True,
+            runner=suite_runner)
+        unit_argv, integ_argv = seen
+        # unit-contract는 GOVERNANCE_DESELECT의 모든 node-id를 정확히 한 번씩
+        # --deselect로 받는다 (광범위 --ignore/-k not 이 아니다).
+        assert unit_argv.count("--deselect") == len(qualify_cmd.GOVERNANCE_DESELECT)
+        assert "--ignore" not in unit_argv
+        for nodeid, reason in qualify_cmd.GOVERNANCE_DESELECT:
+            assert nodeid in unit_argv
+            assert reason  # 사유가 비어 있지 않다
+        # 실제 unit/contract 대상은 그대로 실행된다 (제외는 명시 목록뿐).
+        assert any(str(Path(_REPO) / t) in unit_argv
+                   for t in qualify_cmd.UNIT_CONTRACT_TARGETS)
+        # integration -k stage7에는 governance deselect가 없다.
+        assert "--deselect" not in integ_argv
+        assert "-k" in integ_argv and "stage7" in integ_argv
+        # evidence: 제외 목록·사유 기록.
+        rec = json.loads(
+            (out / "governance-deselected.json").read_text(encoding="utf-8"))
+        assert rec["artifact_type"] == "STAGE7_STANDALONE_GOVERNANCE_DESELECT_V1"
+        assert rec["target_suite"] == "unit-contract"
+        assert [d["nodeid"] for d in rec["deselected"]] == [
+            n for n, _ in qualify_cmd.GOVERNANCE_DESELECT]
+        assert all(d["reason"] for d in rec["deselected"])
+
+
 def test_run_child_bounded_reaps_on_timeout():
     """실제 자식(60초 sleep)을 1초 timeout으로 — 종료·회수를 실증한다."""
     # Windows: kill 직후 자식의 로그 핸들 해제가 반환보다 늦을 수 있어

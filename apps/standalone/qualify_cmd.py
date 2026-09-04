@@ -125,6 +125,40 @@ PHASE_TIMEOUT_MARGIN_S = 900
 #: verification bundle의 시험 명령 (로그 파일명은 final builder 계약).
 UNIT_CONTRACT_TARGETS = ("VDETER/tests/unit", "VDETER/tests/contract")
 INTEGRATION_TARGETS = ("VDETER/tests/integration",)
+
+#: standalone verification bundle에서 **명시적으로 분리**하는 governance/architecture
+#: 시험. 이들은 배포 노드의 RF/PHY/MAC/service 동작이 아니라 **저장소·문서·CI
+#: 거버넌스**(docs/core traceability, source-tree 구조, import-graph 아키텍처)를
+#: 감사하므로 배포 트리에서 구조적으로 실패한다 — 배포에 docs/core가 없고
+#: (traceability.toml 부재), dev 전용 legacy/ archive가 없으며, gnuradio가 설치된
+#: 노드의 단일-프로세스 suite에서는 선행 시험이 sys.modules를 오염시킨다.
+#: 이 목록은 **정확한 node-id 단위 --deselect**다 (광범위 --ignore나 실패 무시가
+#: 아니다). 여기(standalone bundle)에서만 제외하며 **host V1/CI에서는 계속 실행**된다
+#: (host는 qualify_cmd를 거치지 않고 suite를 직접 돈다). 각 항목 (node-id, 사유).
+#: import-graph 2건은 clean 별도 프로세스 재실행에서 PASS 확인(=runtime 결함 아님),
+#: legacy 1건은 배포 미포함 archive 존재를 요구하는 저장소 구조 감사(배포 src의
+#: legacy 부재 자체는 통과). 2026-09-04 사용자 승인(option 1).
+GOVERNANCE_DESELECT = (
+    ("tests/contract/test_stage5_regression_audit.py::"
+     "Stage5TraceabilityAuditTest",
+     "docs/core/traceability.toml 로드 — 저장소 문서 추적성 감사(배포 미포함)"),
+    ("tests/contract/test_arch_traceability.py::TraceabilitySchemaTest",
+     "docs/core/traceability.toml 스키마·ID 유일성·evidence 게이트 감사"),
+    ("tests/contract/test_link_stage0_regression.py::"
+     "LinkStage0RegressionTest",
+     "docs/core/traceability.toml 기반 stage0 케이스 구성 감사"),
+    ("tests/contract/test_arch_structure.py::TargetPackageImportTest::"
+     "test_TC_ARCH_001_core_import_without_gnuradio_uhd",
+     "import-graph 아키텍처 감사 — clean 인터프리터 요구. gnuradio 설치 노드의 "
+     "단일-프로세스 suite에서 선행 시험이 sys.modules를 오염(격리 재실행 PASS)"),
+    ("tests/contract/test_arch_structure.py::TargetPackageImportTest::"
+     "test_TC_ARCH_001_radio_skeletons_import_without_dependencies",
+     "위와 동일 — radio skeleton import 무의존 감사(격리 재실행 PASS)"),
+    ("tests/contract/test_arch_structure.py::ForbiddenImportTest::"
+     "test_TC_ARCH_002_legacy_is_outside_the_source_tree",
+     "source-tree 구조 감사 — dev 전용 legacy/temporary_bpsk archive 존재 요구"
+     "(배포 미포함). 배포 src에 legacy 부재는 확인됨"),
+)
 #: suite 실행 상한 (W5 보완 1 — Phase H 실측: unit+contract ~4분,
 #: integration stage7 부분집합 여유 포함).
 UNIT_CONTRACT_TIMEOUT_S = 1800
@@ -365,8 +399,22 @@ def write_verification_bundle(repo_root: Path, out_dir: Path, binding: dict,
             stdout_path=log_path, timeout_s=timeout_s)
         return result["rc"] == 0 and not result["timed_out"]
 
+    # governance/architecture 감사는 명시 node-id로만 분리한다(광범위 무시 금지).
+    # 제외 목록·사유를 evidence로 남긴다 — host V1/CI에서는 계속 실행됨.
+    deselect_args = ()
+    for nodeid, _reason in GOVERNANCE_DESELECT:
+        deselect_args += ("--deselect", nodeid)
+    write_json_atomic(out_dir / "governance-deselected.json", {
+        "artifact_type": "STAGE7_STANDALONE_GOVERNANCE_DESELECT_V1",
+        "note": ("배포 노드 자격 범위 밖의 저장소·문서·CI 거버넌스 감사. "
+                 "명시적 node-id --deselect이며 광범위 --ignore·실패 무시가 "
+                 "아니다. host V1/CI에서는 계속 실행된다."),
+        "target_suite": "unit-contract",
+        "deselected": [{"nodeid": n, "reason": r}
+                       for n, r in GOVERNANCE_DESELECT],
+    })
     unit_ok = run_suite("unit-contract.log", UNIT_CONTRACT_TARGETS,
-                        UNIT_CONTRACT_TIMEOUT_S)
+                        UNIT_CONTRACT_TIMEOUT_S, extra=deselect_args)
     integration_ok = run_suite("integration-stage7.log", INTEGRATION_TARGETS,
                                INTEGRATION_TIMEOUT_S, extra=("-k", "stage7"))
     return {"frozen_ok": audit["all_unchanged"] and not audit["worktree_dirty"],
