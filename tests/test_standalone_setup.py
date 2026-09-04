@@ -166,13 +166,13 @@ def test_run_setup_orchestration_idempotent():
         assert report["pass"], report
 
         # apt: 설치된 gnuradio 제외 나머지만 설치 명령 (python3-venv 포함 —
-        # W4 보완 3).
+        # W4 보완 3; python3-uhd는 runtime 불필요라 목록에 없다).
         assert report["steps"]["apt_plan"]["missing"] == [
-            "uhd-host", "python3-uhd", "python3-numpy", "python3-venv"]
+            "uhd-host", "python3-numpy", "python3-venv"]
+        assert "python3-uhd" not in setup_cmd.REQUIRED_APT_PACKAGES
         install = next(c for c in commands if c[:3] == ["sudo", "apt-get",
                                                         "install"])
-        assert install[-4:] == ["uhd-host", "python3-uhd", "python3-numpy",
-                                "python3-venv"]
+        assert install[-3:] == ["uhd-host", "python3-numpy", "python3-venv"]
         # venv 생성 + lock 설치 명령이 정확히 구성됐다.
         venv_cmd = next(c for c in commands if c[1:3] == ["-m", "venv"])
         assert "--system-site-packages" in venv_cmd

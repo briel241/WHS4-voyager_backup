@@ -4,7 +4,8 @@
 # apt(시스템 패키지)로 설치되고 venv는 --system-site-packages로 그것을 본다
 # — pip로 numpy를 설치하면 apt 판을 가리므로 여기 넣지 않는다.
 #
-# 버전 근거: 현행 자격 환경 실측 (cryptography 50.0.0 — 2026-09-04).
+# 버전 근거: Pi 자격 환경(Phase F~H venv) 실측 cryptography 50.0.1
+# (2026-09-04 ssh 실측; dev venv의 50.0.0이 아니라 자격 기계 값을 pin한다).
 # 변경 시 해당 환경은 UNQUALIFIED로 시작하며 재자격이 필요하다 (결정 10·13).
-cryptography==50.0.0
+cryptography==50.0.1
 tomli==2.0.1 ; python_version < "3.11"

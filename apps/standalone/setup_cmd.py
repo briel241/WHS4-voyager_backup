@@ -32,8 +32,11 @@ from apps.standalone.state import StatePaths, write_json_atomic
 
 #: apt 의존성 (결정 10 — 대상 Ubuntu 패키지명). python3-venv는 깨끗한
 #: Ubuntu에서 `python3 -m venv`가 실패하지 않기 위한 필수 항목 (W4 보완 3).
+#: python3-uhd는 넣지 않는다 — runtime은 gr-uhd(gnuradio)로 B210을 다루고
+#: python `uhd` 모듈을 import하지 않는다(2026-09-04 grep·Pi 실측). 자격
+#: 환경에 없던 패키지를 setup이 추가하면 "동일 환경 복원"이 깨진다.
 REQUIRED_APT_PACKAGES = (
-    "gnuradio", "uhd-host", "python3-uhd", "python3-numpy", "python3-venv",
+    "gnuradio", "uhd-host", "python3-numpy", "python3-venv",
 )
 
 LOCK_RELPATH = "requirements-standalone.lock"

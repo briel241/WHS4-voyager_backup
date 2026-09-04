@@ -234,6 +234,38 @@ def test_fixtures_match_host_canonical_bytes_and_link_binding():
         })
 
 
+def test_version_probe_cli_fallback_for_uhd():
+    """`import uhd` 불가 환경(Pi 실측)에서 uhd_config_info로 버전을 얻는다."""
+    calls = []
+
+    class Done:
+        def __init__(self, rc, stdout):
+            self.returncode, self.stdout = rc, stdout
+
+    def runner(argv, **kwargs):
+        calls.append(argv[0])
+        if argv[0] == "uhd_config_info":
+            return Done(0, "\nUHD 4.6.0.0-0-g1234abcd\n")
+        return Done(1, "")
+
+    versions = local_config._probe_versions(runner=runner)
+    # python uhd 모듈이 없는 개발 환경에서는 fallback 결과가 그대로 온다.
+    try:
+        import uhd  # type: ignore # noqa: F401
+        has_uhd = True
+    except Exception:  # noqa: BLE001
+        has_uhd = False
+    if not has_uhd:
+        assert versions["uhd"] == "UHD 4.6.0.0-0-g1234abcd"
+        assert "uhd_config_info" in calls
+    # CLI 실패는 None (부재 정직 기록) — 별도 runner로 확인.
+    assert local_config._cli_version(
+        lambda argv, **kw: Done(1, ""), ["x"]) is None
+    assert local_config._cli_version(
+        lambda argv, **kw: (_ for _ in ()).throw(OSError("no tool")),
+        ["x"]) is None
+
+
 def test_phase_deadlines_match_coordinator_contract():
     """git_state에 결속하는 deadline이 coordinator 정본과 일치해야
     RR_BINDING_REJECTED가 나지 않는다 (README §6)."""

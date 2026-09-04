@@ -137,8 +137,30 @@ def parse_hardware_declaration(path: Path | str) -> dict:
 
 # ------------------------------------------------------------ 환경 manifest
 
-def _probe_versions() -> dict:
-    """critical 라이브러리 4종 + 파이썬 버전 실측 (import 기반, 로컬)."""
+def _cli_version(runner, argv):
+    """`<tool> --version` 첫 줄 (없거나 실패면 None)."""
+    try:
+        done = runner(argv, capture_output=True, text=True, timeout=20)
+    except (OSError, ValueError, Exception):  # noqa: BLE001
+        return None
+    if getattr(done, "returncode", 1) != 0:
+        return None
+    for line in (done.stdout or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return None
+
+
+def _probe_versions(runner=None) -> dict:
+    """critical 라이브러리 4종 실측 (로컬).
+
+    UHD는 runtime이 python `uhd` 모듈을 쓰지 않는다(gr-uhd 경유) — Pi 실측
+    (2026-09-04)에서도 `import uhd`가 실패하므로 Phase F 환경 probe와 같이
+    `uhd_config_info --version`으로 fallback한다. gnuradio도 CLI fallback을
+    둔다. 부재는 None으로 정직 기록한다 (qualify는 None을 거부한다)."""
+    import subprocess as _subprocess
+    runner = runner or _subprocess.run
     versions = {}
     for name, module, attr in (
         ("numpy", "numpy", "__version__"),
@@ -153,12 +175,13 @@ def _probe_versions() -> dict:
         import uhd  # type: ignore
         versions["uhd"] = str(uhd.get_version_string())
     except Exception:  # noqa: BLE001
-        versions["uhd"] = None
+        versions["uhd"] = _cli_version(runner, ["uhd_config_info", "--version"])
     try:
         from gnuradio import gr  # type: ignore
         versions["gnuradio"] = str(gr.version())
     except Exception:  # noqa: BLE001
-        versions["gnuradio"] = None
+        versions["gnuradio"] = _cli_version(
+            runner, ["gnuradio-config-info", "--version"])
     return versions
 
 
