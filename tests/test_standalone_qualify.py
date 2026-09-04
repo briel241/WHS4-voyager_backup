@@ -346,12 +346,10 @@ def test_phase_run_mode_mapping_is_fixed():
         "rr-p0": "RF_OFF_QUALIFICATION",
         "rr-p1": "GAIN_CALIBRATION",
         "rr-p2-17": "OPERATIONAL",
-        "rr-p2-19": "OPERATIONAL",
         "rr-p3-fault": "OPERATIONAL",
     }
     assert set(qualify_cmd.PHASE_RUN_MODE) == set(qualify_cmd.LADDER_PHASES)
-    assert qualify_cmd.GAIN_CONSUMING_PHASES == (
-        "rr-p2-17", "rr-p2-19", "rr-p3-fault")
+    assert qualify_cmd.GAIN_CONSUMING_PHASES == ("rr-p2-17", "rr-p3-fault")
     assert all(qualify_cmd.PHASE_RUN_MODE[p] == "OPERATIONAL"
                for p in qualify_cmd.GAIN_CONSUMING_PHASES)
     # runtime 계약과의 정합: 세 값은 loader가 허용하는 RUN_MODES 안이다.
@@ -384,6 +382,60 @@ def test_rr_p1_gain_calibration_config_passes_real_loader():
                 text = (Path(generated["configs_dir"]) / "endpoints"
                         / f"{endpoint}.toml").read_text("utf-8")
                 assert f'run_mode = "{expected}"' in text, (phase, endpoint)
+
+
+def test_ladder_excludes_link19_and_builder_ready_without_rr006():
+    """2026-09-04 정책: rr-p2-19 제거. 사다리는 p0→p1→p2-17→p3-fault 순서로만
+    돌고 rr-p2-19 coordinator는 호출되지 않으며, RR-006 evidence가 없어도
+    final builder가 필수 TC 충족 시 RESEARCH_READY를 낸다. reference의
+    phase_run_ids에 rr-p2-19가 없고 Link 19 제한이 명시된다."""
+    assert qualify_cmd.LADDER_PHASES == ("rr-p0", "rr-p1", "rr-p2-17",
+                                         "rr-p3-fault")
+    assert "rr-p2-19" not in qualify_cmd.PHASE_EXPECTED_TCS
+    assert "rr-p2-19" not in qualify_cmd.PHASE_RUN_MODE
+    assert "rr-p2-19" not in qualify_cmd.GAIN_CONSUMING_PHASES
+    # builder 전역 정책은 그대로: RR-006은 DEFERRED, REQUIRED는 001~005+007.
+    builder = qualify_cmd._load_module(
+        Path(_REPO) / "VDETER" / "tools" / "stage7_rr_final_builder.py",
+        "stage7_rr_final_builder_policy_check")
+    assert "TC-STAGE7-RR-006" in builder.DEFERRED_TCS
+    assert set(builder.REQUIRED_TCS) == {
+        "TC-STAGE7-RR-001", "TC-STAGE7-RR-002", "TC-STAGE7-RR-003",
+        "TC-STAGE7-RR-004", "TC-STAGE7-RR-005", "TC-STAGE7-RR-007"}
+    # 사다리 산출 TC 합집합 == 필수 TC 집합 (RR-006 부재).
+    produced = {tc for tcs in qualify_cmd.PHASE_EXPECTED_TCS.values()
+                for tc in tcs}
+    assert produced == set(builder.REQUIRED_TCS)
+
+    phases_called = []
+
+    def recording_runner(context):
+        phases_called.append(context["phase"])
+        return fabricating_phase_runner(context)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp, phase_runner=recording_runner)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        assert phases_called == ["rr-p0", "rr-p1", "rr-p2-17", "rr-p3-fault"]
+        assert "rr-p2-19" not in phases_called
+        assert not (paths.runs_dir / "qual-20260904-000000-rr-p2-19").exists()
+        assert report["final_status"] == "RESEARCH_READY"
+        reference = qualify_cmd.load_active_reference(paths)
+        assert reference is not None
+        assert "rr-p2-19" not in reference["qualification"]["phase_run_ids"]
+        assert "TC-STAGE7-RR-006" not in reference["qualification"]["tc_results"]
+        limitation = reference["limitations"]
+        assert limitation["link_19_implementation"] == "present"
+        assert limitation["link_19_standalone_qualification"] == "not exercised"
+        assert limitation["link_19_hardware_performance"] == "not guaranteed"
+        assert limitation["operational_scenario_links"] == "Link 11/17 only"
+        # final-result.json에도 RR-006은 deferred 기록만 (MISSING 허용).
+        pointer = json.loads(paths.active_pointer.read_bytes())
+        final = json.loads((paths.qualification_releases / pointer["release"]
+                            / "final-result.json").read_bytes())
+        assert final["final_status"] == "RESEARCH_READY"
+        assert final["deferred_follow_up"]["items"]["TC-STAGE7-RR-006"] == "MISSING"
 
 
 def test_qualify_ladder_applies_run_modes_and_gain_flow():
@@ -439,8 +491,9 @@ def test_qualify_phase_failure_preserves_active_pointer():
         assert report["status"] == "FAIL"
         assert any("기존 active reference 유지" in e
                    for e in report["errors"])
-        # p2-19·p3-fault는 시작하지 않았다 (단계 실패 즉시 중단).
-        assert "rr-p2-19" not in report["phases"]
+        # p3-fault는 시작하지 않았다 (필수 단계 실패 즉시 중단).
+        assert "rr-p3-fault" not in report["phases"]
+        assert list(report["phases"]) == ["rr-p0", "rr-p1", "rr-p2-17"]
         # 포인터는 이전 release 그대로 — 승격되지 않았다.
         assert json.loads(
             paths.active_pointer.read_bytes())["release"] == "rel-prev"

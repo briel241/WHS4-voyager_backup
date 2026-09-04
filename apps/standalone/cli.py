@@ -142,7 +142,10 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     from apps.standalone import qualify_cmd
     out("vdeter qualify — RR qualification ladder (RF transmission)")
     out("  steps: RR-P0 -> RR-P1 (+gain) -> candidate -> RR-P2-17 -> "
-        "RR-P2-19 -> RR-P3-fault -> final builder -> promote")
+        "RR-P3-fault -> verification bundle -> final builder -> promote")
+    out("  scope: Link 19 implementation present, not exercised by this "
+        "qualification, hardware performance not guaranteed; operational "
+        "scenarios use Link 11/17 only")
     out("  duration: several hours; the machine's active reference will be "
         "replaced only if every step passes")
     existing = qualify_cmd.load_active_reference(paths)
@@ -173,6 +176,9 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     if report.get("status") == "QUALIFIED":
         out("QUALIFIED — active reference %s (release %s)" % (
             report["reference"]["sha256"][:12], report["reference"]["release"]))
+        for key, value in qualify_cmd.LINK19_LIMITATION.items():
+            if key != "note":
+                out("  limitation: %s = %s" % (key, value))
         return EXIT_PASS
     out("NOT QUALIFIED — " + "; ".join(report.get("errors") or ["unknown"]))
     out("active reference unchanged")

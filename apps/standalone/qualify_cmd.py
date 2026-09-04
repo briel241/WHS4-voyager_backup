@@ -1,18 +1,22 @@
 """`vdeter qualify` — 단독 RR 재자격 orchestrator (Phase I W5, README §7).
 
-확정 사다리 (결정 20 — 사용자 지정 순서):
+확정 사다리 (결정 20 → 2026-09-04 정책 변경으로 RR-P2-19 제거):
 
     1. RR-P0                      → TC-STAGE7-RR-001
     2. RR-P1 (+gain 측정)         → TC-RR-002·003·004 + gain artifact
     3. candidate reference 생성    (이후 단계·향후 run이 쓸 결속값 확정)
     4. RR-P2-17                   → TC-RR-005
-    5. RR-P2-19                   → TC-RR-006 (기록 전용 — 판정 이관)
-    6. RR-P3-fault                → TC-RR-007 (판정 필수)
-    7. final builder 검증          (verification bundle 결속 포함)
-    8. 전체 PASS 시에만 candidate → active 원자적 승격 (이전 active는 archive)
+    5. RR-P3-fault                → TC-RR-007 (판정 필수)
+    6. verification bundle → final builder 검증
+    7. 전체 PASS 시에만 candidate → releases/ 이동 + active 포인터 원자 교체
 
-soak(RR-008)는 범위 제외. 어느 단계든 실패하면 candidate 미승격 —
-기존 active reference 유지.
+soak(RR-008)·**Link 19(RR-006)** 는 범위 제외. Link 19는 현재 프로젝트의
+운용 시나리오 3종(Link 11/17)이 쓰지 않아 standalone 자격·운용 범위에서
+제외한다 — 구현·profile·registry·단위시험은 그대로 존재하며, final builder의
+전역 정책(RR-006 = DEFERRED_TCS 기록 전용, REQUIRED_TCS = RR-001~005 + 007)은
+바뀌지 않는다. 2차 ladder qual-20260904-055636이 rr-p2-19의 ROC RX
+`LinkIdDetectionError`(frozen PHY 계층)로 정지한 뒤 결정됐다. 어느 단계든
+실패하면 candidate 미승격 — 기존 active reference 유지.
 
 발급 원칙 (승인 조건 2·3)
     - `stage7_issue_qualification_reference.py` CLI는 호출하지 않는다 (SSH·
@@ -46,16 +50,30 @@ from apps.standalone.state import (
 )
 
 #: 사다리의 coordinator phase 순서 (candidate 생성은 p1 직후 별도 단계).
-LADDER_PHASES = ("rr-p0", "rr-p1", "rr-p2-17", "rr-p2-19", "rr-p3-fault")
+#: rr-p2-19(Link 19)는 2026-09-04 정책 변경으로 제거 — 아래 LINK19_LIMITATION.
+LADDER_PHASES = ("rr-p0", "rr-p1", "rr-p2-17", "rr-p3-fault")
 
-#: phase별 그 run이 산출·PASS해야 하는 TC (RR-006 포함 — 사다리 단계 실패
-#: 기준. final builder 판정에서 006은 기록 전용이지만 단계로서는 PASS 요구).
+#: phase별 그 run이 산출·PASS해야 하는 TC — 단계 실패 기준. final builder의
+#: REQUIRED_TCS(RR-001~005 + 007)와 정확히 대응한다.
 PHASE_EXPECTED_TCS = {
     "rr-p0": ("TC-STAGE7-RR-001",),
     "rr-p1": ("TC-STAGE7-RR-002", "TC-STAGE7-RR-003", "TC-STAGE7-RR-004"),
     "rr-p2-17": ("TC-STAGE7-RR-005",),
-    "rr-p2-19": ("TC-STAGE7-RR-006",),
     "rr-p3-fault": ("TC-STAGE7-RR-007",),
+}
+
+#: 최종 reference·보고서에 명시하는 Link 19 제한 (사용자 지정 문구).
+LINK19_LIMITATION = {
+    "link_19_implementation": "present",
+    "link_19_standalone_qualification": "not exercised",
+    "link_19_hardware_performance": "not guaranteed",
+    "operational_scenario_links": "Link 11/17 only",
+    "note": ("Link 19 implementation exists in the tree (PHY/profile/registry/"
+             "unit tests untouched) but is not exercised by the standalone "
+             "qualification ladder and its hardware performance is not "
+             "guaranteed. The three operational scenarios use Link 11/17 only. "
+             "TC-STAGE7-RR-006 remains DEFERRED (record-only) in the final "
+             "builder; REQUIRED_TCS are unchanged."),
 }
 
 #: phase별 resolved config run_mode — **명시 고정** (2026-09-04 사용자 승인).
@@ -69,17 +87,16 @@ PHASE_EXPECTED_TCS = {
 #:
 #:   rr-p0        RF_OFF_QUALIFICATION  — RF-off 생애주기, TX 0
 #:   rr-p1        GAIN_CALIBRATION      — gain 입력 없음; 새 gain artifact 산출
-#:   rr-p2-17/19  OPERATIONAL           — rr-p1 산출 gain을 결속(loader 계약)
+#:   rr-p2-17     OPERATIONAL           — rr-p1 산출 gain을 결속(loader 계약)
 #:   rr-p3-fault  OPERATIONAL           — 동일
 PHASE_RUN_MODE = {
     "rr-p0": "RF_OFF_QUALIFICATION",
     "rr-p1": "GAIN_CALIBRATION",
     "rr-p2-17": "OPERATIONAL",
-    "rr-p2-19": "OPERATIONAL",
     "rr-p3-fault": "OPERATIONAL",
 }
 #: rr-p1이 산출한 gain artifact를 결속하는 phase (= OPERATIONAL phase).
-GAIN_CONSUMING_PHASES = ("rr-p2-17", "rr-p2-19", "rr-p3-fault")
+GAIN_CONSUMING_PHASES = ("rr-p2-17", "rr-p3-fault")
 
 #: coordinator deadline + 회수·정리 여유.
 PHASE_TIMEOUT_MARGIN_S = 900
@@ -387,6 +404,7 @@ def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
             "baseline_sha256": binding["baseline_sha256"],
             "gain": gain,
         },
+        "limitations": dict(LINK19_LIMITATION),
         "scope": ("이 reference는 이 기계·이 배포본·이 identity·이 환경의 "
                   "표준 실행 자격만 담보한다. baseline 문서 실물 대조는 "
                   "audit 환경에서만 수행한다 (결정 8)."),

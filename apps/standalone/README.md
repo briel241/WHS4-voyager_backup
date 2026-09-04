@@ -208,11 +208,20 @@ canonical JSON으로 로컬 생성한다.
 2. RR-P1 (+gain 측정)         → TC-STAGE7-RR-002·003·004 + gain artifact
 3. candidate reference 생성    # 이후 단계·향후 run이 쓸 결속값 확정
 4. RR-P2-17                   → TC-STAGE7-RR-005
-5. RR-P2-19                   → TC-STAGE7-RR-006 (기록 전용 — 판정 이관 항목)
-6. RR-P3-fault                → TC-STAGE7-RR-007 (판정 필수)
-7. final builder 검증          # 아래 verification bundle 포함
-8. 전체 PASS → candidate를 releases/<id>로 이동 후 active 포인터 원자 교체
+5. RR-P3-fault                → TC-STAGE7-RR-007 (판정 필수)
+6. verification bundle → final builder 검증
+7. 전체 PASS → candidate를 releases/<id>로 이동 후 active 포인터 원자 교체
 ```
+
+**Link 19 제외 (2026-09-04 정책 변경, 사용자 지시)**: RR-P2-19(TC-RR-006)는
+standalone 자격 사다리에서 제거했다. 근거 — 현재 프로젝트의 운용 시나리오
+3종은 Link 11/17만 쓰고, final builder는 v0.9.10부터 RR-006을 DEFERRED(기록
+전용)로 다룬다. 2차 ladder(qual-20260904-055636)가 rr-p2-19에서 ROC RX
+`LinkIdDetectionError`(frozen PHY 계층)로 정지한 것이 계기다. Link 19의
+PHY·profile·registry·단위시험 코드는 삭제·수정하지 않으며, 최종 reference와
+보고서에 다음 제한을 명시한다: *Link 19 implementation present / not
+exercised by standalone qualification / hardware performance not guaranteed /
+operational scenarios use Link 11/17 only* (`qualify_cmd.LINK19_LIMITATION`).
 
 자격 실행의 fail-closed 보강 (W5 승인 조건):
 - 각 phase는 독립 process group으로 실행한다. timeout·중단 시 group 전체를
@@ -230,12 +239,14 @@ canonical JSON으로 로컬 생성한다.
   기존 active reference 유지.
 - **phase별 run_mode는 명시 고정**(`qualify_cmd.PHASE_RUN_MODE`, 2026-09-04
   승인): rr-p0 = RF_OFF_QUALIFICATION, **rr-p1 = GAIN_CALIBRATION**(gain
-  입력 없음, 새 gain artifact 산출), rr-p2-17/19·rr-p3-fault = OPERATIONAL
+  입력 없음, 새 gain artifact 산출), rr-p2-17·rr-p3-fault = OPERATIONAL
   (rr-p1 산출 gain 결속). 1차 RF qualification이 rr-p1을 template 기본값
   (RF_OFF)으로 생성해 `calibrate_rf PREPARE REJECTED`로 실패한 뒤 고정했다
   — endpoint runtime은 GAIN_CALIBRATION에서만 gain 탐색을 수락한다.
 - final builder 판정 필수 TC = RR-001~005 + RR-007 (`stage7_rr_final_builder.
-  REQUIRED_TCS` 실측). 사다리는 이를 정확히 산출하며 RR-006은 기록 전용.
+  REQUIRED_TCS` 실측, 무변경). 사다리는 이를 정확히 산출한다. RR-006은
+  builder의 DEFERRED_TCS(기록 전용) 그대로이며 없거나 미실행이어도 판정에
+  들어가지 않는다.
 - gain 재측정 결과는 기록·비교한다. ROC lane1 75dB가 지속되면 기존 관찰·
   물리 경로 점검 항목을 유지한다 (자동 해소로 간주하지 않음 — 결정 19).
 
