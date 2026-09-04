@@ -41,7 +41,12 @@ def test_known_files_classify_to_expected_domain():
         "VDETER/apps/stage7_scenario_controller.py": qd.RF,
         "VDETER/src/vdeter/stage7/pi_runtime.py": qd.RF,
         "VDETER/src/vdeter/phy/resampling.py": qd.RF,
-        "VDETER/configs/stage7/standalone-binding.json": qd.RF,
+        # RF config 템플릿은 rf(byte-identical).
+        "VDETER/configs/stage7/system.toml": qd.RF,
+        "VDETER/configs/stage7/endpoints/mass-a.toml": qd.RF,
+        "VDETER/configs/stage7/profiles/data-profile.toml": qd.RF,
+        # standalone binding은 생성 attestation(매 재생성 head 변경) → tooling.
+        "VDETER/configs/stage7/standalone-binding.json": qd.TOOLING,
         "apps/standalone/qualify_cmd.py": qd.TOOLING,
         "apps/standalone/qualification_domains.py": qd.TOOLING,
         "VDETER/tools/stage7_rr_final_builder.py": qd.TOOLING,

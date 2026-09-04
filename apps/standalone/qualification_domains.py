@@ -88,7 +88,14 @@ def classify(relpath: str) -> str:
     if p.startswith("VDETER/tests/") or p.startswith("tests/"):
         return TOOLING
 
-    # 3) RF 거동(byte-identical 요구).
+    # 3) standalone binding은 tooling — 생성 attestation 산출물로 매 재생성마다
+    #    source_head·generated_utc가 바뀐다. RF 알고리즘 파일 자체는 rf 영역
+    #    byte-identity로 결속되고, binding의 frozen SHA는 그 파생이자 bundle
+    #    frozen-hash-audit로 재검증되므로 여기서 byte-identity를 요구하지 않는다.
+    if p == "VDETER/configs/stage7/standalone-binding.json":
+        return TOOLING
+
+    # 4) RF 거동(byte-identical 요구).
     if p in _RF_APPS:
         return RF
     if p.startswith("VDETER/src/vdeter/"):
