@@ -5,50 +5,52 @@ Whitehat School 4기 팀 프로젝트 — 자율운항선박(MASS)↔원격운�
 응용 계층 + Presentation Interface**를 최신 VDE-TER(Stage 7)와 통합해 담고, 링크·PHY
 계층은 `VDETER/`(팀원 담당)가 맡는다.
 
-## 빠른 시작
+## 환경 설정
+
+실행 장비: Raspberry Pi 5 또는 Ubuntu PC 한 대, Ettus B210 세 대(MASS-A·MASS-B·ROC).
+저장소를 받은 뒤 아래 순서로 준비한다. 설계와 결속 규칙은
+[apps/standalone/README.md](apps/standalone/README.md)에 있다.
+
+```bash
+cd <repository>
+./bin/vdeter setup
+```
+
+`setup`은 기계당 한 번 실행하며 다시 실행해도 기존 설정을 바꾸지 않는다. 하는 일:
+
+- apt 패키지(gnuradio, uhd-host, python3-numpy, python3-venv) 확인·설치
+- `var/venv` 가상환경 생성과 `requirements-standalone.lock` 설치
+- identity(서명 키·인증서·trust store) 생성 — 이미 있으면 그대로 둔다
+- 연결된 B210 목록 출력과 `hardware.toml` 초안 생성
+- 설치 파일 실측(`var/installation/`)과 `~/.local/bin/vdeter` 명령 설치
+
+이후 `hardware.toml`을 편집한다. 역할별 B210 serial, MASS-B 외부 전원 자산, 배선
+프로파일을 기입하고 배선을 확인한 뒤 `wiring.approved = true`로 바꾼다. 역할 배정과
+배선 승인은 자동으로 하지 않는다.
+
+## 실행
+
+```bash
+vdeter qualify --yes          # 새 환경에서 한 번 — RF 자격 사다리(수 시간)
+vdeter run                    # 대화형 메뉴
+vdeter run all                # 전체 시나리오 (SC-VDE-005 → 006 → 001 normal → 001 forged)
+vdeter results                # run 목록과 요약
+```
+
+- 새 기계, 새 설치본, 새 identity, 라이브러리 버전 변경은 모두 UNQUALIFIED로
+  시작하며 `vdeter qualify`를 통과해야 `vdeter run`이 가능하다.
+- 자격은 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격이다.
+- amd64 Ubuntu 지원 코드는 구현돼 있으나 실제 amd64 환경 시험은 장비 부재로
+  유보됐다.
+- `--no-progress`를 붙이면 진행바 대신 줄 단위 상태만 출력한다.
+
+응용 계층만 따로 다룰 때:
 
 ```bash
 python apps/scenario_runner.py           # 시나리오를 골라 실행(대화형)
 python apps/console_server.py            # 콘솔 GUI — 브라우저에서 ROC/MASS 두 창
 python -m pytest tests -q                # 응용 계층 전체 시험
 ```
-
-## Standalone 실행 (Raspberry Pi / Ubuntu, B210 3대)
-
-새 Ubuntu 기계에서 다음 순서만으로 독립 실행한다. 자세한 설계·결속 규칙은
-[apps/standalone/README.md](apps/standalone/README.md).
-
-```bash
-git clone <repository>
-cd <repository>
-./bin/vdeter setup            # 기계당 1회 (apt·venv·identity·hardware.toml 초안·
-                              #  installation manifest·~/.local/bin/vdeter 설치)
-# hardware.toml 편집: 역할↔B210 serial, MASS-B 전원, 배선 확인 후 approved=true
-vdeter qualify --yes          # 새 환경 1회 RF 자격 (수 시간)
-vdeter run                    # 대화형 메뉴
-vdeter run all                # 비대화형 전체 시나리오
-vdeter results
-```
-
-- `setup` 이후에는 **Git이 필요 없다**. 대상 기계의 setup·qualify·run·results는
-  git 명령을 실행하지 않고 기준선 Markdown도 읽지 않는다. `.git`이 없는
-  **tar/USB 복사본**에서도 `./bin/vdeter setup` 뒤 동일하게 동작한다.
-- 결속은 `var/installation/` 설치 manifest(rf·operation·tooling 영역 digest)와
-  reference v2로 성립한다. 첫 번째 명령이 `./bin/vdeter`인 이유: 최상위
-  `vdeter` 파일은 `VDETER/` 디렉터리와 대소문자 무시 파일시스템(Windows 개발
-  checkout)에서 충돌하므로 `bin/`에 둔다. setup이 `~/.local/bin/vdeter`를
-  설치하면 그 뒤는 한 단어 `vdeter`로 쓴다.
-- 일반 실행(`qualify`·`run`·`results`)은 오프라인이다. 인터넷은 `setup`만 쓴다.
-- 새 환경(새 기계·새 설치본·새 identity·라이브러리 변경)은 UNQUALIFIED로
-  시작하며 `vdeter qualify` 1회가 필요하다. 현재 Pi(voyager3)의 기존
-  qualification(reference `aa72badc…`)은 그대로 보존되며 이 변경으로 갱신하지
-  않는다.
-- amd64 Ubuntu(generic-pc) 지원 코드는 구현돼 있으나 실제 amd64 환경 시험은
-  장비 부재로 유보됐다.
-- 자격은 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격이다.
-- 진행 표시: setup·qualify·run bring-up은 20칸 진행바(TTY) 또는 UTC 시각이
-  붙은 줄 로그(nohup/redirect)로 표시한다. `--no-progress`로 진행바를 끈다.
-  READY 이후 시나리오 구간은 퍼센트 없이 송수신·판정 데이터를 줄 단위로 낸다.
 
 ## 문서
 
