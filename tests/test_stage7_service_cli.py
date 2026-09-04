@@ -32,25 +32,20 @@ import apps.stage7_profile as stage7_profile
 import apps.stage7_run as stage7_run
 import apps.stage7_service_layer as service_layer
 
-PHASE_G = os.path.join(_REPO, "VDETER", "results", "phase-g")
+#: Phase G reference의 **tracked fixture** (phase-g-formal-20260902b 사본 —
+#: reference·sidecar는 byte-identical, profile은 host 익명화 + fixture 경로).
+#: 로컬 evidence(VDETER/results/phase-g, git-ignored)에 의존하지 않으므로
+#: clean checkout에서도 실행된다 (2026-09-05 검토 반영).
+PHASE_G_FIXTURE = os.path.join(_REPO, "tests", "fixtures", "phase-g-reference")
 
 
 def _latest_phase_g() -> str:
-    candidates = sorted(
-        os.path.join(PHASE_G, name) for name in os.listdir(PHASE_G)
-        if name.startswith("phase-g-")
-    ) if os.path.isdir(PHASE_G) else []
-    if not candidates:
-        raise AssertionError("phase-g evidence 디렉터리가 없다 — reference 미발급")
-    return candidates[-1]
+    if not os.path.isdir(PHASE_G_FIXTURE):
+        raise AssertionError("phase-g reference fixture 디렉터리가 없다")
+    return PHASE_G_FIXTURE
 
 
 def _profile_path() -> str:
-    # 발급 도구의 무덮어쓰기 금지 때문에 profile은 하위 profile/로 발행된다
-    # (phase-g-formal-20260902b부터). 구 배치도 계속 지원한다.
-    nested = os.path.join(_latest_phase_g(), "profile", "stage7-profile.json")
-    if os.path.isfile(nested):
-        return nested
     return os.path.join(_latest_phase_g(), "stage7-profile.json")
 
 

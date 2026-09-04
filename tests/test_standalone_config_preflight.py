@@ -196,10 +196,12 @@ def test_generate_run_configs_end_to_end_with_real_loader():
         assert 'deployment_manifest_relpath = "var/installation/installation-manifest.json"' in mass_a
 
         git_state = json.loads((out / "git_state.json").read_text("utf-8"))
-        # README §6 표 — 스키마는 호환. git 필드는 참고 provenance(있으면
-        # 기록, 없으면 null)이며 판정에 쓰이지 않는다. baseline은 커밋 상수 pin.
+        # README §6 표 — 스키마는 호환. git 필드는 실행 환경에서 관측하지
+        # 않으므로 **항상 null**이다(호출자가 provenance에 git 값을 넣어도
+        # 무시). baseline은 커밋 상수 pin.
         from apps.standalone.provenance import STAGE7_BASELINE_PIN
-        assert git_state["git_commit"] == "f" * 40
+        assert git_state["git_commit"] is None
+        assert git_state["git_branch"] is None
         assert git_state["git_dirty"] is None
         assert git_state["baseline_sha256"] == STAGE7_BASELINE_PIN["sha256"]
         assert git_state["baseline_version"] == STAGE7_BASELINE_PIN["version"]

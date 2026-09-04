@@ -21,10 +21,14 @@ vdeter results
 ```
 
 - `setup` 이후 Git 불필요: 대상 기계의 setup·qualify·run·results는 `git`
-  명령을 호출하지 않고(`.git` 파일을 읽지도 않고 판정에 쓰지 않음) 기준선
-  Markdown도 읽지 않는다. `.git` 없는 **tar/USB 복사본**도 동일하게 동작한다.
+  명령을 호출하지 않고 `.git`·`standalone-binding.json`도 읽지 않는다 — Git
+  정보는 관측 자체를 하지 않으며 reference·git_state의 git 필드는 항상 null
+  이다. 기준선 Markdown도 읽지 않는다. `.git` 없는 **tar/USB 복사본**도
+  동일하게 동작한다.
 - 일반 실행은 오프라인. 새 환경은 qualification 1회. 현재 Pi의 기존
-  qualification은 보존된다(이 변경으로 갱신하지 않음).
+  qualification(v1 reference)은 **기존 설치본을 건드리지 않았기 때문에**
+  보존된다. 그 설치 root를 이 main으로 갱신하면 v1 reference로는 v2 실행이
+  거부되므로 `vdeter qualify`(전체 RF 사다리)를 다시 통과해야 한다.
 - amd64 지원 코드는 구현됐지만 실제 amd64 시험은 유보. 자격은 외부 공인
   인증이 아닌 RESEARCH_READY 내부 자격.
 - `bin/vdeter`(저장소 launcher)는 venv가 없으면 `setup`만 시스템 python3로
@@ -47,10 +51,11 @@ builder·reference 발급/검증·분류기·qualification 시험 코드) / 비�
 중복 결속. reference **v2**는 installation/rf/operation/tooling SHA·파일별
 SHA map·환경/라이브러리 버전·B210 serial과 역할·USB speed_class·배선 승인·
 gain artifact·identity fingerprint·resolved config SHA·TC 결과·evidence SHA·
-qualification method·limitations를 결속하고, Git commit/branch/dirty·baseline
-Markdown SHA는 optional `provenance`로만 기록한다. v1 reference는 과거 evidence
-조회용으로 계속 읽힌다. coordinator 계약(`git_state.json`)은 무수정이며 git
-필드는 null/참고값, `installation-state.json`(v2)을 additive로 함께 쓴다.
+qualification method·limitations를 결속한다. `provenance`에는 기준선 pin만
+있고 `git`은 항상 null이다(실행 환경에서 Git 정보를 관측하지 않음). v1
+reference는 과거 evidence 조회용으로 계속 읽힌다. coordinator 계약
+(`git_state.json`)은 무수정이며 git 필드는 항상 null, `installation-state.json`
+(v2)을 additive로 함께 쓴다.
 `baseline_sha256` 인자는 커밋 상수 pin(`provenance.STAGE7_BASELINE_PIN`)이다.
 
 **진행 표시(presentation)** — `progress.py`(표준 라이브러리). setup·qualify·
@@ -230,8 +235,8 @@ make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이�
 
 ## 6. git_state.json 호환 생성 (승인 조건 1)
 
-> **v2**: `git_commit`/`git_branch`/`git_dirty`는 참고 provenance(`.git` 파일
-> 읽기, git 명령 없음; 없으면 null)이며 coordinator는 대조하지 않는다.
+> **v2**: `git_commit`/`git_branch`/`git_dirty`는 **항상 null**이다(실행
+> 환경에서 git 명령도 `.git` 읽기도 하지 않음). coordinator는 대조하지 않는다.
 > 결속값은 additive 필드 `installation_sha256`·`rf/operation/tooling_manifest_
 > sha256`·`installation_verified`(및 별도 `installation-state.json`)이고,
 > `baseline_version/sha256`은 커밋 상수 pin이다. 표의 "standalone-binding

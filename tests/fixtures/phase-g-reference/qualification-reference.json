@@ -1,0 +1,571 @@
+{
+ "artifact_type": "STAGE7_QUALIFICATION_REFERENCE",
+ "baseline_sha256": "2a87c1d0f7bee78c13def8b153745ecbe42ac7dcf701d69abffc9141bc9cc026",
+ "gain": {
+  "artifact_input_sha256": "83f79d75f657078368755fc950f62475d89563690d91f03a23a69ed483fce928",
+  "artifact_run_id": "mass-roc-rr-p1-20260902b",
+  "artifact_sha256": "36833ce5018336fa3abec98d6f96dbf5b6da1df87b282581b162f62e07fc3d19",
+  "endpoint_common_rx_gain_db": {
+   "MASS-A": 69,
+   "MASS-B": 69,
+   "ROC": 75
+  },
+  "gain_plan_sha256": "24b403ea13304413a58fc621aab1fd1b770c4744953895c590150c1bd4692e88"
+ },
+ "hardware": {
+  "endpoints": {
+   "MASS-A": {
+    "power": "PI_BUS_POWER",
+    "role": "SHIP",
+    "serial": "34D03DD",
+    "speed_mbps": 5000,
+    "station_id": 111111111,
+    "usb_path": "3-1"
+   },
+   "MASS-B": {
+    "power": "EXTERNAL_DC_AT2024T",
+    "role": "SHIP",
+    "serial": "3515425",
+    "speed_mbps": 480,
+    "station_id": 333333333,
+    "usb_path": "4-2"
+   },
+   "ROC": {
+    "power": "PI_BUS_POWER",
+    "role": "CONTROL",
+    "serial": "34D03E8",
+    "speed_mbps": 5000,
+    "station_id": 222222222,
+    "usb_path": "5-1"
+   }
+  },
+  "forbidden_legacy_serial": "34D6357",
+  "profile": "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
+ },
+ "issued_at_utc": "2026-09-02T07:23:11Z",
+ "issued_by_phase": "G",
+ "orchestration_provenance": {
+  "ast_observed_boundary": [
+   "apps/stage7_trace.py"
+  ],
+  "coordinator_additive_branch": [
+   "mass-roc-service",
+   "mass-roc-session"
+  ],
+  "files": [
+   "apps/scenario_runner.py",
+   "apps/stage7_mass_roc_controller.py",
+   "apps/stage7_profile.py",
+   "apps/stage7_run.py",
+   "apps/stage7_service_layer.py",
+   "apps/stage7_session.py",
+   "apps/stage7_trace.py"
+  ],
+  "note": "orchestration 계층(session/controller/CLI/계측)은 RF 판정을 바꾸지 않으므로 결속에서 제외한다."
+ },
+ "phase_f_deployment": {
+  "deploy_run_id": "phase-fg-requal-20260902c",
+  "file_count": 499,
+  "manifest_sha256": "f799b311fc60d912c9a9b6bb27d65d1ffaf9849c88828cd0e1831835ce9042e5",
+  "remote_path": "~/vdeter-stage7/phase-fg-requal-20260902c"
+ },
+ "qualification": {
+  "counters": {
+   "faults": 0,
+   "inhibited": false,
+   "non_clean_statuses": 0,
+   "wrong_bytes_total": 0
+  },
+  "evidence_root": "~/vdeter-stage7/phase-fg-requal-20260902c/runs/mass-roc-rr-p1-20260902b/",
+  "git_commit": "86463da16fe2b860e2902f25919933b87c3996ec",
+  "phase": "rr-p1",
+  "profile": "RESEARCH_READY_MINIMAL",
+  "raw_phy_paths": {
+   "C1": "PASS",
+   "C2": "PASS",
+   "C3": "PASS",
+   "C4": "PASS",
+   "C5": "PASS",
+   "C6": "PASS"
+  },
+  "revalidate_passed": {
+   "C1": true,
+   "C2": true,
+   "C3": true,
+   "C4": true,
+   "C5": true,
+   "C6": true
+  },
+  "run_id": "mass-roc-rr-p1-20260902b",
+  "scope_note": "P1 pair 결과다 - 3-node group time qualification을 주장하지 않는다.",
+  "skipped_past_due": {
+   "nonzero_records": 0
+  },
+  "skipped_past_due_note": "기록용이다 - 판정 기준이 아니다. 실행마다 흩어지는 환경 변동으로 확인됐고(run e=0, run f=MASS-A C2 3, run g=MASS-B 1), 공식 판정은 TC 결과와 revalidate_passed가 담당한다.",
+  "tc_results": {
+   "TC-STAGE7-RR-002": {
+    "counters": {
+     "bursts_per_path": 10,
+     "cfo_paths": 3,
+     "retries": 0
+    },
+    "duration_s": 3190.4,
+    "evidence_sha256": "2d25b5aa6b12c4f673e25e0e3a6dd80d0b8924933a065607820d12ec40419f1e",
+    "run_id": "mass-roc-rr-p1-20260902b",
+    "status": "PASS"
+   },
+   "TC-STAGE7-RR-003": {
+    "counters": {
+     "candidate_bursts": 10,
+     "final_bursts": 100,
+     "retries": 0
+    },
+    "duration_s": 3190.4,
+    "evidence_sha256": "465ffb4595e7ca4c19b39e5a0eff61dc953214dd8224f1713d75cd31d772af1e",
+    "run_id": "mass-roc-rr-p1-20260902b",
+    "status": "PASS"
+   },
+   "TC-STAGE7-RR-004": {
+    "counters": {
+     "raw_phy_bursts_per_path": 100,
+     "raw_phy_rx_summaries": 6,
+     "retries": 0,
+     "rf_time_bursts_per_path": 10,
+     "wrong_bytes_total": 0
+    },
+    "duration_s": 3190.4,
+    "evidence_sha256": "1a06a69fa2d1637580f1c4df38aae34f24826c04557343c2b3ff327bb7980a8b",
+    "run_id": "mass-roc-rr-p1-20260902b",
+    "status": "PASS"
+   }
+  }
+ },
+ "qualification_critical_manifest": {
+  "entry_points": [
+   "VDETER/apps/stage7_endpoint_launcher.py",
+   "VDETER/apps/stage7_coordinator_main.py"
+  ],
+  "file_count": 156,
+  "function_bound_files": {
+   "VDETER/apps/stage7_coordinator_main.py": {
+    "delta": {
+     "added_functions": [],
+     "added_lines": 0,
+     "changed_functions": [],
+     "deleted_detail": [],
+     "deleted_lines": 0,
+     "kind": "SELF_BASELINE",
+     "note": "Phase F와 Phase G가 같은 트리라 델타가 없다.",
+     "top_level_function_count": 34
+    },
+    "module_imports_sha256": "6fac1f5cb74c9eac519cec32b2d7c474f913a5d9ff82c40238e64ad171e6121b",
+    "phase_f_file_sha256": "64ca9add7e9b349a4938a9422ded87dfc52798b7211ff755e49998beaa35d1df",
+    "phase_g_file_sha256": "64ca9add7e9b349a4938a9422ded87dfc52798b7211ff755e49998beaa35d1df",
+    "qualified_functions": {
+     "_live_b210_speed_map": {
+      "ast_sha256": "6984d9b3eeccce00c0c62ecee6a770b1b3be776036f89f1b8c61507c0d62d4da",
+      "source_sha256": "da6808b40bb4579f353777084c7cb6cdd22c9e893addb445347865c9d7c4abf6"
+     },
+     "_load_run_metadata": {
+      "ast_sha256": "2f6c25b225d7e0bcc2a6a8ed2cec68b0b568c6fda632bbc01f56fdc9cb090f7e",
+      "source_sha256": "130b31258fb704f90b94a3c95d3034b7d40adb7be61e473ec2a8beaf4b9eec9c"
+     },
+     "_open_session_trace": {
+      "ast_sha256": "c64e4eed68f7afc43ed50ba2537497a38690e449418132936a113c38c8698058",
+      "source_sha256": "bb8bf005e9e9016010370a68e1ebd0512e9af9b97ecfa1bc03b90e41c9e625b8"
+     },
+     "_rediscover_b210": {
+      "ast_sha256": "6987cdfe67aa469f53afd43a8b6d7848eb2559991cb5cea159d8b8f49e4f7272",
+      "source_sha256": "b882d3cc9aacb98fd4d348f74b3aa7f49f7ee101608cb3d6aef8865d7f682944"
+     },
+     "_run_rf_qualification": {
+      "ast_sha256": "e91a1bdf96f17ef10dde4d7ede6ab5b0a76780462462c5950b8249c66d068559",
+      "source_sha256": "8ff69faeab71908fbed16ab0df2c8ad7a554cce548c218222c8838df1cb55bc7"
+     },
+     "_run_rr_service_phase": {
+      "ast_sha256": "3286cff6861c77e884a4e9b99f851b0eb33aec76d8fc6f32afcb034591767e5d",
+      "source_sha256": "7473ffe237df13acaa7a2ab27bcd029794d9adc0569d779647be7a121b5d8c4a"
+     },
+     "_service_session_terminal_status": {
+      "ast_sha256": "0c830073feb068c0be88757c1653d2c5d8734b4c149a604ae2f6ace485023571",
+      "source_sha256": "4afcf2791720654bec4a2a158575b929877e424f5e2c74435a545acac8ec090a"
+     },
+     "_spawn_controller": {
+      "ast_sha256": "126b93b934765aa042491fae47b99fbcf3fbc163cbe45aa518a7ab404454b4f7",
+      "source_sha256": "5940787fe6e9a1897a61f054fd727ba27081d21f58bc8f6c0aa470889aad3ca2"
+     },
+     "_spawn_mass_roc_controller": {
+      "ast_sha256": "58adda7a42c1adca5c36ffc9525671e1acc470b9507c8298a68e2ebb5d00ad1e",
+      "source_sha256": "adf8de0f130de0fed2afab04613c71fc2986d78598ad0bb0631bf99d6ac97b7f"
+     },
+     "_spawn_session_lifecycle": {
+      "ast_sha256": "9c73d99108c5454d284266ad0c6c360bd613cec496af6c83ba138b31b443a67b",
+      "source_sha256": "9a694854c97dea1ebf07fd99842e4406863706f45c8f46c68aeb15efb4b5d141"
+     },
+     "_terminate_process_bounded": {
+      "ast_sha256": "b6544800de69e5039f2ad5e250df48c9e64e8ffaf315da76fb46f676c4b3c2a6",
+      "source_sha256": "b7f2bf19c22e10cfb868c275f16fb0c8ace41cab1bc50d82d5c0ffb2fe655b80"
+     },
+     "_utc_now": {
+      "ast_sha256": "3f61038c28bf161009361d9b149a7ef4a31679d761489712a5692bc62fbdfdf0",
+      "source_sha256": "1ae1b69be661c2c932a64abadd46441704430f535838c20c5d4cf2cb6b5dd6b2"
+     },
+     "_worker_process_count": {
+      "ast_sha256": "8a6e2cfa0759b8e88920ddd53c6a8791290a32c720458388baf9731995b3eec3",
+      "source_sha256": "79f552e332b8272a33ae410b7d3e9f6f0070ad27191196a2a454f0ab1d08a3c7"
+     },
+     "_write_plan": {
+      "ast_sha256": "223762d28c89dea858e6a058398e88f67d3599a51d6c0cc84fdc737fc8e81e77",
+      "source_sha256": "85311828cfa8da9c96ea91c1bb85e776f53bbb55ef2e9509c8783898166d2073"
+     },
+     "build_adaptive_gain_paths": {
+      "ast_sha256": "b8971dc956a650a2e0013f520ff52c2cfde659135e0ba5f4be68d79d83b78bdc",
+      "source_sha256": "260b66cd58478b64bac881424e48dbe60ca6bbb886455b85044441f7d1da4de8"
+     },
+     "load_group": {
+      "ast_sha256": "b403c96c8d2f9e0b1b5dfdf7633fc7e0a7c54e8b86920c6f58a9b04b9f497705",
+      "source_sha256": "b9096b34ea0909adb25451cacc6b36552e8c405e585dce7741b4c546220eaecf"
+     },
+     "main": {
+      "ast_sha256": "3829ba6af63761fd9e05651394444283b9550f159c24a889937e73ef05ac96d0",
+      "source_sha256": "0dcf58e5d9e8f97d72273bd98f4ccf5a359097794656da3f85eb38903be91356"
+     },
+     "read_monotonic_raw_ns_local": {
+      "ast_sha256": "2491bae8e401824a336d230a197e6f39d5f0ef5fed52a9db743c6a0bbc6c1e3a",
+      "source_sha256": "78e15ee4b72ef1a680479858f07b3d219cd032b93a6bb4942d44a0a6a726689d"
+     },
+     "run_gaincal": {
+      "ast_sha256": "69665b47b1ee2c95a55fe43b874712020aab50cbfac780d2626338528fae75fd",
+      "source_sha256": "b3ec710f03fa3d0f08219a54375b496374f380d52399472fb7a502268d6ee5b9"
+     },
+     "run_mass_roc": {
+      "ast_sha256": "e258387d89266c2c26122a60fd417caceba842b6d52ff8a761c3201ac2e8ec1d",
+      "source_sha256": "dda7c54e87ef1f0db66b62f24f88f454636bb8f84a09efc832ab6c23dd74225a"
+     },
+     "run_mass_roc_service": {
+      "ast_sha256": "e5900eac9776a13eca8c16ca492a68837397d8a75e97ccee60ab583e703f853d",
+      "source_sha256": "3efb5f6431998f17e19506f3707b867c5e56e2ed0e83ce4749d4ccc53c28e966"
+     },
+     "run_mass_roc_session": {
+      "ast_sha256": "936ee1e16a5b94f4a38db108dff5c4c812561efed9da25b8b0d9628ce4716175",
+      "source_sha256": "9b87e7dcc0c6225ecaa1e27c515986d4a0546320e3210ef62ccb9f1903aabdb9"
+     },
+     "run_p0": {
+      "ast_sha256": "40d0fe53b28008728f05d3cd8b31d1811d900c1ea0002fd14e67dee22f011825",
+      "source_sha256": "519ddc1c7a79d37f3ff946113c61f218027df35ad6e4c51e051259bb00d3cafc"
+     },
+     "run_p0_prepare_configure_arm": {
+      "ast_sha256": "f88006ee2ef60b20ff0756f0ba348eed8287a9fa0654952174579491f2e07891",
+      "source_sha256": "a886ef76887397121f247ccd792825cfd496aeb1eef01373361abc473cf5c80c"
+     },
+     "run_p1": {
+      "ast_sha256": "1b97c3f91f26ce9673f2a9bc651e75c57542391a3f3fb4780d8a097e6f62abf5",
+      "source_sha256": "eef027c5460f118e190fdaef3c730634041a88318c079ed92d16840ae84232fe"
+     },
+     "run_p2": {
+      "ast_sha256": "77200b56314ccc2e092ebaea89e84df9dae56c6fb7fc8d424a4c7bcd92aa021e",
+      "source_sha256": "8f94b6fd8856709b85a94efb3b00e3590ec30dade608c27a1455ae2156fa51b3"
+     },
+     "run_rr_p0": {
+      "ast_sha256": "3a1ecff5acd06709394c7c53fd9dda540df9766257d9226503b62d703f5a4114",
+      "source_sha256": "ce9a90a9188440790ba59b113afd0d0527237ec7ef091460adbc5f3b3be648bd"
+     },
+     "run_rr_p1": {
+      "ast_sha256": "9416871e9f147635a54e7b1171262b0729d1bf4cc5a884d8cb3c17bb5ad7153f",
+      "source_sha256": "6083d85f944ad83b27e092633d82bc7928a5f5c09baf5fb0f7781d2ab8033f38"
+     },
+     "run_rr_p2": {
+      "ast_sha256": "2d46ec59cd9cf1623adb7267998b893435be53b8b3c3d6e991cb8f0732d45325",
+      "source_sha256": "8825a2979968c7c71361ecb94bdf359b34927e35aa99595bf5ce74b496ae58b1"
+     },
+     "run_rr_p3_fault": {
+      "ast_sha256": "b04132ab0405ad5e4d26de5c1a5e69a8abe3789d34ae16e20476fab7c36ea699",
+      "source_sha256": "a9f55fe8c4c3e59c2e8aeb4cbb9408bbcfda008603abdb7dcfad0698e22d5258"
+     },
+     "run_rr_p3_soak": {
+      "ast_sha256": "edb7e9ca3249791238856b91456a6e23f758dd740d9d634cbef56d6b90fc0bbd",
+      "source_sha256": "abbec6d2e990acc42721274dffe6284e452ec484dfd27f7eada4dd132b4e34a7"
+     },
+     "spawn_and_connect": {
+      "ast_sha256": "289867bbf51557b1a4786d94adf8b34ab183c355fbc7acebef50b3447d26f3cc",
+      "source_sha256": "f8bc5ff2d6cfbab3025832ef646c77ce5914d458a62180da247d369dae7ba34e"
+     },
+     "validate_rr_binding": {
+      "ast_sha256": "dcdf9301f1a3ea310e3873dd6e3169d02994b536e3e1845bb200eb41410ee352",
+      "source_sha256": "9b5004c97cc1b806fd84d044e2018b3181eac87d4d6e492474b323a8e6ef9f72"
+     },
+     "write_rr_evidence": {
+      "ast_sha256": "1c07e781d3f2aa9facbfbbeb72453e3b5f7b44cbfca0e1398eb39f576f572f74",
+      "source_sha256": "945c22ca0c4f0c9652cf4930d003946f61c899fce09dfe41827e9f5a60e257d1"
+     }
+    },
+    "rr_phase_dispatch": {
+     "gaincal": [
+      "run_gaincal"
+     ],
+     "hold": [
+      "run_p0"
+     ],
+     "mass-roc-service": [
+      "run_mass_roc_service"
+     ],
+     "p0": [
+      "run_p0"
+     ],
+     "p1": [
+      "run_p1"
+     ],
+     "p2": [
+      "run_p2"
+     ],
+     "rr-p0": [
+      "run_rr_p0"
+     ],
+     "rr-p1": [
+      "run_rr_p1"
+     ],
+     "rr-p2-17": [
+      "run_mass_roc",
+      "run_rr_p2"
+     ],
+     "rr-p2-19": [
+      "run_mass_roc",
+      "run_rr_p2"
+     ],
+     "rr-p3-fault": [
+      "run_rr_p3_fault"
+     ],
+     "rr-p3-soak-17": [
+      "run_rr_p3_soak"
+     ],
+     "rr-p3-soak-19": [
+      "run_rr_p3_soak"
+     ]
+    },
+    "top_level_constants": {
+     "APP_ROOT": "66ce1ce026bf6c58c98f801cec9aa79bc58d570cd362a2a9ea433c7ef2c24779",
+     "CHILD_KILL_TIMEOUT_S": "f1e8cf8c53bd070b8ad51c5f1a6b03231c62a3df9eaa68d2ec2324ef4ad42db7",
+     "CHILD_TERMINATE_TIMEOUT_S": "8e84cc5b19c18ec54d50453504c5b740d3799d5d798b53245408a0771f13f9fc",
+     "ENDPOINT_IDS": "43752d1e43f8b4273d49575fc5e18a68df3c824ba0dcd2e1d99aefcb7182f725",
+     "P1_EDGE_PATHS": "8a6d5fcb1a78cfc34928b5a3904ac8c92a8a6c3732c08062f05b7375a1092b26",
+     "P2_PATHS": "11318d2c7fdbae6dbd4bbcf2172107af9907333527eabac4ed5ab016f549abb9",
+     "PATH_CHANNEL_ROLE": "fa9e8aa32f68f03743698eccec5f5a2cddbf46792ccdaba3a4b44211c2aa369a",
+     "RESEARCH_READY_PROFILE": "16b356993ec77b8c1b619a0a775ea5ee114aac49ad689e14ac739e34d2487362",
+     "REVAL_MAX_NO_DECODE": "ae2b8421da37ae4b513bea5450b2870a69888f2a853e25ddecb9a9bc28f36a63",
+     "RR_CFO_PATHS": "0b160547aacf40dbab283f7aa6373f633bc5513d35105a11721422357fe25bf0",
+     "RR_PHASE_DEADLINE_S": "15c6d8ab817c9aba2f37dc6c413f45c6b99d49f2238e00e5effc8ee7e00cb157",
+     "SERVICE_RF_TIME_PAIRS": "bdeaf06d34290b05080a712b5fd8d6c52850cddc84510f260a362e644aaa5674",
+     "SERVICE_RF_TIME_PATHS": "dac8ae3f5c0540c596423e5b9f601a658993b8d16eee595151951284c35b5307",
+     "SESSION_CLOSED": "96aa48366d09082220e3bd3cfa68c075fade04c2e0619dad4ebaf1d906b26880",
+     "SESSION_DEADLINE_S": "0ae38e082a672e478eade81973690ce71b2deb00741ea38e9989b22d6ac89e6a",
+     "SESSION_DIR_NAME": "126a43acde17257760607bad7a9b95ae439487a13b334570e32e3db5e95719f0",
+     "SESSION_IDLE_TIMEOUT_S": "320b15f18de6c846699d52a9bc41dc65e96f5aeccc5fa5a01817fb86d42be32e",
+     "SESSION_READY": "914f59f244e445920021b1a2adfeca67275399c0c2d68fd8365505f72f032e93",
+     "SESSION_REQUESTS": "e4673b635bad027709952b02d708f93d42b15e0325012cf19086638783658520",
+     "SESSION_RESULTS": "ae5d72108624cbdf6f19d5d4e1561b8ef3ff9547b49bb33c52eef4d168ec84d0",
+     "SESSION_SHUTDOWN": "2c55e71864e1a280c47575ca112f8768250488f2f425d9459678a4f8f9d0024d",
+     "SESSION_WORKLOAD_TIMEOUT_S": "f085e7cef9275410be1ff9114a8ac4f64c1130ae449e70891c646fc3b0a96930",
+     "_EXPECTED_USB_SPEED": "8ea12889c1cb9ce0a306367e37f0983cd02abf4acffe6e2224503d086baba5ac"
+    }
+   }
+  },
+  "scope_method": "endpoint launcher·coordinator 진입점에서 AST 전이적 import 폐포(함수 내부 import 포함) + RF config 원본. 표준/서드파티는 경계로 두고 환경 manifest가 버전을 결속한다. coordinator는 orchestration 분기가 additive로 늘어나므로 전체 파일 해시가 아니라 함수 단위로 결속한다.",
+  "strict_file_count": 156,
+  "strict_files": {
+   "VDETER/apps/stage7_endpoint_launcher.py": "87d648dfc023ed80149f738249370aebf0bd50318424d10c77a2405557e06bb8",
+   "VDETER/configs/stage7/endpoints/mass-a.toml": "bfff6499f564e02e9e686b5012b5e32ba0abe0359c0d462e31b3c4f275b70746",
+   "VDETER/configs/stage7/endpoints/mass-b.toml": "e8a3317138187d462a04ccef2d6ae2e8416b31670d66b1276fada61c45aa81b8",
+   "VDETER/configs/stage7/endpoints/roc.toml": "dbb49190a447bfa835b55f3a04ae9850a9aac0c78067aa439eb48b2ae22f5b39",
+   "VDETER/configs/stage7/profiles/data-profile.toml": "322bfae706d9ab7b9131b35c33f9443349f67b0c05a27e96d056d75507d1ed38",
+   "VDETER/configs/stage7/system.toml": "e989fcc4edaccd3f4265ad31faf7d726a74ad6d3aec4c2169e174dafd559b3c6",
+   "VDETER/src/vdeter/common/addressing.py": "b5dcc8b6af3a66cc997b2beb4f68489e27237502300ca4020919870b6829247e",
+   "VDETER/src/vdeter/common/contracts/link.py": "3d3ee03e25bb707e53101b6aa99714aaedcbf732110d11d9368472c1e2d9ff91",
+   "VDETER/src/vdeter/common/contracts/mac.py": "fed49947b4e29c58d0c740ad515cca10ea72ebaa066cea1d09091ed00e1af828",
+   "VDETER/src/vdeter/common/contracts/mac_execution.py": "d27da83f20d18019d45b8091ea23bbcf2d5c33b9f5a429ac6837981167176f30",
+   "VDETER/src/vdeter/common/contracts/message.py": "ef491b584b9c85f9985cf9290825afcdc17b7ad7858e4635e88cdf4f51235774",
+   "VDETER/src/vdeter/common/contracts/phy.py": "15c9a7e453103d1673e76277c0eac5c2559182bd7737aeb605033e45e6bffa3d",
+   "VDETER/src/vdeter/common/contracts/presentation.py": "997563c2aa353d94c7afd1c225edda80fa7a463b1408df3221d00d961344f663",
+   "VDETER/src/vdeter/common/contracts/radio.py": "b553a4b0e7b03796d5ae8f4b961d2b6cdc51620de18810f796e470f74025a415",
+   "VDETER/src/vdeter/common/contracts/service.py": "dc030c7b6911c984b40cc5d4877d23601ec8b753b195aab992b0a8bcaf60aa36",
+   "VDETER/src/vdeter/common/errors.py": "c8373f26481ba345ed059f2056dcf3c9ed57b936f93cdf7f9f534cf500a95e88",
+   "VDETER/src/vdeter/common/events.py": "4bec62f74a570fa7b3e88c4e6988ac7fdfcecfc3183b93d42077a64cb00afab9",
+   "VDETER/src/vdeter/common/exceptions.py": "d0ec7471ce72997e383fe80958135fe9ddc20db099a471a22174895b9cfb2d4e",
+   "VDETER/src/vdeter/common/identifiers.py": "e027506ac9bdfb4d84af64ef2a0f11f43869d5a9c50f9e60c461a864d4999887",
+   "VDETER/src/vdeter/common/random_source.py": "0d24d361ff92d1ac22a99904690d7e8038867cc854d6af07a37ee24b5a6e0d3c",
+   "VDETER/src/vdeter/common/results.py": "dc9beda38d0f084bcd474f4be86ee0bf6232111f5086f6bb3dec0502e6e6155e",
+   "VDETER/src/vdeter/common/serialization.py": "f4d730d6dd2934c4cdcdd9735029b3d8ff24bed3cc986e67374cace47101083d",
+   "VDETER/src/vdeter/common/time.py": "14d612b32b3fc9a383616bf95baa362de4db057c5209d512bb55c6372b7c253c",
+   "VDETER/src/vdeter/config/loader.py": "c4a838969f51e688192b331965af7b2bc2a72d078e2d3b1978a0f6ded62fa44a",
+   "VDETER/src/vdeter/config/models.py": "6c15d187c19ad7a2da7dc37e39fd34624d88b7a025a93084bd6c13b6af844890",
+   "VDETER/src/vdeter/link/data_plane.py": "a4f4244f8bb73dd1120b2b9d15e240587c7d7d4175a37429f63ccaa543f5a347",
+   "VDETER/src/vdeter/link/data_session/fragmentation.py": "d25122c273d6f30a01f3d499054981276eee933aa279edcb96a1c2a1196edd05",
+   "VDETER/src/vdeter/link/data_session/models.py": "a5cce8fed0b631a52b2fd895cb84b37e80934f8fcc92ef8f26e7a54ca48cdc34",
+   "VDETER/src/vdeter/link/data_session/reassembly.py": "4d45b4ffa047a00307a6a1b7a6c592396a12fd73290dc5f7c7415c52ef1b59bc",
+   "VDETER/src/vdeter/link/messages/builtins.py": "c2952fc75190363c53766b7d4974a9d1038291d3979a170b7cd34736f3bc954e",
+   "VDETER/src/vdeter/link/messages/codec_base.py": "98eaf9619ca0468eb2a15a522ffbfad90f6d3db576a73957f4dc1b2ee680215a",
+   "VDETER/src/vdeter/link/messages/data_common.py": "6039044cf9680f971155cedb8a1e2d95d9e574448abbff2f4287a16173224e6e",
+   "VDETER/src/vdeter/link/messages/interface.py": "5a429bafd989d27cfb4f15a5331cededbbd2ef246eca8415b8757292753c66f3",
+   "VDETER/src/vdeter/link/messages/registry.py": "9192fecb2d866d42d0387b11fb9b40255dab5fe06ad504df39232ceabcca1627",
+   "VDETER/src/vdeter/link/messages/tbb_common.py": "3fd129a6638f8ade31a9cdbb4cf742b49e658f6c301fdceb11a4b4e25560cff4",
+   "VDETER/src/vdeter/link/messages/type_0.py": "8bd42ef71a98604d268289946f8f945a494647eef2a75e85c176b6ab5139828d",
+   "VDETER/src/vdeter/link/messages/type_13.py": "10019242c0e1e48378cb1d65495446761c5adc9b4b5eca2207f789f0edf4644a",
+   "VDETER/src/vdeter/link/messages/type_20.py": "d5ad16d3af23f85b7e6c295ba7590323745995341f26d6f0567cad83f6307437",
+   "VDETER/src/vdeter/link/messages/type_21.py": "e62301870b786421b824385494ff79a90581358f5a749ecfdcbee432d5f1cd2e",
+   "VDETER/src/vdeter/link/messages/type_22.py": "43c9a14c5a5b67b6d6e445ea395c0c2ac44e9da2e51677e6c5fb209f83af9162",
+   "VDETER/src/vdeter/link/messages/type_4.py": "1c613409049c7134e98e202423f8685192767505adc0ec5c2975b87178bd7ba5",
+   "VDETER/src/vdeter/link/messages/type_74.py": "a41cd51480968bde87fa6e8991419e33a0f0149cabbc3b0ef5b2ecd1d879ecd6",
+   "VDETER/src/vdeter/link/messages/type_75.py": "a125f0c66c91c409e6cce3d8bbcc9bfa86d74beadb64eade68e6b3af60788627",
+   "VDETER/src/vdeter/link/messages/type_76.py": "dccf77eb7204c508ca4c373f54a8e96a3f6d9ec7fb5ec76db5231b2e6578fc3f",
+   "VDETER/src/vdeter/link/messages/type_81.py": "3313784766141ed1d9aede14e8e972041a366db1a7a4c9cc23a0c943bc8d4188",
+   "VDETER/src/vdeter/link/messages/type_90.py": "7d9360c07dcdbe463f727efb639ff263355a40fec071133e511b3071e643f460",
+   "VDETER/src/vdeter/link/messages/type_92.py": "222a0b7ef98eed74cc24cc2153d77cabf21def64aca65e9f9c54e1731d2ebee9",
+   "VDETER/src/vdeter/link/messages/type_93.py": "db2131d0ba414ce150bd5b1e9f3f12656c15ef61f329f87bf5306a563846c5dc",
+   "VDETER/src/vdeter/link/models.py": "8735328c591d3b77f0de09c1c251d378eaeec7bd9398dedb05f252d4eacd1369",
+   "VDETER/src/vdeter/link/packet/builder.py": "c38505e1072f5e619c3990e8637b9a74cb62d6e5218bc978ead819b3fb2da97a",
+   "VDETER/src/vdeter/link/packet/crc.py": "708eb18d8a0e3b7da6b90be1484bb2baeb253852596536565a260ef42d1628a4",
+   "VDETER/src/vdeter/link/packet/models.py": "8b77356c00b5c1ef9c298adfe4f0e3cd7efa589d3f32418703c9017926740e61",
+   "VDETER/src/vdeter/link/packet/parser.py": "b223ae7ede24451f4385e0d70205c93e5c951498ba3601e2a1d051d6869e06d6",
+   "VDETER/src/vdeter/link/segment/allocator.py": "85d5e3b43a48c84a11b5a3d4141a7b3eaadaa201ac44b66cd057af0598560334",
+   "VDETER/src/vdeter/link/segment/codec.py": "b0a86f4f1fa5ce1c714f63449509785c8a235c07b0880e6da86575338b7c0184",
+   "VDETER/src/vdeter/link/segment/models.py": "efbe3fcc329d74216181c554ae016dc276d8bb44e94b48ebac56e40cc09668bf",
+   "VDETER/src/vdeter/link/short_data/codec.py": "9df59ef67a67468831acb72bce474345059087dfdad4a70e1d3562f5a32729fd",
+   "VDETER/src/vdeter/link/stub.py": "c5b7715b4a8453e82d1b206d9bd094bf3e4c7820e3aae289eb0b47c400b1e66f",
+   "VDETER/src/vdeter/link/tbb/assembly.py": "15b5b3db31c1a2460f46575310af3c8daad993da39186112f1935f50b6f714c3",
+   "VDETER/src/vdeter/link/tbb/crypto.py": "9b118286414d0a473c2d98310d2ab5316bcb4525271295515e7fa178386b88bd",
+   "VDETER/src/vdeter/link/tbb/transport.py": "62a22c7a4a5d1a3315c18ab624c2b59ea9420be5c0cf4ee55fae63d8e20a2b9d",
+   "VDETER/src/vdeter/link/tbb/wire.py": "406de0c220f1e52448be013500a3ba542039cef21a6daadc293b1d695a47d452",
+   "VDETER/src/vdeter/link/transfer.py": "a11e4c7304729bdf8b08bd86c35d3893a40c23c4b2f74eea5ae4fe119769284f",
+   "VDETER/src/vdeter/mac/__init__.py": "07c347f654544367aa90708297d2b43450278b82c2728a5018f113f603cdb60f",
+   "VDETER/src/vdeter/mac/access.py": "665631fb44ac21cceb276248e36cc616a9aec9b6312271afd7f65cc28c1a0b33",
+   "VDETER/src/vdeter/mac/ack.py": "194fc2a391dbf71c6e6dfb5b667081693c5963687ed4e6effac08bc7811d5f15",
+   "VDETER/src/vdeter/mac/coordinator.py": "9c166667432296e80311f3a20e2c33e5f42f9dc11a5eb6bbb3c487f35050330e",
+   "VDETER/src/vdeter/mac/deployment.py": "f23a35a3b8b6a193d76f22bd4ec24569cdc262e3ecb02fceb2d2046a12e126ae",
+   "VDETER/src/vdeter/mac/execution.py": "503e6cc5ee44a486cdda9ae66db65ab9b101c92ee3a844242cd909991f61923f",
+   "VDETER/src/vdeter/mac/interface.py": "26b77807beb10b35757d3d8f68d23092b6100649439a665c665e5e7200607783",
+   "VDETER/src/vdeter/mac/models.py": "45c4e89db36a79a028439e486481e0699b45056f48622b3069e49e163e4dd44c",
+   "VDETER/src/vdeter/mac/resources.py": "857e95b5dd7bb711aba24faeda1eaf1d7a3e883e1613e1815a1d99c4dc11b0a9",
+   "VDETER/src/vdeter/mac/routing.py": "b7e186924187ea4620b487d49480bffecf0976acc69b4da9aa4731ee2d65cc17",
+   "VDETER/src/vdeter/mac/stub.py": "9a61bb65beb5066563b162346634fef20ff7551dbc08078e20cf5e3bf8d7269a",
+   "VDETER/src/vdeter/mac/tbb.py": "4b0896b2e1a51977d0507ba8be7491edef8ce9ef506686895c3784fb04f6fdca",
+   "VDETER/src/vdeter/mac/tdma.py": "4b7c93fe2333ccc7944e105768321ef9e7be69ebd77f2150d13e979c51eef191",
+   "VDETER/src/vdeter/mac/transfers.py": "3e7226db1346f7dabcb406d4e1ff16cdfac0508cd3c55ac91dd5aa16569b3be0",
+   "VDETER/src/vdeter/phy/__init__.py": "b691bdc66020a69de04fffa5936d54c6d19a540fe78fd7b58a5abc93e97868ee",
+   "VDETER/src/vdeter/phy/burst/framing.py": "39e49a53f509151f15034e9830aa2a7fa64e76d70aff97ad159fce928caaa3dd",
+   "VDETER/src/vdeter/phy/burst/link_id.py": "ca8346581486cd2e660fb6e8cffe88bd8456331408130c276fd45574657a7df3",
+   "VDETER/src/vdeter/phy/burst/rrc.py": "5f218fc7889de0765b3e960b8a1708d53a88f94e080347ed7cff7de251f75cec",
+   "VDETER/src/vdeter/phy/burst/synchronization.py": "328cc5870ac0fcc43fda13968bb7fa93811f86370fe9f5a088a30e0898b6281c",
+   "VDETER/src/vdeter/phy/fec/interleaver.py": "3b777ad2678cd171b4e60f66d93feecdf63e813ea0c8551e620773f807cf5c8a",
+   "VDETER/src/vdeter/phy/fec/puncturing.py": "1003af859e99522bda9081944c947fb4e385dd18bae4d622fd553733517c07e2",
+   "VDETER/src/vdeter/phy/fec/turbo.py": "561ff747254a02ddbb0cb6315cd8faa8b59eb850bf9db13d3136e25aa55b3552",
+   "VDETER/src/vdeter/phy/interface.py": "997ab0c4d5bb88beebabeb15635d0d691772f50270b589fdbe622c4717bc45b4",
+   "VDETER/src/vdeter/phy/models.py": "99a1e46057598f870a0136d36018c39f01d3951e7ec3f05cdb80c664dc227f99",
+   "VDETER/src/vdeter/phy/modulation/__init__.py": "8c73d5f2ced44b2a2db6f6365cfbb9dd35fcffdd2f9252fb7eb32ca97298c6fc",
+   "VDETER/src/vdeter/phy/modulation/pi4_qpsk.py": "3695f1b592035d52177d1a17a2e55008cb516f139169818c218b9c662c573e50",
+   "VDETER/src/vdeter/phy/modulation/qam16.py": "e911e71147c0b516df81e11b516a5371be023f32c3bcf3b03a832b2d48d95589",
+   "VDETER/src/vdeter/phy/multilink.py": "41f712a8c1d2623de75fd45955cc390d60da8c9da8f1201db00594e19834984f",
+   "VDETER/src/vdeter/phy/receiver.py": "14211c7c68bc0fc1fe8c76207718e6c89303be211d2eca3d1ed348117d935f9a",
+   "VDETER/src/vdeter/phy/resampling.py": "22d752466c895e2ec50c010e52088d754b28d4839f50ec2e5f3a57da80b71c78",
+   "VDETER/src/vdeter/phy/scrambling.py": "089360652d2f7f010e48e8d5a06ebab79378d12296648aadbd1e18230ec060e2",
+   "VDETER/src/vdeter/phy/stub.py": "e63ab725a80d14e1e411505ae2966f141bda3ba5d422206d49afc828c9889b73",
+   "VDETER/src/vdeter/phy/transmitter.py": "36c43564912410d18baa48ff11c83aae376288bdd993c368658d40f6056f0c16",
+   "VDETER/src/vdeter/phy/wideband.py": "48deb1c64a24ede8eaa5093dc855feb516515543e091875e67d13f28a7a46398",
+   "VDETER/src/vdeter/presentation/adapter.py": "6b7aeee164efcf3047be9bc52232cf2e3434430102de03d87460521eeab2def4",
+   "VDETER/src/vdeter/presentation/codecs/ais_scheme1.py": "e3cc49b05094438efd01f6930120a627f73681dd4ebaa27d1e0707926523ffdc",
+   "VDETER/src/vdeter/presentation/codecs/base.py": "24d2643b542baa6cf94dced1e3118479435597812252e54edabda37099b54b0f",
+   "VDETER/src/vdeter/presentation/codecs/certificate_report.py": "699b1295cffb268cee87b27d8a9fd1de94f1ec09baeb1fc933a0bc48eeb6a0cc",
+   "VDETER/src/vdeter/presentation/codecs/opaque.py": "1d4904b396088ff6866e76595d3e3d3854bb196755fdd91bf2e2181b6bc46e00",
+   "VDETER/src/vdeter/presentation/codecs/sc_vde_position_report.py": "56c2ccd8bd27661b2f8412732d7ec0076e5960c527649458073491b8bf5f8851",
+   "VDETER/src/vdeter/presentation/codecs/sc_vde_route_control.py": "fe332f97b5ff31f42c5995f7ecc29073849c18d738d4803f9db157bc92a1c9d0",
+   "VDETER/src/vdeter/presentation/registry.py": "8f5d513b7344583b4bd255fb449fb61610ec15a76f18ca193e53352e252ec123",
+   "VDETER/src/vdeter/presentation/stub.py": "1b3a8052975a50af56841947573a2ed96f9a3574da1695e0b529e50f07469de6",
+   "VDETER/src/vdeter/profiles/link_phy.py": "695f3323a26e1a04b08386191940558880eafefb188085367b749f4599f19a91",
+   "VDETER/src/vdeter/profiles/messages.py": "4c94b64f02a52d8ba0b357203d59810c4c1e1b29834dc1ff6d2c270b09339716",
+   "VDETER/src/vdeter/profiles/models.py": "9adf7e4a48816f2aa63bb50c122ba41e00ad106108d2000a6159ca96d59ba973",
+   "VDETER/src/vdeter/profiles/payload_formats.py": "46e1d749c85fbe7e031bb7b5a8cb5ddf87f97da01062af3f2471140fd6e433f9",
+   "VDETER/src/vdeter/radio/b210/__init__.py": "49e4230b89fed1d722ad48687611ceb403a4385db0f97960b18dcdd032cefb18",
+   "VDETER/src/vdeter/radio/b210/adapter.py": "8f8135a3d63e89571a6c4281216ec28f090a2875bdaf57933be176b606f7aad7",
+   "VDETER/src/vdeter/radio/b210/backend.py": "dd2fecf69c3be30b73d36cb89fe95b513d249040803ea6c0d1b6d0af1c2543df",
+   "VDETER/src/vdeter/radio/b210/environment.py": "8590d0d1a63cb8c6b7332bdcfd731832ba735eefc43cc0fd2954c22e73dab567",
+   "VDETER/src/vdeter/radio/b210/isolated_backend.py": "4ee2301155176539a954acda3dcbb9fbc76da33923fa7c95aa75e9ca810f1e61",
+   "VDETER/src/vdeter/radio/b210/preflight.py": "7a552254534e212c1d49d0e16c34c8af508b68efcc5bbf678c3b3d3369c19ed1",
+   "VDETER/src/vdeter/radio/fake.py": "ad73bade7cd531c216929f6e92da71ed6ab66a7c2c197da37c7622af9b2102e7",
+   "VDETER/src/vdeter/radio/interface.py": "205835048ee8d77787b054354577fd39ba428e6c02d30ba97c2474e110cb0385",
+   "VDETER/src/vdeter/radio/models.py": "e98bb6dd00199c4a063425205834f3ee44c3a7489e81f715307b558a5d761688",
+   "VDETER/src/vdeter/radio/software/__init__.py": "0409d962d676a0573e10a1d1b2e4e0185e2a7a3fcb378c4a735850e71e51373b",
+   "VDETER/src/vdeter/radio/software/adapter.py": "420fd4881eaac615f8862cdc7c3a21945f5a12811c7e6422f599ef1bfbcd10c5",
+   "VDETER/src/vdeter/radio/software/faults.py": "5079620b4146787aec02947d3ea1e207506e49bd1a50be19a023e36ff51d7ac9",
+   "VDETER/src/vdeter/radio/software/medium.py": "e867819eec191d9db196a2dbf9913c89649ebeca25fa20abc14a305cc265171e",
+   "VDETER/src/vdeter/runtime/__init__.py": "ba078303441af4dc3c55ac452b0e25b4336fc77ef3b60de2920eace48d049f93",
+   "VDETER/src/vdeter/runtime/endpoint.py": "f114a699352f38b9891d94261bee9f05e6feaba85be86883a76e67714b6ae4dd",
+   "VDETER/src/vdeter/runtime/mac_commands.py": "4f2368a9fda3a19dabb18be95a08361379890715be717ee5c574920f2a46f526",
+   "VDETER/src/vdeter/runtime/phy_bridge.py": "9f3e45de27c4bce941162caa3e3f5e1cd87ba0dee342d2e9a4eb56387245b53e",
+   "VDETER/src/vdeter/runtime/projection.py": "35b974b1d12a39e7f58858bfcb004a23454430f08bc78afc520a486b9448d843",
+   "VDETER/src/vdeter/runtime/stage5.py": "7040717133c724cd639cef6885a5ea9240571416e0b17842433134b7949e6173",
+   "VDETER/src/vdeter/runtime/wiring.py": "13a5b8c9128e6695ec74c137225c4994a45788c609efaceb67815873d9de65d4",
+   "VDETER/src/vdeter/service/models.py": "21aa07569a399053bef9435f15d85adb704059ccc608547016874573c428bcfd",
+   "VDETER/src/vdeter/service/publisher.py": "f7d7ea0fdc5f8c77e8955db1a80d9b7f7d6e86cb349c14af2ca95576498feb9f",
+   "VDETER/src/vdeter/stage7/__init__.py": "f41881a864a41f31aeb47bf4b3b3923478ce66008000adaa9b23ec3dadfbee5e",
+   "VDETER/src/vdeter/stage7/b210_worker.py": "83fda724d4900bf29b2cca233d0731d2fc61711f04fc0e65de8eb88da6f07d9a",
+   "VDETER/src/vdeter/stage7/canonical_json.py": "f41c6e0341ecb76b26a7417fb48c0d2e9252ba76846f25b77e8dbd9ace646b7e",
+   "VDETER/src/vdeter/stage7/cfo.py": "1d1b66adb7ebbb903f5f3101cdaa9e2765cca2455885bc67c0d6438804972b0b",
+   "VDETER/src/vdeter/stage7/configuration.py": "c08ef2684be622e5874a8dcba42a5db54465d15710971ed58d89e06835a634f0",
+   "VDETER/src/vdeter/stage7/coordinator.py": "be693a1d509616d92e7b6d7752cbd55d98337feb4ebbbc7ff6962751fa48671d",
+   "VDETER/src/vdeter/stage7/endpoint.py": "cbba2ce12266b58f20e109a1810f243a847598b04ca7f038bc9d21eb6a236df0",
+   "VDETER/src/vdeter/stage7/errors.py": "a978ae9ecd63615c6dfceecdb02a1725a9c349c4c598f880db3a01a64368d1a4",
+   "VDETER/src/vdeter/stage7/hw_operations.py": "74457e51a902730b4eb1ce206104290d202b93568eecefda8faa4dd720f3571f",
+   "VDETER/src/vdeter/stage7/ipc.py": "7d8570d87b7e86312b6ec99082f3d92ceb81c5e44fe7871b2b83b6717e3e5b00",
+   "VDETER/src/vdeter/stage7/phy_facade.py": "2f7898a113badcd770f97366e25c64516a3b5f6e33263b0ee5ee7b5d7528ebe2",
+   "VDETER/src/vdeter/stage7/pi_runtime.py": "8d5031b1638d0c69be41b74507d16d7d89a57dc24444dcf795832b75b19017b3",
+   "VDETER/src/vdeter/stage7/radio_adapter.py": "da048cc5bbfc517dbf1602a0404ba62edb37358441f6d52f91a17bdcf192600e",
+   "VDETER/src/vdeter/stage7/records.py": "ebb2e6cf234eeb33c15fc8c2e48abb41ed424f077ed43fff4b88bebafff1cccf",
+   "VDETER/src/vdeter/stage7/rf_time.py": "780beb8c3016ca862be52ba686e6bba94f625ab21ee4815ba8880bb86862b4e9",
+   "VDETER/src/vdeter/stage7/routing.py": "e3d2c4f684db70b8bf00a100635499bd832a253de4c9e479bccfb4b1a7fe2af7",
+   "VDETER/src/vdeter/stage7/runtime_client.py": "6bf431eed8d6aef318fdfcf27d343dcd84b2f627f58dc6791c30cb9d568ec425",
+   "VDETER/src/vdeter/stage7/rx_decode_worker.py": "e502000bc41b10df578b9ba58ddd0e35a3417af7a62adcc88e27fb15d753b4f4",
+   "VDETER/src/vdeter/stage7/support.py": "cb74d1e1ebf50b4e4e3711b78d9d1b8ab0004b8dc0ca018400450f19999b3622",
+   "VDETER/src/vdeter/stage7/testing/adapter.py": "63afe1668fec361678d0f9f0ca9c8df53516cc2f10b2785e113cb97a2c61fe2e",
+   "VDETER/src/vdeter/stage7/time_bridge.py": "c544799aa7e3db439fbb1870156dcbfd45bbc22bf7aba9a5f6c750b8689a483f",
+   "VDETER/src/vdeter/stage7/transport.py": "e84680bf48ada56daf0091d2bc1928af652defa9e1d9e592d6c2300e7e8b72cb",
+   "VDETER/src/vdeter/stage7/wiring.py": "d450ce2a27795102eb037e474f9ecdb3f96d03b9863b52e13a76febadee44a1c",
+   "VDETER/tests/support/stage4.py": "a4a1a122a801dc7de73f267e25808e6bfa02fdb2eef75fa89f3a1ff8d62b97e3"
+  },
+  "verified_against": [
+   "phase_f_deploy_record",
+   "phase_f_pi_live",
+   "local_worktree"
+  ]
+ },
+ "qualified_source_commit": "86463da16fe2b860e2902f25919933b87c3996ec",
+ "rf_settings": {
+  "actual_lower_tune_hz": 2447237500,
+  "actual_upper_tune_hz": 2451837500,
+  "analog_bandwidth_hz": 200000,
+  "clock_source": "internal",
+  "cpu_format": "fc32",
+  "implicit_retry": 0,
+  "link_ids": [
+   11,
+   17,
+   19
+  ],
+  "logical_lower_hz": 157237500,
+  "logical_upper_hz": 161837500,
+  "master_clock_rate_hz": 30720000,
+  "otw_format": "sc16",
+  "pps": "NONE",
+  "rx_gain_db": {
+   "MASS-A": 69,
+   "MASS-B": 69,
+   "ROC": 75
+  },
+  "sample_format": "cf32le",
+  "sample_rate_hz": 307200,
+  "time_source": "internal",
+  "translation_hz": 2290000000,
+  "transmit_lead_ns": 250000000,
+  "tx_gain_db": 0,
+  "waveform_bandwidth_hz": 100000
+ },
+ "schema_version": 1,
+ "wiring_profile": "STAGE7_C1_C6_TRIANGLE_V1"
+}

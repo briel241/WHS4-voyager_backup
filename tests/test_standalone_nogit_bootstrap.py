@@ -136,7 +136,8 @@ def test_setup_without_git_creates_manifests_identity_and_draft_idempotently():
         fingerprint = report["steps"]["identity"]["fingerprint"]
         assert report["steps"]["user_launcher"]["installed"] is True
         # Git 정보는 없고(참고 필드 null), 실행은 막히지 않았다.
-        assert provenance.read_git_provenance(root) is None
+        assert provenance.build_provenance(root)["git"] is None
+        assert not hasattr(provenance, "read_git_provenance")  # .git 관측 없음
         draft_sha = im.sha256_file(root / "hardware.toml")
 
         # 재실행: identity·hardware.toml·digest 불변, manifest 재사용.

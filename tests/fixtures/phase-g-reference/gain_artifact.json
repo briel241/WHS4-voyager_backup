@@ -1,0 +1,24 @@
+{
+ "artifact_type": "STAGE7_GAIN_ARTIFACT_V1",
+ "endpoint_common_rx_gain_db": {
+  "MASS-A": 69,
+  "MASS-B": 69,
+  "ROC": 75
+ },
+ "gain_plan_sha256": "24b403ea13304413a58fc621aab1fd1b770c4744953895c590150c1bd4692e88",
+ "lane_candidates": {
+  "MASS-A": {
+   "0": 69,
+   "1": 69
+  },
+  "MASS-B": {
+   "0": 69,
+   "1": 69
+  },
+  "ROC": {
+   "0": 69,
+   "1": 75
+  }
+ },
+ "run_id": "mass-roc-rr-p1-20260902b"
+}
