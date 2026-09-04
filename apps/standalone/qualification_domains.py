@@ -155,8 +155,14 @@ def _sha(text: str) -> str:
 
 
 def rf_critical_symbol_hashes(source: str, symbols) -> dict:
-    """소스에서 지정 최상위 심볼(함수 def 또는 상수 Assign)의 (AST, source)
-    해시를 뽑는다. 누락 심볼은 제외되며 호출부가 완전성을 검사한다."""
+    """소스에서 지정 최상위 심볼(함수 def 또는 상수 Assign)의 해시 두 개를
+    뽑는다: [원문 구간 SHA-256, CRLF→LF 정규화 구간 SHA-256]. 누락 심볼은
+    제외되며 호출부가 완전성을 검사한다.
+
+    원문 구간(`ast.get_source_segment`)은 **바이트 그대로**라 Python 판 사이에
+    안정적이다. `ast.unparse`/`ast.dump` 표현은 CPython patch 판에 따라 달라질
+    수 있어(3.12.3 vs 3.12.13 실측: unparse 상이) 결속에 쓰지 않는다 — Python
+    패키지 갱신만으로 rf digest가 바뀌어 UNQUALIFIED가 나면 안 된다."""
     tree = ast.parse(source)
     want = set(symbols)
     out = {}
@@ -168,7 +174,9 @@ def rf_critical_symbol_hashes(source: str, symbols) -> dict:
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         for name in names:
             if name in want:
-                out[name] = [_sha(ast.dump(node)), _sha(ast.unparse(node))]
+                segment = ast.get_source_segment(source, node) or ""
+                out[name] = [_sha(segment),
+                             _sha(segment.replace("\r\n", "\n"))]
     return out
 
 
