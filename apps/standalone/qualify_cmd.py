@@ -18,15 +18,17 @@ soak(RR-008)·**Link 19(RR-006)** 는 범위 제외. Link 19는 현재 프로젝
 `LinkIdDetectionError`(frozen PHY 계층)로 정지한 뒤 결정됐다. 어느 단계든
 실패하면 candidate 미승격 — 기존 active reference 유지.
 
-발급 원칙 (승인 조건 2·3)
+발급 원칙 (승인 조건 2·3 → clone-bootstrap v2)
     - `stage7_issue_qualification_reference.py` CLI는 호출하지 않는다 (SSH·
-      Git 결합). reference **스키마**와 검증기(`apps.stage7_profile.
-      load_reference`)를 재사용해 로컬 발급하고, 발급 직후 그 검증기로
-      재검증한다.
-    - final builder는 `build(..., head_provider=...)`로 호출하고 head는
-      standalone-binding `source_head`를 공급한다.
+      Git 결합). reference **스키마 v2**(installation/domain digest 결속)로
+      로컬 발급하고, 발급 직후 검증기(`apps.stage7_profile.load_reference`)로
+      재검증한다. Git commit·branch·dirty·baseline Markdown SHA는 판정값이
+      아니라 optional provenance다.
+    - final builder는 `build(..., head_provider=...)`로 호출하고 provider는
+      현행 **installation digest**를 공급한다(v2 installation audit).
     - RR 판정 코드·threshold·deadline은 무수정 — coordinator를 phase 인자로
       spawn만 한다 (프로세스 구성은 결정 6과 동일 패턴).
+    - 대상 기계에서 Git 명령을 호출하지 않고 Markdown을 읽지 않는다.
 """
 
 from __future__ import annotations
@@ -40,7 +42,8 @@ import sys
 import time
 from pathlib import Path
 
-from apps.standalone import deploy_manifest, identity, local_config
+from apps.standalone import identity, installation_manifest, local_config
+from apps.standalone import provenance as provenance_module
 from apps.standalone import qualification_domains as domains
 from apps.standalone.local_session import build_child_env
 from apps.standalone.state import (
@@ -174,6 +177,12 @@ INTEGRATION_TIMEOUT_S = 14400
 ESCALATE_TERM_WAIT_S = 30.0
 ESCALATE_KILL_WAIT_S = 10.0
 
+#: presentation 전용 — 자식 대기 중 주기 호출되는 진행 표시 훅. run_qualify가
+#: progress 객체가 있을 때만 설정하고 종료 시 해제한다. RF-critical 심볼
+#: (`default_phase_runner` 등)은 이 훅을 모르며 바뀌지 않는다; 판정·timeout
+#: 의미도 동일하다.
+_PROGRESS_ON_WAIT = None
+
 REFERENCE_BASENAME = "qualification-reference.json"
 
 
@@ -212,7 +221,8 @@ def run_child_bounded(argv, *, cwd, env, stdout_path: Path,
                       timeout_s: float,
                       term_wait_s: float = ESCALATE_TERM_WAIT_S,
                       kill_wait_s: float = ESCALATE_KILL_WAIT_S,
-                      natural_group_wait_s: float = 5.0) -> dict:
+                      natural_group_wait_s: float = 5.0,
+                      on_wait=None, wait_poll_s: float = 1.0) -> dict:
     """자식(과 그 process group 전체)을 어떤 경로에서도 반드시 정리한다.
 
     W5 보완 1(3차): leader가 **정상 rc=0으로 종료해도** 손자가 group에
@@ -230,6 +240,8 @@ def run_child_bounded(argv, *, cwd, env, stdout_path: Path,
     import os as _os
     import signal as _signal
 
+    if on_wait is None:
+        on_wait = _PROGRESS_ON_WAIT
     use_group = _os.name == "posix"
     popen_kwargs = {}
     if use_group:
@@ -302,7 +314,21 @@ def run_child_bounded(argv, *, cwd, env, stdout_path: Path,
             group_cleared = False if use_group else None
 
         try:
-            process.wait(timeout=timeout_s)
+            if on_wait is None:
+                process.wait(timeout=timeout_s)
+            else:
+                # 진행 표시용 폴링 대기 — 판정·timeout 의미는 동일하다
+                # (deadline은 같은 timeout_s, 초과 시 같은 TimeoutExpired).
+                wait_deadline = time.monotonic() + timeout_s
+                while True:
+                    remaining = wait_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout_s)
+                    try:
+                        process.wait(timeout=min(wait_poll_s, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        on_wait()
             # 정상 완주 — coordinator가 launcher를 회수하므로 group은 곧
             # 사라져야 한다. 자연 소멸을 짧게 기다리고, 남으면 anomaly로
             # 기록한 뒤 강제 정리·재확인한다 (W5 보완 1·3차).
@@ -330,61 +356,67 @@ def run_child_bounded(argv, *, cwd, env, stdout_path: Path,
             "cleanup_anomaly": cleanup_anomaly}
 
 
-# ------------------------------------------------------------ frozen audit
+# ------------------------------------------------------------ installation audit
 
-def local_frozen_hash_audit(repo_root: Path, binding: dict,
-                            *, deploy_verify_pass: bool) -> dict:
-    """git 없는 frozen 감사 (README §7) — binding 기록과 정규화(LF) 대조.
+INSTALLATION_AUDIT_TYPE = "STAGE7_STANDALONE_INSTALLATION_AUDIT_V2"
 
-    산출 스키마는 final builder `--verification-root` 실검사 계약을 따른다:
-    all_unchanged·files·head_commit(40-hex)·worktree_dirty. head는 binding
-    source_head, worktree_dirty는 배포 tree manifest 전수 검증 결과의 부정.
+
+def local_installation_audit(installation: dict, verify_report: dict) -> dict:
+    """git 없는 설치 감사 (v2) — installation manifest ↔ 현재 파일 재측정.
+
+    산출 스키마는 final builder의 v2 실검사 계약을 따른다: `installation_sha256`
+    (64-hex, 현행 installation digest와 일치해야 함)·`installation_verified`·
+    `all_unchanged`·`files`(rf 영역 파일별 기록/실측 SHA). `head_commit`은
+    기록하지 않는다 — Git digest와 installation digest는 필드명으로 구분된다.
     """
+    current = verify_report["current_record"]
     files = []
     all_unchanged = True
-    for relative, expected in sorted(binding["frozen_files"].items()):
-        path = repo_root / "VDETER" / relative
-        try:
-            data = path.read_bytes()
-            actual = hashlib.sha256(
-                data.replace(b"\r\n", b"\n")).hexdigest()
-        except OSError:
-            actual = None
-        unchanged = actual == expected
+    for relative, entry in sorted(installation["files"].items()):
+        if domains.RF not in entry["domains"]:
+            continue
+        actual = (current["files"].get(relative) or {}).get("sha256")
+        unchanged = actual == entry["sha256"]
         all_unchanged = all_unchanged and unchanged
-        files.append({"path": relative, "expected_sha256": expected,
+        files.append({"path": relative, "expected_sha256": entry["sha256"],
                       "actual_sha256": actual, "unchanged": unchanged})
+    verified = bool(verify_report["pass"])
     return {
-        "audit_type": "STAGE7_STANDALONE_FROZEN_AUDIT_V1",
-        "base_ref": "standalone-binding",
+        "audit_type": INSTALLATION_AUDIT_TYPE,
+        "base_ref": "installation-manifest",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "head_commit": binding["source_head"],
-        "worktree_dirty": not deploy_verify_pass,
-        "all_unchanged": all_unchanged,
+        "installation_sha256": installation["installation_sha256"],
+        "domain_sha256": {d: installation["domains"][d]["sha256"]
+                          for d in domains.BOUND_DOMAINS},
+        "installation_verified": verified,
+        "all_unchanged": all_unchanged and verified,
         "files": files,
     }
 
 
-def write_verification_bundle(repo_root: Path, out_dir: Path, binding: dict,
-                              *, deploy_verify_pass: bool,
+def write_verification_bundle(repo_root: Path, out_dir: Path,
+                              installation: dict, *, verify_report: dict,
                               runner=subprocess.run,
-                              python_executable: str | None = None) -> dict:
-    """frozen audit + unit/contract + integration(stage7) 로그 생성.
+                              python_executable: str | None = None,
+                              progress=None) -> dict:
+    """installation audit + unit/contract + integration(stage7) 로그 생성.
 
     반환: {"frozen_ok", "software_ok", "root"} — 둘 다 true여야 final
     builder가 READY를 낼 수 있다 (builder가 재검사하므로 여기 값은 요약).
+    `progress`는 선택적 진행 표시(progress.QualifyProgress 호환) — 판정 무관.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     python_executable = python_executable or sys.executable
 
-    audit = local_frozen_hash_audit(
-        repo_root, binding, deploy_verify_pass=deploy_verify_pass)
+    audit = local_installation_audit(installation, verify_report)
     write_json_atomic(out_dir / "frozen-hash-audit.json", audit)
 
     def run_suite(log_name: str, targets, timeout_s: float, extra=()):
         log_path = out_dir / log_name
         argv = [python_executable, "-m", "pytest", "-q",
                 *[str(repo_root / t) for t in targets], *extra]
+        if progress is not None:
+            progress.suite_started(log_name, log_path)
         if runner is not subprocess.run:
             # 시험 주입 경로 — timeout 계약이 전달되는지 검증 가능하게.
             with open(log_path, "wb") as handle:
@@ -393,12 +425,17 @@ def write_verification_bundle(repo_root: Path, out_dir: Path, binding: dict,
                               env=build_child_env(),
                               stdin=subprocess.DEVNULL,
                               timeout=timeout_s)
-            return done.returncode == 0
-        # 기본 경로 — coordinator와 같은 bounded group 정리 (W5 보완 1).
-        result = run_child_bounded(
-            argv, cwd=repo_root, env=build_child_env(),
-            stdout_path=log_path, timeout_s=timeout_s)
-        return result["rc"] == 0 and not result["timed_out"]
+            ok = done.returncode == 0
+        else:
+            # 기본 경로 — coordinator와 같은 bounded group 정리 (W5 보완 1).
+            result = run_child_bounded(
+                argv, cwd=repo_root, env=build_child_env(),
+                stdout_path=log_path, timeout_s=timeout_s,
+                on_wait=(progress.tick if progress is not None else None))
+            ok = result["rc"] == 0 and not result["timed_out"]
+        if progress is not None:
+            progress.suite_finished(log_name, ok)
+        return ok
 
     # governance/architecture 감사는 명시 node-id로만 분리한다(광범위 무시 금지).
     # 제외 목록·사유를 evidence로 남긴다 — host V1/CI에서는 계속 실행됨.
@@ -418,7 +455,7 @@ def write_verification_bundle(repo_root: Path, out_dir: Path, binding: dict,
                         UNIT_CONTRACT_TIMEOUT_S, extra=deselect_args)
     integration_ok = run_suite("integration-stage7.log", INTEGRATION_TARGETS,
                                INTEGRATION_TIMEOUT_S, extra=("-k", "stage7"))
-    return {"frozen_ok": audit["all_unchanged"] and not audit["worktree_dirty"],
+    return {"frozen_ok": audit["all_unchanged"] and audit["installation_verified"],
             "software_ok": unit_ok and integration_ok,
             "unit_contract_ok": unit_ok,
             "integration_ok": integration_ok,
@@ -484,77 +521,107 @@ def _validate_critical_endpoints(endpoints: dict) -> None:
                            + "; ".join(problems))
 
 
-def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
-                    deploy_files: dict, tc_results: dict,
+def collect_phase_evidence_sha256(run_root: Path) -> dict:
+    """phase run root의 evidence 결속 SHA map (TC artifact·coordinator·runtime·
+    gain artifact·rf-time). 읽기만 한다."""
+    out = {}
+    evidence = run_root / "evidence"
+    if not evidence.is_dir():
+        return out
+    for path in sorted(evidence.rglob("*.json")):
+        out[path.relative_to(run_root).as_posix()] = _sha256_file(path)
+    return out
+
+
+def issue_reference(*, ladder_id: str, installation: dict, tc_results: dict,
                     endpoints_observed: dict, platform_profile: str,
-                    identity_fingerprint: str,
+                    wiring: dict, identity_fingerprint: str,
                     gain: dict | None,
                     environment_manifest: dict,
                     environment_manifest_sha256: str,
                     phase_run_ids: dict,
+                    resolved_config_sha256: dict | None = None,
+                    evidence_sha256: dict | None = None,
                     final_status: str | None = None,
                     final_result_sha256: str | None = None,
                     qualification_method: str = "full_ladder",
+                    provenance: dict | None = None,
                     binding_domains: dict | None = None,
                     evidence_reuse: dict | None = None,
                     endpoint_observations: dict | None = None) -> dict:
-    """로컬 reference 조립 — 기존 스키마(STAGE7_QUALIFICATION_REFERENCE v1)
-    + standalone critical subset (README §8).
+    """로컬 reference 조립 — 스키마 v2 (STAGE7_QUALIFICATION_REFERENCE,
+    schema_version 2, installation/domain digest 결속).
 
-    `qualified_source_commit`은 binding source_head (승인 조건 3과 동일 head
-    identity), critical manifest strict_files는 배포 manifest 파일 map 전체.
+    결속(필수 판정값): installation manifest SHA·rf/operation/tooling manifest
+    SHA·실제 파일별 SHA map·환경/라이브러리 버전·B210 serial과 역할·USB
+    speed_class·배선 승인·gain artifact·identity fingerprint·resolved config
+    SHA·TC 결과·evidence SHA·qualification method·limitations.
+    Git commit·branch·dirty·baseline Markdown SHA는 **판정값이 아니며**
+    `provenance`(optional)로만 기록한다.
 
     `qualification_method`는 "full_ladder"(RF 사다리 완주) 또는 "evidence_reuse"
-    (RF 재실행 없이 기존 RF evidence 재사용, 2026-09-05 사용자 승인). 후자는
-    `binding_domains`(rf_evidence/operation/qualification_tool 3영역 manifest)와
-    `evidence_reuse`(이전 ladder·재사용 사유·가드 결과)를 기록한다. RF/operation
-    핵심 파일이 다르면 발급 자체가 이뤄지지 않는다(호출부가 거부)."""
-    # 조건 2: critical endpoint 스키마({serial, speed_class ∈ 허용값}) 검증 —
+    (RF 재실행 없이 기존 RF evidence 재사용). 후자는 `binding_domains`와
+    `evidence_reuse`(이전 release·재사용 사유·가드 결과)를 기록한다."""
+    # critical endpoint 스키마({serial, speed_class ∈ 허용값}) 검증 —
     # 누락·비허용이면 어느 경로든 발급 거부.
     _validate_critical_endpoints(endpoints_observed)
+    if not isinstance(wiring, dict) or wiring.get("approved") is not True:
+        raise QualifyError("reference 발급 거부 — 배선 승인(wiring.approved=true)"
+                           "이 없습니다")
     versions = {name: environment_manifest.get(f"{name}_version")
                 for name in local_config.CRITICAL_LIBRARIES}
+    digests = installation_manifest.digests_of(installation)
     reference = {
         "artifact_type": "STAGE7_QUALIFICATION_REFERENCE",
-        "schema_version": 1,
+        "schema_version": 2,
         "issued_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "issuer": "vdeter qualify (standalone, Phase I)",
+        "issuer": "vdeter qualify (standalone, clone-bootstrap v2)",
         "qualification_method": qualification_method,
-        "qualified_source_commit": binding["source_head"],
+        "installation": {
+            **digests,
+            "manifest_relpath": local_config.INSTALLATION_MANIFEST_RELPATH,
+            "domain_file_count": {d: installation["domains"][d]["file_count"]
+                                  for d in domains.BOUND_DOMAINS},
+            "files": installation_manifest.bound_files(installation),
+            "rf_critical_symbols": installation["rf_critical_symbols"],
+        },
         "qualification": {
             "run_id": ladder_id,
             "profile": "RESEARCH_READY_MINIMAL",
             "tc_results": {tc: {"status": status}
                            for tc, status in sorted(tc_results.items())},
             "phase_run_ids": phase_run_ids,
+            "resolved_config_sha256": resolved_config_sha256 or {},
+            "evidence_sha256": evidence_sha256 or {},
             "final_status": final_status,
             "final_result_sha256": final_result_sha256,
         },
-        "qualification_critical_manifest": {
-            "strict_files": dict(sorted(deploy_files.items())),
-        },
         "standalone_critical": {
-            "deploy_manifest_sha256": deploy_sha256,
+            **digests,
             "platform_profile": platform_profile,
             "endpoints": endpoints_observed,
+            "wiring": {"profile": wiring.get("profile"),
+                       "approved": True},
             "identity_fingerprint": identity_fingerprint,
             "library_versions": versions,
             "environment_manifest_sha256": environment_manifest_sha256,
-            "baseline_version": binding.get("baseline_version"),
-            "baseline_sha256": binding["baseline_sha256"],
             "gain": gain,
         },
+        "provenance": provenance or {
+            "note": provenance_module.PROVENANCE_NOTE, "git": None,
+            "legacy_binding": None,
+            "stage7_baseline": dict(provenance_module.STAGE7_BASELINE_PIN)},
         "limitations": dict(QUALIFICATION_LIMITATIONS),
-        "scope": ("이 reference는 이 기계·이 배포본·이 identity·이 환경의 "
-                  "표준 실행 자격만 담보한다. baseline 문서 실물 대조는 "
-                  "audit 환경에서만 수행한다 (결정 8)."),
+        "scope": ("이 reference는 이 기계·이 설치본·이 identity·이 환경의 "
+                  "표준 실행 자격만 담보한다. Git 상태와 기준선 문서 실물은 "
+                  "판정에 쓰이지 않으며 host 감사 환경에서만 대조한다."),
     }
     if binding_domains is not None:
-        # 요구사항 4: 이전 RF evidence manifest / 현재 operation manifest /
-        # 현재 qualification-tool manifest를 각각 기록.
+        # 이전 RF evidence manifest / 현재 operation manifest / 현재
+        # qualification-tool manifest를 각각 기록.
         reference["binding_domains"] = binding_domains
     if evidence_reuse is not None:
-        # 요구사항 5: qualification_method=evidence_reuse + 재사용 사유·가드.
+        # qualification_method=evidence_reuse + 재사용 사유·가드.
         reference["evidence_reuse"] = evidence_reuse
     if endpoint_observations is not None:
         # 조건 3: usb_path·speed_mbps는 관측 metadata로만 보존 — critical
@@ -733,76 +800,138 @@ def verify_phase_evidence(run_root: Path, phase: str) -> dict:
 
 # ------------------------------------------------------------ 본체
 
+def prepare_qualification(paths: StatePaths, *,
+                          hardware_path: Path | str | None = None,
+                          repo_root: Path | str | None = None,
+                          preflight_fn=None,
+                          environment_manifest: dict | None = None,
+                          report: dict | None = None,
+                          progress=None) -> dict:
+    """RF 접근 전 준비 경로 — Git·Markdown·binding 없이 동작한다.
+
+    installation manifest 적재·재측정 검증 → identity 정합 → 필수 preflight →
+    critical endpoints → 라이브러리 4종 실재. 실패는 QualifyError. 반환
+    context는 run_qualify/run_qualify_reuse가 공유하며 시험에서 단독 호출한다.
+    """
+    repo_root = Path(repo_root) if repo_root is not None else paths.root
+    report = report if report is not None else {}
+
+    def stage(name, **fields):
+        if progress is not None:
+            progress.gate(name, **fields)
+
+    paths.ensure_var()
+    hardware = local_config.parse_hardware_declaration(
+        hardware_path or (repo_root / "hardware.toml"))
+
+    # --- 설치 무결 (setup installation manifest 기준) -------------------
+    stage("installation manifest")
+    try:
+        installation = installation_manifest.load_installation(paths)
+    except installation_manifest.InstallationError as exc:
+        raise QualifyError(
+            f"{exc} — 먼저 `./bin/vdeter setup`을 실행하십시오") from exc
+    install_check = installation_manifest.verify_installation(
+        repo_root, installation)
+    report["installation_verify"] = {
+        k: v for k, v in install_check.items()
+        if k not in ("checked", "current_record")}
+    if not install_check["pass"]:
+        raise QualifyError(
+            "설치 파일이 setup 시점 installation manifest와 다릅니다 ("
+            + installation_manifest.describe_mismatch(install_check)
+            + ") — 변경을 되돌리거나 `./bin/vdeter setup`으로 manifest를 "
+            "재발급하십시오")
+
+    # --- identity 정합 (manifest·cert·store·파일 일치) ------------------
+    stage("identity")
+    identity_check = identity.check_identity_consistency(paths)
+    report["identity"] = identity_check
+    if not identity_check["pass"]:
+        raise QualifyError(
+            "identity 자료가 서로 일치하지 않습니다: "
+            + "; ".join(identity_check["errors"]))
+
+    # --- 필수 preflight -------------------------------------------------
+    stage("preflight / B210 discovery")
+    if preflight_fn is None:
+        from apps.standalone.local_preflight import run_required_preflight
+
+        def preflight_fn():
+            return run_required_preflight(hardware=hardware, paths=paths)
+    preflight = preflight_fn()
+    report["preflight"] = preflight
+    if not preflight["pass"]:
+        raise QualifyError(
+            "필수 preflight 실패: " + "; ".join(preflight["failures"]))
+    endpoints_observed, endpoint_observations = (
+        critical_endpoints_from_preflight(preflight))
+
+    environment_manifest = (environment_manifest
+                            or local_config.build_environment_manifest())
+    # --- 필수 라이브러리 4종 실재 게이트 ---------------------------------
+    missing_libraries = [
+        name for name in local_config.CRITICAL_LIBRARIES
+        if not (isinstance(environment_manifest.get(f"{name}_version"), str)
+                and environment_manifest[f"{name}_version"].strip())
+    ]
+    if missing_libraries:
+        raise QualifyError(
+            f"필수 라이브러리 버전 확인 불가: {missing_libraries} — "
+            "`./bin/vdeter setup`으로 설치를 완료한 뒤 재시도하십시오 "
+            "(부재 상태로는 자격을 발급하지 않습니다)")
+
+    return {
+        "repo_root": repo_root,
+        "hardware": hardware,
+        "installation": installation,
+        "install_check": install_check,
+        "identity_check": identity_check,
+        "preflight": preflight,
+        "endpoints_observed": endpoints_observed,
+        "endpoint_observations": endpoint_observations,
+        "environment_manifest": environment_manifest,
+        "provenance": provenance_module.build_provenance(repo_root),
+    }
+
+
 def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 repo_root: Path | str | None = None,
-                binding_path: Path | str | None = None,
                 phase_runner=default_phase_runner,
                 suite_runner=subprocess.run,
                 preflight_fn=None,
                 residual_probe=None,
                 environment_manifest: dict | None = None,
                 final_builder_module=None,
-                stamp: str | None = None) -> dict:
+                stamp: str | None = None,
+                progress=None) -> dict:
     """자격 사다리 전체. 반환 report — `status`가 QUALIFIED여야 승격됨.
 
     실패는 QualifyError 또는 report["status"]="FAIL"로 정직 보고하며, 그
-    경우 active reference는 이전 상태 그대로다. `repo_root`/`binding_path`는
-    기본적으로 설치 root에서 파생된다 (명시 인자는 시험 격리용).
+    경우 active reference는 이전 상태 그대로다. `repo_root`는 기본적으로
+    설치 root다 (명시 인자는 시험 격리용). `progress`는 선택적 진행 표시
+    (progress.QualifyProgress 호환) — 판정·threshold·deadline과 무관하다.
     """
+    global _PROGRESS_ON_WAIT
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     report = {"status": "FAIL", "phases": {}, "errors": []}
 
     lock = SingleInstanceLock(paths.lock_path)
     lock.acquire(diagnostics={"command": "qualify"})
+    _PROGRESS_ON_WAIT = progress.tick if progress is not None else None
     try:
-        paths.ensure_var()
-        binding = local_config.load_standalone_binding(
-            binding_path if binding_path is not None else
-            (repo_root / "VDETER" / "configs" / "stage7"
-             / "standalone-binding.json"))
-        hardware = local_config.parse_hardware_declaration(
-            hardware_path or (repo_root / "hardware.toml"))
-
-        # --- 배포 무결 (setup manifest 기준) -----------------------------
-        manifest, manifest_sha = deploy_manifest.load_manifest(
-            paths.var_dir / "deploy-manifest.json")
-        if manifest is None:
-            raise QualifyError(
-                "deploy manifest가 없습니다 — 먼저 `vdeter setup`을 "
-                "실행하십시오")
-        deploy_check = deploy_manifest.verify(repo_root, manifest)
-        report["deploy_verify"] = {k: v for k, v in deploy_check.items()
-                                   if k != "checked"}
-        if not deploy_check["pass"]:
-            raise QualifyError(
-                "배포 tree가 setup 시점 manifest와 다릅니다 "
-                f"(missing={deploy_check['missing'][:3]}, "
-                f"mismatch={deploy_check['mismatch'][:3]}, "
-                f"untracked={deploy_check['untracked'][:3]}) — 변경을 "
-                "되돌리거나 `vdeter setup`으로 manifest를 재발급하십시오")
-
-        # --- identity 정합 (W5 필수 — manifest·cert·store·파일 일치) ------
-        identity_check = identity.check_identity_consistency(paths)
-        report["identity"] = identity_check
-        if not identity_check["pass"]:
-            raise QualifyError(
-                "identity 자료가 서로 일치하지 않습니다: "
-                + "; ".join(identity_check["errors"]))
-
-        # --- 필수 preflight ---------------------------------------------
-        if preflight_fn is None:
-            from apps.standalone.local_preflight import run_required_preflight
-
-            def preflight_fn():
-                return run_required_preflight(hardware=hardware, paths=paths)
-        preflight = preflight_fn()
-        report["preflight"] = preflight
-        if not preflight["pass"]:
-            raise QualifyError(
-                "필수 preflight 실패: " + "; ".join(preflight["failures"]))
-        # 조건 1: full ladder·evidence reuse 공통 함수로 {serial, speed_class}.
-        endpoints_observed, endpoint_observations = (
-            critical_endpoints_from_preflight(preflight))
+        context = prepare_qualification(
+            paths, hardware_path=hardware_path, repo_root=repo_root,
+            preflight_fn=preflight_fn, environment_manifest=environment_manifest,
+            report=report, progress=progress)
+        hardware = context["hardware"]
+        installation = context["installation"]
+        install_check = context["install_check"]
+        identity_check = context["identity_check"]
+        endpoints_observed = context["endpoints_observed"]
+        endpoint_observations = context["endpoint_observations"]
+        environment_manifest = context["environment_manifest"]
+        provenance = context["provenance"]
 
         # candidate는 새 사다리마다 비운 뒤 시작한다 (승격 전 scratch).
         for entry in paths.qualification_candidate.iterdir():
@@ -813,22 +942,6 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
 
         stamp = stamp or time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         ladder_id = f"qual-{stamp}"
-        environment_manifest = (environment_manifest
-                                or local_config.build_environment_manifest())
-
-        # --- 필수 라이브러리 4종 실재 게이트 (W5 보완 3) ------------------
-        # 부재(None/공백)를 자격값으로 기록하는 경로를 P0 시작 전에 차단한다.
-        missing_libraries = [
-            name for name in local_config.CRITICAL_LIBRARIES
-            if not (isinstance(environment_manifest.get(f"{name}_version"),
-                               str)
-                    and environment_manifest[f"{name}_version"].strip())
-        ]
-        if missing_libraries:
-            raise QualifyError(
-                f"필수 라이브러리 버전 확인 불가: {missing_libraries} — "
-                "`vdeter setup`으로 설치를 완료한 뒤 재시도하십시오 "
-                "(부재 상태로는 자격을 발급하지 않습니다)")
 
         if residual_probe is None:
             from apps.standalone.local_preflight import residual_processes
@@ -839,12 +952,17 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
         candidate_info = None
         tc_results = {}
         phase_run_ids = {}
+        resolved_config_sha256 = {}
+        evidence_sha256 = {}
         environment_manifest_sha256 = None
 
-        for phase in LADDER_PHASES:
+        for phase_index, phase in enumerate(LADDER_PHASES, 1):
             run_id = f"{ladder_id}-{phase}"
             run_id, run_root = allocate_run_dir(paths.runs_dir, run_id)
             phase_run_ids[phase] = run_id
+            if progress is not None:
+                progress.phase_started(phase, phase_index, len(LADDER_PHASES),
+                                       run_root)
             gain_input = None
             # run_mode는 PHASE_RUN_MODE로 명시 고정한다 — template 기본값에
             # 기대지 않는다 (1차 실패 원인). rr-p1은 gain 입력 없이
@@ -862,14 +980,15 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 assert run_mode == "OPERATIONAL", phase
             generated = local_config.generate_run_configs(
                 repo_root=repo_root, run_root=run_root, run_id=run_id,
-                rr_phase=phase, hardware=hardware, binding=binding,
-                deployment_manifest_relpath=deploy_manifest.MANIFEST_RELPATH,
-                deployment_manifest_sha256=manifest_sha,
-                deploy_verified=True, run_mode=run_mode,
+                rr_phase=phase, hardware=hardware,
+                installation=installation,
+                installation_verified=bool(install_check["pass"]),
+                provenance=provenance, run_mode=run_mode,
                 gain_input=gain_input,
                 environment_manifest=environment_manifest)
             environment_manifest_sha256 = generated[
                 "environment_manifest_sha256"]
+            resolved_config_sha256[phase] = dict(generated["resolved_sha256"])
 
             timeout_s = (local_config.PHASE_DEADLINES_S[phase]
                          + PHASE_TIMEOUT_MARGIN_S)
@@ -878,7 +997,8 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 "run_root": run_root,
                 "configs_dir": generated["configs_dir"],
                 "phase": phase,
-                "baseline_sha256": binding["baseline_sha256"],
+                "baseline_sha256":
+                    provenance_module.STAGE7_BASELINE_PIN["sha256"],
                 "gain_artifact": gain_artifact_path,
                 "identity_root": paths.identity_dir,
                 "timeout_s": timeout_s,
@@ -928,8 +1048,13 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                     f"{phase} 실패 (rc={outcome['rc']}, "
                     f"{evidence['errors']}) — "
                     "candidate 미승격, 기존 active reference 유지")
+                if progress is not None:
+                    progress.phase_finished(phase, "FAILED")
                 return report
             tc_results.update(evidence["tc_status"])
+            evidence_sha256[phase] = collect_phase_evidence_sha256(run_root)
+            if progress is not None:
+                progress.phase_finished(phase, "PASS")
 
             if phase == "rr-p1":
                 gain_artifact_path = (run_root / "evidence"
@@ -950,19 +1075,20 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 }
                 # --- 3단계: candidate reference 생성 (사다리 진행용) ------
                 candidate = issue_reference(
-                    ladder_id=ladder_id, binding=binding,
-                    deploy_sha256=manifest_sha,
-                    deploy_files={e["path"]: e["sha256"]
-                                  for e in manifest["files"]},
+                    ladder_id=ladder_id, installation=installation,
                     tc_results=dict(tc_results),
                     endpoints_observed=endpoints_observed,
                     endpoint_observations=endpoint_observations,
                     platform_profile=hardware["platform_profile"],
+                    wiring=hardware.get("wiring") or {},
                     identity_fingerprint=identity_check["fingerprint"],
                     gain=gain_record,
                     environment_manifest=environment_manifest,
                     environment_manifest_sha256=environment_manifest_sha256,
-                    phase_run_ids=dict(phase_run_ids))
+                    phase_run_ids=dict(phase_run_ids),
+                    resolved_config_sha256=dict(resolved_config_sha256),
+                    evidence_sha256=dict(evidence_sha256),
+                    provenance=provenance)
                 candidate_info = write_reference(
                     paths.qualification_candidate, candidate)
                 report["candidate"] = {
@@ -971,10 +1097,13 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 }
 
         # --- 7단계: verification bundle + final builder -------------------
+        if progress is not None:
+            progress.bundle_started()
         verification_root = paths.qualification_candidate / "verification"
         bundle = write_verification_bundle(
-            repo_root, verification_root, binding,
-            deploy_verify_pass=True, runner=suite_runner)
+            repo_root, verification_root, installation,
+            verify_report=install_check, runner=suite_runner,
+            progress=progress)
         report["verification"] = {k: v for k, v in bundle.items()
                                   if k != "root"}
         if final_builder_module is None:
@@ -987,12 +1116,14 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
             for phase in LADDER_PHASES
         ]
         final_out = paths.qualification_candidate / "final-result.json"
+        if progress is not None:
+            progress.builder_started()
         final_result = final_builder_module.build(
             evidence_roots, str(final_out),
             software_ok=bundle["software_ok"],
             frozen_hash_ok=bundle["frozen_ok"],
             verification_root=str(verification_root),
-            head_provider=lambda: binding["source_head"])
+            head_provider=lambda: installation["installation_sha256"])
         report["final_status"] = final_result["final_status"]
         report["consistency_problems"] = final_result["consistency_problems"]
         if final_result["final_status"] != "RESEARCH_READY":
@@ -1003,24 +1134,27 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
 
         # --- 8단계: 최종 reference 갱신 + 원자적 승격 ---------------------
         final_reference = issue_reference(
-            ladder_id=ladder_id, binding=binding,
-            deploy_sha256=manifest_sha,
-            deploy_files={e["path"]: e["sha256"]
-                          for e in manifest["files"]},
+            ladder_id=ladder_id, installation=installation,
             tc_results=dict(tc_results),
             endpoints_observed=endpoints_observed,
             endpoint_observations=endpoint_observations,
             platform_profile=hardware["platform_profile"],
+            wiring=hardware.get("wiring") or {},
             identity_fingerprint=identity_check["fingerprint"],
             gain=gain_record,
             environment_manifest=environment_manifest,
             environment_manifest_sha256=environment_manifest_sha256,
             phase_run_ids=dict(phase_run_ids),
+            resolved_config_sha256=dict(resolved_config_sha256),
+            evidence_sha256=dict(evidence_sha256),
             final_status=final_result["final_status"],
-            final_result_sha256=_sha256_file(final_out))
+            final_result_sha256=_sha256_file(final_out),
+            provenance=provenance)
         final_info = write_reference(
             paths.qualification_candidate, final_reference)
         promotion = promote_candidate(paths, release_id=ladder_id)
+        if progress is not None:
+            progress.promoted(ladder_id)
         report["reference"] = {
             "sha256": final_info["sha256"],
             "release": promotion["release"],
@@ -1031,24 +1165,17 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
         report["status"] = "QUALIFIED"
         return report
     finally:
+        _PROGRESS_ON_WAIT = None
         lock.release()
 
 
-def _domain_manifest_record(manifest: dict, domain: str, *, source: str) -> dict:
-    """reference에 담을 한 영역의 manifest 요약(집계 해시·파일 수·출처)."""
-    split = domains.split_manifest(manifest)[domain]
-    return {"aggregate_sha256": split["aggregate_sha256"],
-            "file_count": split["file_count"], "source": source}
-
-
 def _rf_resolved_config_bound_to(prior_ladder_id: str, paths: StatePaths,
-                                 expected_manifest_sha256: str) -> dict:
-    """RF phase resolved config가 이전 배포 manifest에 결속됐는지 확인.
+                                 expected_installation_sha256: str) -> dict:
+    """RF phase resolved config가 이전 installation digest에 결속됐는지 확인.
 
-    각 phase endpoints/*.toml의 `deployment_manifest_sha256`이 전부
-    `expected_manifest_sha256`과 같아야 한다(그 manifest에서 RF가 돌았다는
-    증거). 하나라도 다르거나 없으면 mismatch로 보고한다. 파일 내용은 바꾸지
-    않는다(읽기만)."""
+    각 phase endpoints/*.toml의 `deployment_manifest_sha256`(= installation
+    digest)이 전부 `expected_installation_sha256`과 같아야 한다(그 설치에서
+    RF가 돌았다는 증거). 하나라도 다르거나 없으면 mismatch. 읽기만 한다."""
     import re
     checked, mismatch = [], []
     for phase in LADDER_PHASES:
@@ -1064,154 +1191,108 @@ def _rf_resolved_config_bound_to(prior_ladder_id: str, paths: StatePaths,
             checked.append(str(toml_path.relative_to(paths.runs_dir)))
             if not m:
                 mismatch.append(f"{toml_path.name}: 결속 필드 없음")
-            elif m.group(1) != expected_manifest_sha256:
+            elif m.group(1) != expected_installation_sha256:
                 mismatch.append(f"{toml_path.name}: {m.group(1)[:12]} != "
-                                f"{expected_manifest_sha256[:12]}")
+                                f"{expected_installation_sha256[:12]}")
     return {"pass": not mismatch and bool(checked),
             "checked": checked, "mismatch": mismatch}
 
 
-REUSE_BASELINE_TYPE = "STAGE7_STANDALONE_REUSE_BASELINE_V1"
+def load_release_reference(paths: StatePaths, release_id: str) -> dict:
+    """releases/<id>/의 reference를 검증기로 적재 (sidecar 대조). v1·v2 모두
+    읽히지만 evidence 재사용 원천은 v2만 허용한다."""
+    from apps import stage7_profile
+    if (not isinstance(release_id, str) or not release_id
+            or any(sep in release_id for sep in ("/", "\\", ".."))):
+        raise QualifyError(f"release id 형식이 잘못됐습니다: {release_id!r}")
+    path = paths.qualification_releases / release_id / REFERENCE_BASENAME
+    if not path.is_file():
+        raise QualifyError(f"release reference가 없습니다: {path}")
+    try:
+        return stage7_profile.load_reference(str(path))
+    except stage7_profile.ProfileError as exc:
+        raise QualifyError(f"release reference 검증 실패: {exc}") from exc
 
 
-def _read_rf_critical_symbol_baseline(repo_root: Path | str) -> dict:
-    """현재 배포 트리에서 RF-critical 심볼 소스를 읽어 함수 단위 해시 baseline."""
-    sources = {}
-    for relpath in domains.RF_CRITICAL_QUALIFY_SYMBOLS:
-        sources[relpath] = (Path(repo_root) / relpath).read_text(
-            encoding="utf-8")
-    return domains.rf_critical_symbol_baseline(sources)
+def _prior_files_from_reference(reference: dict) -> tuple:
+    """v2 reference의 installation 결속 → (files map, rf symbols)."""
+    installation = reference.get("installation") or {}
+    files = installation.get("files") or {}
+    symbols = installation.get("rf_critical_symbols") or {}
+    if reference.get("schema_version") != 2 or not files:
+        raise QualifyError(
+            "evidence 재사용 원천은 installation 결속 reference(v2)여야 합니다 "
+            f"(schema_version={reference.get('schema_version')})")
+    return files, symbols
 
 
-def capture_reuse_baseline(repo_root: Path | str,
-                           manifest_path: Path | str) -> dict:
-    """재사용 baseline: 이 시점 배포 manifest + RF-critical 심볼 해시.
-
-    **수정 배포 전에** 호출해 이전(RF 실행) 트리 상태를 고정한다. RF evidence를
-    재사용하려면 배포 후 이 baseline과 대조한다."""
-    manifest, manifest_sha = deploy_manifest.load_manifest(manifest_path)
-    if manifest is None:
-        raise QualifyError(f"deploy manifest 없음: {manifest_path}")
-    return {
-        "artifact_type": REUSE_BASELINE_TYPE,
-        "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "deploy_manifest": manifest,
-        "deploy_manifest_sha256": manifest_sha,
-        "rf_critical_symbols": _read_rf_critical_symbol_baseline(repo_root),
-    }
-
-
-def write_reuse_baseline(repo_root: Path | str, manifest_path: Path | str,
-                         out_path: Path | str) -> dict:
-    baseline = capture_reuse_baseline(repo_root, manifest_path)
-    Path(out_path).write_text(
-        json.dumps(baseline, ensure_ascii=True, sort_keys=True, indent=1),
-        encoding="utf-8")
-    return baseline
-
-
-def load_reuse_baseline(path: Path | str) -> dict:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("artifact_type") != REUSE_BASELINE_TYPE:
-        raise QualifyError(f"reuse baseline 형식이 아닙니다: {path}")
-    return data
-
-
-def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
-                      prior_baseline_path: Path | str, reason: str,
+def run_qualify_reuse(paths: StatePaths, *, prior_release_id: str,
+                      reason: str,
                       hardware_path: Path | str | None = None,
                       repo_root: Path | str | None = None,
-                      binding_path: Path | str | None = None,
                       suite_runner=subprocess.run,
                       preflight_fn=None, residual_probe=None,
                       environment_manifest: dict | None = None,
                       final_builder_module=None,
                       release_id: str | None = None,
-                      supersedes: dict | None = None) -> dict:
-    """RF 사다리 재실행 없이 기존 RF evidence를 재사용해 승격 (2026-09-05 승인,
-    보완 반영).
+                      supersedes: dict | None = None,
+                      progress=None) -> dict:
+    """RF 사다리 재실행 없이 이전 release의 RF evidence를 재사용해 승격 (v2).
 
-    가드: ① rf 영역 파일 byte-identical + RF-critical 심볼(run mode·phase 순서·
-    phase 인자 등) 함수 단위 byte-identical, ② operation 영역 byte-identical(현
-    정책: 회귀 기반 재사용 불허), ③ 변경된 tooling(qualify_cmd governance/bundle,
-    VDETER/tools, qualification 시험)에 수정된 verification bundle 재실행, ④
-    reference에 rf_evidence/operation/qualification_tool manifest + RF 심볼 각각
-    기록, ⑤ qualification_method=evidence_reuse + 사유, ⑥ rf/operation 핵심
-    파일·RF 심볼 하나라도 다르면 거부, ⑦ 문서 변경만으로는 무효화 안 됨, ⑧ 해시
-    임의 패치·기존 결과 변경 금지(읽기만).
-
-    RF 사다리 phase는 실행하지 않는다 — 이전 phase evidence(PASS)만 재사용한다.
+    가드: ① rf 영역 파일 byte-identical + RF-critical 심볼 함수 단위 byte-
+    identical, ② operation 영역 byte-identical(현 정책), ③ 변경된 tooling에
+    수정된 verification bundle 재실행, ④ reference에 rf_evidence/operation/
+    qualification_tool digest·RF 심볼 각각 기록, ⑤ qualification_method=
+    evidence_reuse + 사유, ⑥ rf/operation 핵심 파일·RF 심볼 하나라도 다르면
+    거부, ⑦ 문서(비결속) 변경만으로는 무효화 안 됨, ⑧ 해시 임의 패치·기존
+    결과 변경 금지(읽기만). 이전 baseline은 별도 파일이 아니라 **이전 release
+    reference(v2)에 결속된 파일 map**이다.
     """
+    global _PROGRESS_ON_WAIT
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     report = {"status": "FAIL", "qualification_method": "evidence_reuse",
-              "prior_ladder_id": prior_ladder_id, "errors": []}
-    # release 디렉터리 id — 재발급(supersede) 시 기존 release를 지우지 않고
-    # 새 id로 승격한다(조건 5). qualification.run_id는 RF evidence 출처인
-    # prior ladder를 그대로 가리킨다.
-    release = release_id or prior_ladder_id
+              "prior_release_id": prior_release_id, "errors": []}
+    release = release_id or (prior_release_id + "-reuse")
     report["release_id"] = release
 
     lock = SingleInstanceLock(paths.lock_path)
     lock.acquire(diagnostics={"command": "qualify-reuse"})
+    _PROGRESS_ON_WAIT = progress.tick if progress is not None else None
     try:
-        paths.ensure_var()
-        binding = local_config.load_standalone_binding(
-            binding_path if binding_path is not None else
-            (repo_root / "VDETER" / "configs" / "stage7"
-             / "standalone-binding.json"))
-        hardware = local_config.parse_hardware_declaration(
-            hardware_path or (repo_root / "hardware.toml"))
+        context = prepare_qualification(
+            paths, hardware_path=hardware_path, repo_root=repo_root,
+            preflight_fn=preflight_fn, environment_manifest=environment_manifest,
+            report=report, progress=progress)
+        hardware = context["hardware"]
+        installation = context["installation"]
+        install_check = context["install_check"]
+        identity_check = context["identity_check"]
+        endpoints_observed = context["endpoints_observed"]
+        endpoint_observations = context["endpoint_observations"]
+        environment_manifest = context["environment_manifest"]
+        provenance = context["provenance"]
 
-        current_manifest, current_manifest_sha = deploy_manifest.load_manifest(
-            paths.var_dir / "deploy-manifest.json")
-        if current_manifest is None:
-            raise QualifyError("현재 deploy manifest가 없습니다 — `vdeter setup` 필요")
-        deploy_check = deploy_manifest.verify(repo_root, current_manifest)
-        report["deploy_verify"] = {k: v for k, v in deploy_check.items()
-                                   if k != "checked"}
-        if not deploy_check["pass"]:
-            raise QualifyError(
-                "현재 배포 tree가 manifest와 다릅니다 "
-                f"(missing={deploy_check['missing'][:3]}, "
-                f"mismatch={deploy_check['mismatch'][:3]}, "
-                f"untracked={deploy_check['untracked'][:3]})")
-
-        baseline = load_reuse_baseline(prior_baseline_path)
-        prior_manifest = baseline["deploy_manifest"]
-        prior_manifest_sha = baseline["deploy_manifest_sha256"]
-        prior_rf_symbols = baseline["rf_critical_symbols"]
-        current_rf_symbols = _read_rf_critical_symbol_baseline(repo_root)
-        report["rf_evidence_manifest_sha256"] = prior_manifest_sha
-        report["current_deploy_manifest_sha256"] = current_manifest_sha
-
-        identity_check = identity.check_identity_consistency(paths)
-        report["identity"] = identity_check
-        if not identity_check["pass"]:
-            raise QualifyError("identity 불일치: "
-                               + "; ".join(identity_check["errors"]))
-
-        if preflight_fn is None:
-            from apps.standalone.local_preflight import run_required_preflight
-
-            def preflight_fn():
-                return run_required_preflight(hardware=hardware, paths=paths)
-        preflight = preflight_fn()
-        report["preflight"] = preflight
-        if not preflight["pass"]:
-            raise QualifyError("필수 preflight 실패: "
-                               + "; ".join(preflight["failures"]))
-        # 조건 1: full ladder와 동일한 공통 함수 — critical은 {serial,
-        # speed_class}, usb_path/speed_mbps는 관측 metadata로만 분리.
-        endpoints_observed, endpoint_observations = (
-            critical_endpoints_from_preflight(preflight))
-
-        environment_manifest = (environment_manifest
-                                or local_config.build_environment_manifest())
+        prior = load_release_reference(paths, prior_release_id)
+        prior_files, prior_rf_symbols = _prior_files_from_reference(prior)
+        prior_ladder_id = (prior.get("qualification") or {}).get("run_id")
+        if not prior_ladder_id:
+            raise QualifyError("이전 reference에 qualification.run_id가 없습니다")
+        prior_digests = {
+            k: (prior.get("installation") or {}).get(k)
+            for k in ("installation_sha256", "rf_manifest_sha256",
+                      "operation_manifest_sha256", "tooling_manifest_sha256")}
+        current_digests = installation_manifest.digests_of(installation)
+        report["prior_ladder_id"] = prior_ladder_id
+        report["rf_evidence_installation_sha256"] = prior_digests[
+            "installation_sha256"]
+        report["current_installation_sha256"] = current_digests[
+            "installation_sha256"]
 
         # --- 이전 RF phase evidence 재구성·검증 (재실행 없음) --------------
         phase_run_ids = {phase: f"{prior_ladder_id}-{phase}"
                          for phase in LADDER_PHASES}
         tc_results, gain_record = {}, None
+        evidence_sha256 = {}
         for phase in LADDER_PHASES:
             run_root = paths.runs_dir / phase_run_ids[phase]
             evidence = verify_phase_evidence(run_root, phase)
@@ -1220,6 +1301,7 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                 raise QualifyError(
                     f"{phase} 이전 evidence 미검증({evidence['errors']}) — 재사용 불가")
             tc_results.update(evidence["tc_status"])
+            evidence_sha256[phase] = collect_phase_evidence_sha256(run_root)
             if phase == "rr-p1":
                 gi = run_root / "evidence" / "gain_artifact_input.json"
                 gf = run_root / "evidence" / "gain_artifact.json"
@@ -1231,39 +1313,48 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                     "endpoint_common_rx_gain_db": json.loads(gi.read_bytes())
                     ["endpoint_common_rx_gain_db"],
                     "source_run_id": phase_run_ids[phase]}
+        # 이전 evidence SHA가 이전 reference 기록과 같아야 한다(변조·교체 방지).
+        prior_evidence = (prior.get("qualification") or {}).get(
+            "evidence_sha256") or {}
+        if prior_evidence and prior_evidence != evidence_sha256:
+            raise QualifyError(
+                "이전 RF evidence 파일이 이전 reference 기록과 다릅니다 — "
+                "재사용 불가(evidence 변조/교체 의심)")
 
-        # 요구사항 1(configs): RF resolved config가 이전 manifest에 결속됐는가.
         cfg_bound = _rf_resolved_config_bound_to(
-            prior_ladder_id, paths, prior_manifest_sha)
+            prior_ladder_id, paths, prior_digests["installation_sha256"])
         report["rf_resolved_config_binding"] = cfg_bound
         if not cfg_bound["pass"]:
             raise QualifyError(
-                "RF resolved config가 이전 manifest에 결속되지 않음: "
+                "RF resolved config가 이전 installation digest에 결속되지 않음: "
                 + "; ".join(cfg_bound["mismatch"][:3]))
 
-        # --- 요구사항 3: 수정된 verification bundle 재실행 (operation 회귀 겸용) --
+        # --- 수정된 verification bundle 재실행 (tooling 변경 검증) ---------
+        if progress is not None:
+            progress.bundle_started()
         verification_root = paths.qualification_candidate / "verification"
         bundle = write_verification_bundle(
-            repo_root, verification_root, binding,
-            deploy_verify_pass=True, runner=suite_runner)
+            repo_root, verification_root, installation,
+            verify_report=install_check, runner=suite_runner,
+            progress=progress)
         report["verification"] = {k: v for k, v in bundle.items()
                                   if k != "root"}
         if not bundle["frozen_ok"]:
-            raise QualifyError("frozen-hash audit 실패 — 재사용 승격 불가")
+            raise QualifyError("installation audit 실패 — 재사용 승격 불가")
         if not bundle["software_ok"]:
             raise QualifyError("verification bundle software 검증 실패 — 승격 불가")
 
         # --- 재사용 판정: rf 파일+RF-critical 심볼 byte-identical,
         #     operation byte-identical (현 정책). 아니면 거부. ---
-        reuse = domains.evaluate_reuse(
-            prior_manifest, current_manifest,
+        reuse = domains.evaluate_reuse_v2(
+            prior_files, installation_manifest.bound_files(installation),
             prior_rf_symbols=prior_rf_symbols,
-            current_rf_symbols=current_rf_symbols)
+            current_rf_symbols=installation["rf_critical_symbols"])
         report["reuse_evaluation"] = {
             k: reuse[k] for k in
             ("eligible", "rf_identical", "rf_files_identical",
              "rf_symbols_identical", "rf_symbols_changed",
-             "operation_identical", "tooling_changed", "test_doc_changed",
+             "operation_identical", "tooling_changed", "non_binding_changed",
              "blocking_files")}
         if not reuse["eligible"]:
             raise QualifyError(
@@ -1271,7 +1362,6 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
                 + "; ".join(reuse["blocking_files"][:5]))
 
         # --- final builder (이전 RF evidence roots) -----------------------
-        # env manifest sha는 generate_run_configs와 동일 직렬화로 계산한다.
         environment_manifest_sha256 = hashlib.sha256(json.dumps(
             environment_manifest, ensure_ascii=True, sort_keys=True,
             indent=1).encode("utf-8")).hexdigest()
@@ -1283,68 +1373,87 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
             str(paths.runs_dir / phase_run_ids[phase]
                 / "evidence" / "research_ready") for phase in LADDER_PHASES]
         final_out = paths.qualification_candidate / "final-result.json"
+        if progress is not None:
+            progress.builder_started()
         final_result = final_builder_module.build(
             evidence_roots, str(final_out),
             software_ok=bundle["software_ok"], frozen_hash_ok=bundle["frozen_ok"],
             verification_root=str(verification_root),
-            head_provider=lambda: binding["source_head"])
+            head_provider=lambda: installation["installation_sha256"])
         report["final_status"] = final_result["final_status"]
         if final_result["final_status"] != "RESEARCH_READY":
             raise QualifyError(
                 f"final builder: {final_result['final_status']} — 승격 불가")
 
-        # --- 3영역 manifest + RF-critical 심볼 + evidence_reuse 기록 -------
         binding_domains = {
             "rf_evidence": {
-                **_domain_manifest_record(prior_manifest, domains.RF,
-                                          source=f"prior_ladder:{prior_ladder_id}"),
-                "manifest_sha256": prior_manifest_sha,
-                "rf_critical_symbols": prior_rf_symbols},
-            "operation": _domain_manifest_record(
-                current_manifest, domains.OPERATION, source="current_deploy"),
-            "qualification_tool": _domain_manifest_record(
-                current_manifest, domains.TOOLING, source="current_deploy"),
+                "source": f"prior_release:{prior_release_id}",
+                "prior_ladder_id": prior_ladder_id,
+                "installation_sha256": prior_digests["installation_sha256"],
+                "rf_manifest_sha256": prior_digests["rf_manifest_sha256"],
+                "rf_critical_symbols": prior_rf_symbols,
+                "file_count": len(domains.domain_files_v2(prior_files,
+                                                          domains.RF))},
+            "operation": {
+                "source": "current_installation",
+                "operation_manifest_sha256":
+                    current_digests["operation_manifest_sha256"],
+                "file_count": installation["domains"][domains.OPERATION][
+                    "file_count"]},
+            "qualification_tool": {
+                "source": "current_installation",
+                "tooling_manifest_sha256":
+                    current_digests["tooling_manifest_sha256"],
+                "file_count": installation["domains"][domains.TOOLING][
+                    "file_count"]},
         }
         evidence_reuse = {
             "reason": reason,
+            "prior_release_id": prior_release_id,
+            "prior_reference_sha256": prior.get("_reference_sha256"),
             "prior_ladder_id": prior_ladder_id,
             "release_id": release,
-            # 조건 5: 발급 결함으로 대체된 이전 reference 기록(삭제 없음).
             "supersedes": supersedes,
-            "rf_evidence_manifest_sha256": prior_manifest_sha,
-            "current_deploy_manifest_sha256": current_manifest_sha,
+            "rf_evidence_installation_sha256":
+                prior_digests["installation_sha256"],
+            "current_installation_sha256":
+                current_digests["installation_sha256"],
             "rf_identical": reuse["rf_identical"],
             "rf_files_identical": reuse["rf_files_identical"],
             "rf_symbols_identical": reuse["rf_symbols_identical"],
             "operation_identical": reuse["operation_identical"],
             "tooling_changed": reuse["tooling_changed"],
-            "test_doc_changed": reuse["test_doc_changed"],
+            "non_binding_changed": reuse["non_binding_changed"],
             "rf_resolved_config_binding_pass": cfg_bound["pass"],
             "verification": {"software_ok": bundle["software_ok"],
                              "frozen_ok": bundle["frozen_ok"]},
         }
-
+        prior_resolved = (prior.get("qualification") or {}).get(
+            "resolved_config_sha256") or {}
         reference = issue_reference(
-            ladder_id=prior_ladder_id, binding=binding,
-            deploy_sha256=current_manifest_sha,
-            deploy_files={e["path"]: e["sha256"]
-                          for e in current_manifest["files"]},
+            ladder_id=prior_ladder_id, installation=installation,
             tc_results=dict(tc_results),
             endpoints_observed=endpoints_observed,
             endpoint_observations=endpoint_observations,
             platform_profile=hardware["platform_profile"],
+            wiring=hardware.get("wiring") or {},
             identity_fingerprint=identity_check["fingerprint"],
             gain=gain_record,
             environment_manifest=environment_manifest,
             environment_manifest_sha256=environment_manifest_sha256,
             phase_run_ids=dict(phase_run_ids),
+            resolved_config_sha256=dict(prior_resolved),
+            evidence_sha256=dict(evidence_sha256),
             final_status=final_result["final_status"],
             final_result_sha256=_sha256_file(final_out),
             qualification_method="evidence_reuse",
+            provenance=provenance,
             binding_domains=binding_domains,
             evidence_reuse=evidence_reuse)
         final_info = write_reference(paths.qualification_candidate, reference)
         promotion = promote_candidate(paths, release_id=release)
+        if progress is not None:
+            progress.promoted(release)
         report["reference"] = {
             "sha256": final_info["sha256"],
             "release": promotion["release"],
@@ -1354,4 +1463,5 @@ def run_qualify_reuse(paths: StatePaths, *, prior_ladder_id: str,
         report["status"] = "QUALIFIED"
         return report
     finally:
+        _PROGRESS_ON_WAIT = None
         lock.release()

@@ -83,7 +83,9 @@ def write_hardware(tmp, mutate=None) -> Path:
 
 # ---------------------------------------------------------------- binding
 
-def test_binding_validation():
+def test_binding_validation_legacy_deploy_tool_only():
+    """(legacy) 개발 PC 배포 도구 전용 — 대상 기계 실행 경로는 v2부터 이
+    파일을 읽지 않는다 (README §5)."""
     with tempfile.TemporaryDirectory() as tmp:
         good = local_config.load_standalone_binding(write_binding(tmp))
         assert good["source_head"] == "f" * 40
@@ -140,15 +142,26 @@ _ENV_MANIFEST = {
 }
 
 
+#: v2 결속 입력 — installation manifest digest 부분집합 (measure 결과 호환).
+INSTALLATION = {
+    "installation_sha256": "cd" * 32,
+    "domains": {"rf": {"sha256": "aa" * 32, "file_count": 1},
+                "operation": {"sha256": "bb" * 32, "file_count": 1},
+                "tooling": {"sha256": "cc" * 32, "file_count": 1}},
+}
+PROVENANCE = {"note": "test", "git": {"commit": "f" * 40, "branch": "feature/x",
+                                       "dirty": None},
+              "legacy_binding": None, "stage7_baseline": {"version": "0.9.23"}}
+
+
 def generate(tmp, rr_phase, **overrides):
     run_root = Path(tmp) / "runs" / "r1"
     run_root.mkdir(parents=True, exist_ok=True)
     kwargs = dict(
         repo_root=_REPO, run_root=run_root, run_id="r1", rr_phase=rr_phase,
-        hardware=GOOD_HARDWARE, binding=GOOD_BINDING,
-        deployment_manifest_relpath="var/deploy-manifest.json",
-        deployment_manifest_sha256="cd" * 32,
-        deploy_verified=True, environment_manifest=dict(_ENV_MANIFEST),
+        hardware=GOOD_HARDWARE, installation=INSTALLATION,
+        installation_verified=True, provenance=PROVENANCE,
+        environment_manifest=dict(_ENV_MANIFEST),
     )
     kwargs.update(overrides)
     return local_config.generate_run_configs(**kwargs)
@@ -177,11 +190,33 @@ def test_generate_run_configs_end_to_end_with_real_loader():
         assert result["fixtures"] == []
         assert not (out / "fixtures").exists()
 
+        # deployment_manifest_* config 필드 = installation digest 결속.
+        mass_a = (out / "endpoints" / "mass-a.toml").read_text("utf-8")
+        assert f'deployment_manifest_sha256 = "{INSTALLATION["installation_sha256"]}"' in mass_a
+        assert 'deployment_manifest_relpath = "var/installation/installation-manifest.json"' in mass_a
+
         git_state = json.loads((out / "git_state.json").read_text("utf-8"))
-        # README §6 표 — 출처가 binding/로컬로 바뀌었을 뿐 스키마는 호환.
-        assert git_state["git_commit"] == GOOD_BINDING["source_head"]
-        assert git_state["git_dirty"] is False
-        assert git_state["baseline_sha256"] == GOOD_BINDING["baseline_sha256"]
+        # README §6 표 — 스키마는 호환. git 필드는 참고 provenance(있으면
+        # 기록, 없으면 null)이며 판정에 쓰이지 않는다. baseline은 커밋 상수 pin.
+        from apps.standalone.provenance import STAGE7_BASELINE_PIN
+        assert git_state["git_commit"] == "f" * 40
+        assert git_state["git_dirty"] is None
+        assert git_state["baseline_sha256"] == STAGE7_BASELINE_PIN["sha256"]
+        assert git_state["baseline_version"] == STAGE7_BASELINE_PIN["version"]
+        assert git_state["provenance_schema"] == 2
+        assert git_state["installation_sha256"] == INSTALLATION["installation_sha256"]
+        assert git_state["rf_manifest_sha256"] == "aa" * 32
+        assert git_state["installation_verified"] is True
+        installation_state = json.loads(
+            (out / "installation-state.json").read_text("utf-8"))
+        assert installation_state["artifact_type"] == "STAGE7_STANDALONE_INSTALLATION_STATE_V2"
+        assert installation_state["installation_sha256"] == INSTALLATION["installation_sha256"]
+        assert installation_state["domains"]["tooling"] == "cc" * 32
+        # git 없는 환경: provenance None → git 필드 null, 생성은 그대로 성공.
+        nogit = generate(tmp, "rr-p0", provenance=None,
+                         run_root=Path(tmp) / "runs" / "r2", run_id="r2")
+        assert nogit["git_state"]["git_commit"] is None
+        assert nogit["git_state"]["git_branch"] is None
         assert git_state["qualification_profile"] == "RESEARCH_READY_MINIMAL"
         assert git_state["rr_phase"] == "rr-p0"
         assert git_state["run_id"] == "r1"
@@ -193,13 +228,19 @@ def test_generate_run_configs_end_to_end_with_real_loader():
             _ENV_MANIFEST["usb_devices"])
 
 
-def test_generate_refuses_unverified_deploy_and_bad_phase():
+def test_generate_refuses_unverified_installation_and_bad_phase():
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            generate(tmp, "rr-p0", deploy_verified=False)
-            raise AssertionError("무결 미검증 배포가 거부되지 않았다")
+            generate(tmp, "rr-p0", installation_verified=False)
+            raise AssertionError("무결 미검증 설치가 거부되지 않았다")
         except local_config.ConfigGenerationError as exc:
             assert "무결 검증" in str(exc)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            generate(tmp, "rr-p0", installation={"installation_sha256": "zz"})
+            raise AssertionError("digest 형식 오류가 거부되지 않았다")
+        except local_config.ConfigGenerationError as exc:
+            assert "sha256" in str(exc)
     with tempfile.TemporaryDirectory() as tmp:
         try:
             generate(tmp, "not-a-phase")

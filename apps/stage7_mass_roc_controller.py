@@ -291,6 +291,10 @@ class MassRocScenarioController:
                          original_source=(received or {}).get("original_source"),
                          original_destination=(received or {}).get(
                              "original_destination"))
+        # presentation: 스텝(transfer) 경계마다 trace를 flush해 standalone
+        # run의 실시간 추적이 workload 종료 전에 읽을 수 있게 한다. application
+        # 계층의 경계 flush이며 RF/PHY/MAC hot loop·판정·evidence 내용은 불변.
+        self._trace.flush()
 
         # 오목적지·중복 관측 (증분 기준).
         wrong = 0

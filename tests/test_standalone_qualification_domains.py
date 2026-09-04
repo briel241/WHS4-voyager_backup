@@ -38,36 +38,128 @@ def test_known_files_classify_to_expected_domain():
     cases = {
         "VDETER/apps/stage7_coordinator_main.py": qd.RF,
         "VDETER/apps/stage7_endpoint_launcher.py": qd.RF,
-        "VDETER/apps/stage7_scenario_controller.py": qd.RF,
+        "VDETER/apps/stage7_scenario_controller.py": qd.RF,   # 주영역(rf+operation)
         "VDETER/src/vdeter/stage7/pi_runtime.py": qd.RF,
         "VDETER/src/vdeter/phy/resampling.py": qd.RF,
-        # RF config 템플릿은 rf(byte-identical).
         "VDETER/configs/stage7/system.toml": qd.RF,
         "VDETER/configs/stage7/endpoints/mass-a.toml": qd.RF,
         "VDETER/configs/stage7/profiles/data-profile.toml": qd.RF,
-        # standalone binding은 생성 attestation(매 재생성 head 변경) → tooling.
-        "VDETER/configs/stage7/standalone-binding.json": qd.TOOLING,
         "apps/standalone/qualify_cmd.py": qd.TOOLING,
         "apps/standalone/qualification_domains.py": qd.TOOLING,
+        "apps/standalone/setup_cmd.py": qd.TOOLING,
         "VDETER/tools/stage7_rr_final_builder.py": qd.TOOLING,
         "apps/standalone/templates/hardware.toml.example": qd.TOOLING,
+        "tools/check_docs.py": qd.TOOLING,
         "apps/standalone/cli.py": qd.OPERATION,
         "apps/standalone/run_cmd.py": qd.OPERATION,
-        "apps/standalone/local_config.py": qd.OPERATION,
+        "apps/standalone/local_session.py": qd.OPERATION,
+        "apps/standalone/local_preflight.py": qd.OPERATION,
+        "apps/standalone/identity.py": qd.OPERATION,
+        "apps/standalone/local_config.py": qd.RF,   # 주영역 rf (rf+operation)
+        "apps/stage7_mass_roc_controller.py": qd.OPERATION,
+        "apps/stage7_service_layer.py": qd.OPERATION,
         "common/codec.py": qd.OPERATION,
         "MASS/mass_agent.py": qd.OPERATION,
         "VDETER/apps/stage0_endpoint.py": qd.OPERATION,
-        # qualification 시험 suite는 tooling(변경 시 bundle 재실행), 문서만 비결속.
+        "unknown/new_module.py": qd.OPERATION,      # 미분류 → operation
         "VDETER/tests/unit/test_multirate_phy.py": qd.TOOLING,
         "VDETER/tests/contract/test_arch_traceability.py": qd.TOOLING,
         "VDETER/tests/integration/test_stage7_bringup.py": qd.TOOLING,
         "VDETER/tests/support/phy11.py": qd.TOOLING,
+        "tests/test_standalone_qualify.py": qd.TOOLING,
         "VDETER/tests/README.md": qd.TEST_DOC,
         "docs/core/traceability.toml": qd.TEST_DOC,
         "README.md": qd.TEST_DOC,
+        ".gitignore": qd.TEST_DOC,
+        "docs/구상도.jpg": qd.TEST_DOC,
     }
     for path, expected in cases.items():
         assert qd.classify(path) == expected, path
+
+
+def test_classify_domains_multi_membership_v2():
+    assert qd.classify_domains("VDETER/apps/stage7_scenario_controller.py") == (
+        qd.RF, qd.OPERATION)
+    assert qd.classify_domains("apps/standalone/local_config.py") == (
+        qd.RF, qd.OPERATION)
+    assert qd.classify_domains("apps/standalone/installation_manifest.py") == (
+        qd.TOOLING, qd.OPERATION)
+    assert qd.classify_domains("apps/stage7_profile.py") == (qd.TOOLING, qd.OPERATION)
+    assert qd.classify_domains("requirements-standalone.lock") == (
+        qd.TOOLING, qd.OPERATION)
+    assert qd.classify_domains("bin/vdeter") == (qd.TOOLING, qd.OPERATION)
+    assert qd.classify_domains("README.md") == (qd.NON_BINDING,)
+    assert qd.classify_domains("VDETER/tests/unit/test_x.py") == (qd.TOOLING,)
+    assert qd.classify_domains("some/unknown.py") == (qd.OPERATION,)
+    assert qd.classify_domains("VDETER/src/vdeter/mac/interface.py") == (qd.RF,)
+
+
+def _files_v2(mapping):
+    """{path: sha} → v2 files map (domains는 분류기로)."""
+    return {p: {"sha256": s, "domains": list(qd.classify_domains(p))}
+            for p, s in mapping.items()}
+
+
+_BASE_V2 = {
+    "VDETER/apps/stage7_coordinator_main.py": "rf1",
+    "VDETER/src/vdeter/stage7/pi_runtime.py": "rf2",
+    "VDETER/apps/stage7_scenario_controller.py": "x1",   # rf+operation
+    "apps/standalone/local_config.py": "x2",              # rf+operation
+    "apps/standalone/cli.py": "op1",
+    "apps/standalone/run_cmd.py": "op2",
+    "common/codec.py": "op3",
+    "apps/standalone/qualify_cmd.py": "tool1",
+    "VDETER/tools/stage7_rr_final_builder.py": "tool2",
+    "VDETER/tests/unit/test_multirate_phy.py": "tool3",
+    "tests/test_standalone_qualify.py": "tool4",
+    "README.md": "doc1",
+    "docs/사용법.md": "doc2",
+}
+
+
+def test_evaluate_reuse_v2_rules():
+    base = _files_v2(_BASE_V2)
+    same = qd.evaluate_reuse_v2(base, base)
+    assert same["eligible"] and not same["tooling_changed"]
+    # RF 파일 변경 → RF 재자격 필요(재사용 거부).
+    cur = dict(_BASE_V2); cur["VDETER/src/vdeter/stage7/pi_runtime.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert not r["eligible"] and "rf:changed:VDETER/src/vdeter/stage7/pi_runtime.py" in r["blocking_files"]
+    # 교차영향 파일(scenario controller) 변경 → rf·operation 둘 다 차단.
+    cur = dict(_BASE_V2); cur["VDETER/apps/stage7_scenario_controller.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert not r["rf_identical"] and not r["operation_identical"]
+    # operation 변경 → 자동 재사용 거부(현 정책).
+    cur = dict(_BASE_V2); cur["apps/standalone/cli.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert not r["eligible"] and "operation:changed:apps/standalone/cli.py" in r["blocking_files"]
+    # tooling 변경 → software bundle 재실행 요구(eligible, tooling_changed).
+    cur = dict(_BASE_V2); cur["apps/standalone/qualify_cmd.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert r["eligible"] and r["tooling_changed"] and r["rf_identical"]
+    # qualification 시험 변경 → tooling 변경(비결속 아님).
+    cur = dict(_BASE_V2); cur["tests/test_standalone_qualify.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert r["eligible"] and r["tooling_changed"] and not r["non_binding_changed"]
+    # Markdown 변경 → 자격 영향 없음.
+    cur = dict(_BASE_V2); cur["README.md"] = "NEW"; cur["docs/사용법.md"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert r["eligible"] and not r["tooling_changed"] and r["non_binding_changed"]
+    assert r["blocking_files"] == []
+    # 미분류 실행 파일 추가 → operation 추가 → 거부(fail-safe).
+    cur = dict(_BASE_V2); cur["plugins/extra.py"] = "NEW"
+    r = qd.evaluate_reuse_v2(base, _files_v2(cur))
+    assert not r["eligible"] and "operation:added:plugins/extra.py" in r["blocking_files"]
+    # RF-critical 심볼 변경 → 파일 동일해도 거부.
+    sym = {"apps/standalone/qualify_cmd.py": {
+        "LADDER_PHASES": ["a", "b"], "PHASE_RUN_MODE": ["c", "d"],
+        "PHASE_EXPECTED_TCS": ["e", "f"], "GAIN_CONSUMING_PHASES": ["g", "h"],
+        "default_phase_runner": ["i", "j"]}}
+    mutated = copy.deepcopy(sym)
+    mutated["apps/standalone/qualify_cmd.py"]["PHASE_RUN_MODE"] = ["c", "NEW"]
+    r = qd.evaluate_reuse_v2(base, base, prior_rf_symbols=sym,
+                             current_rf_symbols=mutated)
+    assert not r["eligible"] and "apps/standalone/qualify_cmd.py::PHASE_RUN_MODE" in r["rf_symbols_changed"]
 
 
 def test_every_deployed_file_classifies_into_exactly_one_domain():
@@ -100,13 +192,24 @@ def test_rf_domain_contains_core_and_tests_are_tooling():
     assert "VDETER/src/vdeter/stage7/pi_runtime.py" in rf
     assert "apps/standalone/qualify_cmd.py" not in rf
     tooling = split[qd.TOOLING]["files"]
-    # qualify_cmd(파일 단위 tooling) + qualification 시험 suite = tooling.
     assert "apps/standalone/qualify_cmd.py" in tooling
     assert any(p.startswith("VDETER/tests/") for p in tooling)
-    # 시험 파일은 rf/operation 결속에는 없다(=RF 자격을 파일로 무효화 안 함).
     for d in (qd.RF, qd.OPERATION):
         assert not any(p.startswith("VDETER/tests/")
                        for p in split[d]["files"])
+    # v2 실측: 결속 파일은 비결속과 겹치지 않고 교차영향 파일은 두 영역에.
+    from apps.standalone import installation_manifest as im
+    record = im.measure(Path(_REPO))
+    files = record["files"]
+    assert set(files["VDETER/apps/stage7_scenario_controller.py"]["domains"]) == {
+        qd.RF, qd.OPERATION}
+    assert set(files["apps/standalone/local_config.py"]["domains"]) == {
+        qd.RF, qd.OPERATION}
+    for path, entry in files.items():
+        if qd.NON_BINDING in entry["domains"]:
+            assert entry["domains"] == [qd.NON_BINDING], path
+        else:
+            assert set(entry["domains"]) <= set(qd.BOUND_DOMAINS), path
 
 
 # ---------------------------------------------- RF-critical 심볼(함수 단위 결속)

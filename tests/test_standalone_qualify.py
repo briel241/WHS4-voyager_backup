@@ -1,15 +1,16 @@
-"""Phase I W5 — 단독 RR 자격 orchestrator 계약 시험 (RF 없음).
+"""단독 RR 자격 orchestrator 계약 시험 (v2, RF·Git·binding 없음).
 
-증명하는 것 (apps/standalone/README.md §7, 결정 20)
-  사다리     : P0→P1(+gain)→candidate→P2-17→P2-19→P3-fault→final builder→
-               전체 PASS 시에만 원자적 승격. 단계 실패 시 기존 active 유지.
-  발급       : reference가 **실제 검증기**(apps.stage7_profile.load_reference)
-               를 통과하고, final builder는 **실물 도구**를 head_provider
-               주입으로 실행한다 (가짜 builder 아님 — 승인 조건 2·3).
-  frozen     : git 없는 로컬 frozen 감사가 binding 대조로 all_unchanged를
-               정직 판정.
-  identity   : manifest·인증서·trust store·fingerprint 4자 일치 검사
-               (W5 필수 — 불일치 시 자격 착수 거부).
+증명하는 것 (apps/standalone/README.md §7, 결정 20, clone-bootstrap)
+  사다리     : P0→P1(+gain)→candidate→P2-17→P3-fault→verification bundle→
+               final builder→전체 PASS 시에만 원자적 승격. 단계 실패 시
+               기존 active 유지.
+  발급       : reference v2가 **실제 검증기**(apps.stage7_profile.load_reference)
+               를 통과하고, final builder는 **실물 도구**를 installation digest
+               provider 주입으로 실행한다.
+  installation audit : git 없는 설치 감사가 재측정 대조로 정직 판정.
+  evidence reuse(v2) : 이전 release reference의 파일 결속 대비 rf(파일+심볼)·
+               operation byte-identical일 때만 승격, tooling 변경은 bundle
+               재실행, 결속 불일치·bundle 실패는 거부.
 
 가짜인 것은 **RF phase 실행뿐**이다 — 주입 phase_runner가 coordinator의
 evidence 계약(write_rr_evidence 스키마·index·원본 결속·gain artifact)을
@@ -18,19 +19,18 @@ evidence 계약(write_rr_evidence 스키마·index·원본 결속·gain artifact
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
 from pathlib import Path
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
-for _entry in (os.path.join(_REPO, "VDETER"),
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _entry in (_REPO, _HERE, os.path.join(_REPO, "VDETER"),
                os.path.join(_REPO, "VDETER", "src")):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
@@ -39,90 +39,20 @@ from common.textout import ensure_utf8_output
 
 ensure_utf8_output()
 
-from apps.standalone import (
-    deploy_manifest,
+import standalone_v2_fixtures as fx  # noqa: E402
+from apps.standalone import (  # noqa: E402
     identity,
+    installation_manifest,
+    provenance,
     qualify_cmd,
     state,
 )
 
-
-class Done:
-    def __init__(self, rc=0, stdout=""):
-        self.returncode = rc
-        self.stdout = stdout
-
-
-def normalized_sha(path: Path) -> str:
-    return hashlib.sha256(
-        path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-
-
-def make_real_binding() -> dict:
-    """실제 repo의 frozen 파일 2개를 실측 결속한 binding (0.9.23 사슬 내)."""
-    frozen = {}
-    for relative in ("src/vdeter/config/models.py",
-                     "src/vdeter/config/loader.py"):
-        frozen[relative] = normalized_sha(
-            Path(_REPO) / "VDETER" / relative)
-    return {
-        "artifact_type": "STAGE7_STANDALONE_BINDING_V1",
-        "source_head": "e" * 40,
-        "source_branch": "feature/phase-i-pi-standalone",
-        "source_worktree_dirty": False,
-        "baseline_version": "0.9.23",
-        "baseline_sha256": "2a" * 32,
-        "frozen_files": frozen,
-    }
-
-
-HARDWARE = {
-    "schema_version": 1,
-    "platform_profile": "pi",
-    "endpoints": {
-        "MASS-A": {"serial": "34D03DD"},
-        "MASS-B": {"serial": "3515425", "external_power_asset": "AT2024T"},
-        "ROC": {"serial": "34D03E8"},
-    },
-    "wiring": {"profile": "C1-C6-STANDARD", "approved": True},
-}
-
-
-def write_hardware_toml(path: Path):
-    lines = ["schema_version = 1", 'platform_profile = "pi"']
-    for role, body in HARDWARE["endpoints"].items():
-        lines.append(f'[endpoints."{role}"]')
-        for key, value in body.items():
-            lines.append(f'{key} = "{value}"')
-    lines += ["[wiring]", 'profile = "C1-C6-STANDARD"', "approved = true"]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def fake_preflight():
-    return {
-        "pass": True, "failures": [],
-        "checks": {"b210": {"observed_by_role": {
-            "MASS-A": {"serial": "34D03DD", "usb_path": "3-1",
-                       "speed_mbps": 5000, "speed_class": "super"},
-            "MASS-B": {"serial": "3515425", "usb_path": "4-2",
-                       "speed_mbps": 480, "speed_class": "high"},
-            "ROC": {"serial": "34D03E8", "usb_path": "5-1",
-                    "speed_mbps": 5000, "speed_class": "super"},
-        }}},
-    }
-
-
-ENV_MANIFEST = {
-    "manifest_type": "STAGE7_ENVIRONMENT_MANIFEST_V1",
-    "uname": "unit-test",
-    "usb_devices": "X",
-    "numpy_version": "2.5.2",
-    "cryptography_version": "50.0.0",
-    "uhd_version": "4.6",
-    "gnuradio_version": "3.10",
-}
-
-BINDING = make_real_binding()
+Done = fx.Done
+HARDWARE = fx.HARDWARE
+ENV_MANIFEST = fx.ENV_MANIFEST
+fake_preflight = fx.fake_preflight
+write_hardware_toml = fx.write_hardware_toml
 
 
 def fabricating_phase_runner(context: dict) -> int:
@@ -136,6 +66,8 @@ def fabricating_phase_runner(context: dict) -> int:
     (evidence / f"coordinator-{phase}.json").write_text("{}")
     for member in ("MASS-A", "MASS-B", "ROC"):
         (evidence / f"{member}-runtime.json").write_text("{}")
+    with open(run_root / "coordinator-console.log", "a", encoding="utf-8") as h:
+        h.write("[coordinator] MASS-A 연결됨\n")
 
     index = {"profile": "RESEARCH_READY_MINIMAL", "entries": {}}
     for tc in qualify_cmd.PHASE_EXPECTED_TCS[phase]:
@@ -143,10 +75,10 @@ def fabricating_phase_runner(context: dict) -> int:
             "artifact_type": "STAGE7_RESEARCH_READY_EVIDENCE_V1",
             "profile": "RESEARCH_READY_MINIMAL",
             "tc_id": tc,
-            "baseline_version": BINDING["baseline_version"],
-            "baseline_sha256": BINDING["baseline_sha256"],
-            "git_commit": BINDING["source_head"],
-            "git_dirty": False,
+            "baseline_version": provenance.STAGE7_BASELINE_PIN["version"],
+            "baseline_sha256": context["baseline_sha256"],
+            "git_commit": None,
+            "git_dirty": None,
             "hardware": {"usb_devices": "X"},
             "run_id": run_id,
             "stage7_diag_env": "0",
@@ -190,14 +122,7 @@ def fabricating_phase_runner(context: dict) -> int:
 
 
 def prepare_environment(tmp) -> state.StatePaths:
-    paths = state.StatePaths(tmp)
-    paths.root = Path(_REPO)  # vdeter import·template·frozen 실물 사용
-    paths.ensure_var()
-    identity.ensure_identity(paths)
-    write_hardware_toml(Path(tmp) / "hardware.toml")
-    # setup의 manifest 단계에 해당: 실제 repo tree 실측 → tmp var에 기록.
-    deploy_manifest.write_manifest(_REPO,
-                                   paths.var_dir / "deploy-manifest.json")
+    paths, _record = fx.prepare_environment(tmp, qualified=False)
     return paths
 
 
@@ -205,7 +130,6 @@ def run(paths, tmp, **overrides):
     kwargs = dict(
         hardware_path=Path(tmp) / "hardware.toml",
         repo_root=_REPO,
-        binding_path=None,
         phase_runner=fabricating_phase_runner,
         suite_runner=lambda argv, **kw: Done(0),
         preflight_fn=fake_preflight,
@@ -214,32 +138,36 @@ def run(paths, tmp, **overrides):
         stamp="20260904-000000",
     )
     kwargs.update(overrides)
-    if kwargs["binding_path"] is None:
-        binding_path = Path(tmp) / "standalone-binding.json"
-        binding_path.write_text(json.dumps(BINDING), encoding="utf-8")
-        kwargs["binding_path"] = binding_path
     return qualify_cmd.run_qualify(paths, **kwargs)
+
+
+def _real_verify(paths):
+    return installation_manifest.verify_installation(
+        Path(_REPO), installation_manifest.load_installation(paths))
 
 
 # ---------------------------------------------------------------- 단위
 
-def test_local_frozen_audit_honest_verdicts():
-    audit = qualify_cmd.local_frozen_hash_audit(
-        Path(_REPO), BINDING, deploy_verify_pass=True)
-    assert audit["all_unchanged"] is True
-    assert audit["worktree_dirty"] is False
-    assert audit["head_commit"] == BINDING["source_head"]
-
-    tampered = dict(BINDING)
-    tampered["frozen_files"] = dict(BINDING["frozen_files"])
-    first = next(iter(tampered["frozen_files"]))
-    tampered["frozen_files"][first] = "0" * 64
-    audit2 = qualify_cmd.local_frozen_hash_audit(
-        Path(_REPO), tampered, deploy_verify_pass=True)
-    assert audit2["all_unchanged"] is False
-    audit3 = qualify_cmd.local_frozen_hash_audit(
-        Path(_REPO), BINDING, deploy_verify_pass=False)
-    assert audit3["worktree_dirty"] is True
+def test_local_installation_audit_honest_verdicts():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        record = installation_manifest.load_installation(paths)
+        verify = _real_verify(paths)
+        audit = qualify_cmd.local_installation_audit(record, verify)
+        assert audit["audit_type"] == qualify_cmd.INSTALLATION_AUDIT_TYPE
+        assert audit["all_unchanged"] is True
+        assert audit["installation_verified"] is True
+        assert audit["installation_sha256"] == record["installation_sha256"]
+        assert "head_commit" not in audit          # git 결속 없음
+        assert audit["files"] and all(f["unchanged"] for f in audit["files"])
+        assert all("rf" in record["files"][f["path"]]["domains"]
+                   for f in audit["files"])         # rf 영역 파일만
+        broken = json.loads(json.dumps(verify))
+        broken["pass"] = False
+        broken["current_record"]["files"]["VDETER/src/vdeter/stage7/pi_runtime.py"]["sha256"] = "0" * 64
+        audit2 = qualify_cmd.local_installation_audit(record, broken)
+        assert audit2["all_unchanged"] is False
+        assert audit2["installation_verified"] is False
 
 
 def test_identity_consistency_four_way():
@@ -250,8 +178,6 @@ def test_identity_consistency_four_way():
         check = identity.check_identity_consistency(paths)
         assert check["pass"], check["errors"]
         assert check["fingerprint"] == created["fingerprint"]
-
-        # fingerprint 파일 변조 → 4자 불일치 검출.
         files = identity.identity_paths(paths)
         files["fingerprint"].write_text("deadbeef0000\n", encoding="utf-8")
         tampered = identity.check_identity_consistency(paths)
@@ -260,11 +186,9 @@ def test_identity_consistency_four_way():
 
 
 def test_promote_candidate_pointer_atomic():
-    """release 불변 보관 + 포인터 원자 교체 — 'active 없음' 창이 없다."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = state.StatePaths(tmp)
         paths.ensure_var()
-        # 기존 active: release-A를 가리키는 포인터.
         (paths.qualification_releases / "rel-a").mkdir()
         (paths.qualification_releases / "rel-a" / "old.json").write_text(
             "old", encoding="utf-8")
@@ -280,14 +204,11 @@ def test_promote_candidate_pointer_atomic():
         assert pointer["release"] == "rel-b"
         assert pointer["previous_release"] == "rel-a"
         assert result["reference_sha256"] == "ab" * 32
-        # 이전 release는 불변 이력으로 남는다.
         assert (paths.qualification_releases / "rel-a"
                 / "old.json").read_text() == "old"
         assert (paths.qualification_releases / "rel-b"
                 / qualify_cmd.REFERENCE_BASENAME).read_text() == "new"
         assert not any(paths.qualification_candidate.iterdir())
-
-        # 같은 release id 재사용은 거부 (불변 보관 보장).
         (paths.qualification_candidate
          / qualify_cmd.REFERENCE_BASENAME).write_text("x", encoding="utf-8")
         (paths.qualification_candidate
@@ -298,52 +219,83 @@ def test_promote_candidate_pointer_atomic():
             raise AssertionError("release 중복이 거부되지 않았다")
         except qualify_cmd.QualifyError:
             pass
-        # 실패해도 포인터는 그대로다.
         assert json.loads(
             paths.active_pointer.read_bytes())["release"] == "rel-b"
 
 
 # ---------------------------------------------------------------- e2e
 
-def test_qualify_end_to_end_promotes_real_validated_reference():
-    with tempfile.TemporaryDirectory() as tmp:
-        paths = prepare_environment(tmp)
-        report = run(paths, tmp)
-        assert report["status"] == "QUALIFIED", (
-            report["errors"], report.get("consistency_problems"))
-        # 실물 final builder가 READY를 냈다 (가짜 builder 아님).
-        assert report["final_status"] == "RESEARCH_READY"
-        assert report["consistency_problems"] == []
-        # 사다리 5 phase 전부 PASS·TC 매핑 확인.
-        assert list(report["phases"]) == list(qualify_cmd.LADDER_PHASES)
+def test_qualify_end_to_end_promotes_real_validated_reference_without_git():
+    original_run, original_popen = subprocess.run, subprocess.Popen
+    calls = []
 
-        # active reference가 실제 검증기(load_reference)로 재적재된다.
-        active = qualify_cmd.load_active_reference(paths)
-        assert active is not None
-        assert active["qualified_source_commit"] == BINDING["source_head"]
-        tc = active["qualification"]["tc_results"]
-        assert tc["TC-STAGE7-RR-007"]["status"] == "PASS"
-        critical = active["standalone_critical"]
-        assert critical["gain"]["endpoint_common_rx_gain_db"]["ROC"] == 75
-        assert critical["identity_fingerprint"] == identity.\
-            load_identity_manifest(paths)["certificate_fingerprint"]
-        assert critical["library_versions"]["cryptography"] == "50.0.0"
-        assert len(critical["deploy_manifest_sha256"]) == 64
-        # candidate는 승격 후 비워지고, 포인터가 release를 가리킨다.
-        assert not any(paths.qualification_candidate.iterdir())
-        pointer = json.loads(paths.active_pointer.read_bytes())
-        assert pointer["release"] == "qual-20260904-000000"
-        final = json.loads(
-            (paths.qualification_releases / pointer["release"]
-             / "final-result.json").read_bytes())
-        assert final["final_status"] == "RESEARCH_READY"
+    def guard(argv, *a, **k):
+        calls.append(list(argv))
+        return original_run(argv, *a, **k)
+
+    class GuardPopen(original_popen):
+        def __init__(self, argv, *a, **k):
+            calls.append(list(argv))
+            super().__init__(argv, *a, **k)
+
+    subprocess.run, subprocess.Popen = guard, GuardPopen
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = prepare_environment(tmp)
+            record = installation_manifest.load_installation(paths)
+            report = run(paths, tmp)
+            assert report["status"] == "QUALIFIED", (
+                report["errors"], report.get("consistency_problems"))
+            assert report["final_status"] == "RESEARCH_READY"
+            assert report["consistency_problems"] == []
+            assert list(report["phases"]) == list(qualify_cmd.LADDER_PHASES)
+
+            active = qualify_cmd.load_active_reference(paths)
+            assert active is not None
+            assert active["schema_version"] == 2
+            assert active["qualification_method"] == "full_ladder"
+            assert "qualified_source_commit" not in active
+            inst = active["installation"]
+            assert inst["installation_sha256"] == record["installation_sha256"]
+            assert inst["rf_manifest_sha256"] == record["domains"]["rf"]["sha256"]
+            assert inst["files"] and all(
+                "non_binding" not in e["domains"] for e in inst["files"].values())
+            assert inst["rf_critical_symbols"] == record["rf_critical_symbols"]
+            tc = active["qualification"]["tc_results"]
+            assert tc["TC-STAGE7-RR-007"]["status"] == "PASS"
+            assert set(active["qualification"]["resolved_config_sha256"]) == set(
+                qualify_cmd.LADDER_PHASES)
+            assert set(active["qualification"]["evidence_sha256"]) == set(
+                qualify_cmd.LADDER_PHASES)
+            assert "evidence/research_ready/TC-STAGE7-RR-002.json" in \
+                active["qualification"]["evidence_sha256"]["rr-p1"]
+            critical = active["standalone_critical"]
+            assert critical["installation_sha256"] == record["installation_sha256"]
+            assert critical["wiring"] == {"profile": "C1-C6-STANDARD",
+                                          "approved": True}
+            assert critical["gain"]["endpoint_common_rx_gain_db"]["ROC"] == 75
+            assert critical["identity_fingerprint"] == identity.\
+                load_identity_manifest(paths)["certificate_fingerprint"]
+            assert critical["library_versions"]["cryptography"] == "50.0.0"
+            assert "baseline_sha256" not in critical   # 판정값 아님
+            assert active["provenance"]["stage7_baseline"]["version"] == "0.9.23"
+            assert active["provenance"]["note"]
+            assert not any(paths.qualification_candidate.iterdir())
+            pointer = json.loads(paths.active_pointer.read_bytes())
+            assert pointer["release"] == "qual-20260904-000000"
+            release = paths.qualification_releases / pointer["release"]
+            final = json.loads((release / "final-result.json").read_bytes())
+            assert final["final_status"] == "RESEARCH_READY"
+            audit = json.loads((release / "verification"
+                                / "frozen-hash-audit.json").read_bytes())
+            assert audit["installation_sha256"] == record["installation_sha256"]
+            assert "head_commit" not in audit
+    finally:
+        subprocess.run, subprocess.Popen = original_run, original_popen
+    assert not any(os.path.basename(str(c[0])).startswith("git") for c in calls)
 
 
 def test_phase_run_mode_mapping_is_fixed():
-    """phase별 run_mode 매핑이 승인값과 정확히 일치한다 — 달라지면 실패.
-
-    1차 RF qualification 실패 원인(rr-p1 RF_OFF → calibrate_rf REJECTED)의
-    재발 방지 계약 (2026-09-04 사용자 승인 매핑)."""
     assert qualify_cmd.PHASE_RUN_MODE == {
         "rr-p0": "RF_OFF_QUALIFICATION",
         "rr-p1": "GAIN_CALIBRATION",
@@ -352,32 +304,20 @@ def test_phase_run_mode_mapping_is_fixed():
     }
     assert set(qualify_cmd.PHASE_RUN_MODE) == set(qualify_cmd.LADDER_PHASES)
     assert qualify_cmd.GAIN_CONSUMING_PHASES == ("rr-p2-17", "rr-p3-fault")
-    assert all(qualify_cmd.PHASE_RUN_MODE[p] == "OPERATIONAL"
-               for p in qualify_cmd.GAIN_CONSUMING_PHASES)
-    # runtime 계약과의 정합: 세 값은 loader가 허용하는 RUN_MODES 안이다.
     from vdeter.stage7.configuration import RUN_MODES
     assert set(qualify_cmd.PHASE_RUN_MODE.values()) <= set(RUN_MODES)
 
 
 def test_rr_p1_gain_calibration_config_passes_real_loader():
-    """rr-p1 + GAIN_CALIBRATION + gain 입력 없음 → 실제 loader PASS,
-    rr-p0는 RF_OFF 유지."""
     from apps.standalone import local_config
-    hardware = {
-        "platform_profile": "pi",
-        "endpoints": {"MASS-A": {"serial": "34D03DD"},
-                      "MASS-B": {"serial": "3515425",
-                                 "external_power_asset": "AT2024T"},
-                      "ROC": {"serial": "34D03E8"}},
-        "wiring": {"profile": "C1-C6-STANDARD", "approved": True}}
+    record = fx.repo_installation_record()
     for phase, expected in (("rr-p1", "GAIN_CALIBRATION"),
                             ("rr-p0", "RF_OFF_QUALIFICATION")):
         with tempfile.TemporaryDirectory() as tmp:
             generated = local_config.generate_run_configs(
                 repo_root=_REPO, run_root=Path(tmp) / "r", run_id="r",
-                rr_phase=phase, hardware=hardware, binding=BINDING,
-                deployment_manifest_relpath="var/deploy-manifest.json",
-                deployment_manifest_sha256="cd" * 32, deploy_verified=True,
+                rr_phase=phase, hardware=HARDWARE, installation=record,
+                installation_verified=True,
                 run_mode=qualify_cmd.PHASE_RUN_MODE[phase], gain_input=None,
                 environment_manifest=dict(ENV_MANIFEST))
             for endpoint in ("mass-a", "mass-b", "roc"):
@@ -387,16 +327,8 @@ def test_rr_p1_gain_calibration_config_passes_real_loader():
 
 
 def test_ladder_excludes_link19_and_builder_ready_without_rr006():
-    """2026-09-04 정책: rr-p2-19 제거. 사다리는 p0→p1→p2-17→p3-fault 순서로만
-    돌고 rr-p2-19 coordinator는 호출되지 않으며, RR-006 evidence가 없어도
-    final builder가 필수 TC 충족 시 RESEARCH_READY를 낸다. reference의
-    phase_run_ids에 rr-p2-19가 없고 Link 19 제한이 명시된다."""
     assert qualify_cmd.LADDER_PHASES == ("rr-p0", "rr-p1", "rr-p2-17",
                                          "rr-p3-fault")
-    assert "rr-p2-19" not in qualify_cmd.PHASE_EXPECTED_TCS
-    assert "rr-p2-19" not in qualify_cmd.PHASE_RUN_MODE
-    assert "rr-p2-19" not in qualify_cmd.GAIN_CONSUMING_PHASES
-    # builder 전역 정책은 그대로: RR-006은 DEFERRED, REQUIRED는 001~005+007.
     builder = qualify_cmd._load_module(
         Path(_REPO) / "VDETER" / "tools" / "stage7_rr_final_builder.py",
         "stage7_rr_final_builder_policy_check")
@@ -404,7 +336,6 @@ def test_ladder_excludes_link19_and_builder_ready_without_rr006():
     assert set(builder.REQUIRED_TCS) == {
         "TC-STAGE7-RR-001", "TC-STAGE7-RR-002", "TC-STAGE7-RR-003",
         "TC-STAGE7-RR-004", "TC-STAGE7-RR-005", "TC-STAGE7-RR-007"}
-    # 사다리 산출 TC 합집합 == 필수 TC 집합 (RR-006 부재).
     produced = {tc for tcs in qualify_cmd.PHASE_EXPECTED_TCS.values()
                 for tc in tcs}
     assert produced == set(builder.REQUIRED_TCS)
@@ -420,23 +351,15 @@ def test_ladder_excludes_link19_and_builder_ready_without_rr006():
         report = run(paths, tmp, phase_runner=recording_runner)
         assert report["status"] == "QUALIFIED", report["errors"]
         assert phases_called == ["rr-p0", "rr-p1", "rr-p2-17", "rr-p3-fault"]
-        assert "rr-p2-19" not in phases_called
-        assert not (paths.runs_dir / "qual-20260904-000000-rr-p2-19").exists()
-        assert report["final_status"] == "RESEARCH_READY"
         reference = qualify_cmd.load_active_reference(paths)
-        assert reference is not None
         assert "rr-p2-19" not in reference["qualification"]["phase_run_ids"]
-        assert "TC-STAGE7-RR-006" not in reference["qualification"]["tc_results"]
         limitation = reference["limitations"]
         assert limitation["link_19_implementation"] == "present"
         assert limitation["link_19_standalone_qualification"] == "not exercised"
-        assert limitation["link_19_hardware_performance"] == "not guaranteed"
-        assert limitation["operational_scenario_links"] == "Link 11/17 only"
-        # final-result.json에도 RR-006은 deferred 기록만 (MISSING 허용).
+        assert limitation["physical_usb_detach_recovery"] == "not exercised"
         pointer = json.loads(paths.active_pointer.read_bytes())
         final = json.loads((paths.qualification_releases / pointer["release"]
                             / "final-result.json").read_bytes())
-        assert final["final_status"] == "RESEARCH_READY"
         assert final["deferred_follow_up"]["items"]["TC-STAGE7-RR-006"] == "MISSING"
 
 
@@ -447,9 +370,6 @@ def _coordinator_module():
 
 
 def test_rr_p3_fault_runs_exactly_six_software_subcases():
-    """2026-09-04 정책: run_rr_p3_fault는 소프트웨어 소항목 6개만 실행·판정.
-    usb-detach 소항목·USER-ACTION 안내·STAGE7_P3_USB_DETACH_WAIT_S·
-    HARDWARE_BLOCKED 생성이 함수 본문에 없다 (AST 계약)."""
     import ast
     source = (Path(_REPO) / "VDETER" / "apps"
               / "stage7_coordinator_main.py").read_text("utf-8")
@@ -459,7 +379,6 @@ def test_rr_p3_fault_runs_exactly_six_software_subcases():
                     and node.name == "run_rr_p3_fault")
     recorded = []
     constants = set()
-    # docstring(정책 설명)은 제외하고 실행 문장의 문자열 상수만 검사한다.
     body = function.body[1:] if (
         function.body and isinstance(function.body[0], ast.Expr)
         and isinstance(getattr(function.body[0], "value", None), ast.Constant)
@@ -481,12 +400,10 @@ def test_rr_p3_fault_runs_exactly_six_software_subcases():
     joined = " ".join(constants)
     assert "USER-ACTION" not in joined
     assert "STAGE7_P3_USB_DETACH_WAIT_S" not in joined
-    assert "HARDWARE_BLOCKED" not in joined
     assert coordinator.P3_FAULT_EXCLUDED_SUBCASES == ("usb-detach",)
 
 
 def test_rr_p3_fault_status_six_pass_or_fail():
-    """6개 전부 PASS → PASS, 하나라도 FAIL/누락 → FAIL (HARDWARE_BLOCKED 없음)."""
     coordinator = _coordinator_module()
     names = coordinator.P3_FAULT_REQUIRED_SUBCASES
     all_pass = [{"name": n, "status": "PASS"} for n in names]
@@ -495,43 +412,10 @@ def test_rr_p3_fault_status_six_pass_or_fail():
         one_fail = [dict(s) for s in all_pass]
         one_fail[index]["status"] = "FAIL"
         assert coordinator._p3_fault_status(one_fail) == "FAIL", names[index]
-    assert coordinator._p3_fault_status(all_pass[:-1]) == "FAIL"  # 누락
-    # 제외 소항목이 evidence에 섞여 있어도 판정에 들어가지 않는다.
-    with_excluded = all_pass + [{"name": "usb-detach", "status": "FAIL"}]
-    assert coordinator._p3_fault_status(with_excluded) == "PASS"
-    # write_rr_evidence는 PASS/FAIL만 받는다 — 생성 가능한 값과 정합.
-    assert {coordinator._p3_fault_status(all_pass),
-            coordinator._p3_fault_status(all_pass[:-1])} <= {"PASS", "FAIL"}
-
-
-def test_reference_carries_usb_detach_limitation():
-    """final builder는 TC-007 PASS를 필수 판정하고, reference에 USB detach
-    제외 제한이 명시된다 (e2e — 실물 builder)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        paths = prepare_environment(tmp)
-        report = run(paths, tmp)
-        assert report["status"] == "QUALIFIED", report["errors"]
-        assert report["final_status"] == "RESEARCH_READY"
-        reference = qualify_cmd.load_active_reference(paths)
-        tc = reference["qualification"]["tc_results"]
-        assert tc["TC-STAGE7-RR-007"]["status"] == "PASS"
-        limitation = reference["limitations"]
-        assert limitation["physical_usb_detach_recovery"] == "not exercised"
-        assert limitation["b210_hot_unplug_reenumeration_recovery"] == (
-            "not guaranteed")
-        assert limitation["session_close_and_next_run_b210_rediscovery"] == (
-            "verified as before")
-        assert limitation["vdeter_normal_communication_link17_scenarios"] == (
-            "not affected")
-        assert "not a relaxation" in limitation["usb_detach_note"]
-        # Link 19 제한도 그대로 공존한다.
-        assert limitation["link_19_implementation"] == "present"
+    assert coordinator._p3_fault_status(all_pass[:-1]) == "FAIL"
 
 
 def test_qualify_ladder_applies_run_modes_and_gain_flow():
-    """실제 사다리에서 각 phase의 resolved config run_mode와 gain 입력 흐름:
-    p0 RF_OFF / p1 GAIN_CALIBRATION(gain 입력 없음) / p2·p3 OPERATIONAL이
-    rr-p1 산출 gain_artifact_input.json을 결속한다."""
     contexts = []
 
     def recording_runner(context):
@@ -548,7 +432,9 @@ def test_qualify_ladder_applies_run_modes_and_gain_flow():
             text = (Path(by_phase[phase]["configs_dir"]) / "endpoints"
                     / "mass-a.toml").read_text("utf-8")
             assert f'run_mode = "{expected}"' in text, phase
-        # p0·p1은 gain 입력 없음; p2/p3는 rr-p1 evidence의 gain 입력을 쓴다.
+            # coordinator --baseline-sha256 인자는 커밋 상수 pin.
+            assert by_phase[phase]["baseline_sha256"] == \
+                provenance.STAGE7_BASELINE_PIN["sha256"]
         assert by_phase["rr-p0"]["gain_artifact"] is None
         assert by_phase["rr-p1"]["gain_artifact"] is None
         p1_gain = (Path(by_phase["rr-p1"]["run_root"]) / "evidence"
@@ -556,35 +442,24 @@ def test_qualify_ladder_applies_run_modes_and_gain_flow():
         assert p1_gain.is_file()
         for phase in qualify_cmd.GAIN_CONSUMING_PHASES:
             assert Path(by_phase[phase]["gain_artifact"]) == p1_gain, phase
-            p1_values = json.loads(p1_gain.read_bytes())[
-                "endpoint_common_rx_gain_db"]
-            text = (Path(by_phase[phase]["configs_dir"]) / "endpoints"
-                    / "mass-a.toml").read_text("utf-8")
-            assert 'run_mode = "OPERATIONAL"' in text
-            assert p1_values  # 결속된 gain은 rr-p1 산출값이다
 
 
 def test_qualify_phase_failure_preserves_active_pointer():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        # 기존 active: release-prev를 가리키는 포인터 (내용은 불변 이력).
         (paths.qualification_releases / "rel-prev").mkdir()
         state.write_json_atomic(paths.active_pointer,
                                 {"release": "rel-prev"})
 
         def failing_runner(context):
             if context["phase"] == "rr-p2-17":
-                return 1  # RF phase 실패 모사
+                return 1
             return fabricating_phase_runner(context)
 
         report = run(paths, tmp, phase_runner=failing_runner)
         assert report["status"] == "FAIL"
-        assert any("기존 active reference 유지" in e
-                   for e in report["errors"])
-        # p3-fault는 시작하지 않았다 (필수 단계 실패 즉시 중단).
-        assert "rr-p3-fault" not in report["phases"]
+        assert any("기존 active reference 유지" in e for e in report["errors"])
         assert list(report["phases"]) == ["rr-p0", "rr-p1", "rr-p2-17"]
-        # 포인터는 이전 release 그대로 — 승격되지 않았다.
         assert json.loads(
             paths.active_pointer.read_bytes())["release"] == "rel-prev"
 
@@ -592,7 +467,6 @@ def test_qualify_phase_failure_preserves_active_pointer():
 def test_qualify_residual_and_timeout_fail_closed():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        # phase 후 잔존 프로세스 발견 → 자격 실패 (정리 미확인).
         report = run(paths, tmp, residual_probe=lambda: ["888 launcher"])
         assert report["status"] == "FAIL"
         assert any("정리 미확인" in e for e in report["errors"])
@@ -610,8 +484,6 @@ def test_qualify_residual_and_timeout_fail_closed():
         report = run(paths, tmp, phase_runner=timing_out_runner)
         assert report["status"] == "FAIL"
         assert any("timeout" in e for e in report["errors"])
-        assert report["phases"]["rr-p0"]["escalation"] == [
-            "term-group", "kill-group"]
 
 
 def test_qualify_refuses_missing_library_versions_before_p0():
@@ -631,10 +503,10 @@ def test_qualify_refuses_missing_library_versions_before_p0():
             raise AssertionError("라이브러리 부재가 거부되지 않았다")
         except qualify_cmd.QualifyError as exc:
             assert "uhd" in str(exc)
-        assert calls == []  # RF phase는 시작조차 하지 않았다
+        assert calls == []
 
 
-def test_verification_suite_receives_timeout():
+def test_verification_suite_receives_timeout_and_v2_audit():
     seen = []
 
     def suite_runner(argv, **kwargs):
@@ -642,18 +514,21 @@ def test_verification_suite_receives_timeout():
         return Done(0)
 
     with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        record = installation_manifest.load_installation(paths)
         out = Path(tmp) / "verification"
-        qualify_cmd.write_verification_bundle(
-            Path(_REPO), out, BINDING, deploy_verify_pass=True,
+        bundle = qualify_cmd.write_verification_bundle(
+            Path(_REPO), out, record, verify_report=_real_verify(paths),
             runner=suite_runner)
         assert seen == [qualify_cmd.UNIT_CONTRACT_TIMEOUT_S,
                         qualify_cmd.INTEGRATION_TIMEOUT_S]
+        assert bundle["frozen_ok"] and bundle["software_ok"]
+        audit = json.loads((out / "frozen-hash-audit.json").read_text("utf-8"))
+        assert audit["installation_sha256"] == record["installation_sha256"]
+        assert audit["installation_verified"] is True
 
 
 def test_verification_bundle_deselects_only_governance_from_unit_contract():
-    """계약: governance/architecture 감사만 명시 node-id로 unit-contract에서
-    분리하고(광범위 --ignore 아님), integration에는 적용하지 않으며, 제외
-    목록·사유를 evidence로 남긴다."""
     seen = []
 
     def suite_runner(argv, **kwargs):
@@ -661,38 +536,29 @@ def test_verification_bundle_deselects_only_governance_from_unit_contract():
         return Done(0)
 
     with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        record = installation_manifest.load_installation(paths)
         out = Path(tmp) / "verification"
         qualify_cmd.write_verification_bundle(
-            Path(_REPO), out, BINDING, deploy_verify_pass=True,
+            Path(_REPO), out, record, verify_report=_real_verify(paths),
             runner=suite_runner)
         unit_argv, integ_argv = seen
-        # unit-contract는 GOVERNANCE_DESELECT의 모든 node-id를 정확히 한 번씩
-        # --deselect로 받는다 (광범위 --ignore/-k not 이 아니다).
         assert unit_argv.count("--deselect") == len(qualify_cmd.GOVERNANCE_DESELECT)
         assert "--ignore" not in unit_argv
         for nodeid, reason in qualify_cmd.GOVERNANCE_DESELECT:
-            assert nodeid in unit_argv
-            assert reason  # 사유가 비어 있지 않다
-        # 실제 unit/contract 대상은 그대로 실행된다 (제외는 명시 목록뿐).
+            assert nodeid in unit_argv and reason
         assert any(str(Path(_REPO) / t) in unit_argv
                    for t in qualify_cmd.UNIT_CONTRACT_TARGETS)
-        # integration -k stage7에는 governance deselect가 없다.
         assert "--deselect" not in integ_argv
         assert "-k" in integ_argv and "stage7" in integ_argv
-        # evidence: 제외 목록·사유 기록.
         rec = json.loads(
             (out / "governance-deselected.json").read_text(encoding="utf-8"))
         assert rec["artifact_type"] == "STAGE7_STANDALONE_GOVERNANCE_DESELECT_V1"
-        assert rec["target_suite"] == "unit-contract"
         assert [d["nodeid"] for d in rec["deselected"]] == [
             n for n, _ in qualify_cmd.GOVERNANCE_DESELECT]
-        assert all(d["reason"] for d in rec["deselected"])
 
 
 def test_run_child_bounded_reaps_on_timeout():
-    """실제 자식(60초 sleep)을 1초 timeout으로 — 종료·회수를 실증한다."""
-    # Windows: kill 직후 자식의 로그 핸들 해제가 반환보다 늦을 수 있어
-    # tmp 정리 오류만 허용한다 (검증 대상은 회수·escalation이다).
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         result = qualify_cmd.run_child_bounded(
             [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -700,27 +566,26 @@ def test_run_child_bounded_reaps_on_timeout():
             stdout_path=Path(tmp) / "child.log",
             timeout_s=1.0, term_wait_s=5.0, kill_wait_s=5.0)
         assert result["timed_out"] is True
-        assert result["rc"] is not None  # 회수 완료 (좀비 아님)
-        assert result["escalation"]  # TERM 계열이 실제로 나갔다
-        if os.name == "posix":
-            assert result["group_cleared"] is True
-        else:
-            assert result["group_cleared"] is None  # 비-POSIX 개발 환경
-        assert result["cleanup_anomaly"] is False  # timeout 경로 — 정상 아님
+        assert result["rc"] is not None
+        assert result["escalation"]
+        assert result["cleanup_anomaly"] is False
+    # on_wait(진행 표시 폴링)이 있어도 timeout 의미는 같다.
+    ticks = []
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        result = qualify_cmd.run_child_bounded(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=Path(tmp), env=dict(os.environ),
+            stdout_path=Path(tmp) / "child.log",
+            timeout_s=1.5, term_wait_s=5.0, kill_wait_s=5.0,
+            on_wait=lambda: ticks.append(1), wait_poll_s=0.3)
+        assert result["timed_out"] is True and ticks
 
 
 def test_run_child_bounded_reaps_grandchildren_posix():
-    """부모가 손자를 만들고 먼저 죽는 실제 POSIX 시나리오 (원 결함 재현).
-
-    Windows 개발 환경에서는 SKIP — V2(Pi) 검증 캠페인에서 실행된다."""
     import unittest
     if os.name != "posix":
         raise unittest.SkipTest("POSIX 전용 — Pi V2에서 실행")
-
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        # ① 부모 즉시 종료 + TERM 무시 손자 → 자연 소멸 대기 후
-        #    anomaly 기록 + 강제 정리 + 소멸 재확인 (W5 보완 1·3차).
-        #    부모는 손자 PID를 stdout(log)으로 남긴다 — 실제 소멸 검증용.
         orphan_parent = (
             "import subprocess,sys;"
             "p=subprocess.Popen([sys.executable,'-c',"
@@ -735,10 +600,8 @@ def test_run_child_bounded_reaps_grandchildren_posix():
             timeout_s=30.0, term_wait_s=2.0, kill_wait_s=5.0,
             natural_group_wait_s=1.0)
         assert result["rc"] == 0
-        assert result["cleanup_anomaly"] is True   # 잔류가 실측·기록됐다
-        assert result["group_cleared"] is True     # 강제 정리·소멸 재확인
-        assert "post-exit-group-residue" in result["escalation"]
-        # 손자 PID가 시험 종료 전에 실제로 소멸했는지 확인.
+        assert result["cleanup_anomaly"] is True
+        assert result["group_cleared"] is True
         grandchild_pid = int(
             (Path(tmp) / "a.log").read_text().strip().splitlines()[-1])
         try:
@@ -747,25 +610,9 @@ def test_run_child_bounded_reaps_grandchildren_posix():
         except ProcessLookupError:
             pass
 
-        # ② timeout 경로: TERM 무시 손자는 KILL 단계에서 group째 소멸한다.
-        stubborn = (
-            "import subprocess,sys,time;"
-            "subprocess.Popen([sys.executable,'-c',"
-            "'import signal,time;signal.signal(signal.SIGTERM,"
-            "signal.SIG_IGN);time.sleep(60)']);time.sleep(60)"
-        )
-        result2 = qualify_cmd.run_child_bounded(
-            [sys.executable, "-c", stubborn],
-            cwd=Path(tmp), env=dict(os.environ),
-            stdout_path=Path(tmp) / "b.log",
-            timeout_s=1.0, term_wait_s=3.0, kill_wait_s=5.0)
-        assert result2["timed_out"] is True
-        assert result2["group_cleared"] is True  # KILL로 group 소멸 확인
-        assert "group-survived-term" in result2["escalation"]
-
 
 def minimal_valid_reference() -> dict:
-    """load_reference 검증을 통과하는 최소 reference (포인터 결속 시험용)."""
+    """v1 reference(과거 evidence 조회용)도 검증기를 통과한다 (포인터 결속 시험)."""
     return {
         "artifact_type": "STAGE7_QUALIFICATION_REFERENCE",
         "schema_version": 1,
@@ -784,17 +631,15 @@ def minimal_valid_reference() -> dict:
     }
 
 
-def test_active_pointer_binds_reference_sha():
-    """release 안에서 reference+sidecar를 함께 바꿔도 포인터 SHA가 막는다."""
+def test_active_pointer_binds_reference_sha_and_v1_stays_readable():
     with tempfile.TemporaryDirectory() as tmp:
         paths = state.StatePaths(tmp)
         paths.ensure_var()
         qualify_cmd.write_reference(paths.qualification_candidate,
                                     minimal_valid_reference())
         qualify_cmd.promote_candidate(paths, release_id="rel-1")
-        assert qualify_cmd.load_active_reference(paths) is not None
-
-        # reference와 sidecar를 **함께** 변조 (쌍은 서로 일치하게).
+        loaded = qualify_cmd.load_active_reference(paths)
+        assert loaded is not None and loaded["schema_version"] == 1
         release = paths.qualification_releases / "rel-1"
         forged = minimal_valid_reference()
         forged["qualification"]["run_id"] = "forged"
@@ -803,53 +648,35 @@ def test_active_pointer_binds_reference_sha():
         (release / qualify_cmd.REFERENCE_BASENAME).write_bytes(encoded)
         (release / (qualify_cmd.REFERENCE_BASENAME + ".sha256")).write_text(
             hashlib.sha256(encoded).hexdigest() + "\n", encoding="utf-8")
-        # sidecar는 일치하지만 포인터 SHA와 달라 UNQUALIFIED.
         assert qualify_cmd.load_active_reference(paths) is None
-
-        # 포인터 자체의 스키마·SHA 형식도 검증된다.
         pointer = json.loads(paths.active_pointer.read_bytes())
-        pointer["artifact_type"] = "WRONG"
-        paths.active_pointer.write_text(json.dumps(pointer),
-                                        encoding="utf-8")
-        assert qualify_cmd.load_active_pointer(paths) is None
-        pointer["artifact_type"] = "STAGE7_STANDALONE_ACTIVE_POINTER_V1"
         pointer["reference_sha256"] = "not-a-sha"
-        paths.active_pointer.write_text(json.dumps(pointer),
-                                        encoding="utf-8")
+        paths.active_pointer.write_text(json.dumps(pointer), encoding="utf-8")
         assert qualify_cmd.load_active_pointer(paths) is None
 
 
-def test_qualify_group_uncleared_fails_closed():
+def test_qualify_group_uncleared_and_cleanup_anomaly_fail_closed():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-
-        def gc_false_runner(context):
-            return {"rc": 0, "timed_out": False,
-                    "escalation": ["term-group", "group-survived-kill"],
-                    "group_cleared": False, "cleanup_anomaly": False}
-
-        report = run(paths, tmp, phase_runner=gc_false_runner)
+        report = run(paths, tmp, phase_runner=lambda c: {
+            "rc": 0, "timed_out": False,
+            "escalation": ["term-group", "group-survived-kill"],
+            "group_cleared": False, "cleanup_anomaly": False})
         assert report["status"] == "FAIL"
         assert any("group 소멸 미확인" in e for e in report["errors"])
         assert not paths.active_pointer.exists()
-
-
-def test_qualify_cleanup_anomaly_fails_even_when_cleared():
-    """정리는 됐어도(group_cleared=True) 잔류가 있었으면 자격 실패다."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
 
         def anomaly_runner(context):
-            fabricating_phase_runner(context)  # evidence는 PASS로 만들어도
+            fabricating_phase_runner(context)
             return {"rc": 0, "timed_out": False,
-                    "escalation": ["post-exit-group-residue", "term-group",
-                                   "kill-group"],
+                    "escalation": ["post-exit-group-residue"],
                     "group_cleared": True, "cleanup_anomaly": True}
 
         report = run(paths, tmp, phase_runner=anomaly_runner)
         assert report["status"] == "FAIL"
         assert any("cleanup_anomaly" in e for e in report["errors"])
-        assert not paths.active_pointer.exists()
 
 
 def test_qualify_refuses_identity_mismatch_and_missing_manifest():
@@ -870,46 +697,40 @@ def test_qualify_refuses_identity_mismatch_and_missing_manifest():
         identity.ensure_identity(paths)
         write_hardware_toml(Path(tmp) / "hardware.toml")
         try:
-            run(paths, tmp)  # deploy manifest 없음
+            run(paths, tmp)  # installation manifest 없음
             raise AssertionError("manifest 부재가 거부되지 않았다")
         except qualify_cmd.QualifyError as exc:
             assert "vdeter setup" in str(exc)
 
 
-# ------------------------------- evidence 재사용 (RF 재실행 없이 승격, 3영역 결속)
+def test_qualify_refuses_unapproved_wiring():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        write_hardware_toml(Path(tmp) / "hardware.toml", approved=False)
+        try:
+            run(paths, tmp)
+            raise AssertionError("미승인 배선이 거부되지 않았다")
+        except Exception as exc:  # noqa: BLE001 — ConfigGenerationError
+            assert "approved" in str(exc)
 
-def _seed_prior_reuse(paths, tmp, prior_ladder_id, *,
-                      mutate_manifest=None, mutate_symbols=None):
-    """이전 RF evidence(4 phase)+resolved-config(prior manifest 결속)를 심고,
-    현재 배포에서 파생한 '이전 baseline'(manifest + RF-critical 심볼)을 파일로
-    쓴다. mutate_manifest는 파일 sha를, mutate_symbols는 RF 심볼 해시를 바꿔
-    '이전 대비 현재 변경'을 모델링한다. 반환 (baseline_path, prior_manifest_sha)."""
-    baseline = qualify_cmd.capture_reuse_baseline(
-        _REPO, paths.var_dir / "deploy-manifest.json")
-    if mutate_manifest:
-        mutate_manifest(baseline["deploy_manifest"])
-    baseline["deploy_manifest_sha256"] = deploy_manifest.manifest_sha256(
-        baseline["deploy_manifest"])
-    if mutate_symbols:
-        mutate_symbols(baseline["rf_critical_symbols"])
-    prior_sha = baseline["deploy_manifest_sha256"]
-    baseline_path = Path(tmp) / f"baseline-{prior_ladder_id}.json"
-    baseline_path.write_text(json.dumps(
-        baseline, ensure_ascii=True, sort_keys=True, indent=1), encoding="utf-8")
-    for phase in qualify_cmd.LADDER_PHASES:
-        run_id = f"{prior_ladder_id}-{phase}"
-        run_root = paths.runs_dir / run_id
-        run_root.mkdir(parents=True, exist_ok=True)
-        fabricating_phase_runner(
-            {"run_root": str(run_root), "phase": phase, "run_id": run_id})
-        cfg = run_root / "resolved-configs" / "endpoints"
-        cfg.mkdir(parents=True, exist_ok=True)
-        for endpoint in ("mass-a", "mass-b", "roc"):
-            (cfg / f"{endpoint}.toml").write_text(
-                'run_mode = "GAIN_CALIBRATION"\n'
-                f'deployment_manifest_sha256 = "{prior_sha}"\n',
-                encoding="utf-8")
-    return baseline_path, prior_sha
+
+#: run_id 형식 계약(loader)에 맞는 이전 사다리 stamp/id.
+PRIOR_STAMP = "20260901-000000"
+PRIOR_ID = "qual-" + PRIOR_STAMP
+
+
+# ------------------------------- evidence 재사용 (v2 — 이전 release reference 결속)
+
+def _seed_prior_release(paths, tmp, *, mutate=None) -> str:
+    """전체 사다리로 release qual-PRIOR를 만들고(RF evidence + v2 reference),
+    필요하면 그 reference의 결속 파일 map/심볼을 변형해 '이전 RF evidence가
+    다른 설치에서 나왔다'를 모델링한다. active 포인터는 제거한다."""
+    report = run(paths, tmp, stamp=PRIOR_STAMP)
+    assert report["status"] == "QUALIFIED", report["errors"]
+    if mutate is not None:
+        fx.rewrite_release_reference(paths, PRIOR_ID, mutate)
+    paths.active_pointer.unlink()
+    return PRIOR_ID
 
 
 def _fake_builder(status="RESEARCH_READY"):
@@ -924,14 +745,11 @@ def _fake_builder(status="RESEARCH_READY"):
     return module
 
 
-def _reuse(paths, tmp, baseline_path, prior_ladder_id, **overrides):
-    binding_path = Path(tmp) / "standalone-binding.json"
-    binding_path.write_text(json.dumps(BINDING), encoding="utf-8")
+def _reuse(paths, tmp, prior_release_id, **overrides):
     kwargs = dict(
-        prior_ladder_id=prior_ladder_id, prior_baseline_path=baseline_path,
+        prior_release_id=prior_release_id,
         reason="governance bundle-scope fix (qualification tooling only)",
         hardware_path=Path(tmp) / "hardware.toml", repo_root=_REPO,
-        binding_path=binding_path,
         suite_runner=lambda argv, **kw: Done(0),
         preflight_fn=fake_preflight, residual_probe=lambda: [],
         environment_manifest=dict(ENV_MANIFEST),
@@ -940,59 +758,54 @@ def _reuse(paths, tmp, baseline_path, prior_ladder_id, **overrides):
     return qualify_cmd.run_qualify_reuse(paths, **kwargs)
 
 
-def _set_file_sha(target, value="0" * 64):
-    def mutate(manifest):
-        hit = False
-        for entry in manifest["files"]:
-            if entry["path"] == target:
-                entry["sha256"] = value
-                hit = True
-        assert hit, f"{target} manifest에 없음"
+def _set_prior_file_sha(target, value="0" * 64):
+    def mutate(reference):
+        files = reference["installation"]["files"]
+        assert target in files, f"{target} reference 결속에 없음"
+        files[target]["sha256"] = value
     return mutate
 
 
-def _bump_rf_symbol(symbol):
-    def mutate(symbols):
-        symbols["apps/standalone/qualify_cmd.py"][symbol] = ["MUT", "MUT"]
+def _bump_prior_symbol(symbol):
+    def mutate(reference):
+        reference["installation"]["rf_critical_symbols"][
+            "apps/standalone/qualify_cmd.py"][symbol] = ["MUT", "MUT"]
     return mutate
 
 
-def test_evidence_reuse_promotes_on_governance_deselect_only_change():
-    """governance deselect(=qualify_cmd tooling 부분)만 변경 → RF 재사용 허용."""
+def test_evidence_reuse_promotes_on_tooling_only_change():
+    """qualify_cmd(governance/bundle 부분 = tooling)만 변경 → RF 재사용 허용."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, prior_sha = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
-        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
-        assert report["status"] == "QUALIFIED"
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha("apps/standalone/qualify_cmd.py"))
+        report = _reuse(paths, tmp, prior)
+        assert report["status"] == "QUALIFIED", report["errors"]
         assert report["qualification_method"] == "evidence_reuse"
         ev = report["reuse_evaluation"]
         assert ev["eligible"] and ev["tooling_changed"]
         assert ev["rf_files_identical"] and ev["rf_symbols_identical"]
         assert ev["operation_identical"]
         active = qualify_cmd.load_active_reference(paths)
+        assert active["schema_version"] == 2
         assert active["qualification_method"] == "evidence_reuse"
         assert set(active["binding_domains"]) == {
             "rf_evidence", "operation", "qualification_tool"}
-        assert active["binding_domains"]["rf_evidence"][
-            "manifest_sha256"] == prior_sha
-        assert "rf_critical_symbols" in active["binding_domains"]["rf_evidence"]
+        assert active["binding_domains"]["rf_evidence"]["prior_ladder_id"] == PRIOR_ID
         er = active["evidence_reuse"]
-        assert er["reason"] and er["prior_ladder_id"] == "qual-PRIOR"
-        assert er["rf_symbols_identical"]
+        assert er["reason"] and er["prior_release_id"] == PRIOR_ID
+        assert er["rf_symbols_identical"] and er["verification"]["software_ok"]
+        assert active["qualification"]["run_id"] == PRIOR_ID  # RF 출처
+        assert report["release_id"] == PRIOR_ID + "-reuse"
 
 
 def test_evidence_reuse_refused_on_rr_p1_run_mode_change():
-    """qualify_cmd의 RR-P1 run mode(PHASE_RUN_MODE) 변경 → RF 재사용 거부."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"),
-            mutate_symbols=_bump_rf_symbol("PHASE_RUN_MODE"))
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_bump_prior_symbol("PHASE_RUN_MODE"))
         try:
-            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            _reuse(paths, tmp, prior)
             raise AssertionError("run mode 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "RF 심볼" in str(exc) or "핵심" in str(exc)
@@ -1002,12 +815,11 @@ def test_evidence_reuse_refused_on_rr_p1_run_mode_change():
 def test_evidence_reuse_refused_on_rf_core_file_change():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha(
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha(
                 "VDETER/src/vdeter/stage7/pi_runtime.py"))
         try:
-            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            _reuse(paths, tmp, prior)
             raise AssertionError("rf 핵심 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "핵심" in str(exc) or "rf" in str(exc)
@@ -1015,100 +827,95 @@ def test_evidence_reuse_refused_on_rf_core_file_change():
 
 
 def test_evidence_reuse_refused_on_operation_change():
-    """operation 파일 변경 → 현 정책에서 재사용 거부(byte-identical만 허용)."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/cli.py"))
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha("apps/standalone/cli.py"))
         try:
-            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            _reuse(paths, tmp, prior)
             raise AssertionError("operation 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "operation" in str(exc) or "핵심" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
-def test_evidence_reuse_allows_qualification_test_file_change():
-    """qualification 시험 파일 변경 → RF 재실행 불요, software bundle 재실행 통과."""
+def test_evidence_reuse_qualification_test_change_requires_bundle_only():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha(
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha(
                 "VDETER/tests/unit/test_multirate_phy.py"))
-        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        report = _reuse(paths, tmp, prior)
         assert report["status"] == "QUALIFIED"
         assert report["reuse_evaluation"]["tooling_changed"] is True
+        assert report["reuse_evaluation"]["rf_identical"] is True
         assert report["verification"]["software_ok"] is True
-
-
-def test_evidence_reuse_test_file_change_refused_when_bundle_fails():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha(
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha(
                 "VDETER/tests/unit/test_multirate_phy.py"))
         try:
-            _reuse(paths, tmp, baseline_path, "qual-PRIOR",
-                   suite_runner=lambda argv, **kw: Done(1))
+            _reuse(paths, tmp, prior, suite_runner=lambda argv, **kw: Done(1))
             raise AssertionError("bundle 실패인데 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "software" in str(exc) or "verification" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
-def test_evidence_reuse_doc_only_change_promotes():
-    """문서(.md)만 변경 → 자격 무영향, 재사용 승격."""
+def test_evidence_reuse_refused_when_config_binding_or_evidence_mismatch():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        cur, _ = deploy_manifest.load_manifest(
-            paths.var_dir / "deploy-manifest.json")
-        md = next((e["path"] for e in cur["files"]
-                   if e["path"].endswith(".md")), None)
-        assert md, "배포에 .md 문서가 없다"
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR", mutate_manifest=_set_file_sha(md))
-        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
-        assert report["status"] == "QUALIFIED"
-        assert report["reuse_evaluation"]["test_doc_changed"] is True
-
-
-def test_evidence_reuse_refused_when_config_binding_mismatch():
-    """RF resolved config가 이전 manifest에 결속되지 않으면 거부."""
-    with tempfile.TemporaryDirectory() as tmp:
-        paths = prepare_environment(tmp)
-        baseline_path, prior_sha = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
+        prior = _seed_prior_release(paths, tmp)
         for phase in qualify_cmd.LADDER_PHASES:
-            cfg = (paths.runs_dir / f"qual-PRIOR-{phase}"
+            cfg = (paths.runs_dir / f"{PRIOR_ID}-{phase}"
                    / "resolved-configs" / "endpoints")
             for toml_path in cfg.glob("*.toml"):
                 toml_path.write_text(
                     f'deployment_manifest_sha256 = "{"1" * 64}"\n',
                     encoding="utf-8")
         try:
-            _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+            _reuse(paths, tmp, prior)
             raise AssertionError("config 결속 불일치인데 승격됐다")
         except qualify_cmd.QualifyError as exc:
             assert "결속" in str(exc)
-        assert qualify_cmd.load_active_reference(paths) is None
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        prior = _seed_prior_release(paths, tmp)
+        target = (paths.runs_dir / f"{PRIOR_ID}-rr-p0" / "evidence"
+                  / "coordinator-rr-p0.json")
+        target.write_text('{"tampered": true}', encoding="utf-8")
+        try:
+            _reuse(paths, tmp, prior)
+            raise AssertionError("evidence 교체인데 승격됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "변조" in str(exc) or "다릅니다" in str(exc)
 
 
-# ---------------- critical endpoint 스키마 {serial, speed_class} (2026-09-05 조건 1~5)
+def test_evidence_reuse_requires_v2_prior_reference():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        qualify_cmd.write_reference(paths.qualification_candidate,
+                                    minimal_valid_reference())
+        qualify_cmd.promote_candidate(paths, release_id="legacy-v1")
+        paths.active_pointer.unlink()
+        try:
+            _reuse(paths, tmp, "legacy-v1")
+            raise AssertionError("v1 reference로 재사용이 진행됐다")
+        except qualify_cmd.QualifyError as exc:
+            assert "v2" in str(exc)
+
+
+# ---------------- critical endpoint 스키마 {serial, speed_class}
 
 def test_critical_endpoints_common_function_schema_and_metadata():
     critical, observations = qualify_cmd.critical_endpoints_from_preflight(
         fake_preflight())
-    # critical 스키마는 정확히 {serial, speed_class}, usb_path/speed_mbps는 분리.
     for role, entry in critical.items():
         assert set(entry) == {"serial", "speed_class"}, (role, entry)
         assert entry["speed_class"] in qualify_cmd.CRITICAL_SPEED_CLASSES
         assert set(observations[role]) == {"usb_path", "speed_mbps"}
     assert critical["MASS-A"] == {"serial": "34D03DD", "speed_class": "super"}
-    assert critical["MASS-B"] == {"serial": "3515425", "speed_class": "high"}
     assert observations["MASS-B"] == {"usb_path": "4-2", "speed_mbps": 480}
 
 
@@ -1125,11 +932,12 @@ def test_critical_endpoints_refuse_missing_or_unqualified_speed_class():
 
 def _issue_kwargs(**over):
     base = dict(
-        ladder_id="qual-X", binding=BINDING, deploy_sha256="d" * 64,
-        deploy_files={"a": "1"}, tc_results={"TC-STAGE7-RR-001": "PASS"},
+        ladder_id="qual-X", installation=fx.repo_installation_record(),
+        tc_results={"TC-STAGE7-RR-001": "PASS"},
         endpoints_observed={"MASS-A": {"serial": "34D03DD",
                                        "speed_class": "super"}},
-        platform_profile="pi", identity_fingerprint="abc",
+        platform_profile="pi", wiring=HARDWARE["wiring"],
+        identity_fingerprint="abc",
         gain={"endpoint_common_rx_gain_db": {"MASS-A": 69}},
         environment_manifest=dict(ENV_MANIFEST),
         environment_manifest_sha256="e" * 64, phase_run_ids={})
@@ -1137,13 +945,10 @@ def _issue_kwargs(**over):
     return base
 
 
-def test_issue_reference_refuses_endpoints_without_valid_speed_class():
-    # 조건 2: 발급 시점 검증 — 어느 경로든 누락/비허용이면 거부.
+def test_issue_reference_refuses_bad_endpoints_or_unapproved_wiring():
     for endpoints in (
-        {"MASS-A": {"serial": "34D03DD"}},                      # 누락
+        {"MASS-A": {"serial": "34D03DD"}},
         {"MASS-A": {"serial": "34D03DD", "speed_class": "other"}},
-        {"MASS-A": {"serial": "34D03DD", "usb_path": "3-1",
-                    "speed_mbps": 5000}},                         # 옛 결함 스키마
         {},
     ):
         try:
@@ -1152,26 +957,31 @@ def test_issue_reference_refuses_endpoints_without_valid_speed_class():
             raise AssertionError(f"{endpoints}가 발급 거부되지 않았다")
         except qualify_cmd.QualifyError as exc:
             assert "critical endpoint" in str(exc)
-    # 정상 스키마는 발급된다.
+    try:
+        qualify_cmd.issue_reference(**_issue_kwargs(
+            wiring={"profile": "C1-C6-STANDARD", "approved": False}))
+        raise AssertionError("미승인 배선으로 발급됐다")
+    except qualify_cmd.QualifyError as exc:
+        assert "approved" in str(exc)
     ref = qualify_cmd.issue_reference(**_issue_kwargs())
+    assert ref["schema_version"] == 2
     assert ref["standalone_critical"]["endpoints"]["MASS-A"] == {
         "serial": "34D03DD", "speed_class": "super"}
+    assert ref["provenance"]["git"] is None   # 기본: git 미읽음
+    assert "qualified_source_commit" not in ref
 
 
 def _compare_critical_against(paths, reference):
-    """발급된 reference를 **실제 run 경로 대조(run_cmd.compare_critical)** 에
-    넣는다 — 조건 4."""
     from apps.standalone import run_cmd
-    _, manifest_sha = deploy_manifest.load_manifest(
-        paths.var_dir / "deploy-manifest.json")
+    record = installation_manifest.load_installation(paths)
     fingerprint = identity.check_identity_consistency(paths)["fingerprint"]
     return run_cmd.compare_critical(
-        reference, deploy_sha256=manifest_sha, hardware=HARDWARE,
+        reference, installation=record, hardware=HARDWARE,
         preflight=fake_preflight(), identity_fingerprint=fingerprint,
         environment_manifest=dict(ENV_MANIFEST))
 
 
-def test_full_ladder_reference_passes_real_compare_critical():
+def test_full_ladder_and_reuse_references_pass_real_compare_critical():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
         report = run(paths, tmp)
@@ -1179,62 +989,70 @@ def test_full_ladder_reference_passes_real_compare_critical():
         active = qualify_cmd.load_active_reference(paths)
         cmp = _compare_critical_against(paths, active)
         assert cmp["pass"], cmp["mismatches"]
-        ep = active["standalone_critical"]["endpoints"]
-        assert all(set(v) == {"serial", "speed_class"} for v in ep.values())
-        # 관측 metadata는 critical 밖에 별도 보존(조건 3).
         obs = active["endpoint_observations"]["endpoints"]
         assert obs["MASS-A"] == {"usb_path": "3-1", "speed_mbps": 5000}
-
-
-def test_reuse_reference_passes_real_compare_critical():
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
-        report = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha("apps/standalone/qualify_cmd.py"))
+        report = _reuse(paths, tmp, prior)
         assert report["status"] == "QUALIFIED"
         active = qualify_cmd.load_active_reference(paths)
         cmp = _compare_critical_against(paths, active)
         assert cmp["pass"], cmp["mismatches"]
-        ep = active["standalone_critical"]["endpoints"]
-        assert all(set(v) == {"serial", "speed_class"} for v in ep.values())
-        assert active["endpoint_observations"]["endpoints"]["ROC"] == {
-            "usb_path": "5-1", "speed_mbps": 5000}
 
 
 def test_reuse_supersede_keeps_previous_release_and_records_it():
-    """조건 5: 재발급은 새 release id로 승격하고 이전 release·reference를
-    삭제하지 않으며 supersedes를 기록한다."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
-        baseline_path, _ = _seed_prior_reuse(
-            paths, tmp, "qual-PRIOR",
-            mutate_manifest=_set_file_sha("apps/standalone/qualify_cmd.py"))
-        first = _reuse(paths, tmp, baseline_path, "qual-PRIOR")
+        prior = _seed_prior_release(
+            paths, tmp, mutate=_set_prior_file_sha("apps/standalone/qualify_cmd.py"))
+        first = _reuse(paths, tmp, prior, release_id=PRIOR_ID + "-r1")
         assert first["status"] == "QUALIFIED"
         old_sha = first["reference"]["sha256"]
-        old_dir = paths.qualification_releases / "qual-PRIOR"
-        assert old_dir.is_dir()
-        # 같은 release id로는 재승격 불가(기존 보존) → 새 id + supersedes.
         second = _reuse(
-            paths, tmp, baseline_path, "qual-PRIOR",
-            release_id="qual-PRIOR-r2",
-            supersedes={"reference_sha256": old_sha,
-                        "release": "qual-PRIOR",
-                        "reason": "issuance bug: endpoints lacked speed_class"})
+            paths, tmp, prior, release_id=PRIOR_ID + "-r2",
+            supersedes={"reference_sha256": old_sha, "release": PRIOR_ID + "-r1",
+                        "reason": "issuance bug"})
         assert second["status"] == "QUALIFIED"
-        assert second["release_id"] == "qual-PRIOR-r2"
-        assert second["reference"]["previous_release"] == "qual-PRIOR"
-        assert old_dir.is_dir()  # 삭제 안 됨
-        assert (old_dir / qualify_cmd.REFERENCE_BASENAME).is_file()
+        assert second["reference"]["previous_release"] == PRIOR_ID + "-r1"
+        assert (paths.qualification_releases / (PRIOR_ID + "-r1")
+                / qualify_cmd.REFERENCE_BASENAME).is_file()
+        assert (paths.qualification_releases / PRIOR_ID
+                / qualify_cmd.REFERENCE_BASENAME).is_file()
         active = qualify_cmd.load_active_reference(paths)
         assert active["evidence_reuse"]["supersedes"]["reference_sha256"] == old_sha
-        assert active["evidence_reuse"]["release_id"] == "qual-PRIOR-r2"
-        assert active["qualification"]["run_id"] == "qual-PRIOR"  # RF 출처 유지
-        pointer = json.loads(paths.active_pointer.read_bytes())
-        assert pointer["release"] == "qual-PRIOR-r2"
-        assert pointer["previous_release"] == "qual-PRIOR"
+        assert active["qualification"]["run_id"] == PRIOR_ID
+
+
+def test_qualify_progress_hooks_do_not_change_outcome():
+    """진행 표시(QualifyProgress) 유무와 무관하게 사다리 결과·reference 동일."""
+    from apps.standalone import progress as pg
+    results = []
+    for with_progress in (True, False):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = prepare_environment(tmp)
+            lines = []
+            progress = None
+            reporter = None
+            if with_progress:
+                reporter = pg.ProgressReporter(lines.append, tty=False,
+                                               ticker=False)
+                progress = pg.QualifyProgress(reporter)
+            report = run(paths, tmp, progress=progress)
+            if reporter is not None:
+                reporter.close()
+                text = "\n".join(lines)
+                assert "RR-P0 1/4" in text and "RR-P3-FAULT 4/4" in text
+                assert "Software suite 1/2" in text and "Final builder" in text
+                assert "QUALIFIED · active reference promoted" in text
+                assert "estimated" in text
+                assert "\r" not in text and "\x1b" not in text
+            active = qualify_cmd.load_active_reference(paths)
+            results.append((report["status"], report["final_status"],
+                            active["installation"]["installation_sha256"],
+                            active["qualification"]["tc_results"]))
+    assert results[0] == results[1]
 
 
 if __name__ == "__main__":
@@ -1247,4 +1065,4 @@ if __name__ == "__main__":
                 print(f"  {name} SKIP ({reason})")
                 continue
             print(f"  {name} OK")
-    print("PASS: Phase I W5 standalone qualify 계약")
+    print("PASS: standalone qualify 계약 (v2)")

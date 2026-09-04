@@ -1,15 +1,21 @@
-"""로컬 resolved config 생성기 — run·qualify 공통 (Phase I W3, README §4~§6).
+"""로컬 resolved config 생성기 — run·qualify 공통 (Phase I W3 → clone-bootstrap v2).
 
 host `VDETER/tools/prepare_stage7_run_configs.py`의 로컬 대응물. 같은
 template·같은 loader·같은 fixture 규칙을 쓰되, 출처를 바꾼다:
 
-    host git commit / Markdown 재해시  →  standalone-binding 승계 (결정 8)
+    host git commit / Markdown 재해시  →  installation manifest digest (v2)
     SSH 환경 probe                     →  로컬 실측
     scp 배포                           →  로컬 디렉터리 기록
 
 git_state.json은 **파일명·스키마를 유지**한다 (coordinator
-`_load_run_metadata`/`validate_rr_binding` 무수정 호환 — 승인 조건 1).
-필드별 출처는 README §6 표가 정본이다.
+`_load_run_metadata`/`validate_rr_binding` 무수정 호환). v2에서 git 필드는
+참고 provenance이며(`.git` 파일 읽기, git 명령 없음; 없으면 null) 판정에
+쓰이지 않는다 — coordinator는 git_commit/git_dirty를 대조하지 않는다.
+결속값은 **installation digest**로 대체하고, 같은 값을 additive
+`installation-state.json`(v2)에도 기록한다. `deployment_manifest_sha256`
+config 필드에는 installation digest를 넣는다(위장이 아니라 그 필드의 의미가
+"설치 결속 digest"다). `baseline_sha256`은 RR evidence 계약이 요구하는
+커밋 상수 pin(provenance 모듈)이며 Markdown을 읽지 않는다.
 
 이 모듈은 정책을 정하지 않는다 — rr_phase·run_mode·gain 입력은 호출자
 (run_cmd/qualify_cmd)가 결정해 넘긴다.
@@ -69,7 +75,9 @@ def _is_sha256(value) -> bool:
 # ------------------------------------------------------------ binding·선언
 
 def load_standalone_binding(path: Path | str) -> dict:
-    """standalone-binding.json을 읽고 스키마를 검증한다 (README §5)."""
+    """(legacy) standalone-binding.json 스키마 검증 — 개발 PC 배포 도구
+    `deploy_standalone_to_pi.py` 전용. 대상 기계 실행 경로는 v2부터 이 파일을
+    요구하지 않는다 (installation manifest로 대체)."""
     path = Path(path)
     if not path.is_file():
         raise ConfigGenerationError(
@@ -281,32 +289,55 @@ def _ensure_vdeter_importable(repo_root: Path) -> None:
             sys.path.insert(0, text)
 
 
+INSTALLATION_MANIFEST_RELPATH = "var/installation/installation-manifest.json"
+
+
 def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
                          run_id: str, rr_phase: str,
-                         hardware: dict, binding: dict,
-                         deployment_manifest_relpath: str,
-                         deployment_manifest_sha256: str,
-                         deploy_verified: bool,
+                         hardware: dict, installation: dict,
+                         installation_verified: bool,
+                         provenance: dict | None = None,
                          run_mode: str | None = None,
                          gain_input: dict | None = None,
                          environment_manifest: dict | None = None) -> dict:
-    """run별 resolved config 일습을 생성·검증한다 (README §6 표 구현).
+    """run별 resolved config 일습을 생성·검증한다 (README §6 표 구현, v2).
 
-    반환: {"configs_dir", "git_state", "resolved_sha256": {endpoint: sha},
+    `installation`은 installation_manifest.measure/load 결과(record) 또는 그
+    digest 부분집합(`installation_sha256` + `domains`)이다.
+    `installation_verified`는 호출자가 현재 파일 재측정으로 확인한 결과다 —
+    True가 아니면 결속 근거가 없어 생성을 거부한다.
+
+    반환: {"configs_dir", "git_state", "installation_state",
+           "resolved_sha256": {endpoint: sha},
            "environment_manifest_sha256", "fixtures": [이름...]}.
     실패는 전부 `ConfigGenerationError` — RF 접근 전이다.
     """
+    from apps.standalone.provenance import STAGE7_BASELINE_PIN
+
     repo_root = Path(repo_root)
     run_root = Path(run_root)
 
-    if deploy_verified is not True:
+    if installation_verified is not True:
         raise ConfigGenerationError(
-            "배포 tree 무결 검증이 통과하지 않았습니다 — git_dirty=false를 "
-            "결속할 근거가 없어 config를 생성하지 않습니다")
+            "설치 무결 검증(installation manifest 재측정)이 통과하지 않았습니다 "
+            "— 결속 근거가 없어 config를 생성하지 않습니다")
     if rr_phase not in PHASE_DEADLINES_S:
         raise ConfigGenerationError(f"알 수 없는 rr_phase: {rr_phase!r}")
-    if not _is_sha256(deployment_manifest_sha256):
-        raise ConfigGenerationError("deployment_manifest_sha256이 sha256이 아님")
+    installation_sha256 = (installation or {}).get("installation_sha256")
+    if not _is_sha256(installation_sha256):
+        raise ConfigGenerationError("installation_sha256이 sha256이 아님")
+    domain_digests = {}
+    for domain in ("rf", "operation", "tooling"):
+        value = ((installation.get("domains") or {}).get(domain) or {}).get(
+            "sha256")
+        if not _is_sha256(value):
+            raise ConfigGenerationError(
+                f"installation {domain} digest가 sha256이 아님")
+        domain_digests[domain] = value
+    deployment_manifest_relpath = INSTALLATION_MANIFEST_RELPATH
+    deployment_manifest_sha256 = installation_sha256
+    provenance = provenance or {}
+    git_info = provenance.get("git") or {}
 
     _ensure_vdeter_importable(repo_root)
     from vdeter.stage7.canonical_json import encode_canonical_json
@@ -387,17 +418,28 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     (out_dir / "system.toml").write_bytes(
         (template_dir / "system.toml").read_bytes())
 
-    # --- git_state.json — 호환 스키마, 출처는 binding/로컬 (README §6 표) --
+    # --- git_state.json — 호환 스키마, 출처는 installation/로컬 (README §6 표)
     usb_devices = manifest.get("usb_devices")
     data_link_id = (int(rr_phase[-2:])
                     if rr_phase.endswith(("17", "19")) else None)
     git_state = {
-        "git_commit": binding["source_head"],
-        "git_branch": binding.get("source_branch"),
-        # 배포 tree 무결 검증 통과가 전제됐다 (위 deploy_verified 게이트).
-        "git_dirty": False,
-        "baseline_version": binding.get("baseline_version"),
-        "baseline_sha256": binding["baseline_sha256"],
+        # 참고 provenance (informational only). git 부재면 null — coordinator는
+        # 이 두 필드를 대조하지 않는다. installation digest로 위장하지 않는다.
+        "git_commit": git_info.get("commit"),
+        "git_branch": git_info.get("branch"),
+        "git_dirty": git_info.get("dirty"),
+        "provenance_note": ("git fields are informational only; the binding "
+                            "is the installation digest below"),
+        # RR evidence 계약 상수 pin (Markdown 미독).
+        "baseline_version": STAGE7_BASELINE_PIN["version"],
+        "baseline_sha256": STAGE7_BASELINE_PIN["sha256"],
+        # v2 결속 (additive 필드 — 기존 소비자는 무시한다).
+        "provenance_schema": 2,
+        "installation_sha256": installation_sha256,
+        "rf_manifest_sha256": domain_digests["rf"],
+        "operation_manifest_sha256": domain_digests["operation"],
+        "tooling_manifest_sha256": domain_digests["tooling"],
+        "installation_verified": True,
         "environment_manifest_sha256": manifest_sha,
         "hardware": {"usb_devices": usb_devices},
         "qualification_profile": RESEARCH_READY_PROFILE,
@@ -408,6 +450,19 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         "phase_deadlines_s": dict(PHASE_DEADLINES_S),
     }
     write_json_atomic(out_dir / "git_state.json", git_state)
+    # additive v2 installation-state (신규 소비자용 — 기존 host/v1 경로 불변).
+    installation_state = {
+        "artifact_type": "STAGE7_STANDALONE_INSTALLATION_STATE_V2",
+        "run_id": run_id,
+        "rr_phase": rr_phase,
+        "installation_manifest_relpath": INSTALLATION_MANIFEST_RELPATH,
+        "installation_sha256": installation_sha256,
+        "domains": dict(domain_digests),
+        "installation_verified": True,
+        "environment_manifest_sha256": manifest_sha,
+        "provenance": provenance,
+    }
+    write_json_atomic(out_dir / "installation-state.json", installation_state)
 
     # --- fixtures (host와 동일 canonical JSON) ---------------------------
     fixture_names = []
@@ -421,6 +476,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     return {
         "configs_dir": out_dir,
         "git_state": git_state,
+        "installation_state": installation_state,
         "resolved_sha256": resolved_sha,
         "environment_manifest_sha256": manifest_sha,
         "fixtures": sorted(fixture_names),

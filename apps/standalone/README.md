@@ -8,19 +8,75 @@
 
 ---
 
+## 0. Quick Start (clone-bootstrap v2, 2026-09-05)
+
+```
+git clone <repository>
+cd <repository>
+./bin/vdeter setup
+# hardware.toml 편집·approved=true
+vdeter qualify --yes
+vdeter run all
+vdeter results
+```
+
+- `setup` 이후 Git 불필요: 대상 기계의 setup·qualify·run·results는 `git`
+  명령을 호출하지 않고(`.git` 파일을 읽지도 않고 판정에 쓰지 않음) 기준선
+  Markdown도 읽지 않는다. `.git` 없는 **tar/USB 복사본**도 동일하게 동작한다.
+- 일반 실행은 오프라인. 새 환경은 qualification 1회. 현재 Pi의 기존
+  qualification은 보존된다(이 변경으로 갱신하지 않음).
+- amd64 지원 코드는 구현됐지만 실제 amd64 시험은 유보. 자격은 외부 공인
+  인증이 아닌 RESEARCH_READY 내부 자격.
+- `bin/vdeter`(저장소 launcher)는 venv가 없으면 `setup`만 시스템 python3로
+  허용하고, 있으면 `var/venv/bin/python3`로 CLI를 exec한다. setup이
+  `~/.local/bin/vdeter` 사용자 launcher를 설치한다(타 프로그램 덮어쓰기 없음,
+  멱등 갱신, 저장소 이동 시 stale 오류). 최상위 `vdeter` 파일이 아닌 이유는
+  `VDETER/` 디렉터리와 대소문자 무시 파일시스템 충돌 때문이다.
+
+**v2 결속 요약** — Git 기반 `standalone-binding.json`은 필수 입력에서 제거됐다.
+`./bin/vdeter setup`이 설치 파일을 실측해 `var/installation/`에 네 manifest
+(`installation-manifest.json`, `rf-manifest.json`, `operation-manifest.json`,
+`tooling-manifest.json`; canonical JSON, 파일별 SHA-256, 영역별 SHA-256,
+atomic write, `var/` 제외)를 만든다. 영역 분류(`qualification_domains.py`):
+rf(PHY/MAC/Link/Radio·coordinator·launcher·pi_runtime·RF config·RF phase
+인자/run mode·RF config 생성 코드) / operation(run_cmd·local_session·
+local_config·local_preflight·identity·MASS/ROC application·scenario controller
+·Service API 결속) / tooling(setup·qualify 비RF·verification bundle·final
+builder·reference 발급/검증·분류기·qualification 시험 코드) / 비결속(Markdown·
+보고서·이미지). 미분류 실행 파일은 operation, 교차영향 파일은 여러 영역에
+중복 결속. reference **v2**는 installation/rf/operation/tooling SHA·파일별
+SHA map·환경/라이브러리 버전·B210 serial과 역할·USB speed_class·배선 승인·
+gain artifact·identity fingerprint·resolved config SHA·TC 결과·evidence SHA·
+qualification method·limitations를 결속하고, Git commit/branch/dirty·baseline
+Markdown SHA는 optional `provenance`로만 기록한다. v1 reference는 과거 evidence
+조회용으로 계속 읽힌다. coordinator 계약(`git_state.json`)은 무수정이며 git
+필드는 null/참고값, `installation-state.json`(v2)을 additive로 함께 쓴다.
+`baseline_sha256` 인자는 커밋 상수 pin(`provenance.STAGE7_BASELINE_PIN`)이다.
+
+**진행 표시(presentation)** — `progress.py`(표준 라이브러리). setup·qualify·
+run bring-up: TTY 20칸 유니코드 바(불가 시 ASCII), 같은 줄 갱신, 단계 전환
+시 확정; non-TTY/nohup/redirect: CR·ANSI 없는 UTC 줄 로그, 상태 변화·30초
+heartbeat. 세 의미: exact(실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트
+뒤 `estimated`)/waiting(host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
+READY 이후 시나리오 구간은 진행바 없이 `[n/N] SC-…` 순서와 service_events·
+workload trace 기반 [TX]/[RX]/[ACK]/[STEP] 상세, 실패 시 layer/reason/evidence.
+파생값은 `derived=true`. 같은 정보를 `var/runs/<id>/presentation/`·
+`var/progress/*.log`에 보존한다. 판정·threshold·deadline·retry는 불변.
+
 ## 1. 개요와 명령 생애주기
 
 목표: **코드 + 장비(B210 3대)만으로** 임의의 native Ubuntu(arm64/amd64)에서
 MASS-A/MASS-B/ROC 3-endpoint Stage 7 시스템을 단독 기동·자격·운용한다.
-Windows host, SSH(자기참조 포함), host Git, baseline Markdown, 외부 네트워크
-서비스, 실행 중 dependency 다운로드에 의존하지 않는다.
+Windows host, SSH(자기참조 포함), Git(host·대상 모두), baseline Markdown, 외부
+네트워크 서비스, 실행 중 dependency 다운로드에 의존하지 않는다.
 
 ```
-vdeter setup       # 기계당 1회. apt(온라인 허용)+venv+lock, identity 생성,
-                   # hardware.toml 초안 생성. 멱등 — 기존 identity 불변경.
+./bin/vdeter setup # 기계당 1회. apt(온라인 허용)+venv+lock, identity 생성,
+                   # hardware.toml 초안, installation manifest, 사용자 launcher.
+                   # 멱등 — 기존 identity·hardware.toml 불변경.
 (사용자)           # hardware.toml 편집·승인 (역할↔serial, MASS-B 전원, 배선)
 vdeter qualify     # 단독 RR 재자격 (수 시간, RF 송신). 전체 PASS 시에만
-                   # active reference 원자적 발급. 그 전까지 UNQUALIFIED.
+                   # active reference(v2) 원자적 발급. 그 전까지 UNQUALIFIED.
 vdeter run         # 일상 실행 (완전 오프라인). 메뉴 또는 비대화형 인자.
 vdeter results     # 최근 run 목록·요약 재열람.
 ```
@@ -130,7 +186,13 @@ approved = true                    # "현재 배선이 선언대로"를 사용�
 - station identity·주파수·sample-rate·channel·판정 기준은 ②에 고정 — ①로
   변경 불가(치환 대상 필드가 아님). ② 변경은 manifest 검증이 fail-closed.
 
-## 5. standalone-binding (패키징 시 생성)
+## 5. standalone-binding (legacy — v2에서 필수 입력 아님)
+
+> **v2 (2026-09-05)**: 대상 기계 실행 경로는 이 파일을 더 이상 요구하지 않는다.
+> 결속은 §0의 installation manifest(`var/installation/`)로 대체됐다. 이 절은
+> 개발 PC 패키징 도구(`deploy_standalone_to_pi.py`)와 과거 evidence 이해를
+> 위한 이력이다. 파일이 남아 있어도 참고 provenance로만 기록되고 설치 스캔에서
+> 제외된다.
 
 일반 실행·qualify가 host Git·Markdown을 읽지 않기 위한 **결속 상수 파일**.
 경로: `VDETER/configs/stage7/standalone-binding.json`.
@@ -167,6 +229,13 @@ make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이�
   SHA-256 = 위 값과 정확 일치 (v0.9.23 자격 결속값 그대로).
 
 ## 6. git_state.json 호환 생성 (승인 조건 1)
+
+> **v2**: `git_commit`/`git_branch`/`git_dirty`는 참고 provenance(`.git` 파일
+> 읽기, git 명령 없음; 없으면 null)이며 coordinator는 대조하지 않는다.
+> 결속값은 additive 필드 `installation_sha256`·`rf/operation/tooling_manifest_
+> sha256`·`installation_verified`(및 별도 `installation-state.json`)이고,
+> `baseline_version/sha256`은 커밋 상수 pin이다. 표의 "standalone-binding
+> 승계" 출처는 v1 이력이다.
 
 coordinator `_load_run_metadata`/`validate_rr_binding`은 configs-dir의
 `git_state.json`을 읽는다. **파일명·스키마를 유지**하되 내용은 host Git·
@@ -279,10 +348,13 @@ REFERENCE` schema 1)·atomic publish 패턴·발급 직후 `stage7_profile` 재�
 `source_worktree_dirty=false` + 배포 무결 검증으로. `qualified_source_commit`
 에는 binding `source_head`를 기록한다.
 
-**final builder head 결속 (승인 조건 3)**: `build(..., head_provider=...)`에
-binding `source_head`를 돌려주는 provider를 주입한다. verification bundle의
-`frozen-hash-audit.json` `head_commit`도 같은 값이므로 "audit ↔ 현행 head
-일치" 검사가 배포 환경에서 성립한다.
+**final builder 결속 (승인 조건 3 → v2)**: `build(..., head_provider=...)`에
+현행 **installation digest**를 돌려주는 provider를 주입한다. verification
+bundle의 `frozen-hash-audit.json`은 v2 installation audit(`installation_sha256`
+·`installation_verified`·rf 영역 파일별 대조)이며, builder는 v1(`head_commit`
+↔ git HEAD)과 v2(`installation_sha256` ↔ 현행 digest)를 필드명으로 구분해
+병행 지원한다(계약시험 `VDETER/tests/unit/test_stage7_rr_final_builder_
+installation_audit.py`). 두 값은 서로 위장할 수 없다(40-hex ≠ 64-hex).
 
 **verification bundle 로컬 생성**: final builder `--verification-root` 요구
 3종을 대상 기계에서 생성한다.
@@ -300,7 +372,11 @@ binding `source_head`를 돌려주는 provider를 주입한다. verification bun
 일반 `vdeter run`이 reference와 **대조하는** critical 값 (불일치 = UNQUALIFIED,
 RF 거부):
 
-- deploy manifest 검증 결과 (배포 tree 파일 전수 sha256)
+- (v2) installation manifest 적재·현재 파일 재측정 검증 + installation/rf/
+  operation/tooling digest ↔ reference v2 대조 (영역별 조치 안내: rf/operation
+  변경 → `vdeter qualify`, tooling 변경 → software bundle 재실행). Git 상태는
+  대조하지 않는다. v1 reference(legacy git 결속)는 run에서 거부된다.
+- (v1 이력) deploy manifest 검증 결과 (배포 tree 파일 전수 sha256)
 - B210 serial↔역할 매핑, USB **속도 등급** (MASS-A/ROC=super-speed,
   MASS-B=high-speed)
 - **GNU Radio·UHD·numpy·cryptography 버전** — reference에 기록된 critical

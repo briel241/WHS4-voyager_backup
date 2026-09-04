@@ -338,8 +338,11 @@ class LocalCoordinatorSession:
 
     def wait_result(self, workload_id: str, *,
                     timeout_s: float = WORKLOAD_TIMEOUT_S,
-                    on_trace=None) -> dict:
-        """결과 JSON을 bounded 대기하며 trace를 발생 즉시 흘린다 (결정 21)."""
+                    on_trace=None, on_poll=None) -> dict:
+        """결과 JSON을 bounded 대기하며 trace를 발생 즉시 흘린다 (결정 21).
+
+        `on_poll`은 대기 루프마다 호출되는 presentation 훅(선택) — 실시간
+        service_events 추적용. 판정·timeout 의미는 바뀌지 않는다."""
         deadline = self.clock() + timeout_s
         result_path = self.results_dir / (workload_id + ".json")
         trace_tail = _FileTail(self.workload_trace_path(workload_id))
@@ -355,6 +358,8 @@ class LocalCoordinatorSession:
                 on_trace(row)
 
         while self.clock() < deadline:
+            if on_poll is not None:
+                on_poll()
             drain_trace()
             result = _read_json_if_complete(result_path)
             if result is not None:

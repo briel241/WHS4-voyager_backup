@@ -363,33 +363,68 @@ def build(evidence_roots, out_path, *, software_ok, frozen_hash_ok,
                         "frozen-hash-audit files 목록 부재/공백 "
                         "(감사 도구 산출물 아님)"
                     )
-                head_commit = audit_payload.get("head_commit")
-                if not (isinstance(head_commit, str)
-                        and len(head_commit) == 40):
-                    problems.append(
-                        "frozen-hash-audit head_commit 자기결속 부재"
-                    )
+                installation_digest = audit_payload.get(
+                    "installation_sha256")
+                if installation_digest is not None:
+                    # v2 (standalone clone-bootstrap, additive): 감사 묶음이
+                    # git HEAD 대신 **installation digest**로 자기결속한다.
+                    # head_provider는 현행 installation digest를 돌려준다
+                    # (Git digest를 installation digest로 위장하지 않는다 —
+                    # 두 경로는 필드명으로 구분된다). 검사 의미는 v1과 같다:
+                    # 64-hex 형식 + 현행값 일치 + 확인 불능 fail-closed.
+                    if not (isinstance(installation_digest, str)
+                            and len(installation_digest) == 64):
+                        problems.append(
+                            "installation-audit installation_sha256 "
+                            "자기결속 부재"
+                        )
+                    else:
+                        current_digest = _head_of()
+                        if current_digest is None:
+                            problems.append(
+                                "현행 installation digest 확인 불가 — "
+                                "installation_sha256 결속 검증 불능"
+                            )
+                        elif installation_digest != current_digest:
+                            problems.append(
+                                "installation-audit installation_sha256이 "
+                                "현행 설치와 불일치: "
+                                f"{installation_digest[:12]} != "
+                                f"{current_digest[:12]} (검증 묶음 재생성 필요)"
+                            )
+                    if audit_payload.get("installation_verified") is not True:
+                        problems.append(
+                            "installation-audit installation_verified != true "
+                            "(설치 재측정 미통과 또는 필드 부재)"
+                        )
                 else:
-                    # 0.9.22 사용자 지적: 형식 검사만으론 낡은 묶음이
-                    # 통과 — 현행 HEAD 일치를 요구(코드 변경 후엔 묶음
-                    # 재생성 강제). HEAD 확인 불능도 fail-closed.
-                    current_head = _head_of()
-                    if current_head is None:
+                    head_commit = audit_payload.get("head_commit")
+                    if not (isinstance(head_commit, str)
+                            and len(head_commit) == 40):
                         problems.append(
-                            "현행 git HEAD 확인 불가 — head_commit 결속 "
-                            "검증 불능"
+                            "frozen-hash-audit head_commit 자기결속 부재"
                         )
-                    elif head_commit != current_head:
+                    else:
+                        # 0.9.22 사용자 지적: 형식 검사만으론 낡은 묶음이
+                        # 통과 — 현행 HEAD 일치를 요구(코드 변경 후엔 묶음
+                        # 재생성 강제). HEAD 확인 불능도 fail-closed.
+                        current_head = _head_of()
+                        if current_head is None:
+                            problems.append(
+                                "현행 git HEAD 확인 불가 — head_commit 결속 "
+                                "검증 불능"
+                            )
+                        elif head_commit != current_head:
+                            problems.append(
+                                "frozen-hash-audit head_commit이 현행 HEAD와 "
+                                f"불일치: {head_commit[:12]} != "
+                                f"{current_head[:12]} (검증 묶음 재생성 필요)"
+                            )
+                    if audit_payload.get("worktree_dirty") is not False:
                         problems.append(
-                            "frozen-hash-audit head_commit이 현행 HEAD와 "
-                            f"불일치: {head_commit[:12]} != "
-                            f"{current_head[:12]} (검증 묶음 재생성 필요)"
+                            "frozen-hash-audit worktree_dirty != false "
+                            "(오염 트리 감사 또는 필드 부재)"
                         )
-                if audit_payload.get("worktree_dirty") is not False:
-                    problems.append(
-                        "frozen-hash-audit worktree_dirty != false "
-                        "(오염 트리 감사 또는 필드 부재)"
-                    )
         for fname in (
             "frozen-hash-audit.json", "unit-contract.log",
             "integration-stage7.log", "frozen-audit-stdout.log",

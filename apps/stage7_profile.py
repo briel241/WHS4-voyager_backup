@@ -26,6 +26,11 @@ PROFILE_ARTIFACT_TYPE = "STAGE7_EXECUTION_PROFILE"
 PROFILE_SCHEMA_VERSION = 1
 REFERENCE_ARTIFACT_TYPE = "STAGE7_QUALIFICATION_REFERENCE"
 REFERENCE_SCHEMA_VERSION = 1
+#: v2 (clone-bootstrap): Git·baseline Markdown 결속 대신 installation/domain
+#: digest 결속. v1은 과거 evidence 조회용으로 계속 읽는다.
+REFERENCE_SCHEMA_VERSION_V2 = 2
+ACCEPTED_REFERENCE_SCHEMA_VERSIONS = (REFERENCE_SCHEMA_VERSION,
+                                      REFERENCE_SCHEMA_VERSION_V2)
 
 #: profile 필수 최상위 키.
 _REQUIRED_PROFILE_KEYS = (
@@ -92,7 +97,8 @@ def load_reference(reference_path: str, *, expected_sha256: str | None = None) -
     if reference.get("artifact_type") != REFERENCE_ARTIFACT_TYPE:
         raise ProfileError(f"reference artifact_type이 다릅니다: "
                            f"{reference.get('artifact_type')!r}")
-    if reference.get("schema_version") != REFERENCE_SCHEMA_VERSION:
+    schema = reference.get("schema_version")
+    if schema not in ACCEPTED_REFERENCE_SCHEMA_VERSIONS:
         raise ProfileError("reference schema_version이 다릅니다")
 
     qualification = reference.get("qualification") or {}
@@ -100,13 +106,29 @@ def load_reference(reference_path: str, *, expected_sha256: str | None = None) -
     for name in ("TC-STAGE7-RR-002", "TC-STAGE7-RR-003", "TC-STAGE7-RR-004"):
         if (tc.get(name) or {}).get("status") != "PASS":
             raise ProfileError(f"reference의 {name}이 PASS가 아닙니다")
-    if not reference.get("qualified_source_commit"):
-        raise ProfileError("reference에 qualified_source_commit이 없습니다")
-    critical = reference.get("qualification_critical_manifest") or {}
-    # v2: strict_files(전체 해시 결속) + function_bound_files(함수 단위 결속).
-    # v1 호환: files 하나만 있는 형식도 받는다.
-    if not (critical.get("strict_files") or critical.get("files")):
-        raise ProfileError("reference에 qualification-critical manifest가 없습니다")
+    if schema == REFERENCE_SCHEMA_VERSION_V2:
+        # v2: installation/domain digest 결속이 필수. Git commit·branch·
+        # dirty·baseline Markdown SHA는 판정값이 아니다 (optional provenance).
+        installation = reference.get("installation") or {}
+        digest = installation.get("installation_sha256")
+        if not (isinstance(digest, str) and len(digest) == 64):
+            raise ProfileError("reference(v2)에 installation_sha256이 없습니다")
+        for key in ("rf_manifest_sha256", "operation_manifest_sha256",
+                    "tooling_manifest_sha256"):
+            if not (isinstance(installation.get(key), str)
+                    and len(installation[key]) == 64):
+                raise ProfileError(f"reference(v2)에 installation.{key}가 없습니다")
+        if not installation.get("files"):
+            raise ProfileError("reference(v2)에 installation.files가 없습니다")
+    else:
+        if not reference.get("qualified_source_commit"):
+            raise ProfileError("reference에 qualified_source_commit이 없습니다")
+        critical = reference.get("qualification_critical_manifest") or {}
+        # v1: strict_files(전체 해시 결속) + function_bound_files(함수 단위
+        # 결속). 구판 호환: files 하나만 있는 형식도 받는다.
+        if not (critical.get("strict_files") or critical.get("files")):
+            raise ProfileError(
+                "reference에 qualification-critical manifest가 없습니다")
     reference["_reference_sha256"] = actual
     reference["_reference_path"] = os.path.abspath(reference_path)
     return reference

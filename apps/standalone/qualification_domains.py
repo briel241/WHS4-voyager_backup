@@ -1,27 +1,33 @@
-"""자격 결속 3영역 분리 + evidence 재사용 판정 (Phase I, 2026-09-05 사용자 승인).
+"""자격 결속 영역 분류 + evidence 재사용 판정 (Phase I → clone-bootstrap v2).
 
-배포 manifest의 모든 파일을 **정확히 한 영역**으로 분류한다:
+설치 파일(installation scan)의 모든 파일을 **하나 이상의** 영역으로 분류한다
+(v2: 교차영향 파일은 여러 영역에 중복 결속 — 사용자 지정):
 
-  - ``rf``        : RF evidence 거동을 만드는 파일(coordinator·launcher·scenario
-                    controller·frozen ``src/vdeter``·RF config). 재사용은
-                    **byte-identical**을 요구한다.
-  - ``operation`` : 일반 ``vdeter run`` 거동 파일(standalone run 경로·상위 apps·
-                    common·MASS·ROC·환경 선언). 재사용은 **동일하거나 별도
-                    회귀 통과**를 요구한다.
-  - ``tooling``   : 자격 오케스트레이션·검증·패키징 도구(``qualify_cmd``·
-                    ``VDETER/tools``·템플릿). 변경 시 **수정된 verification
-                    bundle 재실행**으로 검증한다.
-  - ``test_doc``  : 시험·문서. **자격 결속이 아니다** — 변경만으로 RF 자격을
-                    무효화하지 않는다.
+  - ``rf``          : RF evidence 거동을 만드는 파일. PHY/MAC/Link/Radio·
+                      coordinator·launcher·pi_runtime·시간 변환·gain/channel/
+                      sample-rate config·RF phase 인자/run mode·RF config 생성
+                      코드. 재사용은 **byte-identical**을 요구한다.
+  - ``operation``   : 일반 ``vdeter run`` 거동 파일(run_cmd·local_session·
+                      local_config·local_preflight·identity 적재·MASS/ROC
+                      application·scenario controller·Service API 결속).
+                      현 정책: 재사용은 **byte-identical**을 요구한다.
+  - ``tooling``     : setup·qualify의 비RF 부분·verification bundle·final
+                      builder·reference 발급/검증·영역 분류기·installation
+                      manifest·qualification에서 실행하는 시험 코드. 변경 시
+                      **software bundle 재실행**으로 검증한다.
+  - ``non_binding`` : 일반 Markdown·보고서·개발 메모·이미지 등 실행 판정과
+                      무관한 열람 자료. 자격 결속이 아니다.
 
-분류는 경로 패턴(첫 일치)이며, ``classify``가 모든 배포 파일을 빠짐없이 한
-영역에 넣는다(‘unknown’ 없음 — completeness 시험이 고정). tooling·test_doc는
-명시 집합이고, 나머지는 rf(명시) 또는 operation(보수적 기본값)이다. 즉 미분류
-파일은 operation(핵심)으로 떨어져 **fail-safe**하다.
+규칙은 경로 패턴이며, 미분류 실행 파일은 **operation**으로 떨어져 fail-safe
+하다(사용자 지정). qualification 시험 파일은 비결속이 아니라 tooling이다.
+``apps/standalone/qualify_cmd.py``는 파일 단위로는 tooling이되 RF 지배 심볼
+(:data:`RF_CRITICAL_QUALIFY_SYMBOLS`)은 함수 단위 AST/소스 해시로 rf 영역에
+별도 결속한다.
 
-evidence 재사용 판정(:func:`evaluate_reuse`)은 순수 함수다 — 결과를 바꾸지
-않고 이전/현재 manifest만 비교한다. rf 또는 operation 핵심 파일이 하나라도
-다르면(operation은 회귀 미통과 시) 재사용을 거부한다.
+v1 호환: :func:`classify`(단일 주영역, test_doc)와 :func:`split_manifest`·
+:func:`evaluate_reuse`는 v1 배포 manifest(`files: [{path, sha256}]`)용으로
+유지한다. v2 installation record(`files: {path: {sha256, domains}}`)는
+:func:`evaluate_reuse_v2`가 판정한다.
 """
 
 from __future__ import annotations
@@ -33,37 +39,53 @@ import json
 RF = "rf"
 OPERATION = "operation"
 TOOLING = "tooling"
-TEST_DOC = "test_doc"
+TEST_DOC = "test_doc"          # v1 명칭 (v2 non_binding과 동의)
+NON_BINDING = "non_binding"
 
 DOMAINS = (RF, OPERATION, TOOLING, TEST_DOC)
+#: v2 결속 영역(비결속 제외).
+BOUND_DOMAINS = (RF, OPERATION, TOOLING)
 
 #: 재사용 자격에서 **핵심**(변경 시 원칙적으로 거부) 영역.
 CORE_DOMAINS = (RF, OPERATION)
-#: 변경이 허용되되 재검증을 요구하는 영역(verification bundle 재실행).
 TOOLING_DOMAINS = (TOOLING,)
-#: 결속이 아닌 영역(변경 무시).
 NONBINDING_DOMAINS = (TEST_DOC,)
 
-#: RF 거동을 만드는 명시 실행 파일(상위 apps 중).
-_RF_APPS = frozenset({
+#: RF 거동을 만드는 명시 실행 파일(상위 apps 중). launcher·coordinator는 rf
+#: 전용, scenario controller는 rf+operation(교차영향).
+_RF_ONLY_FILES = frozenset({
     "VDETER/apps/stage7_coordinator_main.py",
     "VDETER/apps/stage7_endpoint_launcher.py",
-    "VDETER/apps/stage7_scenario_controller.py",
 })
-#: 자격 tooling 명시 파일(상위 apps 중). RF/run 거동을 직접 만들지 않는
-#: 오케스트레이션·검증 진입점. qualify_cmd.py는 **파일 단위로는 tooling**이되,
-#: 그 안의 RF 지배 심볼(:data:`RF_CRITICAL_QUALIFY_SYMBOLS`)은 함수 단위로 rf에
-#: 별도 결속한다 — run_mode/phase 순서/phase 인자 변경은 재사용을 거부한다.
-_TOOLING_FILES = frozenset({
+_RF_AND_OPERATION_FILES = frozenset({
+    "VDETER/apps/stage7_scenario_controller.py",   # scenario controller
+    "apps/standalone/local_config.py",              # RF config 생성에 관여
+})
+#: 자격 tooling 명시 파일(standalone 중). setup·qualify·분류기·manifest·
+#: deploy manifest·provenance·templates.
+_TOOLING_ONLY_FILES = frozenset({
     "apps/standalone/qualify_cmd.py",
     "apps/standalone/qualification_domains.py",
+    "apps/standalone/setup_cmd.py",
+    "apps/standalone/deploy_manifest.py",
 })
+#: tooling이면서 일반 실행도 쓰는 파일(교차영향 → 두 영역).
+_TOOLING_AND_OPERATION_FILES = frozenset({
+    "apps/standalone/installation_manifest.py",   # setup 생성 + run 검증
+    "apps/standalone/provenance.py",               # baseline pin·git 참고
+    "apps/stage7_profile.py",                      # reference 검증기(run·qualify)
+    "requirements-standalone.lock",                # 환경 정의
+    "bin/vdeter",                                  # 저장소 launcher
+})
+#: 비결속 파일명/접미사.
+_NON_BINDING_SUFFIXES = (".md", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+                         ".pdf", ".xlsx", ".docx", ".pptx")
+_NON_BINDING_FILES = frozenset({".gitignore", ".gitattributes",
+                                "VDETER/.gitignore"})
+_NON_BINDING_NAMES = frozenset({"LICENSE", "LICENSE.txt", "NOTICE"})
 
 #: 파일 단위로는 tooling이지만 RF qualification-critical로 **함수 단위** 결속하는
-#: 심볼(사용자 지정: RF phase 순서·run mode·phase→TC·gain 소비 phase·phase 인자/
-#: env 전달). 이들이 하나라도 바뀌면 RF 재사용을 거부한다. config/gain 해석
-#: 본체(`generate_run_configs`)와 env 빌더(`build_child_env`)는 operation 파일에
-#: 있어 operation byte-identity로 결속된다.
+#: 심볼(RF phase 순서·run mode·phase→TC·gain 소비 phase·phase 인자/env 전달).
 RF_CRITICAL_QUALIFY_SYMBOLS = {
     "apps/standalone/qualify_cmd.py": (
         "LADDER_PHASES",          # RF phase 순서
@@ -75,44 +97,57 @@ RF_CRITICAL_QUALIFY_SYMBOLS = {
 }
 
 
-def classify(relpath: str) -> str:
-    """배포 상대경로를 정확히 한 영역으로 분류(첫 일치)."""
+def _is_non_binding(p: str) -> bool:
+    name = p.rsplit("/", 1)[-1]
+    if p in _NON_BINDING_FILES or name in _NON_BINDING_NAMES:
+        return True
+    if p.startswith("docs/") or "/docs/" in p:
+        return True
+    return p.lower().endswith(_NON_BINDING_SUFFIXES)
+
+
+def classify_domains(relpath: str) -> tuple:
+    """설치 상대경로 → 영역 tuple (하나 이상). 비결속은 ``(NON_BINDING,)``.
+
+    순서는 "주영역 먼저"다 — v1 :func:`classify`는 첫 원소를 쓴다."""
     p = relpath.replace("\\", "/")
 
-    # 1) 문서만 비결속(markdown·docs). tests 하위의 .md도 여기(첫 일치).
-    if p.endswith(".md") or "/docs/" in p or p.startswith("docs/"):
-        return TEST_DOC
+    # 1) 비결속: Markdown·문서·이미지·git 메타.
+    if _is_non_binding(p):
+        return (NON_BINDING,)
 
-    # 2) qualification 시험 suite = qualification-tool(변경 시 bundle 재실행).
-    #    bundle이 도는 unit/contract/integration + support/fixtures 전체.
-    if p.startswith("VDETER/tests/") or p.startswith("tests/"):
-        return TOOLING
+    # 2) qualification 시험 suite·시험 도구 = tooling (비결속 아님).
+    if p.startswith(("VDETER/tests/", "tests/", "VDETER/tools/", "tools/",
+                     "apps/standalone/templates/")):
+        return (TOOLING,)
+    if p in ("VDETER/pyproject.toml", "VDETER/requirements.txt",
+             "VDETER/uv.lock"):
+        return (TOOLING,)
 
-    # 3) standalone binding은 tooling — 생성 attestation 산출물로 매 재생성마다
-    #    source_head·generated_utc가 바뀐다. RF 알고리즘 파일 자체는 rf 영역
-    #    byte-identity로 결속되고, binding의 frozen SHA는 그 파생이자 bundle
-    #    frozen-hash-audit로 재검증되므로 여기서 byte-identity를 요구하지 않는다.
-    if p == "VDETER/configs/stage7/standalone-binding.json":
-        return TOOLING
+    # 3) 명시 교차영향 파일.
+    if p in _RF_AND_OPERATION_FILES:
+        return (RF, OPERATION)
+    if p in _TOOLING_AND_OPERATION_FILES:
+        return (TOOLING, OPERATION)
 
     # 4) RF 거동(byte-identical 요구).
-    if p in _RF_APPS:
-        return RF
-    if p.startswith("VDETER/src/vdeter/"):
-        return RF
-    if p.startswith("VDETER/configs/"):
-        return RF
+    if p in _RF_ONLY_FILES:
+        return (RF,)
+    if p.startswith("VDETER/src/vdeter/") or p.startswith("VDETER/configs/"):
+        return (RF,)
 
-    # 4) 자격 tooling(변경 시 bundle 재실행).
-    if p in _TOOLING_FILES:
-        return TOOLING
-    if p.startswith("VDETER/tools/"):
-        return TOOLING
-    if p.startswith("apps/standalone/templates/"):
-        return TOOLING
+    # 5) 자격 tooling.
+    if p in _TOOLING_ONLY_FILES:
+        return (TOOLING,)
 
-    # 5) 그 외 배포 코드 = 일반 운용(보수적 기본값).
-    return OPERATION
+    # 6) 그 외 실행 파일 = 일반 운용(보수적 기본값, fail-safe).
+    return (OPERATION,)
+
+
+def classify(relpath: str) -> str:
+    """v1 호환: 주영역 하나(비결속은 ``test_doc``)."""
+    primary = classify_domains(relpath)[0]
+    return TEST_DOC if primary == NON_BINDING else primary
 
 
 def _sha(text: str) -> str:
@@ -138,7 +173,7 @@ def rf_critical_symbol_hashes(source: str, symbols) -> dict:
 
 
 def rf_critical_symbol_baseline(file_source_map: dict) -> dict:
-    """{배포경로: 소스문자열} → {배포경로: {심볼: [ast_sha, src_sha]}}.
+    """{설치경로: 소스문자열} → {설치경로: {심볼: [ast_sha, src_sha]}}.
 
     RF_CRITICAL_QUALIFY_SYMBOLS의 모든 심볼이 없으면 예외(결속 대상 누락)."""
     baseline = {}
@@ -155,8 +190,7 @@ def rf_critical_symbol_baseline(file_source_map: dict) -> dict:
 
 
 def rf_symbol_diff(prior: dict, current: dict) -> list:
-    """이전/현재 RF-critical 심볼 baseline 차이(변경·누락 심볼 목록). 빈
-    리스트면 함수 단위로 byte-identical."""
+    """이전/현재 RF-critical 심볼 baseline 차이(변경·누락 심볼 목록)."""
     changed = []
     for relpath, wanted in RF_CRITICAL_QUALIFY_SYMBOLS.items():
         p = prior.get(relpath, {})
@@ -174,10 +208,7 @@ def _aggregate_sha256(files: dict) -> str:
 
 
 def split_manifest(manifest: dict) -> dict:
-    """배포 manifest를 영역별 sub-manifest로 분리.
-
-    반환 {domain: {"files": {path: sha}, "file_count": n,
-    "aggregate_sha256": sha}} — 모든 영역 키가 존재(빈 영역은 file_count 0)."""
+    """v1 배포 manifest를 영역별 sub-manifest로 분리(주영역 하나씩)."""
     buckets = {d: {} for d in DOMAINS}
     for entry in manifest.get("files", ()):
         buckets[classify(entry["path"])][entry["path"]] = entry["sha256"]
@@ -186,8 +217,14 @@ def split_manifest(manifest: dict) -> dict:
             for d, files in buckets.items()}
 
 
+def domain_files_v2(files: dict, domain: str) -> dict:
+    """v2 installation files map(path→{sha256, domains}) 중 한 영역의
+    path→sha256 map."""
+    return {path: entry["sha256"] for path, entry in files.items()
+            if domain in (entry.get("domains") or ())}
+
+
 def _domain_diff(prior_files: dict, current_files: dict) -> dict:
-    """두 영역 파일 map 차이(추가·삭제·불일치). 빈 dict면 byte-identical."""
     added = sorted(set(current_files) - set(prior_files))
     removed = sorted(set(prior_files) - set(current_files))
     changed = sorted(k for k in set(prior_files) & set(current_files)
@@ -199,32 +236,15 @@ def _diff_empty(diff: dict) -> bool:
     return not (diff["added"] or diff["removed"] or diff["changed"])
 
 
-def evaluate_reuse(prior_manifest: dict, current_manifest: dict, *,
-                   prior_rf_symbols: dict | None = None,
-                   current_rf_symbols: dict | None = None) -> dict:
-    """이전 RF evidence manifest 대비 현재 배포 트리의 재사용 자격 판정.
-
-    규칙(사용자 지정, 2026-09-05 보완):
-      - rf 영역 파일이 하나라도 다르면 거부(byte-identical 요구).
-      - rf-critical 심볼(qualify_cmd의 phase 순서·run mode·phase→TC·gain 소비
-        phase·phase 인자 전달)이 함수 단위로 다르면 거부. (파일 단위로는
-        qualify_cmd가 tooling이라 governance/bundle 변경은 허용되지만, RF 지배
-        심볼 변경은 여기서 잡는다.)
-      - operation 영역은 **byte-identical**이어야 한다(현 정책: 회귀 기반
-        재사용은 별도 영향분석 정책 전까지 불허).
-      - tooling 변경은 허용하되 호출부가 수정된 verification bundle을 재실행한다.
-      - test_doc(문서) 변경은 자격에 영향 없음.
-
-    반환: eligibility·영역별 diff·rf 심볼 diff·차단 목록. 순수 판정(무수정)."""
-    prior = split_manifest(prior_manifest)
-    current = split_manifest(current_manifest)
-    diffs = {d: _domain_diff(prior[d]["files"], current[d]["files"])
-             for d in DOMAINS}
-
+def _evaluate(prior_by_domain: dict, current_by_domain: dict, *,
+              prior_rf_symbols, current_rf_symbols,
+              nonbinding_key: str) -> dict:
+    diffs = {d: _domain_diff(prior_by_domain[d], current_by_domain[d])
+             for d in prior_by_domain}
     rf_files_identical = _diff_empty(diffs[RF])
     operation_identical = _diff_empty(diffs[OPERATION])
     tooling_changed = not _diff_empty(diffs[TOOLING])
-    test_doc_changed = not _diff_empty(diffs[TEST_DOC])
+    nonbinding_changed = not _diff_empty(diffs[nonbinding_key])
 
     rf_symbols_changed = rf_symbol_diff(prior_rf_symbols or {},
                                         current_rf_symbols or {})
@@ -241,19 +261,48 @@ def evaluate_reuse(prior_manifest: dict, current_manifest: dict, *,
         for k in ("added", "removed", "changed"):
             blocking += [f"operation:{k}:{f}" for f in diffs[OPERATION][k]]
 
-    eligible = rf_identical and operation_identical
     return {
-        "eligible": eligible,
+        "eligible": rf_identical and operation_identical,
         "rf_identical": rf_identical,
         "rf_files_identical": rf_files_identical,
         "rf_symbols_identical": rf_symbols_identical,
         "rf_symbols_changed": rf_symbols_changed,
         "operation_identical": operation_identical,
         "tooling_changed": tooling_changed,
-        "test_doc_changed": test_doc_changed,
+        "test_doc_changed": nonbinding_changed,
+        "non_binding_changed": nonbinding_changed,
         "blocking_files": blocking,
         "diffs": diffs,
-        "prior_domain_sha256": {d: prior[d]["aggregate_sha256"] for d in DOMAINS},
-        "current_domain_sha256": {d: current[d]["aggregate_sha256"]
-                                  for d in DOMAINS},
+        "prior_domain_sha256": {d: _aggregate_sha256(prior_by_domain[d])
+                                for d in prior_by_domain},
+        "current_domain_sha256": {d: _aggregate_sha256(current_by_domain[d])
+                                  for d in current_by_domain},
     }
+
+
+def evaluate_reuse(prior_manifest: dict, current_manifest: dict, *,
+                   prior_rf_symbols: dict | None = None,
+                   current_rf_symbols: dict | None = None) -> dict:
+    """v1 배포 manifest 기반 재사용 판정 (rf+심볼 byte-identical AND operation
+    byte-identical → eligible; tooling 변경은 bundle 재실행; 문서 무영향)."""
+    prior = split_manifest(prior_manifest)
+    current = split_manifest(current_manifest)
+    return _evaluate({d: prior[d]["files"] for d in DOMAINS},
+                     {d: current[d]["files"] for d in DOMAINS},
+                     prior_rf_symbols=prior_rf_symbols,
+                     current_rf_symbols=current_rf_symbols,
+                     nonbinding_key=TEST_DOC)
+
+
+def evaluate_reuse_v2(prior_files: dict, current_files: dict, *,
+                      prior_rf_symbols: dict | None = None,
+                      current_rf_symbols: dict | None = None) -> dict:
+    """v2 installation files map 기반 재사용 판정 (교차영향 파일은 각 영역에서
+    독립 대조). 규칙은 v1과 같다: rf(파일+심볼)·operation byte-identical일 때만
+    eligible, tooling 변경은 software bundle 재실행, 비결속은 무영향."""
+    keys = (RF, OPERATION, TOOLING, NON_BINDING)
+    prior = {d: domain_files_v2(prior_files, d) for d in keys}
+    current = {d: domain_files_v2(current_files, d) for d in keys}
+    return _evaluate(prior, current, prior_rf_symbols=prior_rf_symbols,
+                     current_rf_symbols=current_rf_symbols,
+                     nonbinding_key=NON_BINDING)
