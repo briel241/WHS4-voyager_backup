@@ -395,3 +395,114 @@ RX 에너지 게이트·duplicate ACK 미검증 범위 — 알려진 한계로 �
 
 기준선 충돌 기록(동결 검토 시 재제시): host git/MD 결속 제거, 플랫폼
 일반화(Pi 5 전제), USB 포트 경로 비강제, 일반 실행 검증 범위 한정.
+
+## 14. Phase I 결과 기록 (2026-09-04/05, Pi 5 arm64 standalone)
+
+이 절은 Phase I(standalone 실행 경로)의 **실측 결과와 보증 범위**를
+기록한다. §1–§13의 설계 명세는 변경하지 않는다.
+
+### 14.1 최종 판정
+
+Raspberry Pi 5(Ubuntu 24.04, aarch64) standalone 배포 트리에서 `vdeter
+setup → qualify → run all → results` 생애주기를 완주했다. 자격은
+**QUALIFIED(final_status RESEARCH_READY, profile RESEARCH_READY_MINIMAL)**,
+운용 시험 `vdeter run all`은 **4/4 PASS**다. 이 자격은 외부 공인 인증이
+아닌 **프로젝트 내부 RESEARCH_READY 자격**이며, 통제된 conducted
+케이블 testbed에서의 연구 실험 진입 가능성만을 뜻한다.
+
+### 14.2 활성 qualification reference 결속값
+
+| 항목 | 값 |
+|---|---|
+| release / active pointer | `qual-20260904-134421-r2` (promoted 2026-09-04T18:39:00Z) |
+| reference SHA-256 | `aa72badcfbf24520552ccc3a57e495e312a616ea0669e988146222fb0614d46b` |
+| qualification_method | `evidence_reuse` — 전체 사다리 `qual-20260904-134421`의 RF evidence 재사용 (RR-P0 → RR-P1 → RR-P2-17 → RR-P3-fault, RR-001·002·003·004·005·007 PASS, baseline 0.9.23 / `2a87c1d0…`) |
+| supersedes | `qual-20260904-134421` reference `1ed9fb4f…` — 발급 결함(endpoints에 `speed_class` 누락)으로 대체, **삭제하지 않고 보존** |
+| qualified_source_commit | `88fa6dfcf133e047606de55c71849bdb32486368` (= standalone-binding head, frozen 14) |
+| deploy manifest | `21695f1227a104ec…` (519 files) — resolved config `deployment_manifest_sha256`와 동일 |
+| platform_profile | `pi` |
+| endpoints (critical `{serial, speed_class}`) | MASS-A `34D03DD`/super · MASS-B `3515425`/high · ROC `34D03E8`/super (usb_path·speed_mbps는 관측 metadata) |
+| identity fingerprint | `b7ea9461ea15` |
+| library versions | gnuradio 3.10.9.2 · UHD 4.6.0.0 · numpy 1.26.4 · cryptography 50.0.1 |
+| gain | MASS-A/MASS-B/ROC 69/69/69 dB (RR-P1 재측정, artifact `f086abcf…`) |
+| binding_domains | rf_evidence 205 files(이전 manifest `e74cb12b…` + qualify_cmd RF-critical symbol 5종 AST 해시) · operation 70 · qualification_tool 225 · test_doc(.md) 19 비결속 |
+| verification bundle (r2) | unit+contract 1037 passed / 10 skipped / **29 deselected**(governance 6 node-id, `verification/governance-deselected.json`) · integration `-k stage7` 10 passed · frozen-hash audit all_unchanged |
+
+evidence_reuse 자동 허용 조건은 **rf 영역 byte-identical AND operation
+영역 byte-identical**이며, RF-critical symbol(사다리 순서·run mode·phase
+인자·gain 소비 phase·`default_phase_runner`) 해시가 하나라도 다르면 거부한다.
+qualification 시험 파일·선택 목록 변경은 RF 재실행 없이 software bundle
+재실행을 요구하고, Markdown 변경은 자격에 영향이 없다.
+
+### 14.3 `vdeter run all` 결과 (run-20260904-184019)
+
+2026-09-04T18:40:20Z – 19:06:41Z(1580 s), bring-up 1회 READY, 자동 재시도
+0회. hardware lifecycle(host-time 획득·active bridge·B210 acquire·endpoint
+start/stop·rf_time pre/post·service admission) 각 1회.
+
+| workload | 판정 | 소요 |
+|---|---|---|
+| SC-VDE-005 (normal) | PASS | 43.0 s |
+| SC-VDE-006 (normal) | PASS | 75.2 s |
+| SC-VDE-001 normal | PASS | 18.9 s |
+| SC-VDE-001 forged | PASS (위조 인증서 `bad-signature` 거부, trust_store_size 0) | 17.7 s |
+
+wrong_dest·duplicates·mismatched_ack·failed 모두 0, payload 무결성·ACK
+correlation·quiescence 확인. 종료 후 workers_after_stop 0, 잔존 프로세스 0,
+cleanup PASS, B210 3대 재발견(5000/480/5000 Mbps), throttled 0x0. summary의
+`reference_sha256`는 활성 reference와 동일. MASS-B의 host-time bracket
+내부 재획득 1회는 run 수준 재시도가 아니며 알려진 가용성 제한이다.
+
+### 14.4 발견·수정한 결함
+
+- **RR-P1 TC-004 RAW-PHY 슬롯 정렬**: RX 캡처 슬롯 시간이 PRE_CORRECTION
+  기준이라 TX(active bridge correction, MASS-A +210.6 µs) 대비 burst onset이
+  복호 여유(≈60–70 sample) 안쪽으로 밀리는 잠복 결함. host 경로에도 존재하던
+  timing margin 결함이며 standalone 배포가 유발한 것이 아니다. `pi_runtime`
+  에서 RAW_PHY phase가 TX와 동일한 시간 변환 함수를 쓰도록 수정(commit
+  `2978e9c`), 오프라인 재생 18/18, 결정적 시험 12건, RF 재시험 C1–C6 PASS.
+- **verification bundle governance 시험**: docs/core·traceability·저장소
+  구조 의존 시험 6 node-id를 명시적 `--deselect`로 분리(코드·evidence에 목록과
+  사유 기록, host V1/CI에서는 계속 실행). import 격리 실패 4건은 별도
+  프로세스에서 PASS 확인.
+- **결속 3영역 분리**: 파일 전체 결속 때문에 tooling 수정만으로 RF 재실행이
+  강제되던 구조를 rf / operation / qualification_tool / test_doc으로 분리.
+- **발급 결함**: evidence_reuse 경로가 endpoints를 `{serial, usb_path,
+  speed_mbps}`로 기록해 `compare_critical`이 거부 → 두 발급 경로가 공통
+  `critical_endpoints_from_preflight()`로 `{serial, speed_class}`를 생성하고
+  발급 시 speed_class ∈ {super, high}를 검증하도록 수정(commit `88fa6df`),
+  r2로 재발급.
+
+### 14.5 마무리 감사 (2026-09-05, RF 없음)
+
+- 소프트웨어 시험: root(standalone·domains·run/CLI·reference·preflight)
+  231 passed / 1 skipped · VDETER unit+contract 1075 passed / 1 skipped ·
+  integration `-k stage7` 10 passed · `git diff --check` 이상 없음.
+- 결속 감사(실제 검증기 `load_reference`·`deploy_manifest.verify`·
+  `compare_critical`·preflight): 17/17 PASS.
+- evidence 보존: `VDETER/results/phase-i/PHASE-I-FINAL-AUDIT/`(git 비추적)
+  347 files, 42,331,378 bytes, Pi 원본 289 files SHA-256 전부 일치, JSON/JSONL
+  파싱 오류 0, 내부 참조(pointer→release→reference·sidecar·final-result 원본
+  결속·run summary·resolved config·supersedes) 전부 PASS. manifest
+  `EVIDENCE-MANIFEST.json` SHA-256 `cd522ec7992ab49dc8f272416ac5043bd2079973f525a9e14c9025a2ed62539b`.
+- secret 검사: evidence·보고서·추적 파일에 개인키 본문·PEM private 마커·
+  비밀번호/토큰·SSH 비밀·identity private 파일 없음(추적 `.pem` 2개는 공개
+  인증서·trust store). 공개 fingerprint·장비 serial은 허용된 공개 기록.
+- 생성형 `standalone-binding.json`은 release artifact로 배포 트리·package에만
+  보존하고 Git에 커밋하지 않는다.
+
+### 14.6 보증 범위와 유보 항목
+
+| 항목 | 상태 |
+|---|---|
+| Link 19 | 현재 운용 범위에서 제외 |
+| USB hot-unplug recovery | 미보증 |
+| 장기 soak | 미수행 |
+| host-time bracket 재획득 가능성 | 알려진 가용성 제한 |
+| amd64 Ubuntu (generic-pc) | 지원 경로 구현 완료, 실제 환경 검증은 장비 부재로 유보 (§12 V3 미수행). amd64 지원 구현 완료, 실제 환경 검증 미수행 |
+| 자격의 성격 | 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격 |
+| strict 하드닝 4건 (§13) | 알려진 한계로 승계 |
+
+보증 범위는 **위 결속값과 동일한 Pi 5 arm64 배포 트리·B210 3대·identity·
+라이브러리 조합**에 한정된다. 다른 장비·다른 배포 트리는 `vdeter qualify`
+재발급 없이는 UNQUALIFIED로 거부된다.
