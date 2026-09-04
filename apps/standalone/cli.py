@@ -146,6 +146,10 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     out("  scope: Link 19 implementation present, not exercised by this "
         "qualification, hardware performance not guaranteed; operational "
         "scenarios use Link 11/17 only")
+    out("  scope: RR-P3-fault judges the six software fault subcases only; "
+        "physical USB detach recovery is not exercised (B210 hot-unplug/"
+        "re-enumeration recovery not guaranteed; session close and next-run "
+        "B210 rediscovery verified as before)")
     out("  duration: several hours; the machine's active reference will be "
         "replaced only if every step passes")
     existing = qualify_cmd.load_active_reference(paths)
@@ -176,8 +180,8 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     if report.get("status") == "QUALIFIED":
         out("QUALIFIED — active reference %s (release %s)" % (
             report["reference"]["sha256"][:12], report["reference"]["release"]))
-        for key, value in qualify_cmd.LINK19_LIMITATION.items():
-            if key != "note":
+        for key, value in qualify_cmd.QUALIFICATION_LIMITATIONS.items():
+            if not key.endswith("note"):
                 out("  limitation: %s = %s" % (key, value))
         return EXIT_PASS
     out("NOT QUALIFIED — " + "; ".join(report.get("errors") or ["unknown"]))

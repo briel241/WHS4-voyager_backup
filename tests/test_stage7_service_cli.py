@@ -212,12 +212,24 @@ def test_topology_and_trust_gates():
     bound_specs = (profile["_reference"]["qualification_critical_manifest"]
                    .get("function_bound_files") or {})
     # 이 시험은 USB/process/trust 게이트를 격리한다. 보존된 과거 profile의
-    # Phase-G 전체-file 결속만 현재 fake 배포 source에 맞춰 새 게이트를 통과시킨다.
+    # **in-memory 사본(synthetic Phase I 재결속 fixture)** 에서만 coordinator
+    # 전체-file SHA와 Phase I 승인 함수(run_rr_p3_fault)의 고정 해시를 현재
+    # 값으로 패치한다 — 실제 Phase G profile/reference 파일과 production
+    # host 코드는 건드리지 않는다 (2026-09-04 조건부 승인). 패치하지 않은
+    # 실제 결속이 현재 coordinator를 거부하는 것은
+    # tests/test_stage7_host_fail_closed.py가 별도로 증명한다.
+    with open(os.path.join(_REPO, "tests", "fixtures",
+                           "stage7_phase_i_function_bindings.json"),
+              encoding="utf-8") as handle:
+        phase_i = json.load(handle)["functions"]
     for candidate, spec in bound_specs.items():
         with open(os.path.join(_REPO, candidate), encoding="utf-8") as handle:
             source = handle.read()
         spec["phase_g_file_sha256"] = hashlib.sha256(
             source.encode("utf-8")).hexdigest()
+        for name, pinned in phase_i.items():
+            if name in spec.get("qualified_functions", {}):
+                spec["qualified_functions"][name] = dict(pinned)
     bound = list(bound_specs)
 
     def make_runner(usb_ok=True, procs="none", throttled="throttled=0x0",

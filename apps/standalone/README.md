@@ -250,6 +250,26 @@ operational scenarios use Link 11/17 only* (`qualify_cmd.LINK19_LIMITATION`).
 - gain 재측정 결과는 기록·비교한다. ROC lane1 75dB가 지속되면 기존 관찰·
   물리 경로 점검 항목을 유지한다 (자동 해소로 간주하지 않음 — 결정 19).
 
+**RR-P3-fault 물리 USB detach 제외 (2026-09-04 정책 변경, 사용자 지시)**:
+TC-STAGE7-RR-007은 소프트웨어 장애 소항목 6개(stale-generation-command,
+worker-kill, coordinator-ipc-loss, restart-generation-fencing,
+scenario-controller-ipc-loss, stale-callback)로만 판정한다 — 6개 전부 PASS면
+PASS, 하나라도 FAIL이면 FAIL. **물리 USB detach·재연결·USB3 속도 복원·UHD
+재열거 복구**는 현재 프로젝트의 운용 시나리오와 무관한 하드웨어 장애 복구
+시험이라 standalone 자격 범위에서 제외했다(coordinator `run_rr_p3_fault`에서
+소항목 제거; HARDWARE_BLOCKED 생성·USER-ACTION 안내·
+`STAGE7_P3_USB_DETACH_WAIT_S`·물리 조작 대기 없음). 이것은 **VDE-TER 프로토콜
+판정 완화가 아니라 범위 제외**다. 제한 명시(`qualify_cmd.USB_DETACH_LIMITATION`,
+reference `limitations`): *physical USB detach recovery not exercised / B210
+hot-unplug/re-enumeration recovery not guaranteed / 정상 세션 종료와 다음 실행의
+B210 재발견은 기존대로 검증 / VDE-TER 정상 통신·Link 17·세 시나리오 보증에
+영향 없음*. 3차 ladder(qual-20260904-081804)가 usb-detach HARDWARE_BLOCKED로
+정지한 것이 계기이며, 그 evidence와 Phase F의 usb-detach PASS evidence는
+과거 기록으로 보존한다. **알려진 문제(미수정)**: coordinator
+`write_rr_evidence`의 `assert status in (PASS, FAIL, ABORTED)`는
+HARDWARE_BLOCKED를 거부해 TC 파일이 기록되지 않는다 — 해당 경로가 더 이상
+도달되지 않으므로 기록만 한다.
+
 **reference 발급 (승인 조건 2)**: `stage7_issue_qualification_reference.py`
 CLI는 SSH·Git 결합이라 직접 호출하지 않는다. 재사용하는 것 — import 폐포
 계산·critical manifest 조립 규칙·reference 스키마(`STAGE7_QUALIFICATION_

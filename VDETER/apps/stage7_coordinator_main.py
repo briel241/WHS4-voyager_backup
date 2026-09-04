@@ -2426,14 +2426,49 @@ def run_rr_p3_soak(coordinator, resolved, plan, run_root: str, *, run_id,
     return {"rr_p3_soak": status, "link": link_id}
 
 
+#: RR-P3-fault 필수 소프트웨어 장애 소항목 — 정확히 이 6개만 실행·판정한다
+#: (2026-09-04 정책: 물리 USB detach 제외).
+P3_FAULT_REQUIRED_SUBCASES = (
+    "stale-generation-command",
+    "worker-kill",
+    "coordinator-ipc-loss(worker-kill-driven)",
+    "restart-generation-fencing",
+    "scenario-controller-ipc-loss",
+    "stale-callback",
+)
+#: 자격 범위에서 제외된 소항목 — evidence detail에 제외 사실만 기록한다.
+P3_FAULT_EXCLUDED_SUBCASES = ("usb-detach",)
+P3_FAULT_EXCLUSION_NOTE = (
+    "physical USB detach recovery not exercised; B210 hot-unplug/"
+    "re-enumeration recovery not guaranteed. Normal session close and "
+    "next-run B210 rediscovery remain verified as before. No impact on "
+    "VDE-TER normal communication, Link 17, or the three operational "
+    "scenarios. Scope exclusion of a hardware fault-recovery test that the "
+    "project does not need — not a relaxation of VDE-TER protocol judgement."
+)
+
+
+def _p3_fault_status(subcases) -> str:
+    """6개 필수 소항목 판정 — 하나라도 FAIL이거나 누락이면 FAIL, 전부 PASS면
+    PASS. HARDWARE_BLOCKED는 생성되지 않는다."""
+    by_name = {s.get("name"): s.get("status") for s in subcases}
+    if any(by_name.get(name) != "PASS" for name in P3_FAULT_REQUIRED_SUBCASES):
+        return "FAIL"
+    return "PASS"
+
+
 def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
                     metadata, processes):
-    """`TC-STAGE7-RR-007`: 중요 장애 각 1회 (v0.9.1 H항).
+    """`TC-STAGE7-RR-007`: 중요 장애 각 1회 (v0.9.1 H항) — 소프트웨어 장애 6건.
 
-    software-only로 검증 가능한 항목은 이 process에서, 실기 physical 항목은
-    stale generation·restart·IPC loss를 통제 주입한다. USB physical detach는
-    사용자 조작이 필요하므로 정확한 serial/케이블을 안내하고 그 입력만 기다린다
-    (임의 장비 분리 없음). deadline 40분.
+    stale generation·worker kill·coordinator IPC loss·restart fencing·
+    scenario-controller IPC loss·stale callback을 통제 주입한다(TX 0).
+    **물리 USB detach 소항목은 2026-09-04 정책 변경(사용자 지시)으로 자격
+    범위에서 제외**됐다 — 현재 프로젝트의 운용 시나리오와 무관한 하드웨어
+    장애 복구 시험이며 VDE-TER 프로토콜 판정 완화가 아니다. 자동 분리·사용자
+    조작 대기·안내 출력·`STAGE7_P3_USB_DETACH_WAIT_S`를 쓰지 않고
+    HARDWARE_BLOCKED를 만들지 않는다. 6건 전부 PASS면 PASS, 하나라도 FAIL이면
+    FAIL. deadline 40분.
     """
 
     guard = PhaseGuard("RR-P3-fault", deadline_s=40 * 60)
@@ -2517,103 +2552,10 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
                note="old-generation callback state 변경 0은 stage7 software "
                     "fault-injection suite가 검증 (software-only)")
 
-        # 7) 대표 B210 USB detach — 물리 조작 필요. 자동 분리하지 않는다.
-        #    STAGE7_P3_USB_DETACH_WAIT_S > 0 이면 사용자 조작을 실시간 감지해
-        #    실검증한다(분리→재결합→USB3 5000M 복원→uhd 재열거). 기본(0)은
-        #    종전대로 HARDWARE_BLOCKED 기록만 한다.
-        detach_wait_s = int(
-            os.environ.get("STAGE7_P3_USB_DETACH_WAIT_S", "0") or 0
-        )
-        detach_serial = "34D03DD"
-        if detach_wait_s <= 0:
-            record("usb-detach", "HARDWARE_BLOCKED",
-                   note="MASS-A(serial 34D03DD, USB3 5000M cable)의 물리 detach/reset은 "
-                        "사용자 조작 필요. 임의 장비를 분리하지 않으며, 실행하려면 해당 "
-                        "serial의 케이블만 뽑았다 다시 꽂은 뒤 새 run으로 재개.",
-                   serial=detach_serial)
-        else:
-            import glob as _glob
-
-            def _sysfs_dir_for_serial():
-                for path in _glob.glob("/sys/bus/usb/devices/*/serial"):
-                    try:
-                        with open(path, encoding="ascii", errors="ignore") as fh:
-                            if fh.read().strip() == detach_serial:
-                                return os.path.dirname(path)
-                    except OSError:
-                        continue
-                return None
-
-            def _wait_sysfs(want_present, label):
-                deadline = time.monotonic() + detach_wait_s
-                tick = 0
-                while time.monotonic() < deadline:
-                    found = _sysfs_dir_for_serial()
-                    if bool(found) == want_present:
-                        return found if want_present else True
-                    time.sleep(1.0)
-                    tick += 1
-                    if tick % 10 == 0:
-                        guard.progress(f"usb-detach-wait-{label}")
-                return None if want_present else False
-
-            initial_dir = _sysfs_dir_for_serial()
-            if initial_dir is None:
-                record("usb-detach", "FAIL",
-                       reason=f"{detach_serial} sysfs 부재 (시작 전제 위반)")
-            else:
-                print(
-                    "[coordinator] [USER-ACTION] MASS-A(serial 34D03DD) USB "
-                    f"케이블을 지금 뽑으세요 (감지 대기 ≤{detach_wait_s}s)",
-                    flush=True,
-                )
-                detached = _wait_sysfs(False, "detach")
-                if not detached:
-                    record("usb-detach", "HARDWARE_BLOCKED",
-                           note=f"분리 미감지 (대기 {detach_wait_s}s 초과) — "
-                                "사용자 조작 없이 종료, 장비 미접촉",
-                           serial=detach_serial)
-                else:
-                    detach_utc = _utc_now()
-                    print(
-                        "[coordinator] [USER-ACTION] 분리 감지. 이제 케이블을 "
-                        "다시 꽂으세요 (감지 대기 "
-                        f"≤{detach_wait_s}s)",
-                        flush=True,
-                    )
-                    new_dir = _wait_sysfs(True, "reattach")
-                    if not new_dir:
-                        record("usb-detach", "FAIL",
-                               reason="재결합 미감지 — 장비가 분리 상태로 남음",
-                               detached_utc=detach_utc)
-                    else:
-                        try:
-                            with open(os.path.join(new_dir, "speed"),
-                                      encoding="ascii") as fh:
-                                speed = fh.read().strip()
-                        except OSError:
-                            speed = "unreadable"
-                        uhd_visible = _rediscover_b210(
-                            [detach_serial]
-                        ).get(detach_serial, False)
-                        ok = speed == "5000" and uhd_visible
-                        record(
-                            "usb-detach", "PASS" if ok else "FAIL",
-                            serial=detach_serial, detached_utc=detach_utc,
-                            reattached_utc=_utc_now(), usb_speed=speed,
-                            uhd_rediscovered=bool(uhd_visible),
-                            note="물리 분리·재결합 실검증 (분리 감지→재결합→"
-                                 "USB3 5000M 복원→uhd 재열거)",
-                        )
-
-        blocking = [s for s in subcases if s["status"] == "FAIL"]
-        hw_blocked = [s for s in subcases if s["status"] == "HARDWARE_BLOCKED"]
-        if blocking:
-            status = "FAIL"
-        elif hw_blocked:
-            status = "HARDWARE_BLOCKED"
-        else:
-            status = "PASS"
+        # 7) 물리 USB detach — 자격 범위 제외 (2026-09-04 정책 변경, 사용자
+        #    지시). 실행·대기·안내·env 사용 없음. 제외 사실은 evidence detail에
+        #    기록한다 (P3_FAULT_EXCLUSION_NOTE). 과거 usb-detach evidence는 보존.
+        status = _p3_fault_status(subcases)
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
         status = "FAIL"
@@ -2623,7 +2565,11 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
             started_utc=started, ended_utc=_utc_now(),
             duration_s=time.monotonic() - t0,
             counters={"subcases": len(subcases), "retries": 0},
-            status=status, detail={"subcases": subcases, "error": error},
+            status=status,
+            detail={"subcases": subcases, "error": error,
+                    "required_subcases": list(P3_FAULT_REQUIRED_SUBCASES),
+                    "excluded_subcases": list(P3_FAULT_EXCLUDED_SUBCASES),
+                    "exclusion_note": P3_FAULT_EXCLUSION_NOTE},
             hardware=metadata.get("hardware", {}),
         )
     if status == "FAIL":

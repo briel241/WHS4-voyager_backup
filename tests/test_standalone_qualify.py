@@ -438,6 +438,94 @@ def test_ladder_excludes_link19_and_builder_ready_without_rr006():
         assert final["deferred_follow_up"]["items"]["TC-STAGE7-RR-006"] == "MISSING"
 
 
+def _coordinator_module():
+    return qualify_cmd._load_module(
+        Path(_REPO) / "VDETER" / "apps" / "stage7_coordinator_main.py",
+        "stage7_coordinator_main_p3_policy_check")
+
+
+def test_rr_p3_fault_runs_exactly_six_software_subcases():
+    """2026-09-04 정책: run_rr_p3_fault는 소프트웨어 소항목 6개만 실행·판정.
+    usb-detach 소항목·USER-ACTION 안내·STAGE7_P3_USB_DETACH_WAIT_S·
+    HARDWARE_BLOCKED 생성이 함수 본문에 없다 (AST 계약)."""
+    import ast
+    source = (Path(_REPO) / "VDETER" / "apps"
+              / "stage7_coordinator_main.py").read_text("utf-8")
+    tree = ast.parse(source)
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "run_rr_p3_fault")
+    recorded = []
+    constants = set()
+    # docstring(정책 설명)은 제외하고 실행 문장의 문자열 상수만 검사한다.
+    body = function.body[1:] if (
+        function.body and isinstance(function.body[0], ast.Expr)
+        and isinstance(getattr(function.body[0], "value", None), ast.Constant)
+        and isinstance(function.body[0].value.value, str)) else function.body
+    executable_nodes = [n for stmt in body for n in ast.walk(stmt)]
+    for node in executable_nodes:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            constants.add(node.value)
+    for node in executable_nodes:
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "record" and node.args
+                and isinstance(node.args[0], ast.Constant)):
+            recorded.append(node.args[0].value)
+    coordinator = _coordinator_module()
+    assert sorted(set(recorded)) == sorted(
+        coordinator.P3_FAULT_REQUIRED_SUBCASES)
+    assert len(coordinator.P3_FAULT_REQUIRED_SUBCASES) == 6
+    assert "usb-detach" not in recorded
+    joined = " ".join(constants)
+    assert "USER-ACTION" not in joined
+    assert "STAGE7_P3_USB_DETACH_WAIT_S" not in joined
+    assert "HARDWARE_BLOCKED" not in joined
+    assert coordinator.P3_FAULT_EXCLUDED_SUBCASES == ("usb-detach",)
+
+
+def test_rr_p3_fault_status_six_pass_or_fail():
+    """6개 전부 PASS → PASS, 하나라도 FAIL/누락 → FAIL (HARDWARE_BLOCKED 없음)."""
+    coordinator = _coordinator_module()
+    names = coordinator.P3_FAULT_REQUIRED_SUBCASES
+    all_pass = [{"name": n, "status": "PASS"} for n in names]
+    assert coordinator._p3_fault_status(all_pass) == "PASS"
+    for index in range(len(names)):
+        one_fail = [dict(s) for s in all_pass]
+        one_fail[index]["status"] = "FAIL"
+        assert coordinator._p3_fault_status(one_fail) == "FAIL", names[index]
+    assert coordinator._p3_fault_status(all_pass[:-1]) == "FAIL"  # 누락
+    # 제외 소항목이 evidence에 섞여 있어도 판정에 들어가지 않는다.
+    with_excluded = all_pass + [{"name": "usb-detach", "status": "FAIL"}]
+    assert coordinator._p3_fault_status(with_excluded) == "PASS"
+    # write_rr_evidence는 PASS/FAIL만 받는다 — 생성 가능한 값과 정합.
+    assert {coordinator._p3_fault_status(all_pass),
+            coordinator._p3_fault_status(all_pass[:-1])} <= {"PASS", "FAIL"}
+
+
+def test_reference_carries_usb_detach_limitation():
+    """final builder는 TC-007 PASS를 필수 판정하고, reference에 USB detach
+    제외 제한이 명시된다 (e2e — 실물 builder)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        assert report["final_status"] == "RESEARCH_READY"
+        reference = qualify_cmd.load_active_reference(paths)
+        tc = reference["qualification"]["tc_results"]
+        assert tc["TC-STAGE7-RR-007"]["status"] == "PASS"
+        limitation = reference["limitations"]
+        assert limitation["physical_usb_detach_recovery"] == "not exercised"
+        assert limitation["b210_hot_unplug_reenumeration_recovery"] == (
+            "not guaranteed")
+        assert limitation["session_close_and_next_run_b210_rediscovery"] == (
+            "verified as before")
+        assert limitation["vdeter_normal_communication_link17_scenarios"] == (
+            "not affected")
+        assert "not a relaxation" in limitation["usb_detach_note"]
+        # Link 19 제한도 그대로 공존한다.
+        assert limitation["link_19_implementation"] == "present"
+
+
 def test_qualify_ladder_applies_run_modes_and_gain_flow():
     """실제 사다리에서 각 phase의 resolved config run_mode와 gain 입력 흐름:
     p0 RF_OFF / p1 GAIN_CALIBRATION(gain 입력 없음) / p2·p3 OPERATIONAL이

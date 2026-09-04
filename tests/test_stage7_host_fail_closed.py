@@ -115,6 +115,131 @@ def test_function_bound_accepts_complete_matching_reference():
     assert item["dispatch_changed"] is False
 
 
+# ---------------------------------------------------------------------------
+# Phase I 조건부 승인(2026-09-04) — 실제 Phase G 결속 vs 현재 coordinator.
+# 계약 A: 패치하지 않은 진짜 Phase G reference는 변경된 coordinator를 RF 접근
+#         전에 거부해야 한다 (production `_verify_function_bound` 무수정).
+# 계약 B: synthetic Phase I 재결속(고정 해시) fixture에서만 통과하고, 다른
+#         qualification 함수 변조·run_rr_p3_fault 추가 변경은 다시 거부된다.
+# ---------------------------------------------------------------------------
+
+_COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
+
+
+def _phase_g_profile_copy():
+    """실제 Phase G profile을 적재한 in-memory 사본 (파일 무수정)."""
+    import copy
+    import glob
+
+    from apps import stage7_profile
+    candidates = sorted(glob.glob(os.path.join(
+        _REPO, "VDETER", "results", "phase-g", "phase-g-*")))
+    if not candidates:
+        raise AssertionError("phase-g reference 디렉터리가 없다")
+    nested = os.path.join(candidates[-1], "profile", "stage7-profile.json")
+    path = nested if os.path.isfile(nested) else os.path.join(
+        candidates[-1], "stage7-profile.json")
+    return copy.deepcopy(stage7_profile.load_profile(path))
+
+
+def _current_coordinator_source() -> str:
+    with open(os.path.join(_REPO, _COORDINATOR_REL), encoding="utf-8") as h:
+        return h.read()
+
+
+def _serving_runner(source: str):
+    def runner(command, **_kwargs):
+        assert command[0] == "ssh" and command[-1].startswith("cat ")
+        return _Completed(source)
+    return runner
+
+
+def _mutate_function(source: str, name: str) -> str:
+    tree = ast.parse(source)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    lines = source.splitlines(keepends=True)
+    first = node.body[0].lineno - 1
+    indent = len(lines[first]) - len(lines[first].lstrip())
+    lines.insert(first, " " * indent + "_phase_i_mutation_probe = 1\n")
+    return "".join(lines)
+
+
+def _phase_i_pinned() -> dict:
+    with open(os.path.join(_REPO, "tests", "fixtures",
+                           "stage7_phase_i_function_bindings.json"),
+              encoding="utf-8") as handle:
+        return json.load(handle)["functions"]
+
+
+def _rebind_for_phase_i(profile: dict, source: str, *,
+                        pin_run_rr_p3_fault: bool = True) -> dict:
+    """synthetic 재결속: 전체 file SHA(항상) + run_rr_p3_fault 고정 해시(선택)."""
+    spec = profile["_reference"]["qualification_critical_manifest"][
+        "function_bound_files"][_COORDINATOR_REL]
+    spec["phase_g_file_sha256"] = hashlib.sha256(
+        source.encode("utf-8")).hexdigest()
+    if pin_run_rr_p3_fault:
+        for name, pinned in _phase_i_pinned().items():
+            spec["qualified_functions"][name] = dict(pinned)
+    return profile
+
+
+def test_real_phase_g_binding_rejects_current_coordinator():
+    """계약 A: 패치 없는 실제 Phase G 결속은 현재 coordinator를 거부한다 —
+    사유는 전체 file SHA 불일치(첫 게이트)."""
+    profile = _phase_g_profile_copy()
+    source = _current_coordinator_source()
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _serving_runner(source))
+        raise AssertionError("실제 Phase G 결속이 변경된 coordinator를 통과시켰다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        text = str(exc)
+        assert "run_rr_p3_fault" in text or "전체 파일" in text, text
+
+
+def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
+    """계약 A(함수 단위): 전체 file SHA만 현재값으로 맞추고 함수 해시는 실제
+    Phase G 값 그대로면 changed=['run_rr_p3_fault']로 거부된다 — 즉 변경된
+    함수가 정확히 하나이고 그것이 승인 대상임을 실제 결속으로 확인."""
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(),
+                                  _current_coordinator_source(),
+                                  pin_run_rr_p3_fault=False)
+    try:
+        stage7_service_layer._verify_function_bound(
+            profile, "$HOME/deploy",
+            _serving_runner(_current_coordinator_source()))
+        raise AssertionError("함수 해시 불일치가 거부되지 않았다")
+    except stage7_service_layer.ServiceSessionError as exc:
+        text = str(exc)
+        assert "run_rr_p3_fault" in text, text
+        assert "changed=['run_rr_p3_fault']" in text, text
+
+
+def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():
+    """계약 B: synthetic Phase I 재결속 fixture에서만 통과. 다른 qualification
+    함수 변조(run_rr_p1)나 run_rr_p3_fault 추가 변경은 다시 거부된다."""
+    source = _current_coordinator_source()
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
+    report = stage7_service_layer._verify_function_bound(
+        profile, "$HOME/deploy", _serving_runner(source))
+    item = report[_COORDINATOR_REL]
+    assert item["pass"] is True and item["changed"] == []
+
+    for target in ("run_rr_p1", "run_rr_p3_fault"):
+        mutated = _mutate_function(source, target)
+        # 전체 file SHA는 변조본에 맞추되 함수 고정 해시는 승인값 그대로 —
+        # 함수 단위 가드가 변조를 잡아야 한다.
+        profile2 = _rebind_for_phase_i(_phase_g_profile_copy(), mutated)
+        try:
+            stage7_service_layer._verify_function_bound(
+                profile2, "$HOME/deploy", _serving_runner(mutated))
+            raise AssertionError(f"{target} 변조가 거부되지 않았다")
+        except stage7_service_layer.ServiceSessionError as exc:
+            assert f"changed=['{target}']" in str(exc), str(exc)
+
+
 def _preflight_profile():
     endpoints = {
         "MASS-A": {"serial": "A", "usb_path": "3-1", "speed_mbps": 5000},

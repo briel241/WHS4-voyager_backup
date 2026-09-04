@@ -39,6 +39,20 @@ QUALIFIED_FUNCTIONS = (
 )
 
 
+#: Phase I 승인 변경의 고정 fixture (2026-09-04, 사용자 조건부 승인).
+#: 계약 A: 기존 Phase F/G qualification 함수는 qualified commit과 완전 일치.
+#: 계약 B: 승인된 `run_rr_p3_fault`(물리 USB detach 소항목 제외)는 완료본의
+#: AST/source SHA-256으로 고정 — 이후 변경은 다시 실패로 검출된다. 이름
+#: allow-list가 아니라 해시 고정이다. root tests/와 단일 출처로 공유한다.
+PHASE_I_BINDINGS_PATH = os.path.join(
+    REPO, "tests", "fixtures", "stage7_phase_i_function_bindings.json")
+
+
+def _phase_i_bindings() -> dict:
+    with open(PHASE_I_BINDINGS_PATH, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def _function_hashes(source: str) -> dict:
     """최상위 함수별 (AST dump, unparse) 해시. 중첩 함수는 부모에 포함된다."""
     tree = ast.parse(source)
@@ -50,6 +64,40 @@ def _function_hashes(source: str) -> dict:
                 hashlib.sha256(ast.unparse(node).encode("utf-8")).hexdigest(),
             )
     return result
+
+
+def _qualification_drift(old: dict, new: dict) -> dict:
+    """계약 A·B 판정 (시험 본체가 변조 시나리오에도 재사용).
+
+    반환: {"unexpected_changed": [...], "pinned_mismatch": [...],
+           "unexpected_added": [...], "removed": [...]} — 전부 비어야 통과."""
+    bindings = _phase_i_bindings()
+    approved = {name: (spec["ast_sha256"], spec["source_sha256"])
+                for name, spec in bindings["functions"].items()}
+    unexpected_changed = [
+        name for name in QUALIFIED_FUNCTIONS
+        if name not in approved and old.get(name) != new.get(name)]
+    pinned_mismatch = [
+        name for name, pinned in approved.items() if new.get(name) != pinned]
+    expected_added = set(bindings["added_functions"]) | {
+        "_service_session_terminal_status", "_terminate_process_bounded"}
+    unexpected_added = sorted(set(new) - set(old) - expected_added)
+    removed = sorted(set(old) - set(new))
+    return {"unexpected_changed": unexpected_changed,
+            "pinned_mismatch": pinned_mismatch,
+            "unexpected_added": unexpected_added, "removed": removed}
+
+
+def _mutate_function(source: str, name: str) -> str:
+    """지정 함수 본문 첫 문장 앞에 무해한 문장을 삽입해 AST/source를 바꾼다."""
+    tree = ast.parse(source)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    lines = source.splitlines(keepends=True)
+    first = node.body[0].lineno - 1
+    indent = len(lines[first]) - len(lines[first].lstrip())
+    lines.insert(first, " " * indent + "_phase_i_mutation_probe = 1\n")
+    return "".join(lines)
 
 
 def _git_show(path_at_commit: str) -> str:
@@ -78,23 +126,62 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
                          "_run_rf_qualification이 변경됐다 — Phase F 재qualification 필요")
 
     def test_all_qualified_functions_invariant(self):
-        changed = [name for name in QUALIFIED_FUNCTIONS
-                   if self.old.get(name) != self.new.get(name)]
-        self.assertEqual(changed, [], f"qualification 경로 함수 변경: {changed}")
+        """계약 A: Phase I 승인 함수(run_rr_p3_fault)를 제외한 qualification
+        함수 전부가 qualified commit과 완전 일치. 계약 B: 승인 함수는 고정
+        해시와 정확히 일치."""
+        drift = _qualification_drift(self.old, self.new)
+        self.assertEqual(drift["unexpected_changed"], [],
+                         f"qualification 경로 함수 변경: {drift}")
+        self.assertEqual(drift["pinned_mismatch"], [],
+                         f"Phase I 승인 함수가 고정 해시와 다름: {drift}")
+
+    def test_phase_i_function_pinned_by_hash_not_by_name(self):
+        """계약 B: run_rr_p3_fault는 승인 완료본의 AST/source SHA-256과 정확히
+        일치해야 하며(이름 allow-list 아님), qualified commit 판과는 달라야
+        한다(실제로 변경된 완료본임을 증명)."""
+        pinned = _phase_i_bindings()["functions"]["run_rr_p3_fault"]
+        self.assertEqual(self.new["run_rr_p3_fault"],
+                         (pinned["ast_sha256"], pinned["source_sha256"]))
+        self.assertNotEqual(self.old["run_rr_p3_fault"],
+                            self.new["run_rr_p3_fault"])
 
     def test_no_qualified_function_removed(self):
         removed = sorted(set(self.old) - set(self.new))
         self.assertEqual(removed, [], f"함수 삭제: {removed}")
 
     def test_change_is_additive_only(self):
-        """승인된 보완은 service-session 함수와 신규 cleanup helper에 한정한다."""
+        """변경 함수 집합은 정확히 {run_mass_roc_session(Phase G),
+        run_rr_p3_fault(Phase I)}; 추가 함수는 Phase G helper 2개 +
+        Phase I `_p3_fault_status`로 한정."""
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
-        self.assertEqual(changed, ["run_mass_roc_session"], str(changed))
+        self.assertEqual(changed, sorted(_phase_i_bindings()[
+            "expected_changed_vs_qualified_commit"]), str(changed))
+        self.assertEqual(changed, ["run_mass_roc_session", "run_rr_p3_fault"])
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["_service_session_terminal_status",
+        self.assertEqual(added, ["_p3_fault_status",
+                                 "_service_session_terminal_status",
                                  "_terminate_process_bounded"],
                          str(added))
+        self.assertEqual(_qualification_drift(self.old, self.new)[
+            "unexpected_added"], [])
+
+    def test_guard_detects_mutation_of_other_qualified_function(self):
+        """다른 qualification 함수 하나(run_rr_p1)를 임의 변경하면 가드 실패."""
+        with open(os.path.join(REPO, COORDINATOR_REL), encoding="utf-8") as h:
+            source = h.read()
+        mutated = _function_hashes(_mutate_function(source, "run_rr_p1"))
+        drift = _qualification_drift(self.old, mutated)
+        self.assertEqual(drift["unexpected_changed"], ["run_rr_p1"])
+
+    def test_guard_detects_mutation_of_pinned_phase_i_function(self):
+        """새 run_rr_p3_fault의 해시가 바뀌면(추가 변경) 가드 실패."""
+        with open(os.path.join(REPO, COORDINATOR_REL), encoding="utf-8") as h:
+            source = h.read()
+        mutated = _function_hashes(_mutate_function(source, "run_rr_p3_fault"))
+        drift = _qualification_drift(self.old, mutated)
+        self.assertEqual(drift["pinned_mismatch"], ["run_rr_p3_fault"])
+        self.assertEqual(drift["unexpected_changed"], [])
 
 
 class _FakeArgs:

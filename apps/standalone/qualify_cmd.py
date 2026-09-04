@@ -68,13 +68,34 @@ LINK19_LIMITATION = {
     "link_19_standalone_qualification": "not exercised",
     "link_19_hardware_performance": "not guaranteed",
     "operational_scenario_links": "Link 11/17 only",
-    "note": ("Link 19 implementation exists in the tree (PHY/profile/registry/"
-             "unit tests untouched) but is not exercised by the standalone "
-             "qualification ladder and its hardware performance is not "
-             "guaranteed. The three operational scenarios use Link 11/17 only. "
-             "TC-STAGE7-RR-006 remains DEFERRED (record-only) in the final "
-             "builder; REQUIRED_TCS are unchanged."),
+    "link_19_note": (
+        "Link 19 implementation exists in the tree (PHY/profile/registry/"
+        "unit tests untouched) but is not exercised by the standalone "
+        "qualification ladder and its hardware performance is not "
+        "guaranteed. The three operational scenarios use Link 11/17 only. "
+        "TC-STAGE7-RR-006 remains DEFERRED (record-only) in the final "
+        "builder; REQUIRED_TCS are unchanged."),
 }
+#: RR-P3-fault 물리 USB detach 제외 (2026-09-04 정책 변경, 사용자 지정 문구).
+USB_DETACH_LIMITATION = {
+    "physical_usb_detach_recovery": "not exercised",
+    "b210_hot_unplug_reenumeration_recovery": "not guaranteed",
+    "session_close_and_next_run_b210_rediscovery": "verified as before",
+    "vdeter_normal_communication_link17_scenarios": "not affected",
+    "usb_detach_note": (
+        "TC-STAGE7-RR-007 is judged on the six software fault subcases "
+        "(stale-generation-command, worker-kill, coordinator-ipc-loss, "
+        "restart-generation-fencing, scenario-controller-ipc-loss, "
+        "stale-callback). The physical USB detach / re-attach / USB3 speed "
+        "restore / UHD re-enumeration subcase is excluded from the standalone "
+        "qualification scope: it is a hardware fault-recovery test the "
+        "project does not need, not a relaxation of VDE-TER protocol "
+        "judgement. Known issue (not fixed here): write_rr_evidence asserts "
+        "status in PASS/FAIL/ABORTED and would reject HARDWARE_BLOCKED; that "
+        "path is no longer reachable."),
+}
+#: reference `limitations`에 담기는 전체 제한 (키 충돌 없음).
+QUALIFICATION_LIMITATIONS = {**LINK19_LIMITATION, **USB_DETACH_LIMITATION}
 
 #: phase별 resolved config run_mode — **명시 고정** (2026-09-04 사용자 승인).
 #:
@@ -404,7 +425,7 @@ def issue_reference(*, ladder_id: str, binding: dict, deploy_sha256: str,
             "baseline_sha256": binding["baseline_sha256"],
             "gain": gain,
         },
-        "limitations": dict(LINK19_LIMITATION),
+        "limitations": dict(QUALIFICATION_LIMITATIONS),
         "scope": ("이 reference는 이 기계·이 배포본·이 identity·이 환경의 "
                   "표준 실행 자격만 담보한다. baseline 문서 실물 대조는 "
                   "audit 환경에서만 수행한다 (결정 8)."),
