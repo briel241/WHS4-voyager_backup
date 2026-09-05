@@ -71,8 +71,10 @@ deselect). 따라서 **"전체 저장소의 모든 시험이 clean clone에서 �
 **진행 표시(presentation)** — `progress.py`(표준 라이브러리). setup·qualify·
 run bring-up: TTY 20칸 유니코드 바(불가 시 ASCII), 같은 줄 갱신, 단계 전환
 시 확정; non-TTY/nohup/redirect: CR·ANSI 없는 UTC 줄 로그, 상태 변화·30초
-heartbeat. 세 의미: exact(실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트
-뒤 `estimated`)/waiting(host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
+heartbeat. **각 줄(단계)의 퍼센트는 그 단계 자체의 진행률**(0→100%, 단계 안에서만
+단조)이고, 사다리·bring-up 전체 진행률은 `overall=NN%` 필드다. 세 의미: exact
+(실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트 뒤 `estimated`)/waiting
+(host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
 READY 이후 시나리오 구간은 진행바 없이 `[n/N] SC-…` 순서와 service_events·
 workload trace 기반 [TX]/[RX]/[ACK]/[STEP] 상세, 실패 시 layer/reason/evidence.
 파생값은 `derived=true`. 같은 정보를 `var/runs/<id>/presentation/`·

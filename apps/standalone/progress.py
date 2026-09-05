@@ -139,7 +139,10 @@ class ProgressReporter:
 
     호출 규약: :meth:`phase`로 단계를 시작하고 :meth:`update`로 값·필드를
     갱신, :meth:`finish`로 확정한다. 다른 출력은 반드시 :meth:`log`를 거쳐야
-    진행바와 섞이지 않는다. 퍼센트는 같은 reporter 안에서 뒤로 가지 않는다.
+    진행바와 섞이지 않는다. 한 줄(단계)의 퍼센트는 **그 단계 자체의 진행률**
+    (0→100%)이고 같은 단계 안에서 뒤로 가지 않는다; 새 단계는 0부터 다시
+    센다. 여러 단계를 아우르는 전체 진행률은 호출자가 `overall=NN%` 필드로
+    싣는다(BringupTracker·QualifyProgress).
     """
 
     def __init__(self, sink=None, *, stream=None, enabled: bool = True,
@@ -211,7 +214,9 @@ class ProgressReporter:
         return max(0, min(100, percent))
 
     def _monotonic_percent(self, percent):
-        """같은 reporter 안에서 퍼센트가 뒤로 가지 않게 한다 (표시 전용)."""
+        """같은 단계 안에서 퍼센트가 뒤로 가지 않게 한다 (표시 전용).
+        :meth:`phase`가 새 단계마다 초기화한다 — 앞 단계의 100%가 다음 단계
+        줄에 눌어붙지 않는다."""
         if percent is None:
             return None
         if percent < self._max_percent:
@@ -313,6 +318,16 @@ class ProgressReporter:
             self._write_sink(text)
         self._write_evidence(text)
 
+    def _write_evidence_if_changed(self, *, force: bool = False) -> None:
+        """TTY 확정 줄의 evidence 기록 — 마지막 기록과 같은 내용이면 생략."""
+        line = self._line
+        key = (line["label"], line["mode"], self._percent(line),
+               tuple(sorted((k, str(v)) for k, v in line["fields"].items())))
+        if not force and key == self._last_emit_key:
+            return
+        self._last_emit_key = key
+        self._write_evidence(self.render_plain(line))
+
     # ---- 공개 API -------------------------------------------------------
 
     def phase(self, label: str, *, mode: str = MODE_ESTIMATED, fraction=None,
@@ -327,6 +342,7 @@ class ProgressReporter:
                           "fraction": fraction, "hold_fraction": hold_fraction,
                           "fields": dict(fields), "started": self.clock(),
                           "status": None}
+            self._max_percent = -1      # 단계별 단조 — 새 단계는 0부터
             self._last_emit_key = None
             self._emit_plain(force=True)
             self._draw_bar()
@@ -363,7 +379,7 @@ class ProgressReporter:
                                         "done".ljust(STATUS_COLUMN_WIDTH), 1)
                 self.stream.write(text + "\n")
                 self.stream.flush()
-                self._write_evidence(self.render_plain(self._line))
+                self._write_evidence_if_changed(force=(status != "done"))
             else:
                 # done은 값이 바뀌었을 때만(중복 억제), 실패·중단은 항상 기록.
                 self._emit_plain(force=(status != "done"))
@@ -498,15 +514,26 @@ class BringupTracker:
         return BRINGUP_PHASES[self.phase_index]
 
     def _overall_fraction(self, phase_fraction) -> float:
+        """bring-up 전체 진행률(가중치) — `overall=` 필드용, 바의 값이 아니다."""
         key, _label, typical, _mode = self._phase()
         inner = 0.0 if phase_fraction is None else phase_fraction
         return min(0.99, (self.completed_weight + inner * typical) / _BRINGUP_TOTAL_S)
+
+    def _overall_field(self, phase_fraction) -> str:
+        return "%d%%" % int(self._overall_fraction(phase_fraction) * 100 + 1e-9)
 
     def _start_phase(self, index: int) -> None:
         if index >= len(BRINGUP_PHASES):
             return
         if self.phase_index >= 0:
+            _k, _l, _t, prev_mode = self._phase()
             self.completed_weight += self._phase()[2]
+            # 끝난 단계는 자기 100%로 확정한다 (waiting은 퍼센트 없이 done).
+            if prev_mode == MODE_WAITING:
+                self.reporter.update(overall=self._overall_field(0.0))
+            else:
+                self.reporter.update(fraction=1.0,
+                                     overall=self._overall_field(0.0))
             self.reporter.finish("done")
         self.phase_index = index
         self.phase_started = self.clock()
@@ -515,14 +542,14 @@ class BringupTracker:
         fields = {}
         if key == "startup":
             fields["ready"] = "%d/%d" % (self.ready_endpoints, self.endpoint_total)
-            fraction = self._overall_fraction(self.ready_endpoints / self.endpoint_total)
+            fraction = self.ready_endpoints / self.endpoint_total
         elif mode == MODE_WAITING:
             fraction = None
         else:
-            fraction = self._overall_fraction(0.0)
+            fraction = 0.0
+        fields["overall"] = self._overall_field(fraction or 0.0)
         self.reporter.phase(label, mode=mode, fraction=fraction,
-                            hold_fraction=self._overall_fraction(0.0),
-                            scope="BRINGUP", **fields)
+                            hold_fraction=0.0, scope="BRINGUP", **fields)
 
     def _advance_to(self, key: str) -> None:
         for index, phase in enumerate(BRINGUP_PHASES):
@@ -542,11 +569,12 @@ class BringupTracker:
                 self.ready_endpoints = min(self.endpoint_total,
                                            self.ready_endpoints + 1)
                 if self._phase()[0] == "startup":
+                    inner = self.ready_endpoints / self.endpoint_total
                     self.reporter.update(
-                        fraction=self._overall_fraction(
-                            self.ready_endpoints / self.endpoint_total),
+                        fraction=inner,
                         ready="%d/%d" % (self.ready_endpoints,
-                                         self.endpoint_total))
+                                         self.endpoint_total),
+                        overall=self._overall_field(inner))
                 return
             if line.startswith("[coordinator] prepare/configure/arm_rx COMPLETED"):
                 self._advance_to("host_time")
@@ -604,7 +632,8 @@ class BringupTracker:
             key, _label, typical, mode = self._phase()
             if mode == MODE_ESTIMATED and self.phase_started is not None:
                 inner = min(0.95, (self.clock() - self.phase_started) / typical)
-                self.reporter.update(fraction=self._overall_fraction(inner))
+                self.reporter.update(fraction=inner,
+                                     overall=self._overall_field(inner))
             self.reporter.tick()
 
     def ready(self) -> None:
@@ -612,7 +641,8 @@ class BringupTracker:
             self._advance_to("service")
             total = format_hms(self.clock() - self.session_started)
             self.reporter.update(fraction=1.0, mode=MODE_EXACT,
-                                 label="Service session READY", total=total)
+                                 label="Service session READY", total=total,
+                                 overall="100%")
             self.reporter.finish("done")
 
     def failed_at(self, status: str = "FAILED") -> str:
@@ -984,8 +1014,9 @@ _RR_STAGES = ("prepare/configure/arm_rx", "start_cfo", "acquire_host_time",
 
 
 class QualifyProgress:
-    """qualify 진행 표시 — RR phase n/N(exact) + 전체 estimated(가중치),
-    phase 내부는 콘솔 stage 전이·fault subcase 6·pytest `[NN%]` exact."""
+    """qualify 진행 표시 — 줄마다 RR phase n/N, 바의 퍼센트는 **그 phase 자체**
+    (estimated: 경과/실측 가중치, fault subcase 6·pytest `[NN%]`는 exact),
+    사다리 전체 진행률은 `overall=NN%` 필드(가중치 합)."""
 
     FAULT_SUBCASES = 6
 
@@ -1018,6 +1049,9 @@ class QualifyProgress:
         weight = QUALIFY_WEIGHTS.get(self.phase_key, 0.0)
         return min(0.99, (self.completed_weight + inner * weight) / _QUALIFY_TOTAL_S)
 
+    def _overall_field(self, inner: float) -> str:
+        return "%d%%" % int(self._overall(inner) * 100 + 1e-9)
+
     def phase_started(self, phase: str, index: int, total: int, run_root) -> None:
         self.phase_key = phase
         self.phase_index, self.phase_total = index, total
@@ -1028,18 +1062,19 @@ class QualifyProgress:
         self._console = FileTail(Path(run_root) / "coordinator-console.log")
         self.phase_label = "%s %d/%d" % (phase.upper(), index, total)
         self.reporter.phase(self.phase_label, mode=MODE_ESTIMATED,
-                            fraction=self._overall(0.0), scope="QUALIFY",
-                            stage=self.stage)
+                            fraction=0.0, scope="QUALIFY",
+                            stage=self.stage, overall=self._overall_field(0.0))
 
     def _on_phase_console_line(self, line: str) -> None:
         f = _FAULT_RE.match(line)
         if f:
             self.faults_done += 1
+            inner = self.faults_done / self.FAULT_SUBCASES
             self.reporter.update(
-                mode=MODE_EXACT,
-                fraction=self._overall(self.faults_done / self.FAULT_SUBCASES),
+                mode=MODE_EXACT, fraction=inner,
                 subcases="%d/%d" % (self.faults_done, self.FAULT_SUBCASES),
-                last="%s:%s" % (f.group(1), f.group(2)))
+                last="%s:%s" % (f.group(1), f.group(2)),
+                overall=self._overall_field(inner))
             return
         r = _RAW_PHY_RE.match(line)
         if r:
@@ -1081,7 +1116,8 @@ class QualifyProgress:
                 weight = QUALIFY_WEIGHTS.get(self.phase_key, 1.0)
                 inner = min(0.95, (self.clock() - self._phase_started_at) / weight)
                 if self.reporter._line and self.reporter._line["mode"] == MODE_ESTIMATED:
-                    self.reporter.update(fraction=self._overall(inner))
+                    self.reporter.update(fraction=inner,
+                                         overall=self._overall_field(inner))
         if self._suite_tail is not None:
             percent = None
             for line in self._suite_tail.new_lines():
@@ -1089,16 +1125,19 @@ class QualifyProgress:
                     percent = int(m.group(1))
             if percent is not None:
                 inner = percent / 100.0
-                self.reporter.update(mode=MODE_EXACT,
-                                     fraction=self._overall(inner),
-                                     tests="%d%%" % percent)
+                self.reporter.update(mode=MODE_EXACT, fraction=inner,
+                                     tests="%d%%" % percent,
+                                     overall=self._overall_field(inner))
         self.reporter.tick()
 
     def phase_finished(self, phase: str, status: str) -> None:
         self.completed_weight += QUALIFY_WEIGHTS.get(phase, 0.0)
         self._console = None
         if status == "PASS":
-            self.reporter.update(fraction=self._overall(1.0))
+            # 이 phase 100%; overall은 완료 가중치 합(이 phase 가중치를 두 번
+            # 세지 않는다 — 예전엔 여기서 99%로 튀어 뒤 phase가 99%에 고정됐다).
+            self.reporter.update(fraction=1.0, mode=MODE_EXACT,
+                                 overall=self._overall_field(0.0))
             self.reporter.finish("done", result="PASS")
         else:
             self.reporter.finish("FAILED", result=status)
@@ -1116,14 +1155,16 @@ class QualifyProgress:
         self._suite_tail = FileTail(log_path)
         self.reporter.phase("Software suite %d/2 · %s"
                             % (self._suite_index, log_name.replace(".log", "")),
-                            mode=MODE_EXACT, fraction=self._overall(0.0),
-                            scope="QUALIFY", tests="0%")
+                            mode=MODE_EXACT, fraction=0.0,
+                            scope="QUALIFY", tests="0%",
+                            overall=self._overall_field(0.0))
 
     def suite_finished(self, log_name: str, ok: bool) -> None:
         self.completed_weight += QUALIFY_WEIGHTS.get("bundle:" + log_name, 0.0)
         self._suite_tail = None
         if ok:
-            self.reporter.update(fraction=self._overall(1.0), tests="100%")
+            self.reporter.update(fraction=1.0, tests="100%",
+                                 overall=self._overall_field(0.0))
             self.reporter.finish("done", result="PASS")
         else:
             self.reporter.finish("FAILED", result="FAIL")
@@ -1131,13 +1172,14 @@ class QualifyProgress:
     def builder_started(self) -> None:
         self.phase_key = "builder"
         self.reporter.phase("Final builder", mode=MODE_ESTIMATED,
-                            fraction=self._overall(0.0), scope="QUALIFY")
+                            fraction=0.0, scope="QUALIFY",
+                            overall=self._overall_field(0.0))
 
     def promoted(self, release_id: str) -> None:
         self.completed_weight += QUALIFY_WEIGHTS.get("builder", 0.0)
         self.reporter.update(fraction=1.0, mode=MODE_EXACT,
                              label="QUALIFIED · active reference promoted",
-                             release=release_id)
+                             release=release_id, overall="100%")
         self.reporter.finish("done")
 
 
