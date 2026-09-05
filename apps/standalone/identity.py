@@ -78,16 +78,16 @@ def ensure_identity(paths, *, now=None,
         manifest = load_identity_manifest(paths)
         if manifest is None:
             raise IdentityError(
-                "identity-manifest.json이 없거나 손상됐습니다 — "
-                "`vdeter setup --new-identity`로 재생성하십시오")
+                "identity-manifest.json is missing or corrupt — "
+                "regenerate it with `vdeter setup --new-identity`")
         return {"created": False,
                 "fingerprint": manifest.get("certificate_fingerprint")}
     if any(present.values()):
         broken = [name for name, exists in present.items() if not exists]
         raise IdentityError(
-            f"identity가 부분적으로만 존재합니다 (부재: {broken}) — 자동 "
-            "복구하지 않습니다. `vdeter setup --new-identity`로 명시적으로 "
-            "재생성하십시오")
+            f"identity is only partially present (missing: {broken}) — not "
+            "repaired automatically; regenerate it explicitly with "
+            "`vdeter setup --new-identity`")
 
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -123,7 +123,7 @@ def ensure_identity(paths, *, now=None,
 
     fingerprint = certificate_fingerprint(cert_der)
     if fingerprint.is_err:
-        raise IdentityError(f"fingerprint 계산 실패: {fingerprint.error}")
+        raise IdentityError(f"fingerprint computation failed: {fingerprint.error}")
     fingerprint_hex = fingerprint.value.hex()
 
     files["key"].write_bytes(key_pem)
@@ -141,9 +141,9 @@ def ensure_identity(paths, *, now=None,
         "subject_common_name": SUBJECT_COMMON_NAME,
         "certificate_fingerprint": fingerprint_hex,
         "previous_fingerprint": previous_fingerprint,
-        "note": ("TEST profile 전용 identity. private key 원문·해시는 어떤 "
-                 "산출물에도 기록하지 않는다. 신규 identity는 재자격 전까지 "
-                 "UNQUALIFIED다."),
+        "note": ("Identity for the TEST profile only. Neither the private key nor its hash is "
+                 "recorded in any artifact. A new identity is UNQUALIFIED until "
+                 "re-qualification."),
     }
     files["manifest"].write_text(
         json.dumps(manifest, ensure_ascii=True, sort_keys=True, indent=1),
@@ -171,35 +171,35 @@ def check_identity_consistency(paths) -> dict:
     manifest = load_identity_manifest(paths)
     manifest_fp = (manifest or {}).get("certificate_fingerprint")
     if manifest is None:
-        errors.append("identity-manifest.json 부재/손상")
+        errors.append("identity-manifest.json missing or corrupt")
 
     def fingerprint_of(pem_path):
         certificate = x509.load_pem_x509_certificate(pem_path.read_bytes())
         der = certificate.public_bytes(serialization.Encoding.DER)
         result = certificate_fingerprint(der)
         if result.is_err:
-            raise IdentityError(f"fingerprint 계산 실패: {result.error}")
+            raise IdentityError(f"fingerprint computation failed: {result.error}")
         return result.value.hex()
 
     cert_fp = store_fp = file_fp = None
     try:
         cert_fp = fingerprint_of(files["certificate"])
     except (OSError, ValueError) as exc:
-        errors.append(f"인증서 적재 실패: {exc}")
+        errors.append(f"certificate load failed: {exc}")
     try:
         store_fp = fingerprint_of(files["trust_store"])
     except (OSError, ValueError) as exc:
-        errors.append(f"trust store 적재 실패: {exc}")
+        errors.append(f"trust store load failed: {exc}")
     try:
         file_fp = files["fingerprint"].read_text(encoding="utf-8").strip()
     except OSError as exc:
-        errors.append(f"fingerprint 파일 적재 실패: {exc}")
+        errors.append(f"fingerprint file load failed: {exc}")
 
     observed = {"manifest": manifest_fp, "certificate": cert_fp,
                 "trust_store": store_fp, "fingerprint_file": file_fp}
     distinct = {value for value in observed.values() if value is not None}
     if len(distinct) != 1:
-        errors.append(f"identity 자료 간 fingerprint 불일치: {observed}")
+        errors.append(f"fingerprint mismatch between identity materials: {observed}")
     return {"pass": not errors,
             "fingerprint": cert_fp,
             "observed": observed,

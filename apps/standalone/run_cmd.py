@@ -263,7 +263,8 @@ def gain_input_from_reference(reference: dict) -> dict:
 #: bring-up 실패 중 재시도를 **금지**하는 신호 (설정·장비·키·결속 오류).
 _NON_TRANSIENT_MARKERS = (
     "BINDING_REJECTED", "config 적재 실패", "system plan 적재 실패",
-    "spawn 실패", "trust", "identity", "fingerprint", "REQUIRED_UNSET",
+    "spawn 실패", "spawn failed", "trust", "identity", "fingerprint",
+    "REQUIRED_UNSET",
     "DEVICE_ERROR", "No devices found", "USB",
 )
 _HOST_TIME_MARKERS = ("host affine fit FAIL", "acquire_host_time")

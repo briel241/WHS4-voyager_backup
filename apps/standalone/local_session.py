@@ -210,7 +210,7 @@ class LocalCoordinatorSession:
 
     def start(self) -> None:
         if self.process is not None:
-            raise LocalSessionError("세션이 이미 시작됐습니다")
+            raise LocalSessionError("session already started")
         self.run_root.mkdir(parents=True, exist_ok=True)
         # spawn 시도 사실을 먼저 기록한다 — spawn 예외가 나도 finalize가
         # bounded cleanup 확인을 생략하지 않게 (host 판과 같은 원칙).
@@ -231,7 +231,7 @@ class LocalCoordinatorSession:
         except Exception as exc:
             self._close_console_handle()
             raise LocalSessionError(
-                f"coordinator spawn 실패: {type(exc).__name__}: {exc}"
+                f"coordinator spawn failed: {type(exc).__name__}: {exc}"
             ) from exc
 
     def _close_console_handle(self) -> None:
@@ -263,7 +263,7 @@ class LocalCoordinatorSession:
                    on_stage=None) -> dict:
         """`session/ready.json`을 bounded 대기한다. 실패는 예외."""
         if self.process is None:
-            raise LocalSessionError("세션이 시작되지 않았습니다")
+            raise LocalSessionError("session not started")
         deadline = self.clock() + timeout_s
         ready_path = self.session_dir / SESSION_READY
         while self.clock() < deadline:
@@ -275,11 +275,11 @@ class LocalCoordinatorSession:
                     on_stage(line)
             if self.coordinator_exited():
                 raise LocalSessionError(
-                    "bring-up 중 coordinator가 종료했습니다 "
+                    "coordinator exited during bring-up "
                     f"(rc={self.coordinator_rc()})")
             self.sleeper(POLL_INTERVAL_S)
         raise LocalSessionError(
-            f"bring-up timeout ({timeout_s:.0f}s) — RF 실행 중단")
+            f"bring-up timeout ({timeout_s:.0f}s) — RF run aborted")
 
     # ---- workload -------------------------------------------------------
 
@@ -370,7 +370,7 @@ class LocalCoordinatorSession:
                 return result
             if self.coordinator_exited():
                 raise LocalSessionError(
-                    f"workload {workload_id} 중 세션이 종료했습니다 "
+                    f"workload {workload_id}: session exited during the workload "
                     f"(rc={self.coordinator_rc()})")
             self.sleeper(TRACE_POLL_INTERVAL_S)
         raise LocalSessionError(f"workload {workload_id} timeout")
@@ -462,7 +462,7 @@ class LocalCoordinatorSession:
         exited = self.coordinator_exited()
         rc = self.coordinator_rc()
         if self.launch_attempted and not exited:
-            problems.append("coordinator가 종료를 확인받지 못했습니다")
+            problems.append("coordinator exit was not confirmed")
 
         # done.rc — 로컬 계층이 기록한다 (모듈 docstring 참조).
         if exited and rc is not None:
@@ -477,20 +477,20 @@ class LocalCoordinatorSession:
                     os.replace(tmp, self.done_rc_path)
                 elif existing != str(rc):
                     problems.append(
-                        f"기존 done.rc({existing!r})와 회수 rc({rc}) 불일치")
+                        f"existing done.rc ({existing!r}) and reaped rc ({rc}) differ")
             except OSError as exc:
-                problems.append(f"done.rc 기록 실패: {exc}")
+                problems.append(f"failed to record done.rc: {exc}")
         if exited and rc not in (0, None):
-            problems.append(f"coordinator 비정상 종료 (rc={rc})")
+            problems.append(f"coordinator exited abnormally (rc={rc})")
 
         closed = _read_json_if_complete(self.session_dir / SESSION_CLOSED)
         if closed is None:
-            problems.append("closed.json 부재 — cleanup 미확인")
+            problems.append("closed.json missing — cleanup unconfirmed")
         else:
             if closed.get("status") != "PASS":
-                problems.append(f"원격 close status={closed.get('status')!r}")
+                problems.append(f"close status={closed.get('status')!r}")
             if (closed.get("cleanup") or {}).get("pass") is not True:
-                problems.append("cleanup pass가 true가 아님")
+                problems.append("cleanup pass is not true")
 
         probe = (self.residual_probe if self.residual_probe is not None
                  else self._default_residual_probe)
@@ -498,11 +498,11 @@ class LocalCoordinatorSession:
             residual = probe()
         except Exception as exc:  # noqa: BLE001 - probe 실패도 정직 계상
             residual = None
-            problems.append(f"잔존 프로세스 probe 실패: {exc}")
+            problems.append(f"residual process probe failed: {exc}")
         if residual is None:
-            problems.append("잔존 프로세스 확인 불가 (probe 사용 불가)")
+            problems.append("cannot check residual processes (probe unavailable)")
         elif residual:
-            problems.append(f"잔존 프로세스 발견: {residual[:3]}")
+            problems.append(f"residual processes found: {residual[:3]}")
 
         self._close_console_handle()
         return {

@@ -176,7 +176,7 @@ def measure(root: Path | str, *, now=None) -> dict:
         critical_symbols = domains.rf_critical_symbol_baseline(sources)
     except ValueError as exc:
         raise InstallationError(
-            f"RF-critical 심볼 결속 불가: {exc} — 설치가 불완전합니다") from exc
+            f"cannot bind RF-critical symbols: {exc} — the installation is incomplete") from exc
 
     domain_sha = {}
     domain_count = {}
@@ -272,15 +272,15 @@ def _load_json(path: Path) -> dict:
         data = path.read_bytes()
     except OSError as exc:
         raise InstallationError(
-            f"installation manifest가 없습니다: {path} — `./vdeter setup`을 "
-            "먼저 실행하십시오") from exc
+            f"installation manifest missing: {path} — run `./bin/vdeter setup` "
+            "first") from exc
     try:
         payload = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise InstallationError(
-            f"installation manifest 손상(JSON 아님): {path}") from exc
+            f"installation manifest corrupt (not JSON): {path}") from exc
     if not isinstance(payload, dict):
-        raise InstallationError(f"installation manifest 구조 아님: {path}")
+        raise InstallationError(f"installation manifest has an unexpected structure: {path}")
     return payload
 
 
@@ -293,15 +293,15 @@ def load_installation(paths) -> dict:
     directory = installation_dir(paths)
     record = _load_json(directory / INSTALLATION_MANIFEST)
     if record.get("artifact_type") != INSTALLATION_MANIFEST_TYPE:
-        raise InstallationError("installation manifest artifact_type 불일치")
+        raise InstallationError("installation manifest artifact_type mismatch")
     if record.get("schema_version") != SCHEMA_VERSION:
-        raise InstallationError("installation manifest schema_version 불일치")
+        raise InstallationError("installation manifest schema_version mismatch")
     files = record.get("files")
     if not isinstance(files, dict) or not files:
-        raise InstallationError("installation manifest files 부재")
+        raise InstallationError("installation manifest has no files")
     symbols = record.get("rf_critical_symbols")
     if not isinstance(symbols, dict) or not symbols:
-        raise InstallationError("installation manifest rf_critical_symbols 부재")
+        raise InstallationError("installation manifest has no rf_critical_symbols")
     recomputed = {}
     for domain in domains.BOUND_DOMAINS:
         files_map = domains.domain_files_v2(files, domain)
@@ -310,25 +310,25 @@ def load_installation(paths) -> dict:
         recorded = (record.get("domains") or {}).get(domain, {}).get("sha256")
         if recorded != recomputed[domain]:
             raise InstallationError(
-                f"installation manifest 변조 의심: {domain} digest 불일치 "
-                f"(기록 {str(recorded)[:12]} != 재계산 {recomputed[domain][:12]})")
+                f"installation manifest tampering suspected: {domain} digest mismatch "
+                f"(recorded {str(recorded)[:12]} != recomputed {recomputed[domain][:12]})")
     if record.get("installation_sha256") != _installation_sha256(recomputed):
         raise InstallationError(
-            "installation manifest 변조 의심: installation_sha256 불일치")
+            "installation manifest tampering suspected: installation_sha256 mismatch")
     for domain, name in DOMAIN_MANIFESTS.items():
         sub = _load_json(directory / name)
         if sub.get("artifact_type") != DOMAIN_MANIFEST_TYPE:
-            raise InstallationError(f"{name} artifact_type 불일치")
+            raise InstallationError(f"{name} artifact_type mismatch")
         if sub.get("domain") != domain:
-            raise InstallationError(f"{name} domain 불일치")
+            raise InstallationError(f"{name} domain mismatch")
         if sub.get("sha256") != recomputed[domain]:
             raise InstallationError(
-                f"{name} digest가 installation manifest와 다릅니다 (변조 의심)")
+                f"{name} digest differs from the installation manifest (tampering suspected)")
         if sub.get("files") != domains.domain_files_v2(files, domain):
             raise InstallationError(
-                f"{name} files가 installation manifest와 다릅니다 (변조 의심)")
+                f"{name} files differ from the installation manifest (tampering suspected)")
         if domain == domains.RF and sub.get("critical_symbols") != symbols:
-            raise InstallationError("rf-manifest critical_symbols 불일치")
+            raise InstallationError("rf-manifest critical_symbols mismatch")
     return record
 
 

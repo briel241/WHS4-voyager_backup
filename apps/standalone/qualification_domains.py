@@ -188,11 +188,11 @@ def rf_critical_symbol_baseline(file_source_map: dict) -> dict:
     for relpath, wanted in RF_CRITICAL_QUALIFY_SYMBOLS.items():
         source = file_source_map.get(relpath)
         if source is None:
-            raise ValueError(f"RF-critical 심볼 소스 없음: {relpath}")
+            raise ValueError(f"RF-critical symbol source missing: {relpath}")
         hashes = rf_critical_symbol_hashes(source, wanted)
         missing = sorted(set(wanted) - set(hashes))
         if missing:
-            raise ValueError(f"{relpath} RF-critical 심볼 누락: {missing}")
+            raise ValueError(f"{relpath} RF-critical symbols missing: {missing}")
         baseline[relpath] = hashes
     return baseline
 

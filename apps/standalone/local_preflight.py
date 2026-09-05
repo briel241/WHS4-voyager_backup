@@ -90,18 +90,18 @@ def check_b210_roles(declared_serials: dict, observed: dict) -> dict:
         seen = observed.get(serial)
         if seen is None:
             errors.append(
-                f"{role}: 선언된 serial {serial}이 USB에서 보이지 않습니다 — "
-                "케이블·전원을 확인하십시오")
+                f"{role}: declared serial {serial} is not visible on USB — "
+                "check the cable and power")
             by_role[role] = None
             continue
         required = ROLE_SPEED_CLASS[role]
         actual = speed_class(seen.get("speed_mbps"))
         if actual != required:
             errors.append(
-                f"{role}: USB 속도 등급 불일치 — 요구 {required}, 실측 "
+                f"{role}: USB speed class mismatch — required {required}, observed "
                 f"{actual}({seen.get('speed_mbps')}M). "
-                + ("USB3 포트에 연결하십시오" if required == "super"
-                   else "USB2(480M) 연결이어야 합니다"))
+                + ("connect it to a USB 3 port" if required == "super"
+                   else "it must be a USB 2 (480M) connection"))
         # usb_path는 기록만 한다 (결정 12 — 차단·재자격 사유 아님).
         by_role[role] = {"serial": serial,
                          "usb_path": seen.get("usb_path"),
@@ -143,17 +143,17 @@ def check_private_key_mode(path: Path | str, *, mode_reader=None) -> dict:
             return stat_module.S_IMODE(os.stat(p).st_mode)
     if not path.is_file():
         return {"pass": False, "present": False, "mode": None,
-                "error": f"개인키가 없습니다: {path}"}
+                "error": f"private key missing: {path}"}
     try:
         mode = mode_reader(path)
     except OSError as exc:
         return {"pass": False, "present": True, "mode": None,
-                "error": f"개인키 권한 확인 실패: {exc}"}
+                "error": f"private key permission check failed: {exc}"}
     ok = mode == 0o600
     return {"pass": ok, "present": True, "mode": oct(mode),
             "error": None if ok else
-            f"개인키 권한이 0600이 아닙니다({oct(mode)}) — "
-            f"`chmod 600 {path}` 후 재시도하십시오"}
+            f"private key permissions are not 0600 ({oct(mode)}) — "
+            f"`chmod 600 {path}` and retry"}
 
 
 def check_key_cert_match(key_path: Path | str, cert_path: Path | str):
@@ -192,10 +192,10 @@ def platform_checks(profile: str, *, runner=subprocess.run) -> dict:
             value = (done.stdout or "").strip()
         except (OSError, subprocess.SubprocessError) as exc:
             return {"pass": False, "profile": profile, "throttled": None,
-                    "error": f"vcgencmd 실행 실패: {exc}"}
+                    "error": f"vcgencmd failed: {exc}"}
         ok = value == "throttled=0x0"
         return {"pass": ok, "profile": profile, "throttled": value,
-                "error": None if ok else f"Pi throttled 상태: {value}"}
+                "error": None if ok else f"Pi throttled state: {value}"}
 
     # generic-pc — 기록 전용.
     records = {}
@@ -240,11 +240,11 @@ def run_required_preflight(*, hardware: dict, paths, key_path=None,
     residual = residual_probe()
     report["checks"]["residual_processes"] = residual
     if residual is None:
-        failures.append("잔존 프로세스 확인 불가 (pgrep 부재)")
+        failures.append("cannot check residual processes (pgrep missing)")
     elif residual:
         failures.append(
-            f"잔존 프로세스 발견: {residual[:3]} — 자동 종료하지 않습니다. "
-            "해당 프로세스를 확인·정리한 뒤 재시도하십시오")
+            f"residual processes found: {residual[:3]} — not terminated automatically; "
+            "inspect and clean them up, then retry")
 
     # identity 파일명은 identity 모듈이 단일 출처다 (W4 보완 1) —
     # setup이 만든 실제 파일과 preflight가 검사하는 파일이 항상 같다.
@@ -260,9 +260,9 @@ def run_required_preflight(*, hardware: dict, paths, key_path=None,
         match = key_cert_check(key_path, cert_path)
         report["checks"]["key_cert_match"] = match
         if match is None:
-            failures.append("key-cert 일치 확인 불가")
+            failures.append("cannot verify key-certificate match")
         elif match is False:
-            failures.append("개인키와 인증서의 공개키가 일치하지 않습니다")
+            failures.append("the private key does not match the certificate's public key")
 
     plat = platform_probe(hardware.get("platform_profile"))
     report["checks"]["platform"] = plat
@@ -273,8 +273,8 @@ def run_required_preflight(*, hardware: dict, paths, key_path=None,
     report["checks"]["disk"] = disk
     if disk["status"] == "refuse":
         failures.append(
-            f"디스크 여유 부족 ({disk['free_bytes']} bytes) — evidence를 "
-            "수동으로 옮기거나 정리한 뒤 재시도하십시오")
+            f"insufficient free disk space ({disk['free_bytes']} bytes) — move or clean up evidence "
+            "manually, then retry")
 
     report["failures"] = failures
     report["pass"] = not failures

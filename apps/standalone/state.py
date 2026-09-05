@@ -104,7 +104,7 @@ class SingleInstanceLock:
 
     def acquire(self, *, diagnostics: dict | None = None) -> None:
         if self._handle is not None:
-            raise StateError("lock을 이미 보유하고 있습니다")
+            raise StateError("lock already held")
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(self.lock_path, "a+")
         try:
@@ -112,8 +112,8 @@ class SingleInstanceLock:
         except OSError as exc:
             handle.close()
             raise StateError(
-                "다른 vdeter 프로세스가 실행 중입니다 (단일 인스턴스 lock "
-                f"보유 불가: {self.lock_path})") from exc
+                "another vdeter process is running (single-instance lock "
+                f"unavailable: {self.lock_path})") from exc
         self._handle = handle
         # 진단 기록 (판정 비사용). 기록 실패가 lock을 깨지 않는다.
         try:
@@ -159,14 +159,14 @@ def allocate_run_dir(runs_dir: Path | str, run_id: str | None = None,
 
     if run_id is not None:
         if not run_id or any(sep in run_id for sep in ("/", "\\", "..")):
-            raise StateError(f"run-id 형식이 잘못됐습니다: {run_id!r}")
+            raise StateError(f"malformed run-id: {run_id!r}")
         run_root = runs_dir / run_id
         try:
             run_root.mkdir(exist_ok=False)
         except FileExistsError:
             raise StateError(
-                f"run-id {run_id!r}가 이미 존재합니다: {run_root} — 기존 "
-                "evidence 보호를 위해 거부합니다. 다른 run-id를 쓰십시오"
+                f"run-id {run_id!r} already exists: {run_root} — refused to protect existing "
+                "evidence; use a different run-id"
             ) from None
         return run_id, run_root
 
@@ -182,7 +182,7 @@ def allocate_run_dir(runs_dir: Path | str, run_id: str | None = None,
             suffix += 1
             candidate = f"{base}-{suffix}"
             if suffix > 1000:  # 방어적 상한 — 실사용에서 도달 불가
-                raise StateError(f"run-id 접미사 소진: {base}")
+                raise StateError(f"run-id suffixes exhausted: {base}")
 
 
 def check_disk_space(path: Path | str,
