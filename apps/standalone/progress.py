@@ -751,9 +751,12 @@ def _plain(value) -> str:
 BLOCK_INDENT = "  "
 
 
-def _emit_block(out, header: str, fields) -> None:
+def _emit_block(out, header: str, fields, *, gap: bool = True) -> None:
     """`header` 다음에 (key, value) 쌍을 한 줄씩 들여써 출력한다. value가
-    None인 항목은 생략; 이미 'key=value ...' 문자열이면 그대로 한 줄."""
+    None인 항목은 생략; 이미 'key=value ...' 문자열이면 그대로 한 줄.
+    블록 사이는 빈 줄 하나로 띄운다(`gap`; 2026-09-05 사용자 요구)."""
+    if gap:
+        out("")
     out(header)
     for item in fields:
         if isinstance(item, str):
@@ -817,6 +820,7 @@ class ScenarioTracer:
                 else " " + (certificate_case or "normal"))
         prefix = "[%d/%d] " % (index, total) if total > 1 else ""
         self._steps_printed = False
+        self._summary_open = False
         _emit_block(self.out, "%s%s%s" % (prefix, scenario_id, case),
                     [("time", utc_now(self.wallclock)), ("run_id", run_id),
                      ("workload_id", workload_id or "-")])
@@ -963,13 +967,17 @@ class ScenarioTracer:
                 for key in ("remaining_waypoints", "route_linkage_id", "sog"):
                     if key in step:
                         extra.append((key, step[key]))
+            # 판정 줄 목록은 한 블록: 첫 줄 앞에만 빈 줄, 상세가 붙는 줄은 따로.
             _emit_block(self.out, "[STEP %d/%d] %-*s  %s"
-                        % (index, total, width, name, status), extra)
+                        % (index, total, width, name, status), extra,
+                        gap=(index == 1 or bool(extra)))
         self._steps_printed = True
 
     def _print_scenario_result(self, result: dict) -> None:
         self._print_steps(result.get("steps"))
         counters = result.get("counters") or {}
+        self.out("")                      # 요약 블록 시작
+        self._summary_open = True
         self.out("  counters: transfers_completed=%s transfers_failed=%s"
                  % (counters.get("transfers_completed"),
                     counters.get("transfers_failed")))
@@ -992,6 +1000,9 @@ class ScenarioTracer:
             for child in (scenario.get("results") or {}).values():
                 inner = (child or {}).get("result") or child or {}
                 self._print_steps(inner.get("steps"))
+        if not getattr(self, "_summary_open", False):
+            self.out("")                  # counters 없이 바로 요약이면 빈 줄
+            self._summary_open = True
         self.out("  result=%s  elapsed=%s  wall_clock_s=%s"
                  % (status, self._elapsed(), result.get("wall_clock_s", "?")))
         self.out("  quiescence=%s  non_terminal_transfers=%s  "
