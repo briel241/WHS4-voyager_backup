@@ -126,7 +126,7 @@ def test_allocate_run_dir_auto_suffix_and_user_refusal():
             state.allocate_run_dir(runs, "my-run")
             raise AssertionError("중복 run-id가 거부되지 않았다")
         except state.StateError as exc:
-            assert "이미 존재" in str(exc)
+            assert "already exists" in str(exc)
         for bad in ("", "a/b", "a\\b", ".."):
             try:
                 state.allocate_run_dir(runs, bad)
@@ -444,9 +444,9 @@ def test_close_escalates_and_reports_honest_failure():
         assert session.process.terminated and session.process.killed
         assert summary["escalation"] == ["terminate", "kill"]
         text = " / ".join(summary["problems"])
-        assert "closed.json 부재" in text          # cleanup 미확인 = 실패
-        assert "비정상 종료" in text
-        assert "잔존 프로세스 발견" in text
+        assert "closed.json missing" in text          # cleanup 미확인 = 실패
+        assert "exited abnormally" in text
+        assert "residual processes found" in text
         assert session.done_rc_path.read_text("utf-8").strip() == "-9"
 
 
@@ -518,7 +518,7 @@ def test_finalize_fail_closed_when_probe_unavailable():
             {"status": "PASS", "cleanup": {"pass": True}})
         summary = session.finalize()
         assert summary["pass"] is False
-        assert any("확인 불가" in p for p in summary["problems"])
+        assert any("cannot check" in p for p in summary["problems"])
 
 
 # ---------------------------------------------------------------- 이식성 계약

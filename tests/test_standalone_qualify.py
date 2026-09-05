@@ -182,7 +182,7 @@ def test_identity_consistency_four_way():
         files["fingerprint"].write_text("deadbeef0000\n", encoding="utf-8")
         tampered = identity.check_identity_consistency(paths)
         assert not tampered["pass"]
-        assert any("불일치" in e for e in tampered["errors"])
+        assert any("mismatch" in e for e in tampered["errors"])
 
 
 def test_promote_candidate_pointer_atomic():
@@ -458,7 +458,7 @@ def test_qualify_phase_failure_preserves_active_pointer():
 
         report = run(paths, tmp, phase_runner=failing_runner)
         assert report["status"] == "FAIL"
-        assert any("기존 active reference 유지" in e for e in report["errors"])
+        assert any("existing active reference kept" in e for e in report["errors"])
         assert list(report["phases"]) == ["rr-p0", "rr-p1", "rr-p2-17"]
         assert json.loads(
             paths.active_pointer.read_bytes())["release"] == "rel-prev"
@@ -469,7 +469,7 @@ def test_qualify_residual_and_timeout_fail_closed():
         paths = prepare_environment(tmp)
         report = run(paths, tmp, residual_probe=lambda: ["888 launcher"])
         assert report["status"] == "FAIL"
-        assert any("정리 미확인" in e for e in report["errors"])
+        assert any("cleanup unconfirmed" in e for e in report["errors"])
         assert not paths.active_pointer.exists()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -663,7 +663,7 @@ def test_qualify_group_uncleared_and_cleanup_anomaly_fail_closed():
             "escalation": ["term-group", "group-survived-kill"],
             "group_cleared": False, "cleanup_anomaly": False})
         assert report["status"] == "FAIL"
-        assert any("group 소멸 미확인" in e for e in report["errors"])
+        assert any("group termination unconfirmed" in e for e in report["errors"])
         assert not paths.active_pointer.exists()
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
@@ -808,7 +808,7 @@ def test_evidence_reuse_refused_on_rr_p1_run_mode_change():
             _reuse(paths, tmp, prior)
             raise AssertionError("run mode 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
-            assert "RF 심볼" in str(exc) or "핵심" in str(exc)
+            assert "RF symbols" in str(exc) or "core" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
@@ -822,7 +822,7 @@ def test_evidence_reuse_refused_on_rf_core_file_change():
             _reuse(paths, tmp, prior)
             raise AssertionError("rf 핵심 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
-            assert "핵심" in str(exc) or "rf" in str(exc)
+            assert "core" in str(exc) or "rf" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
@@ -835,7 +835,7 @@ def test_evidence_reuse_refused_on_operation_change():
             _reuse(paths, tmp, prior)
             raise AssertionError("operation 변경인데 재사용이 승격됐다")
         except qualify_cmd.QualifyError as exc:
-            assert "operation" in str(exc) or "핵심" in str(exc)
+            assert "operation" in str(exc) or "core" in str(exc)
         assert qualify_cmd.load_active_reference(paths) is None
 
 
@@ -878,7 +878,7 @@ def test_evidence_reuse_refused_when_config_binding_or_evidence_mismatch():
             _reuse(paths, tmp, prior)
             raise AssertionError("config 결속 불일치인데 승격됐다")
         except qualify_cmd.QualifyError as exc:
-            assert "결속" in str(exc)
+            assert "bound" in str(exc)
     with tempfile.TemporaryDirectory() as tmp:
         paths = prepare_environment(tmp)
         prior = _seed_prior_release(paths, tmp)
@@ -889,7 +889,7 @@ def test_evidence_reuse_refused_when_config_binding_or_evidence_mismatch():
             _reuse(paths, tmp, prior)
             raise AssertionError("evidence 교체인데 승격됐다")
         except qualify_cmd.QualifyError as exc:
-            assert "변조" in str(exc) or "다릅니다" in str(exc)
+            assert "tamper" in str(exc) or "differ" in str(exc)
 
 
 def test_evidence_reuse_requires_v2_prior_reference():

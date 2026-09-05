@@ -116,9 +116,9 @@ def test_hardware_declaration_validation():
             (lambda d: d["endpoints"]["ROC"].pop("serial"), "ROC.serial"),
             (lambda d: d["endpoints"]["MASS-B"].pop("external_power_asset"),
              "external_power_asset"),
-            (lambda d: d["wiring"].update(approved=False), "승인"),
+            (lambda d: d["wiring"].update(approved=False), "approve"),
             (lambda d: d["endpoints"]["MASS-A"].update(serial="3515425"),
-             "중복"),
+             "more than one role"),
         ]
         for mutate, needle in cases:
             try:
@@ -236,7 +236,7 @@ def test_generate_refuses_unverified_installation_and_bad_phase():
             generate(tmp, "rr-p0", installation_verified=False)
             raise AssertionError("무결 미검증 설치가 거부되지 않았다")
         except local_config.ConfigGenerationError as exc:
-            assert "무결 검증" in str(exc)
+            assert "integrity check" in str(exc)
     with tempfile.TemporaryDirectory() as tmp:
         try:
             generate(tmp, "rr-p0", installation={"installation_sha256": "zz"})
@@ -363,7 +363,7 @@ def test_b210_roles_speed_class_enforced_port_path_recorded_only():
             DECLARED, local_preflight.probe_usb_serials(sysfs3))
         assert not report3["pass"]
         text = " / ".join(report3["errors"])
-        assert "속도 등급 불일치" in text and "보이지 않습니다" in text
+        assert "speed class mismatch" in text and "not visible" in text
 
 
 def test_residual_processes_filters_and_unavailable():
@@ -477,14 +477,15 @@ def test_run_required_preflight_aggregation():
         kwargs["residual_probe"] = lambda: ["888 launcher"]
         report2 = local_preflight.run_required_preflight(**kwargs)
         assert not report2["pass"]
-        assert any("자동 종료하지 않습니다" in f for f in report2["failures"])
+        assert any("not terminated automatically" in f for f in report2["failures"])
 
         # key-cert 확인 불가(None)도 fail-closed.
         kwargs["residual_probe"] = lambda: []
         kwargs["key_cert_check"] = lambda k, c: None
         report3 = local_preflight.run_required_preflight(**kwargs)
         assert not report3["pass"]
-        assert any("확인 불가" in f for f in report3["failures"])
+        assert any("cannot verify" in f or "cannot check" in f
+                       for f in report3["failures"])
 
 
 if __name__ == "__main__":

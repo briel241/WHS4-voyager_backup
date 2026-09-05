@@ -191,7 +191,7 @@ def test_run_setup_orchestration_idempotent():
                                 apt_install=False, home=home)
             raise AssertionError("apt 누락이 거부되지 않았다")
         except setup_cmd.SetupError as exc:
-            assert "누락" in str(exc)
+            assert "missing" in str(exc)
 
 
 def test_setup_identity_passes_default_preflight():

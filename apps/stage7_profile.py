@@ -64,13 +64,13 @@ def sha256_bytes(data: bytes) -> str:
 def _no_secrets(name: str, payload: str) -> None:
     for marker in _SECRET_MARKERS:
         if marker in payload:
-            raise ProfileError(f"{name}에 비밀정보 표지가 있습니다: {marker!r}")
+            raise ProfileError(f"{name} contains a secret marker: {marker!r}")
 
 
 def load_reference(reference_path: str, *, expected_sha256: str | None = None) -> dict:
     """qualification reference를 읽고 sidecar·본문 SHA-256을 검증한다."""
     if not os.path.isfile(reference_path):
-        raise ProfileError(f"qualification reference가 없습니다: {reference_path}")
+        raise ProfileError(f"qualification reference missing: {reference_path}")
     with open(reference_path, "rb") as handle:
         raw = handle.read()
     actual = sha256_bytes(raw)
@@ -81,54 +81,54 @@ def load_reference(reference_path: str, *, expected_sha256: str | None = None) -
         # `<name>.json` → `<name>.sha256` 형태도 허용한다.
         sidecar_path = os.path.splitext(reference_path)[0] + ".sha256"
     if not os.path.isfile(sidecar_path):
-        raise ProfileError("qualification reference sidecar(.sha256)가 없습니다")
+        raise ProfileError("qualification reference sidecar (.sha256) missing")
     with open(sidecar_path, "r", encoding="utf-8") as handle:
         sidecar = handle.read().split()[0].strip()
     if sidecar != actual:
         raise ProfileError(
-            f"reference sidecar SHA 불일치: sidecar={sidecar[:16]}… "
+            f"reference sidecar SHA mismatch: sidecar={sidecar[:16]}… "
             f"actual={actual[:16]}…")
     if expected_sha256 is not None and expected_sha256 != actual:
         raise ProfileError(
-            f"profile이 결속한 reference SHA와 다릅니다: "
+            f"differs from the reference SHA bound by the profile: "
             f"profile={expected_sha256[:16]}… actual={actual[:16]}…")
 
     reference = json.loads(raw.decode("utf-8"))
     if reference.get("artifact_type") != REFERENCE_ARTIFACT_TYPE:
-        raise ProfileError(f"reference artifact_type이 다릅니다: "
+        raise ProfileError(f"reference artifact_type differs: "
                            f"{reference.get('artifact_type')!r}")
     schema = reference.get("schema_version")
     if schema not in ACCEPTED_REFERENCE_SCHEMA_VERSIONS:
-        raise ProfileError("reference schema_version이 다릅니다")
+        raise ProfileError("reference schema_version differs")
 
     qualification = reference.get("qualification") or {}
     tc = qualification.get("tc_results") or {}
     for name in ("TC-STAGE7-RR-002", "TC-STAGE7-RR-003", "TC-STAGE7-RR-004"):
         if (tc.get(name) or {}).get("status") != "PASS":
-            raise ProfileError(f"reference의 {name}이 PASS가 아닙니다")
+            raise ProfileError(f"reference {name} is not PASS")
     if schema == REFERENCE_SCHEMA_VERSION_V2:
         # v2: installation/domain digest 결속이 필수. Git commit·branch·
         # dirty·baseline Markdown SHA는 판정값이 아니다 (optional provenance).
         installation = reference.get("installation") or {}
         digest = installation.get("installation_sha256")
         if not (isinstance(digest, str) and len(digest) == 64):
-            raise ProfileError("reference(v2)에 installation_sha256이 없습니다")
+            raise ProfileError("reference (v2) has no installation_sha256")
         for key in ("rf_manifest_sha256", "operation_manifest_sha256",
                     "tooling_manifest_sha256"):
             if not (isinstance(installation.get(key), str)
                     and len(installation[key]) == 64):
-                raise ProfileError(f"reference(v2)에 installation.{key}가 없습니다")
+                raise ProfileError(f"reference (v2) has no installation.{key}")
         if not installation.get("files"):
-            raise ProfileError("reference(v2)에 installation.files가 없습니다")
+            raise ProfileError("reference (v2) has no installation.files")
     else:
         if not reference.get("qualified_source_commit"):
-            raise ProfileError("reference에 qualified_source_commit이 없습니다")
+            raise ProfileError("reference has no qualified_source_commit")
         critical = reference.get("qualification_critical_manifest") or {}
         # v1: strict_files(전체 해시 결속) + function_bound_files(함수 단위
         # 결속). 구판 호환: files 하나만 있는 형식도 받는다.
         if not (critical.get("strict_files") or critical.get("files")):
             raise ProfileError(
-                "reference에 qualification-critical manifest가 없습니다")
+                "reference has no qualification-critical manifest")
     reference["_reference_sha256"] = actual
     reference["_reference_path"] = os.path.abspath(reference_path)
     return reference
@@ -137,25 +137,25 @@ def load_reference(reference_path: str, *, expected_sha256: str | None = None) -
 def load_profile(profile_path: str) -> dict:
     """profile을 읽고 schema를 검증한 뒤 reference까지 함께 적재한다."""
     if not os.path.isfile(profile_path):
-        raise ProfileError(f"profile이 없습니다: {profile_path}")
+        raise ProfileError(f"profile missing: {profile_path}")
     with open(profile_path, "rb") as handle:
         raw = handle.read()
     _no_secrets("profile", raw.decode("utf-8", "replace"))
     profile = json.loads(raw.decode("utf-8"))
 
     if profile.get("artifact_type") != PROFILE_ARTIFACT_TYPE:
-        raise ProfileError(f"profile artifact_type이 다릅니다: "
+        raise ProfileError(f"profile artifact_type differs: "
                            f"{profile.get('artifact_type')!r}")
     if profile.get("schema_version") != PROFILE_SCHEMA_VERSION:
-        raise ProfileError("profile schema_version이 다릅니다")
+        raise ProfileError("profile schema_version differs")
     missing = [k for k in _REQUIRED_PROFILE_KEYS if k not in profile]
     if missing:
-        raise ProfileError(f"profile 필수 키 누락: {missing}")
+        raise ProfileError(f"profile required keys missing: {missing}")
 
     reference_spec = profile["qualification_reference"]
     reference_path = reference_spec.get("path")
     if not reference_path:
-        raise ProfileError("profile.qualification_reference.path가 없습니다")
+        raise ProfileError("profile.qualification_reference.path missing")
     if not os.path.isabs(reference_path):
         reference_path = os.path.normpath(
             os.path.join(os.path.dirname(os.path.abspath(profile_path)),
@@ -180,10 +180,10 @@ def validate_local_bindings(profile: dict) -> dict:
     def require(name, condition, detail=""):
         checks[name] = {"pass": bool(condition), "detail": detail}
         if not condition:
-            raise ProfileError(f"{name} 실패: {detail}")
+            raise ProfileError(f"{name} failed: {detail}")
 
     # baseline
-    require("baseline_sha256 결속",
+    require("baseline_sha256 binding",
             profile["baseline_sha256"] == reference["baseline_sha256"],
             f"profile={profile['baseline_sha256'][:16]}… "
             f"reference={reference['baseline_sha256'][:16]}…")
@@ -195,7 +195,7 @@ def validate_local_bindings(profile: dict) -> dict:
     for path, key, label in ((artifact_path, "artifact_sha256", "gain artifact"),
                              (input_path, "artifact_input_sha256", "gain artifact input")):
         if not os.path.isfile(path):
-            raise ProfileError(f"{label} 파일이 없습니다: {path}")
+            raise ProfileError(f"{label} file missing: {path}")
         actual = sha256_file(path)
         require(f"{label} SHA", actual == reference["gain"][key],
                 f"actual={actual[:16]}… reference={reference['gain'][key][:16]}…")
@@ -203,11 +203,11 @@ def validate_local_bindings(profile: dict) -> dict:
     # gain input이 artifact를 가리키는지 (공식 계약)
     with open(input_path, "rb") as handle:
         gain_input = json.loads(handle.read().decode("utf-8"))
-    require("gain input의 source_gain_artifact_sha256",
+    require("gain input source_gain_artifact_sha256",
             gain_input.get("source_gain_artifact_sha256")
             == reference["gain"]["artifact_sha256"],
             str(gain_input.get("source_gain_artifact_sha256"))[:16])
-    require("공통 RX gain 결속",
+    require("common RX gain binding",
             gain_input.get("endpoint_common_rx_gain_db")
             == reference["gain"]["endpoint_common_rx_gain_db"],
             str(gain_input.get("endpoint_common_rx_gain_db")))
@@ -216,22 +216,22 @@ def validate_local_bindings(profile: dict) -> dict:
     require("wiring profile",
             profile["wiring_profile"] == reference["wiring_profile"],
             profile["wiring_profile"])
-    require("endpoint 매핑",
+    require("endpoint mapping",
             profile["endpoints"] == reference["hardware"]["endpoints"],
             "profile.endpoints != reference.hardware.endpoints")
-    require("RF 설정 결속",
+    require("RF settings binding",
             profile["rf_settings"] == reference["rf_settings"],
             "profile.rf_settings != reference.rf_settings")
     forbidden = reference["hardware"].get("forbidden_legacy_serial")
     serials = {e["serial"] for e in profile["endpoints"].values()}
-    require("금지 legacy serial 미사용", forbidden not in serials, str(forbidden))
+    require("forbidden legacy serial not used", forbidden not in serials, str(forbidden))
 
     # trust: 개인키는 경로와 요구 권한만 기술한다(내용·해시 금지).
     trust = profile["trust"]
     for key in ("certificate_path", "trust_store_path", "private_key_path",
                 "private_key_required_mode"):
-        require(f"trust.{key} 존재", key in trust, str(sorted(trust)))
-    require("trust 개인키 해시 미기록",
+        require(f"trust.{key} present", key in trust, str(sorted(trust)))
+    require("trust private key hash not recorded",
             not any("sha" in k.lower() and "key" in k.lower() for k in trust),
             str(sorted(trust)))
 

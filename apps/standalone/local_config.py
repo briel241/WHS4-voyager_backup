@@ -82,25 +82,25 @@ def load_standalone_binding(path: Path | str) -> dict:
     path = Path(path)
     if not path.is_file():
         raise ConfigGenerationError(
-            f"standalone-binding이 없습니다: {path} — 배포물 패키징 시 "
-            "make_standalone_binding.py가 생성해야 합니다")
+            f"standalone-binding missing: {path} — the deployment packager "
+            "(make_standalone_binding.py) must generate it")
     binding = json.loads(path.read_bytes().decode("utf-8"))
     if binding.get("artifact_type") != "STAGE7_STANDALONE_BINDING_V1":
-        raise ConfigGenerationError("standalone-binding artifact_type 불일치")
+        raise ConfigGenerationError("standalone-binding artifact_type mismatch")
     head = binding.get("source_head")
     if not (isinstance(head, str) and len(head) == 40
             and all(c in "0123456789abcdef" for c in head)):
         raise ConfigGenerationError(
-            "standalone-binding source_head가 40-hex commit이 아닙니다")
+            "standalone-binding source_head is not a 40-hex commit")
     if binding.get("source_worktree_dirty") is not False:
         raise ConfigGenerationError(
             "standalone-binding source_worktree_dirty != false — dirty "
-            "트리에서 패키징된 배포물은 결속 근거가 없습니다")
+            "tree packaging gives the deployment no binding basis")
     if not _is_sha256(binding.get("baseline_sha256")):
-        raise ConfigGenerationError("standalone-binding baseline_sha256 비정상")
+        raise ConfigGenerationError("standalone-binding baseline_sha256 is malformed")
     frozen = binding.get("frozen_files")
     if not isinstance(frozen, dict) or not frozen:
-        raise ConfigGenerationError("standalone-binding frozen_files 부재")
+        raise ConfigGenerationError("standalone-binding has no frozen_files")
     return binding
 
 
@@ -109,48 +109,48 @@ def parse_hardware_declaration(path: Path | str) -> dict:
     path = Path(path)
     if not path.is_file():
         raise ConfigGenerationError(
-            f"hardware.toml이 없습니다: {path} — `vdeter setup`이 만든 초안을 "
-            "편집·승인하십시오 (templates/hardware.toml.example 참조)")
+            f"hardware.toml missing: {path} — edit and approve the draft written by `vdeter setup` "
+            "(see templates/hardware.toml.example)")
     with open(path, "rb") as handle:
         declaration = tomllib.load(handle)
     errors = []
     if declaration.get("schema_version") != 1:
-        errors.append("schema_version은 1이어야 합니다")
+        errors.append("schema_version must be 1")
     if declaration.get("platform_profile") not in ("pi", "generic-pc"):
-        errors.append("platform_profile은 'pi' 또는 'generic-pc'여야 합니다")
+        errors.append("platform_profile must be 'pi' or 'generic-pc'")
     endpoints = declaration.get("endpoints") or {}
     unfilled = []
     for role in ("MASS-A", "MASS-B", "ROC"):
         serial = (endpoints.get(role) or {}).get("serial")
         if not serial or not isinstance(serial, str):
-            errors.append(f"endpoints.{role}.serial이 없습니다")
+            errors.append(f"endpoints.{role}.serial is missing")
         elif serial == "REQUIRED_FILL":
             unfilled.append(role)
     if unfilled:
         # setup 초안 그대로 — 중복 오류 대신 기입 안내를 낸다 (Pi 실측 UX).
-        errors.append(f"endpoints.{'/'.join(unfilled)}.serial이 초안 값"
-                      "(REQUIRED_FILL)입니다 — 각 역할의 B210 serial을 "
-                      "기입하십시오 (초안 주석의 탐지 목록 참조)")
+        errors.append(f"endpoints.{'/'.join(unfilled)}.serial is still the draft value"
+                      " (REQUIRED_FILL) — fill in the B210 serial for each role "
+                      "(see the detected list in the draft comments)")
     asset = (endpoints.get("MASS-B") or {}).get("external_power_asset")
     if not asset or asset == "REQUIRED_FILL":
-        errors.append("endpoints.MASS-B.external_power_asset이 없습니다 "
-                      "(사용자만 제공할 수 있는 물리 자산 ID)")
+        errors.append("endpoints.MASS-B.external_power_asset is missing "
+                      "(a physical asset ID only the operator can provide)")
     serials = [
         (endpoints.get(role) or {}).get("serial")
         for role in ("MASS-A", "MASS-B", "ROC")
     ]
     filled = [s for s in serials if s and s != "REQUIRED_FILL"]
     if len(set(filled)) != len(filled):
-        errors.append("역할별 serial이 중복됩니다")
+        errors.append("the same serial is assigned to more than one role")
     wiring = declaration.get("wiring") or {}
     if not wiring.get("profile"):
-        errors.append("wiring.profile이 없습니다")
+        errors.append("wiring.profile is missing")
     if wiring.get("approved") is not True:
-        errors.append("wiring.approved = true가 아닙니다 — 배선을 확인한 뒤 "
-                      "사용자가 직접 승인해야 실행할 수 있습니다")
+        errors.append("wiring.approved is not true — verify the wiring, then "
+                      "approve it yourself before running")
     if errors:
         raise ConfigGenerationError(
-            "hardware.toml 검증 실패:\n  - " + "\n  - ".join(errors))
+            "hardware.toml validation failed:\n  - " + "\n  - ".join(errors))
     return declaration
 
 
@@ -320,20 +320,20 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
 
     if installation_verified is not True:
         raise ConfigGenerationError(
-            "설치 무결 검증(installation manifest 재측정)이 통과하지 않았습니다 "
-            "— 결속 근거가 없어 config를 생성하지 않습니다")
+            "installation integrity check (installation manifest re-measurement) did not pass "
+            "— no binding basis, so no config is generated")
     if rr_phase not in PHASE_DEADLINES_S:
-        raise ConfigGenerationError(f"알 수 없는 rr_phase: {rr_phase!r}")
+        raise ConfigGenerationError(f"unknown rr_phase: {rr_phase!r}")
     installation_sha256 = (installation or {}).get("installation_sha256")
     if not _is_sha256(installation_sha256):
-        raise ConfigGenerationError("installation_sha256이 sha256이 아님")
+        raise ConfigGenerationError("installation_sha256 is not a sha256")
     domain_digests = {}
     for domain in ("rf", "operation", "tooling"):
         value = ((installation.get("domains") or {}).get(domain) or {}).get(
             "sha256")
         if not _is_sha256(value):
             raise ConfigGenerationError(
-                f"installation {domain} digest가 sha256이 아님")
+                f"installation {domain} digest is not a sha256")
         domain_digests[domain] = value
     deployment_manifest_relpath = INSTALLATION_MANIFEST_RELPATH
     deployment_manifest_sha256 = installation_sha256
@@ -410,7 +410,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         )
         if loaded.is_err:
             raise ConfigGenerationError(
-                f"{endpoint} config 검증 실패: {loaded.error}")
+                f"{endpoint} config validation failed: {loaded.error}")
         out_path = out_dir / "endpoints" / f"{endpoint}.toml"
         out_path.write_text(text, encoding="utf-8", newline="\n")
         resolved_sha[endpoint] = loaded.value.resolved_sha256

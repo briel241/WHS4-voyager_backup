@@ -161,7 +161,7 @@ def test_write_load_verify_roundtrip_atomic_and_tamper_detection():
             im.load_installation(paths)
             raise AssertionError("변조가 거부되지 않았다")
         except im.InstallationError as exc:
-            assert "변조" in str(exc)
+            assert "tamper" in str(exc)
         im.write_installation(paths, record)
         # 변조 2: 영역 manifest 파일만 바꿈 → 상호 정합 실패.
         sub = directory / "operation-manifest.json"

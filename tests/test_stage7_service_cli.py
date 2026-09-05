@@ -154,7 +154,7 @@ def test_missing_gain_artifact_rejected():
             stage7_profile.validate_local_bindings(profile)
             raise AssertionError("없는 gain artifact가 통과했다")
         except stage7_profile.ProfileError as exc:
-            assert "없습니다" in str(exc)
+            assert "missing" in str(exc)
 
 
 def test_profile_rejects_secret_markers():
@@ -167,7 +167,7 @@ def test_profile_rejects_secret_markers():
             stage7_profile.load_profile(path)
             raise AssertionError("개인키 해시 필드가 통과했다")
         except stage7_profile.ProfileError as exc:
-            assert "비밀정보" in str(exc)
+            assert "secret marker" in str(exc)
 
 
 # ------------------------------------------------------- critical/preflight 게이트
