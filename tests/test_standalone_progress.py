@@ -187,6 +187,7 @@ def _console_lines():
         "[guard:MASS-ROC-SESSION] progress #64 terminal:validate_rf_time",
         "[coordinator] validate_rf_time PRE COMPLETED",
         "[guard:MASS-ROC-SESSION] progress #95 terminal:prepare_active_bridge",
+        "[coordinator] active bridge COMMITTED",
         "[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED",
         "[guard:MASS-ROC-SESSION] progress #133 terminal:open_service_admission",
         "[coordinator] publish_service_start COMPLETED — RUNNING",
@@ -227,9 +228,15 @@ def test_bringup_tracker_phases_exact_waiting_estimated_ready():
         pre = [l for l in lines if "RF-time PRE" in l][-1]
         # 200s/457s → 이 단계 43%; overall=(15+448+0.43*457)/1392 ≈ 47%.
         assert "] 43% estimated RF-time PRE" in pre and "overall=47%" in pre
-        feed(8); feed(9); feed(10); feed(11); feed(12)
+        feed(8); feed(9)
         pre_done = [l for l in lines if "RF-time PRE" in l][-1]
         assert "] 100% RF-time PRE" in pre_done
+        assert "Active bridge commit" in lines[-1]
+        feed(10)   # active bridge COMMITTED → RF-time POST 검증 시작
+        assert "] 0% estimated RF-time POST validation" in lines[-1]
+        clock.advance(100); tracker.poll()
+        assert "] 21% estimated RF-time POST validation" in lines[-1]
+        feed(11); feed(12); feed(13)
         tracker.ready()
         assert "Service session READY" in lines[-1] and "100%" in lines[-1]
         assert "total=" in lines[-1] and "overall=100%" in lines[-1]
@@ -267,6 +274,10 @@ def test_bringup_bar_starts_at_zero_after_preflight_on_same_reporter():
             gates.gate(name)
         gates.done()
         assert "100% Preflight" in lines[-1]
+        # 게이트 줄은 각각 자기 과업: 시작 0% → 확정 100% (전체 위치는 gate=n/N).
+        finals = [l for l in lines if "Preflight" in l and "100%" in l]
+        assert len(finals) == 5 and all("gate=" in l for l in finals), lines
+        assert not any(("20%" in l or "40%" in l) and "Preflight" in l for l in lines)
         pg.BringupTracker(reporter, console_log=console, clock=clock)
         assert "] 0% Endpoint startup" in lines[-1] and "ready=0/3" in lines[-1]
         reporter.close()
@@ -304,6 +315,15 @@ def test_qualify_percent_is_per_phase_and_overall_is_a_field():
         qp.phase_finished("rr-p2-17", "PASS")
         start("rr-p3-fault", 4)
         assert "] 0% estimated RR-P3-FAULT 4/4" in lines[-1] and "overall=84%" in lines[-1]
+        # estimated(경과) → exact(subcase) 전환 때 overall이 뒤로 가지 않는다
+        # (경과 60s ≈ 85%, 첫 subcase 1/6 ≈ 84%: 후퇴 대신 85% 유지).
+        clock.advance(60); qp.tick()
+        assert "overall=85%" in lines[-1]
+        console = Path(tmp) / "rr-p3-fault" / "coordinator-console.log"
+        with open(console, "a", encoding="utf-8") as h:
+            h.write("[coordinator] fault stale-generation-command: PASS {}\n")
+        clock.advance(6); qp.tick()
+        assert "subcases=1/6" in lines[-1] and "overall=85%" in lines[-1]
         qp.phase_finished("rr-p3-fault", "PASS")
         log = Path(tmp) / "unit-contract.log"
         log.write_text("", encoding="utf-8")

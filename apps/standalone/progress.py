@@ -520,7 +520,9 @@ class BringupTracker:
         return min(0.99, (self.completed_weight + inner * typical) / _BRINGUP_TOTAL_S)
 
     def _overall_field(self, phase_fraction) -> str:
-        return "%d%%" % int(self._overall_fraction(phase_fraction) * 100 + 1e-9)
+        percent = int(self._overall_fraction(phase_fraction) * 100 + 1e-9)
+        self._overall_max = max(getattr(self, "_overall_max", 0), percent)
+        return "%d%%" % self._overall_max          # 전체 진행률도 후퇴 없음
 
     def _start_phase(self, index: int) -> None:
         if index >= len(BRINGUP_PHASES):
@@ -584,6 +586,11 @@ class BringupTracker:
                 return
             if line.startswith("[coordinator] validate_rf_time PRE COMPLETED"):
                 self._advance_to("active_bridge")
+                return
+            if line.startswith("[coordinator] active bridge COMMITTED"):
+                # bridge 확정 → RF-time POST 검증 시작 (실측 ~7.6분; 없으면
+                # POST 구간 전체가 'Active bridge commit'으로 표시됐다).
+                self._advance_to("rf_time_post")
                 return
             if line.startswith("[coordinator] validate_rf_time POST COMPLETED"):
                 self._advance_to("service")
@@ -1107,6 +1114,10 @@ class QualifyProgress:
     # ---- 준비 게이트 --------------------------------------------------------
 
     def gate(self, name: str, **fields) -> None:
+        line = self.reporter._line
+        if line is not None and line["status"] is None \
+                and str(line["label"]).startswith("Preflight"):
+            self.reporter.update(fraction=1.0)   # 앞 게이트는 자기 100%로 확정
         self.reporter.phase("Preflight · %s" % name, mode=MODE_EXACT,
                             fraction=0.0, scope="QUALIFY", **fields)
 
@@ -1117,7 +1128,15 @@ class QualifyProgress:
         return min(0.99, (self.completed_weight + inner * weight) / _QUALIFY_TOTAL_S)
 
     def _overall_field(self, inner: float) -> str:
-        return "%d%%" % int(self._overall(inner) * 100 + 1e-9)
+        percent = int(self._overall(inner) * 100 + 1e-9)
+        self._overall_max = max(getattr(self, "_overall_max", 0), percent)
+        return "%d%%" % self._overall_max          # 전체 진행률도 후퇴 없음
+
+    def _estimated_inner(self) -> float:
+        weight = QUALIFY_WEIGHTS.get(self.phase_key, 1.0)
+        if self._phase_started_at is None:
+            return 0.0
+        return min(0.95, (self.clock() - self._phase_started_at) / weight)
 
     def phase_started(self, phase: str, index: int, total: int, run_root) -> None:
         self.phase_key = phase
@@ -1155,7 +1174,12 @@ class QualifyProgress:
                     self.stage = stage + " done"
                     fields = {"stage": self.stage}
                     if stage == "acquire_host_time":
-                        self.reporter.update(mode=MODE_ESTIMATED, **fields)
+                        # waiting → estimated 복귀: 같은 갱신에서 퍼센트·overall도
+                        # 즉시 경과 기준으로 맞춘다 (다음 tick까지 묵은 값 방지).
+                        inner = self._estimated_inner()
+                        self.reporter.update(mode=MODE_ESTIMATED, fraction=inner,
+                                             overall=self._overall_field(inner),
+                                             **fields)
                     else:
                         self.reporter.update(**fields)
                     return
@@ -1180,8 +1204,7 @@ class QualifyProgress:
             for line in self._console.new_lines():
                 self._on_phase_console_line(line)
             if self._phase_started_at is not None:
-                weight = QUALIFY_WEIGHTS.get(self.phase_key, 1.0)
-                inner = min(0.95, (self.clock() - self._phase_started_at) / weight)
+                inner = self._estimated_inner()
                 if self.reporter._line and self.reporter._line["mode"] == MODE_ESTIMATED:
                     self.reporter.update(fraction=inner,
                                          overall=self._overall_field(inner))
@@ -1266,11 +1289,12 @@ class SetupProgress:
         self.total = len(SETUP_STEPS)
 
     def step(self, name: str, **fields) -> None:
+        if self.index:
+            self.reporter.update(fraction=1.0)   # 앞 단계는 자기 100%로 확정
         self.index += 1
         self.reporter.phase("Setup · %s" % name, mode=MODE_EXACT,
-                            fraction=(self.index - 1) / self.total,
-                            scope="SETUP", step="%d/%d" % (self.index, self.total),
-                            **fields)
+                            fraction=0.0, scope="SETUP",
+                            step="%d/%d" % (self.index, self.total), **fields)
 
     def done(self) -> None:
         self.reporter.update(fraction=1.0)
@@ -1290,10 +1314,11 @@ class GateProgress:
         self.scope = scope
 
     def gate(self, name: str, **fields) -> None:
+        if self.index:
+            self.reporter.update(fraction=1.0)   # 앞 게이트는 자기 100%로 확정
         self.index += 1
         self.reporter.phase("Preflight · %s" % name, mode=MODE_EXACT,
-                            fraction=(self.index - 1) / max(1, self.total),
-                            scope=self.scope,
+                            fraction=0.0, scope=self.scope,
                             gate="%d/%d" % (self.index, self.total), **fields)
 
     def done(self) -> None:
