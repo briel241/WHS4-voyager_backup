@@ -83,6 +83,7 @@ def make_session_factory(script=None):
 
         def wait_ready(self, *, timeout_s=None, on_stage=None):
             if on_stage:
+                on_stage("MASS-A 연결됨")   # coordinator 원문(한국어) → 표시는 영어
                 on_stage("acquire_host_time COMPLETED")
             index = len(instances) - 1
             interrupts = script.get("bringup_interrupt") or []
@@ -365,6 +366,7 @@ def test_run_noninteractive_all_pass_end_to_end():
         text = "\n".join(lines)
         assert "QUALIFIED (reference" in text
         assert "SESSION READY" in text
+        assert "MASS-A connected" in text and "연결됨" not in text
         # bring-up 진행 표시(non-TTY 줄 로그)와 시나리오 순서·추적 출력.
         assert "[BRINGUP]" in text and "Endpoint startup" in text
         assert "Service session READY" in text

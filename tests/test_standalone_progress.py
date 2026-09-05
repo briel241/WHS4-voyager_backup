@@ -384,6 +384,9 @@ def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
                               certificate_case="normal",
                               workload_id="run-1-sc006-002", run_id="run-1")
         assert lines[0] == "[2/4] SC-VDE-006"
+        # 헤더 뒤에 key=value 한 줄씩 (세로 블록).
+        assert lines[1:4] == ["  time=2027-01-15T08:00:00Z", "  run_id=run-1",
+                              "  workload_id=run-1-sc006-002"]
         tid = "8f73c821-0000-4000-8000-000000000001"
         with open(events / "ROC.jsonl", "a", encoding="utf-8") as h:
             h.write(_service_event(transfer_id=tid, transfer_state="QUEUED", t_mono=100.0))
@@ -406,13 +409,18 @@ def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
             h.write(_service_event(transfer_id=tid, transfer_state="COMPLETED", t_mono=112.0))
         tracer.poll()
         joined = "\n".join(lines)
-        assert "[TX] QUEUED  endpoint=ROC  transfer_id=8f73c821…" in joined
-        assert "[TX] TRANSMITTING" in joined and "since_queued=3.500s derived=true" in joined
-        assert ("[RX] DATA_RECEIVED  endpoint=MASS-A  payload_format=sc_vde.route_control.command"
-                "  application_bytes=29  payload_sha256=9b28d7740000…  src=ROC(222222222)"
-                "  dst=MASS-A(111111111)") in joined
-        assert "[TX] COMPLETED" in joined and "ack_correlation=derived" in joined
-        assert "ack_latency=6.000s" in joined
+        # 세로 블록: 헤더 한 줄 + 들여쓴 필드 한 줄씩. 가로 한 줄 형식은 없다.
+        assert "[TX] QUEUED\n  endpoint=ROC\n  transfer_id=8f73c821…\n" in joined
+        assert ("[TX] TRANSMITTING\n  endpoint=ROC\n  transfer_id=8f73c821…\n"
+                "  since_queued=3.500s derived=true\n") in joined
+        assert ("[RX] DATA_RECEIVED\n  endpoint=MASS-A\n"
+                "  payload_format=sc_vde.route_control.command\n"
+                "  application_bytes=29\n  payload_sha256=9b28d7740000…\n"
+                "  src=ROC(222222222)\n  dst=MASS-A(111111111)\n") in joined
+        assert ("[TX] COMPLETED\n  endpoint=ROC\n  transfer_id=8f73c821…\n"
+                "  since_queued=12.000s derived=true\n  ack_correlation=derived\n"
+                "  ack_latency=6.000s\n  derived=true") in joined
+        assert not any(l.startswith("[TX]") and "endpoint=" in l for l in lines)
         # 종료 시 workload trace·result 상세.
         tracer.on_trace_row({"event": "submit", "step": "006-steering-command",
                              "t_utc": "2026-09-05T12:25:14Z", "transfer_id": tid,
@@ -436,12 +444,77 @@ def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
                                                "transfers_observed": 5}},
                                evidence_dir=run_root / "workloads" / "x")
         joined = "\n".join(lines)
-        assert "[STEP 1/1] 006-steering-transfer  PASS  transfer_id=8f73c821…  state=COMPLETED  byte_exact=true" in joined
-        assert "counters: transfers_completed=1" in joined
-        assert "quiescence=PASS" in joined and "evidence=" in joined
+        assert ("[STEP] 006-steering-command  submit\n  time=2026-09-05T12:25:14Z\n"
+                "  transfer_id=8f73c821…\n  src=ROC(222222222)\n  dst=MASS-A(111111111)\n"
+                "  payload_format=sc_vde.route_control.command\n  application_bytes=29\n"
+                "  payload_sha256=9b28d7740000…\n  ack_required=true\n") in joined
+        assert ("[STEP 1/1] 006-steering-transfer  PASS\n  transfer_id=8f73c821…\n"
+                "  state=COMPLETED\n  byte_exact=true\n  payload_sha256=true\n") in joined
+        assert ("  counters: transfers_completed=1 transfers_failed=0\n"
+                "            wrong_destination=0 mismatched_ack=0 duplicates=0\n") in joined
+        assert "  result=PASS  elapsed=" in joined and "wall_clock_s=75.2" in joined
+        assert "  quiescence=PASS  non_terminal_transfers=0  transfers_observed=5" in joined
+        assert "  workers_running=-  launchers_alive=-  faults=-" not in joined
+        assert "evidence=" in joined
         # 시나리오 구간에는 퍼센트 바가 없다.
         assert "%" not in joined.replace("100%", "")  # 퍼센트 문자 자체가 없다
         assert "█" not in joined and "[#" not in joined
+
+
+def test_scenario_tracer_prints_step_pairs_from_trace_and_falls_back_to_session_result():
+    """실측 workload trace의 scenario_result.steps는 [name, status] 쌍이다
+    (dict 아님) — 예전 코드는 이를 건너뛰어 [STEP n/N] 줄이 전혀 나오지 않았다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        run_root = Path(tmp) / "run-3"
+        (run_root / "evidence" / "service_events").mkdir(parents=True)
+        lines = []
+        tracer = pg.ScenarioTracer(lines.append, run_root=run_root, clock=Clock())
+        tracer.start_workload(index=1, total=4, scenario_id="SC-VDE-005",
+                              certificate_case="normal", workload_id="w5",
+                              run_id="run-3")
+        tracer.on_trace_row({"event": "scenario_result", "status": "PASS",
+                             "steps": [["005-command-transfer", "PASS"],
+                                       ["005-route-applied", "PASS"],
+                                       ["005-mass-b-clean", "PASS"]],
+                             "counters": {"transfers_completed": 2,
+                                          "transfers_failed": 0,
+                                          "wrong_destination": 0,
+                                          "mismatched_ack": 0, "duplicates": 0}})
+        joined = "\n".join(lines)
+        assert "[STEP 1/3] 005-command-transfer  PASS" in joined
+        assert "[STEP 2/3] 005-route-applied     PASS" in joined
+        assert "[STEP 3/3] 005-mass-b-clean      PASS" in joined
+        # session result의 dict steps는 trace가 이미 찍었으면 반복하지 않는다.
+        tracer.finish_workload({"status": "PASS", "wall_clock_s": 18.4,
+                                "quiescence": {"pass": True},
+                                "scenario": {"results": {"SC-VDE-005": {
+                                    "steps": [{"name": "005-command-transfer",
+                                               "status": "PASS"}]}}}},
+                               evidence_dir=run_root / "workloads" / "w5")
+        assert "\n".join(lines).count("[STEP 1/") == 1
+        # trace에 scenario_result가 없었던 workload는 session result로 출력.
+        lines.clear()
+        tracer.start_workload(index=2, total=4, scenario_id="SC-VDE-006",
+                              certificate_case="normal", workload_id="w6",
+                              run_id="run-3")
+        tracer.finish_workload({"status": "PASS", "wall_clock_s": 80.6,
+                                "quiescence": {"pass": True},
+                                "scenario": {"results": {"SC-VDE-006": {
+                                    "steps": [{"name": "006-steering-transfer",
+                                               "status": "PASS",
+                                               "state": "COMPLETED",
+                                               "transfer_id": "32d95f97-1"}]}}}},
+                               evidence_dir=None)
+        joined = "\n".join(lines)
+        assert ("[STEP 1/1] 006-steering-transfer  PASS\n  transfer_id=32d95f97…\n"
+                "  state=COMPLETED") in joined
+
+
+def test_bringup_stage_lines_are_english():
+    from apps.standalone import run_cmd
+    assert run_cmd.english_stage_line("MASS-A 연결됨") == "MASS-A connected"
+    assert run_cmd.english_stage_line("acquire_host_time COMPLETED") == \
+        "acquire_host_time COMPLETED"
 
 
 def test_scenario_tracer_failure_block_has_layer_reason_and_evidence():
