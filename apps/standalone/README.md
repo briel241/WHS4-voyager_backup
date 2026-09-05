@@ -76,7 +76,9 @@ heartbeat. **각 줄(단계)의 퍼센트는 그 단계 자체의 진행률**(0�
 (실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트 뒤 `estimated`)/waiting
 (host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
 READY 이후 시나리오 구간은 진행바 없이 `[n/N] SC-…` 순서와 service_events·
-workload trace 기반 [TX]/[RX]/[ACK]/[STEP] 상세, 실패 시 layer/reason/evidence.
+workload trace 기반 [TX]/[RX]/[STEP] 상세(헤더 한 줄 + `key=value` 한 줄씩의
+세로 블록), `[STEP n/N] name PASS` 판정 줄, 실패 시 layer/reason/evidence.
+bring-up 단계 줄은 영어(coordinator의 `연결됨`은 표시에서 `connected`).
 파생값은 `derived=true`. 같은 정보를 `var/runs/<id>/presentation/`·
 `var/progress/*.log`에 보존한다. 판정·threshold·deadline·retry는 불변.
 

@@ -736,6 +736,35 @@ def _station_label(station) -> str:
     return "%s(%s)" % (name, station) if name else str(station)
 
 
+def _plain(value) -> str:
+    """필드 값 표기: bool은 소문자(true/false), None은 '-'."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "-"
+    return str(value)
+
+
+#: 세로 블록 형식 — 헤더 한 줄 + 들여쓴 `key=value` 한 줄씩 (가로로 긴 한 줄 대신).
+BLOCK_INDENT = "  "
+
+
+def _emit_block(out, header: str, fields) -> None:
+    """`header` 다음에 (key, value) 쌍을 한 줄씩 들여써 출력한다. value가
+    None인 항목은 생략; 이미 'key=value ...' 문자열이면 그대로 한 줄."""
+    out(header)
+    for item in fields:
+        if isinstance(item, str):
+            out(BLOCK_INDENT + item)
+            continue
+        key, value = item
+        if value is None:
+            continue
+        out(BLOCK_INDENT + "%s=%s" % (key, _plain(value)))
+
+
 class ScenarioTracer:
     """bring-up 이후 시나리오 실시간 추적 — 퍼센트 진행바 없음.
 
@@ -743,6 +772,10 @@ class ScenarioTracer:
     append) — TRANSFER_STATE_CHANGED·DATA_RECEIVED·ERROR. 종료 시 원천:
     workload trace(submit/transfer_terminal/data_received/scenario_result)와
     session result(quiescence·counters). 파생값은 `derived=true`로 표시한다.
+
+    출력은 **세로 블록**이다: `[TX] STATE` / `[RX] DATA_RECEIVED` /
+    `[STEP] name  submit` 같은 헤더 한 줄 뒤에 `key=value`를 한 줄씩 들여쓴다
+    (가로로 긴 한 줄은 터미널에서 읽기 어렵다 — 2026-09-05 사용자 요구).
     """
 
     def __init__(self, out, *, run_root: Path | str,
@@ -783,9 +816,10 @@ class ScenarioTracer:
         case = ("" if scenario_id != "SC-VDE-001"
                 else " " + (certificate_case or "normal"))
         prefix = "[%d/%d] " % (index, total) if total > 1 else ""
-        self.out("%s%s%s" % (prefix, scenario_id, case))
-        self.out("  time=%s run_id=%s workload_id=%s"
-                 % (utc_now(self.wallclock), run_id, workload_id or "-"))
+        self._steps_printed = False
+        _emit_block(self.out, "%s%s%s" % (prefix, scenario_id, case),
+                    [("time", utc_now(self.wallclock)), ("run_id", run_id),
+                     ("workload_id", workload_id or "-")])
 
     def _elapsed(self) -> str:
         return format_hms(self.clock() - (self.started or self.clock()))
@@ -793,13 +827,20 @@ class ScenarioTracer:
     # ---- 실시간 service_events ----------------------------------------------
 
     def poll(self) -> None:
+        # 한 poll에 여러 endpoint의 새 이벤트가 함께 오면 t_mono 순으로
+        # 출력한다 (endpoint 파일 순서가 아니라 실제 발생 순서).
+        batch = []
         for endpoint, tail in self._tails.items():
             for line in tail.new_lines():
                 try:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                self._on_service_event(endpoint, event)
+                t_mono = event.get("t_mono")
+                key = float(t_mono) if isinstance(t_mono, (int, float)) else float("inf")
+                batch.append((key, len(batch), endpoint, event))
+        for _key, _seq, endpoint, event in sorted(batch, key=lambda b: (b[0], b[1])):
+            self._on_service_event(endpoint, event)
 
     def _on_service_event(self, endpoint: str, event: dict) -> None:
         kind = event.get("event_type")
@@ -810,8 +851,8 @@ class ScenarioTracer:
             record = self._transfers.setdefault(
                 transfer_id, {"endpoint": endpoint, "states": []})
             record["states"].append((state, t_mono))
-            fields = ["endpoint=%s" % endpoint,
-                      "transfer_id=%s" % _short(transfer_id)]
+            fields = [("endpoint", endpoint),
+                      ("transfer_id", _short(transfer_id))]
             first = record["states"][0][1]
             if (t_mono is not None and first is not None
                     and state != record["states"][0][0]):
@@ -820,33 +861,31 @@ class ScenarioTracer:
             if state == "WAITING_ACK":
                 self._pending_ack.append((endpoint, transfer_id, t_mono))
             if state == "COMPLETED":
-                ack = self._derive_ack(endpoint, transfer_id, t_mono)
-                if ack:
-                    fields.append(ack)
+                fields.extend(self._derive_ack(endpoint, transfer_id, t_mono))
             if event.get("error_code"):
-                fields.append("error_code=%s" % event["error_code"])
+                fields.append(("error_code", event["error_code"]))
             self.tx_seen += 1
-            self.out("[TX] %s  %s" % (state, "  ".join(fields)))
+            _emit_block(self.out, "[TX] %s" % state, fields)
         elif kind == "DATA_RECEIVED":
             self.rx_seen += 1
             src = event.get("original_source")
             dst = event.get("original_destination")
-            self.out("[RX] DATA_RECEIVED  endpoint=%s  payload_format=%s  "
-                     "application_bytes=%s  payload_sha256=%s  src=%s  dst=%s"
-                     % (endpoint, event.get("payload_format"),
-                        event.get("payload_len"),
-                        _short(event.get("payload_sha256"), 12),
-                        _station_label(src), _station_label(dst)))
+            _emit_block(self.out, "[RX] DATA_RECEIVED", [
+                ("endpoint", endpoint),
+                ("payload_format", event.get("payload_format")),
+                ("application_bytes", event.get("payload_len")),
+                ("payload_sha256", _short(event.get("payload_sha256"), 12)),
+                ("src", _station_label(src)), ("dst", _station_label(dst))])
             if str(event.get("payload_format") or "").endswith(".ack"):
                 # 파생 ACK 관측 — 명시 correlates_to는 event에 없다.
                 self._pending_ack.append(("ack:" + endpoint, None, t_mono))
         elif kind == "ERROR":
-            self.out("[ERR] endpoint=%s  error_code=%s  message=%s"
-                     % (endpoint, event.get("error_code"),
-                        scrub_text(str(event.get("error_message") or ""))))
+            _emit_block(self.out, "[ERR]", [
+                ("endpoint", endpoint), ("error_code", event.get("error_code")),
+                ("message", scrub_text(str(event.get("error_message") or "")))])
         elif kind in ("SERVICE_STARTED", "SERVICE_STOPPED",
                       "ENDPOINT_HEALTH_CHANGED"):
-            self.out("[EP] %s  endpoint=%s" % (kind, endpoint))
+            _emit_block(self.out, "[EP] %s" % kind, [("endpoint", endpoint)])
 
     def _derive_ack(self, endpoint: str, transfer_id, t_completed):
         """WAITING_ACK→COMPLETED 전이 사이에 도착한 .ack DATA_RECEIVED를
@@ -854,78 +893,89 @@ class ScenarioTracer:
         waiting = [p for p in self._pending_ack
                    if p[0] == endpoint and p[1] == transfer_id]
         if not waiting:
-            return None
+            return []
         t_wait = waiting[-1][2]
         acks = [p for p in self._pending_ack
                 if p[0].startswith("ack:") and p[2] is not None
                 and t_wait is not None and t_completed is not None
                 and float(t_wait) <= float(p[2]) <= float(t_completed)]
         if not acks:
-            return "ack=completed_without_observed_ack_payload derived=true"
+            return ["ack=completed_without_observed_ack_payload derived=true"]
         latency = float(acks[-1][2]) - float(t_wait)
-        return ("ack_correlation=derived  ack_latency=%.3fs  derived=true"
-                % latency)
+        return [("ack_correlation", "derived"),
+                "ack_latency=%.3fs" % latency, ("derived", "true")]
 
     # ---- 종료 시 workload trace·result ------------------------------------
 
     def on_trace_row(self, row: dict) -> None:
         event = row.get("event")
         if event == "submit":
-            self.out("[STEP] %s  submit  time=%s  transfer_id=%s  src=%s  "
-                     "dst=%s  payload_format=%s  application_bytes=%s  "
-                     "payload_sha256=%s  ack_required=%s"
-                     % (row.get("step"), row.get("t_utc"),
-                        _short(row.get("transfer_id")),
-                        "%s(%s)" % (row.get("sender"),
-                                    row.get("source_station")),
-                        "%s(%s)" % (row.get("receiver"),
-                                    row.get("destination_station")),
-                        row.get("payload_format"), row.get("payload_len"),
-                        _short(row.get("payload_sha256"), 12),
-                        row.get("ack_required")))
+            _emit_block(self.out, "[STEP] %s  submit" % row.get("step"), [
+                ("time", row.get("t_utc")),
+                ("transfer_id", _short(row.get("transfer_id"))),
+                ("src", "%s(%s)" % (row.get("sender"), row.get("source_station"))),
+                ("dst", "%s(%s)" % (row.get("receiver"),
+                                    row.get("destination_station"))),
+                ("payload_format", row.get("payload_format")),
+                ("application_bytes", row.get("payload_len")),
+                ("payload_sha256", _short(row.get("payload_sha256"), 12)),
+                ("ack_required", row.get("ack_required"))])
         elif event == "transfer_terminal":
-            self.out("[STEP] %s  terminal_state=%s  transfer_id=%s"
-                     % (row.get("step"), row.get("terminal_state"),
-                        _short(row.get("transfer_id"))))
+            _emit_block(self.out, "[STEP] %s  terminal_state=%s"
+                        % (row.get("step"), row.get("terminal_state")),
+                        [("transfer_id", _short(row.get("transfer_id")))])
         elif event == "data_received":
-            self.out("[STEP] %s  received=%s  endpoint=%s  src=%s  dst=%s"
-                     % (row.get("step"), row.get("present"),
-                        row.get("receiver"),
-                        _station_label(row.get("original_source")),
-                        _station_label(row.get("original_destination"))))
+            _emit_block(self.out, "[STEP] %s  received=%s"
+                        % (row.get("step"), _plain(row.get("present"))), [
+                ("endpoint", row.get("receiver")),
+                ("src", _station_label(row.get("original_source"))),
+                ("dst", _station_label(row.get("original_destination")))])
         elif event == "scenario_result":
             self._print_scenario_result(row)
 
-    def _print_scenario_result(self, result: dict) -> None:
-        steps = result.get("steps") or []
+    def _print_steps(self, steps) -> None:
+        """`[STEP n/N] name  STATUS` — workload trace의 [name, status] 쌍과
+        session result의 dict(전이 상태·수신 검사 포함) 모두 받는다."""
+        steps = [st for st in (steps or []) if isinstance(st, (dict, list, tuple))]
         total = len(steps)
+        if not total:
+            return
+        width = max(len(str(st.get("name") if isinstance(st, dict) else st[0]))
+                    for st in steps)
         for index, step in enumerate(steps, 1):
-            if not isinstance(step, dict):
-                continue
-            name = step.get("name")
-            status = step.get("status")
+            if isinstance(step, dict):
+                name, status = step.get("name"), step.get("status")
+            else:
+                name = step[0] if len(step) > 0 else "?"
+                status = step[1] if len(step) > 1 else "?"
             extra = []
-            if step.get("transfer_id"):
-                extra.append("transfer_id=%s" % _short(step["transfer_id"]))
-            if step.get("state"):
-                extra.append("state=%s" % step["state"])
-            checks = step.get("received_checks") or {}
-            for key in ("byte_exact", "original_source", "original_destination",
-                        "payload_format", "payload_len", "payload_sha256"):
-                if key in checks:
-                    extra.append("%s=%s" % (key, str(checks[key]).lower()))
-            for key in ("remaining_waypoints", "route_linkage_id", "sog"):
-                if key in step:
-                    extra.append("%s=%s" % (key, step[key]))
-            self.out("[STEP %d/%d] %s  %s%s"
-                     % (index, total, name, status,
-                        ("  " + "  ".join(extra)) if extra else ""))
+            if isinstance(step, dict):
+                if step.get("transfer_id"):
+                    extra.append(("transfer_id", _short(step["transfer_id"])))
+                if step.get("state"):
+                    extra.append(("state", step["state"]))
+                checks = step.get("received_checks") or {}
+                for key in ("byte_exact", "original_source",
+                            "original_destination", "payload_format",
+                            "payload_len", "payload_sha256"):
+                    if key in checks:
+                        extra.append((key, checks[key]))
+                for key in ("remaining_waypoints", "route_linkage_id", "sog"):
+                    if key in step:
+                        extra.append((key, step[key]))
+            _emit_block(self.out, "[STEP %d/%d] %-*s  %s"
+                        % (index, total, width, name, status), extra)
+        self._steps_printed = True
+
+    def _print_scenario_result(self, result: dict) -> None:
+        self._print_steps(result.get("steps"))
         counters = result.get("counters") or {}
-        self.out("  counters: transfers_completed=%s transfers_failed=%s "
-                 "wrong_destination=%s mismatched_ack=%s duplicates=%s"
+        self.out("  counters: transfers_completed=%s transfers_failed=%s"
                  % (counters.get("transfers_completed"),
-                    counters.get("transfers_failed"),
-                    counters.get("wrong_destination"),
+                    counters.get("transfers_failed")))
+        self.out("            wrong_destination=%s mismatched_ack=%s "
+                 "duplicates=%s"
+                 % (counters.get("wrong_destination"),
                     counters.get("mismatched_ack"),
                     counters.get("duplicates")))
         if result.get("reason"):
@@ -936,15 +986,21 @@ class ScenarioTracer:
         status = result.get("status")
         scenario = result.get("scenario") or {}
         quiescence = result.get("quiescence") or {}
+        if not getattr(self, "_steps_printed", False):
+            # workload trace에 scenario_result가 없었으면 session result의
+            # 상세 steps(전이 상태·수신 검사 포함)로 출력한다.
+            for child in (scenario.get("results") or {}).values():
+                inner = (child or {}).get("result") or child or {}
+                self._print_steps(inner.get("steps"))
         self.out("  result=%s  elapsed=%s  wall_clock_s=%s"
                  % (status, self._elapsed(), result.get("wall_clock_s", "?")))
         self.out("  quiescence=%s  non_terminal_transfers=%s  "
-                 "transfers_observed=%s  workers_running=%s  "
-                 "launchers_alive=%s  faults=%s"
+                 "transfers_observed=%s"
                  % ("PASS" if quiescence.get("pass") else "FAIL",
                     quiescence.get("non_terminal_transfers"),
-                    quiescence.get("transfers_observed"),
-                    quiescence.get("workers_running"),
+                    quiescence.get("transfers_observed")))
+        self.out("  workers_running=%s  launchers_alive=%s  faults=%s"
+                 % (quiescence.get("workers_running"),
                     quiescence.get("launchers_alive"),
                     quiescence.get("faults")))
         if evidence_dir is not None:

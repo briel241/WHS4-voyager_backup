@@ -110,6 +110,18 @@ def stamp(seconds: float) -> str:
     return "[%2d:%02d]" % (seconds // 60, seconds % 60)
 
 
+#: coordinator 콘솔의 한국어 단계 문구 → 영어 (표시 전용; coordinator 무수정).
+_STAGE_KO_EN = (("연결됨", "connected"),)
+
+
+def english_stage_line(line: str) -> str:
+    """bring-up 단계 줄을 영어로 — coordinator가 내는 `MASS-A 연결됨` 같은
+    한국어 조각만 바꾸고 나머지는 그대로 둔다."""
+    for ko, en in _STAGE_KO_EN:
+        line = line.replace(ko, en)
+    return line
+
+
 def render_trace_event(row: dict, elapsed_s: float):
     """workload trace 이벤트 한 줄 (영어, workload 기준 경과). 없으면 None."""
     event = row.get("event")
@@ -478,7 +490,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         reporter.tick_hook = tracker.poll
 
     def on_stage(line):
-        out("  %s %s" % (stamp(clock() - started), line))
+        out("  %s %s" % (stamp(clock() - started), english_stage_line(line)))
         if tracker is not None:
             tracker.poll()
 
