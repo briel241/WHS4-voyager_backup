@@ -417,6 +417,33 @@ def prepare(paths: StatePaths, *, repo_root=None,
 
 # ------------------------------------------------------------ 세션 실행
 
+def close_notes(summary: dict) -> list:
+    """close 요약의 보충 설명 — 판정은 바꾸지 않는다. coordinator는 workload가
+    하나라도 FAIL이면 스스로 FAIL 판정·rc=1로 끝나므로(설계), 그 경우 정리
+    (cleanup)가 통과했다는 사실을 따로 밝힌다 (실측 run-20260905-044555)."""
+    notes = []
+    closed = summary.get("closed") or {}
+    cleanup = closed.get("cleanup") or {}
+    rc = summary.get("coordinator_rc")
+    error = str(closed.get("error") or "")
+    if rc not in (0, None) and "workload" in error.lower():
+        notes.append("coordinator verdict FAIL because a workload failed (rc=%s "
+                     "is the designed exit for that; not a crash)" % rc)
+    if cleanup:
+        rediscovered = cleanup.get("rediscovery") or {}
+        notes.append("cleanup %s — launcher clean exit %s, B210 rediscovered %d/%d, "
+                     "workers after stop %s" % (
+                         "PASS" if cleanup.get("pass") else "FAIL",
+                         _plain_bool(cleanup.get("launcher_clean_exit")),
+                         sum(1 for v in rediscovered.values() if v),
+                         len(rediscovered), cleanup.get("workers_after_stop")))
+    return notes
+
+
+def _plain_bool(value) -> str:
+    return "true" if value is True else "false" if value is False else "-"
+
+
 def _close_with_interrupt_guard(session, out) -> dict:
     """첫 Ctrl+C는 정상 close, close 중 두 번째 Ctrl+C는 즉시 에스컬레이션
     (결정 17). 어느 경로든 finalize의 정직 판정을 돌려준다."""
@@ -764,6 +791,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 else:
                     out("Closed with problems: "
                         + "; ".join(summary["problems"]))
+                    for note in close_notes(summary):
+                        out("  note: " + note)
                 attempts.append({"attempt": attempt, "run_id": stopped.run_id,
                                  "bringup": "INTERRUPTED",
                                  "finalize": summary})
@@ -866,6 +895,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 out("Closed — cleanup PASS, residual processes 0")
             else:
                 out("Closed with problems: " + "; ".join(summary["problems"]))
+                for note in close_notes(summary):
+                    out("  note: " + note)
                 exit_code = EXIT_FAIL
             passed = sum(1 for r in results if r.get("status") == "PASS")
             planned = len(plan) if not interactive else len(results)

@@ -556,6 +556,59 @@ def test_menu_input_ignores_arrow_key_escape_sequences():
     assert run_cmd._clean_choice("q") == "q"
 
 
+def test_failure_layer_uses_observed_service_errors_and_close_notes_explain_rc1():
+    """실측 run-20260905-044555 재현: forged 인증서가 MASS-A PHY에서
+    LinkIdDetectionError로 4회 복호 실패 → ROC transfer TRANSFER_TIMEOUT.
+    결과 error 문자열이 비어 있어도 관측 ERROR로 layer=PHY여야 한다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        run_root = Path(tmp) / "run-f"
+        events = run_root / "evidence" / "service_events"
+        events.mkdir(parents=True)
+        for ep in ("MASS-A", "MASS-B", "ROC"):
+            (events / f"{ep}.jsonl").write_text("", encoding="utf-8")
+        lines = []
+        tracer = pg.ScenarioTracer(lines.append, run_root=run_root, clock=Clock())
+        tracer.start_workload(index=4, total=4, scenario_id="SC-VDE-001",
+                              certificate_case="forged", workload_id="w4",
+                              run_id="run-f")
+        with open(events / "MASS-A.jsonl", "a", encoding="utf-8") as h:
+            for _ in range(4):
+                h.write(json.dumps({
+                    "t_mono": 100.0, "event_type": "ERROR", "transfer_id": None,
+                    "transfer_state": None, "error_code": "TRANSFER_FAILED",
+                    "error_message": "전송 처리에 실패했습니다",
+                    "error_details": "Details(entries=(('reason', 'LinkIdDetectionError'),))"}) + "\n")
+        with open(events / "ROC.jsonl", "a", encoding="utf-8") as h:
+            h.write(_service_event(transfer_id="83b7bc2c-1", transfer_state="FAILED",
+                                   t_mono=177.0, error_code="TRANSFER_TIMEOUT"))
+        tracer.poll()
+        joined = "\n".join(lines)
+        assert "[ERR]\n  endpoint=MASS-A\n  error_code=TRANSFER_FAILED\n  reason=LinkIdDetectionError\n" in joined
+        tracer.finish_workload({
+            "status": "FAIL", "wall_clock_s": 318.7,
+            "quiescence": {"pass": True, "non_terminal_transfers": 0},
+            "scenario": {"error": None, "results": {"SC-VDE-001[forged]": {
+                "status": "FAIL", "reason": "MASS-A가 인증서 DATA_RECEIVED를 받지 못함",
+                "steps": [{"name": "001-transfer", "status": "FAIL",
+                           "state": "FAILED", "transfer_id": "83b7bc2c-1"}]}}}},
+            evidence_dir=run_root / "workloads" / "w4")
+        joined = "\n".join(lines)
+        assert "[FAIL] layer=PHY" in joined
+        assert "observed_errors=MASS-A:LinkIdDetectionError×4" in joined
+        assert "failed_step=001-transfer state=FAILED" in joined
+    # close 보충 설명: workload FAIL에 따른 rc=1은 설계 동작, cleanup PASS 명시.
+    from apps.standalone import run_cmd
+    notes = run_cmd.close_notes({
+        "coordinator_rc": 1,
+        "closed": {"status": "FAIL", "error": "하나 이상의 workload가 FAIL",
+                   "cleanup": {"pass": True, "launcher_clean_exit": True,
+                               "rediscovery": {"a": True, "b": True, "c": True},
+                               "workers_after_stop": 0}}})
+    assert notes[0].startswith("coordinator verdict FAIL because a workload failed")
+    assert "cleanup PASS — launcher clean exit true, B210 rediscovered 3/3, workers after stop 0" in notes[1]
+    assert run_cmd.close_notes({"coordinator_rc": 0, "closed": {}}) == []
+
+
 def test_bringup_stage_lines_are_english():
     from apps.standalone import run_cmd
     assert run_cmd.english_stage_line("MASS-A 연결됨") == "MASS-A connected"
