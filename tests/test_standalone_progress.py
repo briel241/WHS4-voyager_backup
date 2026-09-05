@@ -437,9 +437,13 @@ def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
                 "  payload_format=sc_vde.route_control.command\n"
                 "  application_bytes=29\n  payload_sha256=9b28d7740000…\n"
                 "  src=ROC(222222222)\n  dst=MASS-A(111111111)\n") in joined
+        # COMPLETED after WAITING_ACK = MAC ACK 수신; latency는 WAITING_ACK(104)→
+        # COMPLETED(112) 전이 8 s. 응용 .ack payload(110)는 별개 [RX]로 보인다.
         assert ("[TX] COMPLETED\n  endpoint=ROC\n  transfer_id=8f73c821…\n"
-                "  since_queued=12.000s derived=true\n  ack_correlation=derived\n"
-                "  ack_latency=6.000s\n  derived=true") in joined
+                "  since_queued=12.000s derived=true\n  ack=received\n"
+                "  ack_source=transfer_state derived=true\n"
+                "  ack_latency=8.000s derived=true") in joined
+        assert "completed_without_observed_ack_payload" not in joined
         assert not any(l.startswith("[TX]") and "endpoint=" in l for l in lines)
         # 블록 사이는 빈 줄 하나.
         assert "  transfer_id=8f73c821…\n\n[TX] TRANSMITTING\n" in joined
@@ -462,6 +466,8 @@ def test_scenario_tracer_prints_transfer_ack_and_no_percent_bar():
                                           "transfers_completed": 1,
                                           "transfers_failed": 0,
                                           "wrong_destination": 0}})
+        # 판정 블록은 종료 요약과 함께 나온다 — 실시간 흐름 중간에 끼지 않음.
+        assert not any(l.startswith("[STEP 1/1]") for l in lines)
         tracer.finish_workload({"status": "PASS", "wall_clock_s": 75.2,
                                 "quiescence": {"pass": True, "non_terminal_transfers": 0,
                                                "transfers_observed": 5}},
@@ -504,19 +510,23 @@ def test_scenario_tracer_prints_step_pairs_from_trace_and_falls_back_to_session_
                                           "transfers_failed": 0,
                                           "wrong_destination": 0,
                                           "mismatched_ack": 0, "duplicates": 0}})
-        joined = "\n".join(lines)
-        # 판정 줄 목록은 붙여서 한 블록, 앞에만 빈 줄.
-        assert ("\n\n[STEP 1/3] 005-command-transfer  PASS\n"
-                "[STEP 2/3] 005-route-applied     PASS\n"
-                "[STEP 3/3] 005-mass-b-clean      PASS\n\n  counters:") in joined
-        # session result의 dict steps는 trace가 이미 찍었으면 반복하지 않는다.
+        assert not any(l.startswith("[STEP 1/3]") for l in lines)   # 종료 시 출력
+        # trace의 쌍 steps가 있으면 session result의 dict steps보다 우선, 한 번만.
         tracer.finish_workload({"status": "PASS", "wall_clock_s": 18.4,
                                 "quiescence": {"pass": True},
                                 "scenario": {"results": {"SC-VDE-005": {
                                     "steps": [{"name": "005-command-transfer",
                                                "status": "PASS"}]}}}},
                                evidence_dir=run_root / "workloads" / "w5")
-        assert "\n".join(lines).count("[STEP 1/") == 1
+        joined = "\n".join(lines)
+        # 판정 줄 목록은 붙여서 한 블록, 앞에만 빈 줄, 이어서 요약 블록.
+        assert ("\n\n[STEP 1/3] 005-command-transfer  PASS\n"
+                "[STEP 2/3] 005-route-applied     PASS\n"
+                "[STEP 3/3] 005-mass-b-clean      PASS\n\n  counters:"
+                " transfers_completed=2 transfers_failed=0\n"
+                "            wrong_destination=0 mismatched_ack=0 duplicates=0\n"
+                "  result=PASS") in joined
+        assert joined.count("[STEP 1/") == 1
         # trace에 scenario_result가 없었던 workload는 session result로 출력.
         lines.clear()
         tracer.start_workload(index=2, total=4, scenario_id="SC-VDE-006",
@@ -533,6 +543,17 @@ def test_scenario_tracer_prints_step_pairs_from_trace_and_falls_back_to_session_
         joined = "\n".join(lines)
         assert ("[STEP 1/1] 006-steering-transfer  PASS\n  transfer_id=32d95f97…\n"
                 "  state=COMPLETED") in joined
+
+
+def test_menu_input_ignores_arrow_key_escape_sequences():
+    from apps.standalone import run_cmd
+    assert run_cmd._clean_choice("\x1b[A") == ""
+    # Pi 실측 입력(Alt+S, Delete, Alt+a): CSI 시퀀스와 Alt+문자(ESC+문자)는 모두
+    # 버려 빈 입력으로 취급 → 메뉴만 다시 표시, RF 동작 없음.
+    assert run_cmd._clean_choice("\x1bS\x1b[3~\x1ba") == ""
+    assert run_cmd._clean_choice("\x1b[Aa") == "a"
+    assert run_cmd._clean_choice("  2 \n") == "2"
+    assert run_cmd._clean_choice("q") == "q"
 
 
 def test_bringup_stage_lines_are_english():

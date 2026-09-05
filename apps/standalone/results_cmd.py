@@ -33,11 +33,22 @@ def list_runs(paths: StatePaths, *, limit: int = 20) -> list:
             continue
         summary = _read_json(directory / "summary.json") or {}
         run_info = _read_json(directory / "run.json") or {}
+        if directory.name.startswith("qual-"):
+            # qualification ladder phase evidence (`vdeter qualify`) — not a
+            # scenario run; scenarios column does not apply.
+            status, scenarios = "qualify", "-"
+        elif summary:
+            status = summary.get("status", "-")
+            scenarios = "%s/%s" % (summary.get("scenarios_passed", "-"),
+                                   summary.get("scenarios_planned", "-"))
+        else:
+            # started through `vdeter run` but no summary.json yet: still in
+            # progress, or ended without a normal close.
+            status, scenarios = "unfinished", "-"
         entries.append({
             "run_id": directory.name,
-            "status": summary.get("status", "-"),
-            "scenarios": "%s/%s" % (summary.get("scenarios_passed", "-"),
-                                   summary.get("scenarios_planned", "-")),
+            "status": status,
+            "scenarios": scenarios,
             "finished_utc": summary.get("finished_utc")
             or run_info.get("requested_utc") or "-",
             "path": str(directory),
@@ -97,10 +108,12 @@ def main_results(paths: StatePaths, run_id: str | None = None,
     if not entries:
         out("No runs recorded yet (evidence root: %s)" % paths.runs_dir)
         return EXIT_OK
-    out("%-28s %-6s %-9s %s" % ("run-id", "status", "scenarios",
-                                "finished (UTC)"))
+    width = max([len("run-id")] + [len(e["run_id"]) for e in entries])
+    out("%-*s %-10s %-9s %s" % (width, "run-id", "status", "scenarios",
+                                "finished / requested (UTC)"))
     for entry in entries:
-        out("%-28s %-6s %-9s %s" % (entry["run_id"], entry["status"],
+        out("%-*s %-10s %-9s %s" % (width, entry["run_id"], entry["status"],
                                     entry["scenarios"], entry["finished_utc"]))
-    out("(show one: vdeter results <run-id>)")
+    out("(show one: vdeter results <run-id>; qualify = qualification ladder "
+        "phase evidence, unfinished = no summary.json yet)")
     return EXIT_OK

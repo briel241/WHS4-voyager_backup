@@ -827,7 +827,7 @@ class ScenarioTracer:
                 else " " + (certificate_case or "normal"))
         prefix = "[%d/%d] " % (index, total) if total > 1 else ""
         self._steps_printed = False
-        self._summary_open = False
+        self._scenario_result = None
         _emit_block(self.out, "%s%s%s" % (prefix, scenario_id, case),
                     [("time", utc_now(self.wallclock)), ("run_id", run_id),
                      ("workload_id", workload_id or "-")])
@@ -872,7 +872,7 @@ class ScenarioTracer:
             if state == "WAITING_ACK":
                 self._pending_ack.append((endpoint, transfer_id, t_mono))
             if state == "COMPLETED":
-                fields.extend(self._derive_ack(endpoint, transfer_id, t_mono))
+                fields.extend(self._derive_ack(record, t_mono))
             if event.get("error_code"):
                 fields.append(("error_code", event["error_code"]))
             self.tx_seen += 1
@@ -898,23 +898,21 @@ class ScenarioTracer:
                       "ENDPOINT_HEALTH_CHANGED"):
             _emit_block(self.out, "[EP] %s" % kind, [("endpoint", endpoint)])
 
-    def _derive_ack(self, endpoint: str, transfer_id, t_completed):
-        """WAITING_ACK→COMPLETED 전이 사이에 도착한 .ack DATA_RECEIVED를
-        시간순으로 짝짓는다 — 파생값(derived=true)."""
-        waiting = [p for p in self._pending_ack
-                   if p[0] == endpoint and p[1] == transfer_id]
-        if not waiting:
+    @staticmethod
+    def _derive_ack(record: dict, t_completed):
+        """WAITING_ACK 뒤의 COMPLETED는 MAC ACK 수신을 뜻한다(서비스 상태
+        기계: WAITING_ACK→COMPLETED on ACK / →FAILED on timeout). ack_latency는
+        WAITING_ACK→COMPLETED 전이 시간 — 파생값(derived=true). 응용 계층
+        `.ack` payload는 별개의 후속 transfer라 [RX]로 따로 보인다."""
+        waits = [t for st, t in record["states"] if st == "WAITING_ACK"]
+        if not waits:
             return []
-        t_wait = waiting[-1][2]
-        acks = [p for p in self._pending_ack
-                if p[0].startswith("ack:") and p[2] is not None
-                and t_wait is not None and t_completed is not None
-                and float(t_wait) <= float(p[2]) <= float(t_completed)]
-        if not acks:
-            return ["ack=completed_without_observed_ack_payload derived=true"]
-        latency = float(acks[-1][2]) - float(t_wait)
-        return [("ack_correlation", "derived"),
-                "ack_latency=%.3fs" % latency, ("derived", "true")]
+        t_wait = waits[-1]
+        out = [("ack", "received"), ("ack_source", "transfer_state derived=true")]
+        if t_wait is not None and t_completed is not None:
+            out.append("ack_latency=%.3fs derived=true"
+                       % max(0.0, float(t_completed) - float(t_wait)))
+        return out
 
     # ---- 종료 시 workload trace·result ------------------------------------
 
@@ -942,7 +940,9 @@ class ScenarioTracer:
                 ("src", _station_label(row.get("original_source"))),
                 ("dst", _station_label(row.get("original_destination")))])
         elif event == "scenario_result":
-            self._print_scenario_result(row)
+            # 판정 블록은 workload 종료 시 요약과 함께 낸다 (실시간 [TX]/[RX]
+            # 흐름 중간에 끼어들지 않게) — 여기서는 보관만.
+            self._scenario_result = row
 
     def _print_steps(self, steps) -> None:
         """`[STEP n/N] name  STATUS` — workload trace의 [name, status] 쌍과
@@ -984,7 +984,6 @@ class ScenarioTracer:
         self._print_steps(result.get("steps"))
         counters = result.get("counters") or {}
         self.out("")                      # 요약 블록 시작
-        self._summary_open = True
         self.out("  counters: transfers_completed=%s transfers_failed=%s"
                  % (counters.get("transfers_completed"),
                     counters.get("transfers_failed")))
@@ -1001,15 +1000,18 @@ class ScenarioTracer:
         status = result.get("status")
         scenario = result.get("scenario") or {}
         quiescence = result.get("quiescence") or {}
-        if not getattr(self, "_steps_printed", False):
+        verdict = getattr(self, "_scenario_result", None)
+        if verdict is None:
             # workload trace에 scenario_result가 없었으면 session result의
-            # 상세 steps(전이 상태·수신 검사 포함)로 출력한다.
+            # 상세 steps(전이 상태·수신 검사 포함)·counters로 구성한다.
             for child in (scenario.get("results") or {}).values():
                 inner = (child or {}).get("result") or child or {}
-                self._print_steps(inner.get("steps"))
-        if not getattr(self, "_summary_open", False):
-            self.out("")                  # counters 없이 바로 요약이면 빈 줄
-            self._summary_open = True
+                if inner.get("steps") or inner.get("counters"):
+                    verdict = {"steps": inner.get("steps"),
+                               "counters": inner.get("counters"),
+                               "reason": inner.get("reason")}
+                    break
+        self._print_scenario_result(verdict or {})
         self.out("  result=%s  elapsed=%s  wall_clock_s=%s"
                  % (status, self._elapsed(), result.get("wall_clock_s", "?")))
         self.out("  quiescence=%s  non_terminal_transfers=%s  "
