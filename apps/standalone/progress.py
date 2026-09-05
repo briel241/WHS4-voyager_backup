@@ -743,6 +743,24 @@ def _station_label(station) -> str:
     return "%s(%s)" % (name, station) if name else str(station)
 
 
+_REASON_RE = re.compile(r"'reason',\s*'([^']+)'")
+
+
+def _error_reason(event: dict):
+    """service ERROR 이벤트의 error_details(`Details(entries=(('reason', 'X'),))`
+    문자열 또는 dict)에서 reason만 뽑는다. 없으면 None."""
+    details = event.get("error_details")
+    if isinstance(details, dict):
+        value = details.get("reason")
+        return str(value) if value else None
+    if isinstance(details, (list, tuple)):
+        for item in details:
+            if isinstance(item, (list, tuple)) and len(item) == 2 and item[0] == "reason":
+                return str(item[1])
+    m = _REASON_RE.search(str(details or ""))
+    return m.group(1) if m else None
+
+
 def _plain(value) -> str:
     """필드 값 표기: bool은 소문자(true/false), None은 '-'."""
     if value is True:
@@ -803,6 +821,7 @@ class ScenarioTracer:
             tail.seek_end()
         self._transfers = {}      # transfer_id → {endpoint, states:[(state, t_mono)]}
         self._pending_ack = []    # (sender, transfer_id, t_mono WAITING_ACK)
+        self._errors = []         # (endpoint, error_code, reason) — service ERROR 관측
         self.workload = None
         self.started = None
         self.tx_seen = 0
@@ -820,6 +839,7 @@ class ScenarioTracer:
         self.started = self.clock()
         self._transfers = {}
         self._pending_ack = []
+        self._errors = []
         self.tx_seen = self.rx_seen = 0
         for tail in self._tails.values():
             tail.seek_end()
@@ -891,8 +911,11 @@ class ScenarioTracer:
                 # 파생 ACK 관측 — 명시 correlates_to는 event에 없다.
                 self._pending_ack.append(("ack:" + endpoint, None, t_mono))
         elif kind == "ERROR":
+            reason = _error_reason(event)
+            self._errors.append((endpoint, event.get("error_code"), reason))
             _emit_block(self.out, "[ERR]", [
                 ("endpoint", endpoint), ("error_code", event.get("error_code")),
+                ("reason", reason),
                 ("message", scrub_text(str(event.get("error_message") or "")))])
         elif kind in ("SERVICE_STARTED", "SERVICE_STOPPED",
                       "ENDPOINT_HEALTH_CHANGED"):
@@ -1026,7 +1049,14 @@ class ScenarioTracer:
         if evidence_dir is not None:
             self.out("  evidence=%s" % evidence_dir)
         if status != "PASS" or not quiescence.get("pass"):
-            self.out("  [FAIL] layer=%s" % self._failure_layer(result))
+            self.out("  [FAIL] layer=%s" % self._failure_layer(result, self._errors))
+            if self._errors:
+                counts = {}
+                for endpoint, code, reason in self._errors:
+                    key = "%s:%s" % (endpoint, reason or code or "?")
+                    counts[key] = counts.get(key, 0) + 1
+                self.out("  observed_errors=%s" % ", ".join(
+                    "%s×%d" % (k, n) for k, n in counts.items()))
             if self.workload:
                 self.out("  scenario=%s workload_id=%s"
                          % (self.workload.get("scenario_id"),
@@ -1054,19 +1084,31 @@ class ScenarioTracer:
             self.out("  elapsed_since_workload_start=%s" % self._elapsed())
 
     @staticmethod
-    def _failure_layer(result: dict) -> str:
-        """실패 계층 추정(기존 오류 계약 문자열 기반 — 새 오류명 생성 없음)."""
+    def _failure_layer(result: dict, errors=()) -> str:
+        """실패 계층 추정(기존 오류 계약 문자열 기반 — 새 오류명 생성 없음).
+
+        session result의 error 문자열에 더해, workload 중 관측한 service ERROR
+        (endpoint, error_code, reason)를 함께 본다 — 예: 수신 endpoint의
+        `LinkIdDetectionError`는 PHY, `DEVICE_ERROR`/uhd는 RADIO,
+        ack/timeout은 MAC. 실측(run-20260905-044555): 결과 error가 비어 있어
+        APPLICATION으로 표시됐지만 실제 원인은 MASS-A PHY 검출 실패였다."""
         quiescence = result.get("quiescence") or {}
         scenario = result.get("scenario") or {}
         error = str(scenario.get("error") or result.get("error") or "")
-        lowered = error.lower()
-        if quiescence.get("pass") is False and not error:
+        for child in (scenario.get("results") or {}).values():
+            inner = (child or {}).get("result") or child or {}
+            if inner.get("reason"):
+                error += " " + str(inner["reason"])
+        observed = " ".join("%s %s" % (code or "", reason or "")
+                            for _ep, code, reason in (errors or ()))
+        lowered = (error + " " + observed).lower()
+        if quiescence.get("pass") is False and not error.strip() and not observed.strip():
             return "ORCHESTRATION"
         if "device_error" in lowered or "uhd" in lowered:
             return "RADIO"
         if "linkid" in lowered or "decode" in lowered:
             return "PHY"
-        if "ack" in lowered or "mac" in lowered:
+        if "ack" in lowered or "mac" in lowered or "timeout" in lowered:
             return "MAC"
         return "APPLICATION"
 
