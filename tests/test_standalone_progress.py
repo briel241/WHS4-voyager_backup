@@ -141,6 +141,11 @@ def test_percent_never_goes_backwards_and_waiting_holds():
     reporter.update(events=5)
     last = stream.getvalue().split("\r")[-1]
     assert "waiting" in last and "events=5" in last
+    # 단조는 단계 안에서만: 새 단계는 앞 단계의 50%에 눌어붙지 않고 자기 값부터.
+    reporter.phase("C", mode=pg.MODE_ESTIMATED, fraction=0.1)
+    assert " 10% estimated" in stream.getvalue().split("\r")[-1]
+    reporter.update(fraction=0.05)
+    assert " 10% estimated" in stream.getvalue().split("\r")[-1]
     reporter.finish("done")
     reporter.close()
 
@@ -204,29 +209,127 @@ def test_bringup_tracker_phases_exact_waiting_estimated_ready():
             clock.advance(6)
             tracker.poll()
 
+        assert "] 0% Endpoint startup" in lines[-1] and "overall=0%" in lines[-1]
         feed(0); feed(1)
-        assert "ready=2/3" in lines[-1] and "estimated" not in lines[-1]
+        # 바의 퍼센트는 이 단계 자체(2/3=66%), 전체 진행률은 overall 필드.
+        assert "] 66% Endpoint startup" in lines[-1] and "ready=2/3" in lines[-1]
+        assert "estimated" not in lines[-1] and "overall=0%" in lines[-1]
         feed(2); feed(3)
+        startup_done = [l for l in lines if "Endpoint startup" in l][-1]
+        assert "] 100% Endpoint startup" in startup_done and "ready=3/3" in startup_done
         assert "waiting Host-time acquisition" in lines[-1]
         feed(4); feed(5)
         assert "events=2" in lines[-1] and "waiting" in lines[-1]
         feed(6)
         assert "RF-time PRE validation" in lines[-1] and "estimated" in lines[-1]
+        assert "] 0% estimated RF-time PRE" in lines[-1]
         clock.advance(200); tracker.poll()
         pre = [l for l in lines if "RF-time PRE" in l][-1]
-        assert "estimated" in pre
+        # 200s/457s → 이 단계 43%; overall=(15+448+0.43*457)/1392 ≈ 47%.
+        assert "] 43% estimated RF-time PRE" in pre and "overall=47%" in pre
         feed(8); feed(9); feed(10); feed(11); feed(12)
+        pre_done = [l for l in lines if "RF-time PRE" in l][-1]
+        assert "] 100% RF-time PRE" in pre_done
         tracker.ready()
         assert "Service session READY" in lines[-1] and "100%" in lines[-1]
-        assert "total=" in lines[-1]
-        # 퍼센트가 뒤로 간 줄이 없다.
-        percents = []
+        assert "total=" in lines[-1] and "overall=100%" in lines[-1]
+        # 퍼센트는 같은 단계(label) 안에서 뒤로 가지 않는다; overall도 단조.
+        by_label, overalls = {}, []
         for line in lines:
-            token = line.split("] ")[1].split(" ")[0] if "] " in line else ""
+            if "] " not in line:
+                continue
+            rest = line.split("] ", 1)[1]
+            token = rest.split(" ")[0]
+            label = rest.split(" elapsed=")[0]
+            for key in (" ready=", " events=", " overall=", " paths=", " total="):
+                label = label.split(key)[0]
+            label = label.split(" ", 1)[1] if token.endswith("%") else label
             if token.endswith("%"):
-                percents.append(int(token[:-1]))
-        assert percents == sorted(percents)
+                by_label.setdefault(label, []).append(int(token[:-1]))
+            if " overall=" in line:
+                overalls.append(int(line.split(" overall=")[1].split("%")[0]))
+        assert all(v == sorted(v) for v in by_label.values()), by_label
+        assert overalls == sorted(overalls), overalls
         reporter.close()
+
+
+def test_bringup_bar_starts_at_zero_after_preflight_on_same_reporter():
+    """Pi 실측 결함 재현: PREFLIGHT 게이트가 100%로 끝난 같은 reporter에서
+    bring-up 첫 줄이 100%로 시작했다(전역 단조 클램프). 단계별 단조여야 한다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        console = Path(tmp) / "coordinator-console.log"
+        console.write_text("", encoding="utf-8")
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+        gates = pg.GateProgress(reporter, 5)
+        for name in ("installation manifest", "active reference", "identity",
+                     "preflight / B210 discovery", "critical comparison"):
+            gates.gate(name)
+        gates.done()
+        assert "100% Preflight" in lines[-1]
+        pg.BringupTracker(reporter, console_log=console, clock=clock)
+        assert "] 0% Endpoint startup" in lines[-1] and "ready=0/3" in lines[-1]
+        reporter.close()
+
+
+def test_qualify_percent_is_per_phase_and_overall_is_a_field():
+    """Pi 실측 결함 재현: RR-P1 종료 시 phase 가중치가 두 번 더해져 99%가 되고
+    이후 RR-P2-17·P3·suite·builder 줄이 전부 99%에 고정됐다. 각 줄의 퍼센트는
+    그 phase 자체(0→100%), 사다리 전체는 overall 필드여야 한다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+        qp = pg.QualifyProgress(reporter, clock=clock)
+
+        def start(phase, index):
+            root = Path(tmp) / phase
+            root.mkdir()
+            (root / "coordinator-console.log").write_text("", encoding="utf-8")
+            qp.phase_started(phase, index, 4, root)
+
+        start("rr-p0", 1)
+        assert "] 0% estimated RR-P0 1/4" in lines[-1] and "overall=0%" in lines[-1]
+        qp.phase_finished("rr-p0", "PASS")
+        assert "] 100% RR-P0 1/4" in lines[-1] and "result=PASS" in lines[-1]
+        start("rr-p1", 2)
+        assert "] 0% estimated RR-P1 2/4" in lines[-1]
+        clock.advance(pg.QUALIFY_WEIGHTS["rr-p1"] * 0.5); qp.tick()
+        # 이 phase 50%; overall=(20+0.5*3395)/6796 ≈ 25%.
+        assert "] 50% estimated RR-P1 2/4" in lines[-1] and "overall=25%" in lines[-1]
+        qp.phase_finished("rr-p1", "PASS")
+        assert "] 100% RR-P1 2/4" in lines[-1] and "overall=50%" in lines[-1]
+        start("rr-p2-17", 3)
+        assert "] 0% estimated RR-P2-17 3/4" in lines[-1] and "overall=50%" in lines[-1]
+        assert not any("99%" in l for l in lines)
+        qp.phase_finished("rr-p2-17", "PASS")
+        start("rr-p3-fault", 4)
+        assert "] 0% estimated RR-P3-FAULT 4/4" in lines[-1] and "overall=84%" in lines[-1]
+        qp.phase_finished("rr-p3-fault", "PASS")
+        log = Path(tmp) / "unit-contract.log"
+        log.write_text("", encoding="utf-8")
+        qp.bundle_started()
+        qp.suite_started("unit-contract.log", log)
+        assert "] 0% Software suite 1/2" in lines[-1] and "overall=86%" in lines[-1]
+        qp.suite_finished("unit-contract.log", True)
+        assert "] 100% Software suite 1/2" in lines[-1]
+        qp.builder_started()
+        assert "] 0% estimated Final builder" in lines[-1]
+        qp.promoted("qual-x")
+        assert "] 100% QUALIFIED" in lines[-1] and "overall=100%" in lines[-1]
+        reporter.close()
+
+
+def test_tty_finish_does_not_duplicate_evidence_lines():
+    """TTY에서 단계 확정 줄이 값 변화 없이 evidence에 두 번 기록되지 않는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "progress.log"
+        reporter, stream, clock = _reporter(tty=True, evidence=log)
+        gates = pg.GateProgress(reporter, 2)
+        gates.gate("a"); gates.gate("b"); gates.done()
+        reporter.close()
+        text = log.read_text("utf-8").splitlines()
+        assert len(text) == len(set(text)), text
+        assert any("100% Preflight · b" in l for l in text)
 
 
 def test_bringup_failure_lines_have_layer_reason_and_evidence():
