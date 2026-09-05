@@ -24,6 +24,7 @@ run-id로 최대 1회. 설정·장비·키·UNQUALIFIED·cleanup 실패는 재�
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -580,6 +581,15 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     return result
 
 
+_ESCAPE_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z~]|\x1b[A-Za-z]|[\x00-\x1f\x7f]")
+
+
+def _clean_choice(raw: str) -> str:
+    """메뉴 입력 정리 — 방향키·기능키 ESC 시퀀스와 제어 문자를 제거한다
+    (`input()`은 방향키를 '\\x1b[A' 같은 문자열로 넘긴다)."""
+    return _ESCAPE_SEQ_RE.sub("", str(raw)).strip()
+
+
 def _menu(session, *, out, input_fn, clock, tracer=None, run_id=None,
           run_root=None) -> list:
     ordered = sorted(SCENARIOS)
@@ -591,11 +601,11 @@ def _menu(session, *, out, input_fn, clock, tracer=None, run_id=None,
         out("  a) run all (005 -> 006 -> 001 normal -> 001 forged)")
         out("  q) quit")
         try:
-            choice = input_fn("select > ").strip()
+            choice = _clean_choice(input_fn("select > "))
         except EOFError:
             break
         if not choice:
-            continue
+            continue          # 빈 입력·방향키 등 제어 시퀀스만이면 다시 표시
         lowered = choice.lower()
         if lowered in ("q", "quit", "exit"):
             break
