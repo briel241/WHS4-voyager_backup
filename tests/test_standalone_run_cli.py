@@ -70,6 +70,7 @@ def make_session_factory(script=None):
             self.closed = False
             self.escalated = False
             self.submitted = []
+            self.polls = []
             instances.append(self)
 
         def start(self):
@@ -110,8 +111,9 @@ def make_session_factory(script=None):
 
         def wait_result(self, workload_id, *, timeout_s=None, on_trace=None,
                         on_poll=None):
-            if on_poll:
-                on_poll()
+            # R1: READY 이후 폴링 훅은 실행 경로에 없어야 한다 — 받은 값을 기록만
+            # 하고(호출하지 않음) 시험이 None임을 단언한다.
+            self.polls.append(on_poll)
             if on_trace:
                 on_trace({"event": "submit", "step": "s1", "sender": "ROC",
                           "receiver": "MASS-A", "transfer_id": "8f73c821-x",
@@ -122,10 +124,8 @@ def make_session_factory(script=None):
                           "ack_required": True, "t_utc": "2026-09-05T00:00:00Z"})
                 on_trace({"event": "scenario_result", "status": "PASS",
                           "scenario": self.submitted[-1][0],
-                          "steps": [{"name": "s1", "status": "PASS",
-                                     "transfer_id": "8f73c821-x",
-                                     "state": "COMPLETED",
-                                     "received_checks": {"byte_exact": True}}],
+                          # controller와 같은 (name, status) 쌍 형식
+                          "steps": [["s1", "PASS"]],
                           "counters": {"transfers_completed": 1,
                                        "transfers_failed": 0,
                                        "wrong_destination": 0,
@@ -362,16 +362,21 @@ def test_run_noninteractive_all_pass_end_to_end():
                 / "installation-state.json").is_file()
         assert session.submitted == list(run_cmd.DEFAULT_BATCH_PLAN)
         assert session.closed
+        # R1: READY 이후 wait_result에 폴링 훅(on_poll)이 전달되지 않는다.
+        assert session.polls == [None] * len(run_cmd.DEFAULT_BATCH_PLAN)
 
         text = "\n".join(lines)
         assert "QUALIFIED (reference" in text
         assert "SESSION READY" in text
         assert "MASS-A connected" in text and "연결됨" not in text
-        # bring-up 진행 표시(non-TTY 줄 로그)와 시나리오 순서·추적 출력.
+        # bring-up 진행 표시(non-TTY 줄 로그)와 READY 이후 저 I/O 시나리오 출력
+        # (88fa6df와 같은 running/trace 행/result 요약 — 실시간 세로 블록 없음).
         assert "[BRINGUP]" in text and "Endpoint startup" in text
         assert "Service session READY" in text
-        assert "[1/4] SC-VDE-005" in text and "[4/4] SC-VDE-001 forged" in text
-        assert "[STEP] s1  submit" in text and "[STEP 1/1] s1  PASS" in text
+        assert "running SC-VDE-005" in text and "running SC-VDE-001 (forged)" in text
+        assert "ROC -> MASS-A    submit    route  353 B  [s1]" in text
+        assert "verdict   PASS" in text
+        assert "[STEP" not in text and "[TX]" not in text and "[RX]" not in text
         assert "result: PASS · 87.3 s · quiescence OK" in text
         assert "Closed — cleanup PASS, residual processes 0" in text
         # non-TTY: carriage return·ANSI 오염 없음, 시나리오 구간 진행바 없음.
@@ -419,7 +424,7 @@ def test_progress_toggle_keeps_judgement_and_evidence_identical():
                               for w in summary["workloads"]]})
             text = "\n".join(lines)
             assert "\r" not in text and "\x1b" not in text
-            assert "[1/4] SC-VDE-005" in text
+            assert "running SC-VDE-005" in text     # READY 이후 저 I/O 출력 (R1)
     assert summaries[0] == summaries[1]
 
 
@@ -486,8 +491,8 @@ def test_run_interactive_menu_and_workload_failure_stops_batch():
         assert summary["interactive"] is True and summary["status"] == "PASS"
         assert not any(l.startswith("RESULT ") for l in lines)
         text = "\n".join(lines)
-        assert "[1/4]" not in text  # 개별 시나리오에는 [n/N] 없음
-        assert "SC-VDE-001 forged" in text
+        assert "[1/4]" not in text  # READY 이후 [n/N]·세로 블록 없음 (R1)
+        assert "running SC-VDE-001 (forged)" in text
 
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp)
@@ -500,9 +505,9 @@ def test_run_interactive_menu_and_workload_failure_stops_batch():
         assert session.submitted == [("SC-VDE-005", "normal"),
                                      ("SC-VDE-006", "normal")]
         text = "\n".join(lines)
-        assert "reason: ack timeout" in text
-        assert "[FAIL] layer=MAC" in text and "error=ack timeout" in text
-        assert "evidence=" in text
+        assert "result: FAIL" in text and "reason: ack timeout" in text
+        assert "[FAIL] layer=" not in text          # 실시간 판정 블록 없음 (R1)
+        assert "Evidence: " in text
         assert any(l.startswith("RESULT overall=FAIL scenarios=1/4")
                    for l in lines)
 
