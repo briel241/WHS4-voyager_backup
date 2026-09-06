@@ -75,10 +75,14 @@ heartbeat. **각 줄(단계)의 퍼센트는 그 단계 자체의 진행률**(0�
 단조)이고, 사다리·bring-up 전체 진행률은 `overall=NN%` 필드다. 세 의미: exact
 (실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트 뒤 `estimated`)/waiting
 (host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
-READY 이후 시나리오 구간은 진행바 없이 `[n/N] SC-…` 순서와 service_events·
-workload trace 기반 [TX]/[RX]/[STEP] 상세(헤더 한 줄 + `key=value` 한 줄씩의
-세로 블록), `[STEP n/N] name PASS` 판정 줄, 실패 시 layer/reason/evidence.
-bring-up 단계 줄은 영어(coordinator의 `연결됨`은 표시에서 `connected`).
+READY 이후 시나리오 구간은 **저 I/O 경로**(2026-09-06 R1 선택 롤백, 88fa6df와
+동일): `running SC-…` 한 줄, workload trace 행(세션의 trace tail, on_trace)과
+종료 시 `result: PASS/FAIL · 소요 · quiescence` 요약만 터미널에 낸다.
+service_events 폴링·실시간 [TX]/[RX]/[STEP] 세로 블록·transfer별 강제 trace
+flush·presentation 파일 갱신은 **실행 경로에 없다**(mirror는 READY에서 끊는다).
+상세 분석은 종료 후 evidence(`workloads/<id>/`, `evidence/service_events/`)와
+`vdeter results`로 한다. bring-up 단계 줄은 영어(coordinator의 `연결됨`은
+표시에서 `connected`).
 CLI 출력·오류 메시지·setup이 쓰는 hardware.toml 초안 주석은 모두 영어다(2026-09-05
 사용자 결정; 소스 주석·docstring·이 README는 한국어 유지). coordinator·launcher가
 직접 내는 콘솔 원문(예: `config 적재 실패`)은 RF 계층 무수정 원칙에 따라 그대로다.

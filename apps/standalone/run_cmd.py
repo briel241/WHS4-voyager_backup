@@ -561,50 +561,29 @@ def _emit_trace(row, elapsed_s, out):
         out(line)
 
 
-def _run_workload(session, scenario_id, certificate_case, *, out, clock,
-                  tracer=None, index: int = 1, total: int = 1,
-                  run_id: str | None = None, run_root=None):
+def _run_workload(session, scenario_id, certificate_case, *, out, clock):
+    """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
+
+    표시는 `running …`, workload trace 행(on_trace, 세션의 trace tail)과
+    `result_line` 요약뿐이다. service_events 폴링·강제 flush·presentation
+    파일 갱신·실시간 세로 블록은 실행 경로에 없다(R1 선택 롤백). 판정·
+    timeout·evidence 계약은 세션 객체가 그대로 소유한다."""
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
-    if tracer is None:
-        out("  running " + label)
+    out("  running " + label)
     workload_id = session.submit_workload(
         scenario_id, certificate_case,
         on_settle=lambda remaining, prev: out(
             "  settling %.0f s (RX pipeline drain after %s)"
             % (remaining, prev)))
-    if tracer is not None:
-        # 시나리오 구간: 퍼센트 진행바 없음 — 순서 [n/N]와 실시간 송수신 추적.
-        tracer.start_workload(index=index, total=total,
-                              scenario_id=scenario_id,
-                              certificate_case=certificate_case,
-                              workload_id=workload_id, run_id=run_id)
     started = clock()
-
-    def on_trace(row):
-        if tracer is not None:
-            tracer.on_trace_row(row)
-        else:
-            _emit_trace(row, clock() - started, out)
-
-    wait_kwargs = {"on_trace": on_trace}
-    if tracer is not None:
-        wait_kwargs["on_poll"] = tracer.poll
-    try:
-        result = session.wait_result(workload_id, **wait_kwargs)
-    except TypeError:
-        # 구판 세션 객체(on_poll 미지원) 호환 — 표시 훅만 생략한다.
-        result = session.wait_result(workload_id, on_trace=on_trace)
-    if tracer is not None:
-        tracer.poll()
+    result = session.wait_result(
+        workload_id,
+        on_trace=lambda row: _emit_trace(row, clock() - started, out))
     result.setdefault("wall_clock_s", round(clock() - started, 1))
     result.setdefault("workload_id", workload_id)
     result.setdefault("scenario_id", scenario_id)
     result.setdefault("certificate_case", certificate_case)
-    if tracer is not None:
-        evidence_dir = (Path(run_root) / "workloads" / workload_id
-                        if run_root is not None else None)
-        tracer.finish_workload(result, evidence_dir=evidence_dir)
     out(result_line(result))
     return result
 
@@ -618,8 +597,7 @@ def _clean_choice(raw: str) -> str:
     return _ESCAPE_SEQ_RE.sub("", str(raw)).strip()
 
 
-def _menu(session, *, out, input_fn, clock, tracer=None, run_id=None,
-          run_root=None) -> list:
+def _menu(session, *, out, input_fn, clock) -> list:
     ordered = sorted(SCENARIOS)
     results = []
     while True:
@@ -638,13 +616,9 @@ def _menu(session, *, out, input_fn, clock, tracer=None, run_id=None,
         if lowered in ("q", "quit", "exit"):
             break
         if lowered in ("a", "all"):
-            for position, (scenario_id, case) in enumerate(
-                    DEFAULT_BATCH_PLAN, 1):
-                result = _run_workload(
-                    session, scenario_id, case, out=out, clock=clock,
-                    tracer=tracer, index=position,
-                    total=len(DEFAULT_BATCH_PLAN), run_id=run_id,
-                    run_root=run_root)
+            for scenario_id, case in DEFAULT_BATCH_PLAN:
+                result = _run_workload(session, scenario_id, case,
+                                       out=out, clock=clock)
                 results.append(result)
                 if result.get("status") != "PASS" or not (
                         result.get("quiescence") or {}).get("pass"):
@@ -673,8 +647,7 @@ def _menu(session, *, out, input_fn, clock, tracer=None, run_id=None,
                 continue
             case = answer
         result = _run_workload(session, scenario_id, case, out=out,
-                               clock=clock, tracer=tracer, run_id=run_id,
-                               run_root=run_root)
+                               clock=clock)
         results.append(result)
         if not (result.get("quiescence") or {}).get("pass"):
             out("  session can no longer accept workloads (quiescence "
@@ -726,6 +699,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
     except StateError as exc:
         out("Refused: " + str(exc))
         return EXIT_INTERNAL
+    # READY 이후(시나리오 구간)에는 진행바·mirror 없이 이 원 sink로만 출력한다.
+    terminal_out = out
     mirror = progress_module.MirroredOut(out, None)
     reporter = progress_module.make_reporter(
         plain=not progress, sink=mirror, stream=progress_stream,
@@ -864,19 +839,20 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         results = []
         exit_code = EXIT_PASS
         interrupted = False
-        tracer = progress_module.ScenarioTracer(out, run_root=run_root,
-                                                clock=clock)
+        # SESSION READY 이후: 88fa6df와 같은 저 I/O 경로. 진행바는 이미 닫혔고
+        # (bring-up 끝), presentation mirror도 끊는다 — 시나리오 구간에는
+        # service_events 폴링·실시간 추적·presentation 파일 갱신이 없다(R1).
+        # workload trace·result·evidence 생성은 세션/coordinator 계약 그대로다.
+        mirror.set_path(None)
+        out = terminal_out
         try:
             if interactive:
                 results = _menu(session, out=out, input_fn=input_fn,
-                                clock=clock, tracer=tracer,
-                                run_id=active_run_id, run_root=run_root)
+                                clock=clock)
             else:
-                for position, (scenario_id, case) in enumerate(plan, 1):
-                    result = _run_workload(
-                        session, scenario_id, case, out=out, clock=clock,
-                        tracer=tracer, index=position, total=len(plan),
-                        run_id=active_run_id, run_root=run_root)
+                for scenario_id, case in plan:
+                    result = _run_workload(session, scenario_id, case,
+                                           out=out, clock=clock)
                     results.append(result)
                     if result.get("status") != "PASS" or not (
                             result.get("quiescence") or {}).get("pass"):
