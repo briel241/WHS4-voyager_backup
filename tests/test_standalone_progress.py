@@ -82,7 +82,7 @@ def test_tty_updates_same_line_and_finalizes_on_phase_change():
     finalized = text.split("\n")[0].split("\r")[-1]
     assert "Endpoint startup" in finalized and " 66%" in finalized
     last = text.split("\n")[-1]
-    assert "waiting" in last and "%" not in last.split("]")[1].split("Host")[0]
+    assert "progress n/a" in last and "%" not in last.split("]")[1].split("Host")[0]
     reporter.finish("FAILED")
     assert "FAILED" in stream.getvalue().split("\n")[-2]
     reporter.close()
@@ -111,7 +111,7 @@ def test_non_tty_writes_plain_lines_without_cr_or_ansi_and_heartbeats():
     assert lines
     first = lines[-1]
     assert first[4] == "-" and first.endswith("Z") is False and "T" in first[:20]
-    assert "[BRINGUP] waiting Host-time acquisition endpoint=MASS-B elapsed=00:00" in first
+    assert "[BRINGUP] progress n/a Host-time acquisition endpoint=MASS-B elapsed=00:00" in first
     assert "\r" not in first and "\x1b" not in first
     # 같은 값 반복은 억제된다.
     reporter.update(endpoint="MASS-B")
@@ -140,7 +140,7 @@ def test_percent_never_goes_backwards_and_waiting_holds():
     reporter.phase("B", mode=pg.MODE_WAITING, hold_fraction=0.1)
     reporter.update(events=5)
     last = stream.getvalue().split("\r")[-1]
-    assert "waiting" in last and "events=5" in last
+    assert "progress n/a" in last and "events=5" in last
     # 단조는 단계 안에서만: 새 단계는 앞 단계의 50%에 눌어붙지 않고 자기 값부터.
     reporter.phase("C", mode=pg.MODE_ESTIMATED, fraction=0.1)
     assert " 10% estimated" in stream.getvalue().split("\r")[-1]
@@ -153,7 +153,7 @@ def test_percent_never_goes_backwards_and_waiting_holds():
 def test_exact_has_no_estimated_and_estimated_is_marked():
     assert pg.status_column(pg.MODE_EXACT, 70).strip() == "70%"
     assert pg.status_column(pg.MODE_ESTIMATED, 48).strip() == "48% estimated"
-    assert pg.status_column(pg.MODE_WAITING, None).strip() == "waiting"
+    assert pg.status_column(pg.MODE_WAITING, None).strip() == "progress n/a"
     assert pg.status_column(pg.MODE_EXACT, 100).strip() == "100%"
     assert len(pg.status_column(pg.MODE_ESTIMATED, 5)) == pg.STATUS_COLUMN_WIDTH
 
@@ -218,9 +218,9 @@ def test_bringup_tracker_phases_exact_waiting_estimated_ready():
         feed(2); feed(3)
         startup_done = [l for l in lines if "Endpoint startup" in l][-1]
         assert "] 100% Endpoint startup" in startup_done and "ready=3/3" in startup_done
-        assert "waiting Host-time acquisition" in lines[-1]
+        assert "progress n/a Host-time acquisition" in lines[-1]
         feed(4); feed(5)
-        assert "events=2" in lines[-1] and "waiting" in lines[-1]
+        assert "events=2" in lines[-1] and "progress n/a" in lines[-1]
         feed(6)
         assert "RF-time PRE validation" in lines[-1] and "estimated" in lines[-1]
         assert "] 0% estimated RF-time PRE" in lines[-1]
@@ -464,3 +464,78 @@ def test_progress_toggle_does_not_change_outcome_of_run_flow():
     이 progress on/off 두 경로로 실행한다."""
     source = (Path(_REPO) / "tests" / "test_standalone_run_cli.py").read_text("utf-8")
     assert "def test_progress_toggle_keeps_judgement_and_evidence_identical" in source
+
+
+def _event_fmt(stage_line):
+    return "  [ev] " + stage_line
+
+
+def _ordering_positions(lines):
+    """(완료 100% 줄, 이벤트 줄, 다음 단계 0% 줄)의 인덱스."""
+    done = [i for i, l in enumerate(lines) if "100% RF-time POST validation" in l or
+            ("RF-time POST validation" in l and "100%" in l)]
+    event = [i for i, l in enumerate(lines) if "[ev] validate_rf_time POST COMPLETED" in l]
+    nxt = [i for i, l in enumerate(lines) if "Service startup" in l and ("0%" in l or "estimated" in l)]
+    return done, event, nxt
+
+
+def test_bringup_completion_event_order_non_tty_and_dedup():
+    """완료 이벤트는 '해당 단계 100% 확정 → 이벤트 → 다음 단계 0%' 순서이며,
+    콘솔 tail과 on_stage 두 경로로 같은 줄이 와도 이벤트는 한 번만 난다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        console = Path(tmp) / "coordinator-console.log"
+        console.write_text("", encoding="utf-8")
+        lines = []
+        reporter, stream, clock = _reporter(tty=False, sink=lines.append)
+        tracker = pg.BringupTracker(reporter, console_log=console, clock=clock,
+                                    event_formatter=_event_fmt)
+        with open(console, "a", encoding="utf-8") as handle:
+            for line in _console_lines()[:11]:
+                handle.write(line + "\n")
+        clock.advance(6); tracker.poll()
+        assert "RF-time POST validation" in lines[-1]
+        # (a) on_stage가 먼저 오는 경우
+        clock.advance(6)
+        tracker.on_stage_line("validate_rf_time POST COMPLETED — HOST_TIME_LOCKED")
+        with open(console, "a", encoding="utf-8") as handle:
+            handle.write("[coordinator] validate_rf_time POST COMPLETED — HOST_TIME_LOCKED\n")
+        clock.advance(6); tracker.poll()   # tail이 같은 줄을 보지만 중복 처리하지 않는다
+        done, event, nxt = _ordering_positions(lines)
+        assert len(event) == 1, lines
+        assert done and nxt and done[-1] < event[0] < nxt[0], lines
+        # (b) 콘솔 tail이 먼저 오는 경우 (service 완료 → READY 확정 → 이벤트)
+        with open(console, "a", encoding="utf-8") as handle:
+            handle.write("[coordinator] publish_service_start COMPLETED — RUNNING\n")
+        clock.advance(6); tracker.poll()
+        tracker.on_stage_line("publish_service_start COMPLETED — RUNNING")
+        ready_idx = [i for i, l in enumerate(lines) if "Service session READY" in l and "100%" in l]
+        ev2 = [i for i, l in enumerate(lines) if "[ev] publish_service_start COMPLETED" in l]
+        assert len(ev2) == 1 and ready_idx and ready_idx[-1] < ev2[0], lines
+        tracker.ready()   # fallback은 중복 출력하지 않는다
+        assert len([l for l in lines if "Service session READY" in l and "100%" in l]) == 1
+        reporter.close()
+
+
+def test_bringup_completion_event_order_tty():
+    """TTY도 같은 논리 순서: 확정 줄(개행) → 이벤트 줄 → 다음 단계 바."""
+    with tempfile.TemporaryDirectory() as tmp:
+        console = Path(tmp) / "coordinator-console.log"
+        console.write_text("", encoding="utf-8")
+        reporter, stream, clock = _reporter(tty=True)
+        tracker = pg.BringupTracker(reporter, console_log=console, clock=clock,
+                                    event_formatter=_event_fmt)
+        with open(console, "a", encoding="utf-8") as handle:
+            for line in _console_lines()[:11]:
+                handle.write(line + "\n")
+        clock.advance(6); tracker.poll()
+        clock.advance(6)
+        tracker.on_stage_line("validate_rf_time POST COMPLETED — HOST_TIME_LOCKED")
+        text = stream.getvalue()
+        i_event = text.find("[ev] validate_rf_time POST COMPLETED")
+        i_done = text.rfind("100%", 0, i_event)             # 확정된 100% 줄
+        i_next = text.find("Service startup", i_event)
+        assert 0 <= i_done < i_event < i_next, text[-600:]
+        assert "RF-time POST validation" in text[i_done:i_event]
+        assert text[i_done:i_event].count("\n") >= 1      # 확정 줄은 개행으로 닫힌다
+        assert "waiting" not in text and "progress n/a" in text
+        reporter.close()

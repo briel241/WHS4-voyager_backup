@@ -9,8 +9,10 @@ hot loop에 계측·파일 I/O를 추가하지 않는다).
       TTY에서는 같은 줄을 덮어쓰는 20칸 바, non-TTY/nohup/redirect에서는
       carriage return·ANSI 없이 UTC 시각이 붙은 줄 단위 로그.
       세 의미: exact(실제 분모 있음, `estimated` 없음) / estimated(가중치
-      추정, 퍼센트 바로 뒤 `estimated`) / waiting(완료 시점 불명 — 퍼센트를
-      늘리지 않고 관측값·경과시간만).
+      추정, 퍼센트 바로 뒤 `estimated`) / waiting(단계 내부 진행률을 계산할
+      수 없음 — 가짜 퍼센트 대신 `progress n/a`와 관측값·경과시간만; 멈춤이
+      아니다). bring-up 단계 전이는 항상 "현재 단계 100%/done 확정 → 완료
+      이벤트 줄 → 다음 단계 0%" 순서로 낸다(TTY·non-TTY 동일).
     - bring-up READY 뒤(시나리오 구간)에는 이 모듈이 관여하지 않는다 —
       run_cmd가 `running …`·trace 행·`result_line` 요약만 원 sink로 낸다
       (2026-09-06 R1 선택 롤백: 실시간 추적·service_events 폴링 제거).
@@ -38,7 +40,8 @@ MODE_EXACT = "exact"
 MODE_ESTIMATED = "estimated"
 MODE_WAITING = "waiting"
 
-STATUS_COLUMN_WIDTH = 14  # " 48% estimated" / "waiting       " / "FAILED        "
+STATUS_COLUMN_WIDTH = 14  # " 48% estimated" / "progress n/a  " / "FAILED        "
+WAITING_TEXT = "progress n/a"   # 단계 내부 진행률 계산 불가(멈춤 아님)
 
 _PEM_PATTERN = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----|"
@@ -116,7 +119,7 @@ def status_column(mode: str, percent, status=None) -> str:
     elif status == "INTERRUPTED":
         text = "INTERRUPTED"
     elif mode == MODE_WAITING:
-        text = "waiting"
+        text = WAITING_TEXT
     elif percent is None:
         text = "    "
     elif mode == MODE_ESTIMATED and percent < 100:
@@ -249,7 +252,7 @@ class ProgressReporter:
         elif line["status"] == "done":
             word = "done" if percent is None else "%d%%" % percent
         elif line["mode"] == MODE_WAITING:
-            word = "waiting"
+            word = WAITING_TEXT
         elif percent is None:
             word = "running"
         elif line["mode"] == MODE_ESTIMATED and percent < 100:
@@ -486,13 +489,34 @@ _RF_PATH_RE = re.compile(r"(C[1-6])")
 class BringupTracker:
     """coordinator 콘솔·trace를 읽어 bring-up 진행바를 구동한다 (표시 전용).
 
-    host-time은 완료 시점을 예측할 수 없으므로 `waiting`(퍼센트 정지, 이벤트
-    수·경과시간 표시). RF-time PRE/POST는 실측 소요가 안정적이라 경과시간
-    기반 `estimated`. endpoint startup은 연결 endpoint n/3 exact."""
+    host-time은 완료 시점을 예측할 수 없으므로 `waiting`(`progress n/a` —
+    퍼센트 정지, 이벤트 수·경과시간 표시). RF-time PRE/POST는 실측 소요가
+    안정적이라 경과시간 기반 `estimated`. endpoint startup은 연결 endpoint
+    n/3 exact.
+
+    완료 이벤트 순서: 단계를 끝내는 coordinator 줄(`… COMPLETED`/`COMMITTED`)
+    은 콘솔 tail(:meth:`poll`)과 run_cmd의 on_stage(:meth:`on_stage_line`)
+    두 경로로 들어오는데, 어느 쪽이 먼저 오든 **한 번만** "현재 단계
+    100%/done 확정 → `[elapsed] … COMPLETED` 이벤트 줄 → 다음 단계 0%"
+    순서로 낸다. 이벤트 문구는 `event_formatter(stage_line)`(run_cmd가
+    stamp·영어 변환을 넣어 준다)로 만든다; 없으면 전이만 하고 이벤트 줄은
+    내지 않는다(시험·표시 전용)."""
+
+    _TRANSITIONS = (
+        ("prepare/configure/arm_rx COMPLETED", "host_time"),
+        ("acquire_host_time COMPLETED", "rf_time_pre"),
+        ("validate_rf_time PRE COMPLETED", "active_bridge"),
+        # bridge 확정 → RF-time POST 검증 시작 (실측 ~7.6분; 없으면 POST
+        # 구간 전체가 'Active bridge commit'으로 표시됐다).
+        ("active bridge COMMITTED", "rf_time_post"),
+        ("validate_rf_time POST COMPLETED", "service"),
+    )
+    _SERVICE_DONE = "publish_service_start COMPLETED"
+    _CONSOLE_PREFIX = "[coordinator] "
 
     def __init__(self, reporter: ProgressReporter, *, console_log: Path | str,
                  trace_log: Path | str | None = None, endpoint_total: int = 3,
-                 clock=time.monotonic) -> None:
+                 clock=time.monotonic, event_formatter=None) -> None:
         self.reporter = reporter
         self.clock = clock
         self._console = FileTail(console_log)
@@ -506,8 +530,11 @@ class BringupTracker:
         self.notes = {}
         self.failed = False
         self.session_started = clock()
+        self.event_formatter = event_formatter
+        self._handled_stage_lines = set()   # 전이 줄 1회 처리(두 경로 중복 방지)
+        self._ready_done = False
         self._lock = threading.RLock()
-        self._start_phase(0)
+        self._open_phase(0)
 
     # ---- 단계 전이 ------------------------------------------------------
 
@@ -525,19 +552,30 @@ class BringupTracker:
         self._overall_max = max(getattr(self, "_overall_max", 0), percent)
         return "%d%%" % self._overall_max          # 전체 진행률도 후퇴 없음
 
+    def _finish_current(self) -> None:
+        """진행 중 단계를 자기 100%로 확정한다 (waiting은 퍼센트 없이 done)."""
+        if self.phase_index < 0:
+            return
+        _k, _l, typical, prev_mode = self._phase()
+        self.completed_weight += typical
+        if prev_mode == MODE_WAITING:
+            self.reporter.update(overall=self._overall_field(0.0))
+        else:
+            self.reporter.update(fraction=1.0,
+                                 overall=self._overall_field(0.0))
+        self.reporter.finish("done")
+
     def _start_phase(self, index: int) -> None:
+        """현재 단계 확정 후 index 단계 시작 (이벤트 줄 없는 전이)."""
         if index >= len(BRINGUP_PHASES):
             return
         if self.phase_index >= 0:
-            _k, _l, _t, prev_mode = self._phase()
-            self.completed_weight += self._phase()[2]
-            # 끝난 단계는 자기 100%로 확정한다 (waiting은 퍼센트 없이 done).
-            if prev_mode == MODE_WAITING:
-                self.reporter.update(overall=self._overall_field(0.0))
-            else:
-                self.reporter.update(fraction=1.0,
-                                     overall=self._overall_field(0.0))
-            self.reporter.finish("done")
+            self._finish_current()
+        self._open_phase(index)
+
+    def _open_phase(self, index: int) -> None:
+        if index >= len(BRINGUP_PHASES):
+            return
         self.phase_index = index
         self.phase_started = self.clock()
         self.events_in_phase = 0
@@ -554,14 +592,70 @@ class BringupTracker:
         self.reporter.phase(label, mode=mode, fraction=fraction,
                             hold_fraction=0.0, scope="BRINGUP", **fields)
 
-    def _advance_to(self, key: str) -> None:
+    def _advance_to(self, key: str, event_text: str | None = None) -> None:
         for index, phase in enumerate(BRINGUP_PHASES):
             if phase[0] == key:
                 if index > self.phase_index:
-                    # 건너뛴 단계는 완료로 확정한다.
-                    while self.phase_index < index:
-                        self._start_phase(self.phase_index + 1)
+                    # 순서: 현재 단계 100%/done 확정 → 완료 이벤트 줄 →
+                    # 다음 단계 0% (건너뛴 단계는 완료로 확정한다).
+                    self._finish_current()
+                    if event_text:
+                        self.reporter.log(event_text)
+                    while self.phase_index < index - 1:
+                        self._open_phase(self.phase_index + 1)
+                        self._finish_current()
+                    self._open_phase(index)
+                elif event_text:
+                    self.reporter.log(event_text)
                 return
+
+    def _transition_key(self, stage_line: str):
+        for prefix, key in self._TRANSITIONS:
+            if stage_line.startswith(prefix):
+                return key
+        return None
+
+    def _handle_stage(self, stage_line: str, event_text: str | None) -> bool:
+        """단계를 끝내는 줄을 정확히 한 번 처리한다(콘솔 tail·on_stage 어느
+        경로가 먼저 와도). 처리했거나 이미 처리된 줄이면 True."""
+        if stage_line in self._handled_stage_lines:
+            return True
+        key = self._transition_key(stage_line)
+        if key is not None:
+            self._handled_stage_lines.add(stage_line)
+            self._advance_to(key, event_text)
+            return True
+        if stage_line.startswith(self._SERVICE_DONE):
+            self._handled_stage_lines.add(stage_line)
+            self._complete_service()
+            if event_text:
+                self.reporter.log(event_text)
+            return True
+        return False
+
+    def on_stage_line(self, stage_line: str) -> None:
+        """run_cmd on_stage 경로(`[coordinator] ` 접두 제거된 단계 줄): 이벤트
+        문구를 내되, 단계를 끝내는 줄이면 '현재 단계 확정 → 이벤트 → 다음
+        단계' 순서를 지킨다. 콘솔 tail이 먼저 처리한 줄은 다시 내지 않는다."""
+        with self._lock:
+            text = (self.event_formatter(stage_line)
+                    if self.event_formatter is not None else None)
+            if self._handle_stage(stage_line, text):
+                return
+            if text:
+                self.reporter.log(text)
+
+    def _complete_service(self) -> None:
+        """service 단계를 READY로 확정한다 (한 번만)."""
+        self._advance_to("service")
+        if self._ready_done:
+            return
+        self._ready_done = True
+        total = format_hms(self.clock() - self.session_started)
+        self.reporter.update(fraction=1.0, mode=MODE_EXACT,
+                             label="Service session READY", total=total,
+                             overall="100%")
+        self.reporter.finish("done")
 
     # ---- 입력 -------------------------------------------------------------
 
@@ -579,23 +673,12 @@ class BringupTracker:
                                          self.endpoint_total),
                         overall=self._overall_field(inner))
                 return
-            if line.startswith("[coordinator] prepare/configure/arm_rx COMPLETED"):
-                self._advance_to("host_time")
-                return
-            if line.startswith("[coordinator] acquire_host_time COMPLETED"):
-                self._advance_to("rf_time_pre")
-                return
-            if line.startswith("[coordinator] validate_rf_time PRE COMPLETED"):
-                self._advance_to("active_bridge")
-                return
-            if line.startswith("[coordinator] active bridge COMMITTED"):
-                # bridge 확정 → RF-time POST 검증 시작 (실측 ~7.6분; 없으면
-                # POST 구간 전체가 'Active bridge commit'으로 표시됐다).
-                self._advance_to("rf_time_post")
-                return
-            if line.startswith("[coordinator] validate_rf_time POST COMPLETED"):
-                self._advance_to("service")
-                return
+            if line.startswith(self._CONSOLE_PREFIX):
+                stage_line = line[len(self._CONSOLE_PREFIX):]
+                text = (self.event_formatter(stage_line)
+                        if self.event_formatter is not None else None)
+                if self._handle_stage(stage_line, text):
+                    return
             if "host affine fit FAIL" in line:
                 self.notes["reason"] = "HOST_AFFINE_FIT_FAILED"
                 self.reporter.update(last="host affine fit FAIL")
@@ -645,13 +728,10 @@ class BringupTracker:
             self.reporter.tick()
 
     def ready(self) -> None:
+        """READY 확정 — `publish_service_start COMPLETED` 줄에서 이미 확정됐으면
+        중복하지 않는다(그 줄을 못 봤을 때의 fallback)."""
         with self._lock:
-            self._advance_to("service")
-            total = format_hms(self.clock() - self.session_started)
-            self.reporter.update(fraction=1.0, mode=MODE_EXACT,
-                                 label="Service session READY", total=total,
-                                 overall="100%")
-            self.reporter.finish("done")
+            self._complete_service()
 
     def failed_at(self, status: str = "FAILED") -> str:
         with self._lock:
