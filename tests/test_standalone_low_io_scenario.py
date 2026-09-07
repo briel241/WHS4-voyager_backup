@@ -145,23 +145,44 @@ def test_ready_after_phase_has_no_tracer_polling_or_presentation_io():
         assert session.polls == [None] * len(run_cmd.DEFAULT_BATCH_PLAN)
         assert session.submitted == list(run_cmd.DEFAULT_BATCH_PLAN)
 
-        # 5)·6) READY 이후 열린 파일: summary.json(원자 발행)뿐 —
-        #       service_events·presentation·console/progress 로그 없음.
+        # 5)·6) READY 이후 열린 파일: summary.json(원자 발행, 쓰기)과, 각 workload의
+        #       result 확정 **후** 상세 보고를 위해 읽기 전용으로 정확히 한 번 여는
+        #       evidence(service_events/<EP>.jsonl, 없을 때만 final-result.json)뿐 —
+        #       presentation·console/progress/run 로그 없음, 다른 쓰기 없음.
         after = spy.after_ready()
         assert after, "READY 이후 open 기록이 없다 — spy가 동작하지 않았다"
-        offenders = [(p, m) for p, m in after
-                     if "service_events" in p.replace("\\", "/")
-                     or "presentation" in p.replace("\\", "/")
+        normalized = [(p.replace("\\", "/"), m) for p, m in after]
+        offenders = [(p, m) for p, m in normalized
+                     if "presentation" in p
                      or p.endswith(("console.log", "progress.log", "run.log"))]
         assert offenders == [], offenders
-        names = {os.path.basename(p) for p, _m in after}
-        assert all(n.startswith("summary.json") for n in names), names
+        writes = [(p, m) for p, m in normalized
+                  if any(flag in m for flag in "wax+")
+                  and not os.path.basename(p).startswith("summary.json")]
+        assert writes == [], writes
+        allowed_reads = {}
+        for p, m in normalized:
+            if os.path.basename(p).startswith("summary.json"):
+                continue
+            assert ("/evidence/service_events/" in p
+                    or p.endswith("mass-roc-events/final-result.json")), (p, m)
+            assert "r" in m and "+" not in m, (p, m)
+            allowed_reads[p] = allowed_reads.get(p, 0) + 1
+        # endpoint 파일은 workload마다 한 번(bounded snapshot), 그 이상 없음.
+        assert allowed_reads, normalized
+        assert all(count <= len(run_cmd.DEFAULT_BATCH_PLAN)
+                   for count in allowed_reads.values()), allowed_reads
         # presentation 디렉터리는 READY 이후 크기·구성 변화가 없다.
         assert phase["presentation_snapshot"] is not None
         assert phase["presentation_after"] == phase["presentation_snapshot"]
 
-        # 8)·9) 결과 요약·evidence·판정 계약은 그대로다.
+        # 8)·9) 결과 요약·evidence·판정 계약은 그대로다. 상세 블록은 result 확정 뒤
+        #       (running 줄과 result 줄 사이) 한 번만 나온다.
         assert "result: PASS · 87.3 s · quiescence OK" in text
+        i_running = text.index("running SC-VDE-005")
+        i_block = text.index("[1/4] SC-VDE-005 — PASS")
+        i_result = text.index("result: PASS · 87.3 s")
+        assert i_running < i_block < i_result
         assert "Closed — cleanup PASS, residual processes 0" in text
         assert (Path(session.run_root) / "summary.json").is_file()
         assert "[STEP" not in text and "[TX]" not in text and "[RX]" not in text
