@@ -17,8 +17,10 @@ bring-up 자동 재시도(결정 16): host-time 획득의 일시적 실패로 **
 분류된** 경우에만, cleanup PASS·잔존 0·B210 3대 재발견을 확인한 뒤 새
 run-id로 최대 1회. 설정·장비·키·UNQUALIFIED·cleanup 실패는 재시도 없음.
 
-출력은 전부 영어, 시나리오 진행은 trace 발생 즉시 workload 기준 경과
-타임스탬프로 흘린다 (결정 21). 종료 코드는 README §11.
+출력은 전부 영어. 시나리오 구간은 RF 활성 중에는 `running …`만 내고,
+workload 결과가 확정된 뒤 evidence를 한 번 읽어 전송 단위 세로 상세 블록
+(scenario_report — `vdeter results`와 같은 렌더러)과 result 요약을 낸다.
+종료 코드는 README §11.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from apps.standalone import (
     progress as progress_module,
     provenance as provenance_module,
     qualify_cmd,
+    scenario_report,
 )
 from apps.standalone.local_session import (
     LocalCoordinatorSession,
@@ -155,17 +158,8 @@ def render_trace_event(row: dict, elapsed_s: float):
     return None
 
 
-def result_line(result: dict) -> str:
-    quiescence = result.get("quiescence") or {}
-    line = "  result: %s · %s s · quiescence %s" % (
-        result.get("status"), result.get("wall_clock_s", "?"),
-        "OK" if quiescence.get("pass") else "FAIL")
-    if result.get("status") != "PASS":
-        scenario = result.get("scenario") or {}
-        reason = scenario.get("error") or result.get("error")
-        if reason:
-            line += "\n  reason: " + str(reason)[:200]
-    return line
+#: `result: PASS · 19.2 s · quiescence OK` — results_cmd와 공유 (scenario_report).
+result_line = scenario_report.result_line
 
 
 # ------------------------------------------------------------ 게이트
@@ -510,18 +504,26 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     out("Bringing up hardware session (~20-23 min, once per run)")
     started = clock()
     tracker = None
+
+    def stage_event(line):
+        return "  %s %s" % (stamp(clock() - started), english_stage_line(line))
+
     if reporter is not None:
         tracker = progress_module.BringupTracker(
             reporter, console_log=getattr(session, "console_log_path",
                                           run_root / "coordinator-console.log"),
             trace_log=run_root / "session-coordinator-trace.jsonl",
-            clock=clock)
+            clock=clock, event_formatter=stage_event)
         reporter.tick_hook = tracker.poll
 
     def on_stage(line):
-        out("  %s %s" % (stamp(clock() - started), english_stage_line(line)))
+        # 표시 순서(진행바 100% → 완료 이벤트 → 다음 단계)는 tracker가 지킨다;
+        # 같은 줄이 콘솔 tail로 먼저 처리됐으면 다시 내지 않는다.
         if tracker is not None:
+            tracker.on_stage_line(line)
             tracker.poll()
+        else:
+            out(stage_event(line))
 
     try:
         session.start()
@@ -555,19 +557,19 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     return session, run_id, run_root, ready
 
 
-def _emit_trace(row, elapsed_s, out):
-    line = render_trace_event(row, elapsed_s)
-    if line:
-        out(line)
-
-
-def _run_workload(session, scenario_id, certificate_case, *, out, clock):
+def _run_workload(session, scenario_id, certificate_case, *, out, clock,
+                  index=None, total=None):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
 
-    표시는 `running …`, workload trace 행(on_trace, 세션의 trace tail)과
-    `result_line` 요약뿐이다. service_events 폴링·강제 flush·presentation
-    파일 갱신·실시간 세로 블록은 실행 경로에 없다(R1 선택 롤백). 판정·
-    timeout·evidence 계약은 세션 객체가 그대로 소유한다."""
+    RF 활성 구간(submit→result)에는 `running …`과 settle 안내만 표시하고
+    trace 행은 on_trace로 **메모리에 수집만** 한다. 결과 JSON이 확정된 뒤
+    (terminal state·verdict·quiescence·non_terminal 포함) 완료 evidence를
+    파일당 한 번 읽어(final-result·service_events, scenario_report) 전송
+    단위 세로 상세 블록을 출력하고, 마지막에 `result_line` 요약을 낸다.
+    service_events 폴링·강제 flush·presentation 파일 갱신·실시간 블록은
+    실행 경로에 없다(R1 선택 롤백). 상세 블록 렌더링 실패는 판정·close·
+    evidence에 영향을 주지 않는다(경고 한 줄). 판정·timeout·evidence 계약은
+    세션 객체가 그대로 소유한다."""
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
     out("  running " + label)
@@ -577,13 +579,17 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock):
             "  settling %.0f s (RX pipeline drain after %s)"
             % (remaining, prev)))
     started = clock()
-    result = session.wait_result(
-        workload_id,
-        on_trace=lambda row: _emit_trace(row, clock() - started, out))
+    trace_rows = []
+    result = session.wait_result(workload_id, on_trace=trace_rows.append)
     result.setdefault("wall_clock_s", round(clock() - started, 1))
     result.setdefault("workload_id", workload_id)
     result.setdefault("scenario_id", scenario_id)
     result.setdefault("certificate_case", certificate_case)
+    # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
+    for line in scenario_report.workload_report_lines(
+            trace_rows, result, run_root=getattr(session, "run_root", None),
+            index=index, total=total):
+        out(line)
     out(result_line(result))
     return result
 
@@ -616,9 +622,10 @@ def _menu(session, *, out, input_fn, clock) -> list:
         if lowered in ("q", "quit", "exit"):
             break
         if lowered in ("a", "all"):
-            for scenario_id, case in DEFAULT_BATCH_PLAN:
+            for number, (scenario_id, case) in enumerate(DEFAULT_BATCH_PLAN, 1):
                 result = _run_workload(session, scenario_id, case,
-                                       out=out, clock=clock)
+                                       out=out, clock=clock, index=number,
+                                       total=len(DEFAULT_BATCH_PLAN))
                 results.append(result)
                 if result.get("status") != "PASS" or not (
                         result.get("quiescence") or {}).get("pass"):
@@ -850,9 +857,10 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 results = _menu(session, out=out, input_fn=input_fn,
                                 clock=clock)
             else:
-                for scenario_id, case in plan:
+                for number, (scenario_id, case) in enumerate(plan, 1):
                     result = _run_workload(session, scenario_id, case,
-                                           out=out, clock=clock)
+                                           out=out, clock=clock,
+                                           index=number, total=len(plan))
                     results.append(result)
                     if result.get("status") != "PASS" or not (
                             result.get("quiescence") or {}).get("pass"):

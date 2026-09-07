@@ -57,6 +57,91 @@ fake_preflight = fx.fake_preflight
 
 # ---------------------------------------------------------------- 가짜 세션
 
+SECRET_PAYLOAD_MARKER = "U0VDUkVULVBBWUxPQUQtTUFSS0VS"   # "SECRET-PAYLOAD-MARKER" base64
+
+
+def _fake_tid(run_id: str, n: int) -> str:
+    return "%s-8f73c821-%03d" % (run_id, n)
+
+
+def _fake_base(n: int) -> float:
+    return 1000000.0 + 100.0 * n
+
+
+def fake_trace_rows(workload_id, run_id, n, scenario, case) -> list:
+    """coordinator workload trace 형식(완료 evidence)의 행 — 시각은 t_monotonic_s
+    (workload 기준)·t_utc·t_mono(data_received)만."""
+    tid, base = _fake_tid(run_id, n), _fake_base(n)
+    payload_format = ("x509.certificate_report" if scenario == "SC-VDE-001"
+                      else "route")
+    return [
+        {"event": "workload_begin", "seq": 1, "scenario_id": scenario,
+         "certificate_case": case, "workload_id": workload_id,
+         "t_monotonic_s": 0.0001, "t_utc": "2026-09-05T00:00:00Z"},
+        {"event": "submit", "seq": 2, "step": "s1", "sender": "ROC",
+         "receiver": "MASS-A", "transfer_id": tid,
+         "payload_format": payload_format, "payload_len": 353,
+         "payload_sha256": "9b" * 32, "source_station": 222222222,
+         "destination_station": 111111111, "ack_required": True,
+         "t_monotonic_s": 0.084, "t_utc": "2026-09-05T00:00:00Z"},
+        {"event": "transfer_terminal", "seq": 3, "step": "s1", "transfer_id": tid,
+         "terminal_state": "COMPLETED", "t_monotonic_s": 14.61,
+         "t_utc": "2026-09-05T00:00:14Z"},
+        {"event": "data_received", "seq": 4, "step": "s1", "receiver": "MASS-A",
+         "original_source": 222222222, "original_destination": 111111111,
+         "present": True, "t_mono": base + 14.61, "t_monotonic_s": 14.6103,
+         "t_utc": "2026-09-05T00:00:14Z"},
+        {"event": "scenario_result", "seq": 5, "status": "PASS",
+         "scenario": scenario,
+         # controller와 같은 (name, status) 쌍 형식
+         "steps": [["s1", "PASS"]],
+         "counters": {"transfers_completed": 1, "transfers_failed": 0,
+                      "wrong_destination": 0, "mismatched_ack": 0,
+                      "duplicates": 0},
+         "t_monotonic_s": 14.62, "t_utc": "2026-09-05T00:00:14Z"},
+        {"event": "workload_end", "seq": 6, "status": "PASS", "error": None,
+         "cleanup_errors": [], "t_monotonic_s": 15.69,
+         "t_utc": "2026-09-05T00:00:15Z"},
+    ]
+
+
+def fake_scenario_result(workload_id, run_id, n, scenario, case) -> dict:
+    """result JSON의 `scenario` (= mass-roc-events/final-result.json) 축약형."""
+    tid = _fake_tid(run_id, n)
+    checks = {"byte_exact": True, "original_destination": True,
+              "original_source": True, "payload_format": True,
+              "payload_len": True, "payload_sha256": True}
+    transfer_step = {"name": "s1", "status": "PASS", "state": "COMPLETED",
+                     "transfer_id": tid, "received_checks": checks}
+    if scenario == "SC-VDE-001" and case == "forged":
+        steps = [{"name": "001-report-built", "status": "PASS"}, transfer_step,
+                 {"name": "001-forged-rejected", "status": "PASS",
+                  "reason": "bad-signature", "trust_store_size": 0},
+                 {"name": "001-not-stored", "status": "PASS"}]
+    elif scenario == "SC-VDE-001":
+        steps = [{"name": "001-report-built", "status": "PASS"}, transfer_step,
+                 {"name": "001-verified-stored", "status": "PASS",
+                  "reason": "ok", "trust_store_size": 1},
+                 {"name": "001-idempotent-store", "status": "PASS"},
+                 {"name": "001-resend-ok", "status": "PASS"}]
+    else:
+        steps = [transfer_step]
+    label = scenario + ("[%s]" % case if scenario == "SC-VDE-001" else "")
+    return {"artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
+            "scenario_id": scenario, "workload_id": workload_id, "status": "PASS",
+            "error": None, "cleanup_errors": [],
+            "results": {label: {
+                "scenario_id": label, "status": "PASS", "reason": None,
+                "counters": {"transfers_completed": 1, "transfers_failed": 0,
+                             "wrong_destination": 0, "mismatched_ack": 0,
+                             "duplicates": 0},
+                "steps": steps,
+                "transfers": [{"transfer_id": tid, "step": "s1",
+                               "final_transfer_state": "COMPLETED",
+                               "wrong_destination": 0,
+                               "received": {"valid": True, "checks": checks}}]}}}
+
+
 def make_session_factory(script=None):
     script = script or {}
     instances = []
@@ -101,11 +186,44 @@ def make_session_factory(script=None):
                              "[coordinator] validate_rf_time PRE COMPLETED\n"
                              "[coordinator] validate_rf_time POST COMPLETED\n"
                              "[coordinator] publish_service_start COMPLETED — RUNNING\n")
+            # 완료된 evidence 흉내: endpoint service_events는 bring-up에서 미리
+            # 기록해 두고(READY 이후 fake가 파일을 쓰지 않도록), workload n의
+            # transfer_id·t_mono 기준과 짝을 맞춘다 (payload 원문은 절대 표시되면 안 된다).
+            events_dir = self.run_root / "evidence" / "service_events"
+            events_dir.mkdir(parents=True, exist_ok=True)
+            roc, mass_a = [], []
+            for n in range(1, 5):
+                tid, base = _fake_tid(self.kwargs["run_id"], n), _fake_base(n)
+                for offset, state in ((6.5, "QUEUED"), (9.5, "TRANSMITTING"),
+                                      (10.0, "WAITING_ACK"), (21.0, "COMPLETED")):
+                    roc.append({"t_mono": base + offset, "event_type": "TRANSFER_STATE_CHANGED",
+                                "transfer_id": tid, "transfer_state": state, "error_code": None})
+                mass_a.append({"t_mono": base + 14.61, "event_type": "DATA_RECEIVED",
+                               "transfer_id": None, "payload_sha256": "9b" * 32,
+                               "payload_len": 353,
+                               "payload_base64": SECRET_PAYLOAD_MARKER})
+            for name, rows in (("ROC", roc), ("MASS-A", mass_a)):
+                (events_dir / (name + ".jsonl")).write_bytes(
+                    "".join(json.dumps(r) + "\n" for r in rows).encode("utf-8"))
+            # coordinator가 남기는 workload trace 파일도 같은 행으로 미리 기록한다
+            # (batch 계획의 workload id는 결정적) — results 재열람이 읽는 evidence.
+            for n, (scenario_id, case) in enumerate(run_cmd.DEFAULT_BATCH_PLAN, 1):
+                wid = "%s-%s-%03d" % (self.kwargs["run_id"], scenario_id.lower(), n)
+                wdir = self.run_root / "workloads" / wid
+                wdir.mkdir(parents=True, exist_ok=True)
+                (wdir / "workload-trace.jsonl").write_bytes("".join(
+                    json.dumps(r) + "\n" for r in fake_trace_rows(
+                        wid, self.kwargs["run_id"], n, scenario_id, case)).encode("utf-8"))
             return {"run_id": self.kwargs["run_id"]}
 
         def submit_workload(self, scenario_id, certificate_case="normal", *,
                             on_settle=None):
             self.submitted.append((scenario_id, certificate_case))
+            # I/O 격리 검증용: submit 시점의 out 길이 (이전 workload 블록이 끝난 뒤인지).
+            probe = script.get("out_probe")
+            self.submit_out_lengths = getattr(self, "submit_out_lengths", [])
+            if probe:
+                self.submit_out_lengths.append(probe())
             return "%s-%s-%03d" % (self.kwargs["run_id"],
                                    scenario_id.lower(), len(self.submitted))
 
@@ -114,28 +232,33 @@ def make_session_factory(script=None):
             # R1: READY 이후 폴링 훅은 실행 경로에 없어야 한다 — 받은 값을 기록만
             # 하고(호출하지 않음) 시험이 None임을 단언한다.
             self.polls.append(on_poll)
+            scenario, case = self.submitted[-1]
+            n = len(self.submitted)
+            self.trace_out_lengths = getattr(self, "trace_out_lengths", [])
             if on_trace:
-                on_trace({"event": "submit", "step": "s1", "sender": "ROC",
-                          "receiver": "MASS-A", "transfer_id": "8f73c821-x",
-                          "payload_format": "route", "payload_len": 353,
-                          "payload_sha256": "9b" * 32,
-                          "source_station": 222222222,
-                          "destination_station": 111111111,
-                          "ack_required": True, "t_utc": "2026-09-05T00:00:00Z"})
-                on_trace({"event": "scenario_result", "status": "PASS",
-                          "scenario": self.submitted[-1][0],
-                          # controller와 같은 (name, status) 쌍 형식
-                          "steps": [["s1", "PASS"]],
-                          "counters": {"transfers_completed": 1,
-                                       "transfers_failed": 0,
-                                       "wrong_destination": 0,
-                                       "mismatched_ack": 0, "duplicates": 0}})
-            scenario = self.submitted[-1][0]
+                for row in fake_trace_rows(workload_id, self.kwargs["run_id"], n,
+                                           scenario, case):
+                    on_trace(row)
+                    # 실시간 출력 금지 검증용: 이 시점의 out 길이를 기록한다.
+                    probe = script.get("out_probe")
+                    if probe:
+                        self.trace_out_lengths.append(probe())
             override = (script.get("results") or {}).get(scenario)
-            result = {"status": "PASS", "quiescence": {"pass": True},
-                      "wall_clock_s": 87.3, "scenario": {}}
+            result = {"status": "PASS", "quiescence": {"pass": True,
+                                                       "non_terminal_transfers": 0,
+                                                       "workers_running": 3,
+                                                       "launchers_alive": 3,
+                                                       "faults": 0, "inhibited": False},
+                      "session_health_before": {"expected_launchers": 3},
+                      "wall_clock_s": 87.3,
+                      "scenario": fake_scenario_result(workload_id, self.kwargs["run_id"],
+                                                       n, scenario, case)}
             if override:
                 result.update(override)
+            probe = script.get("out_probe")
+            self.result_out_lengths = getattr(self, "result_out_lengths", [])
+            if probe:
+                self.result_out_lengths.append(probe())
             return result
 
         def close(self):
@@ -374,9 +497,20 @@ def test_run_noninteractive_all_pass_end_to_end():
         assert "[BRINGUP]" in text and "Endpoint startup" in text
         assert "Service session READY" in text
         assert "running SC-VDE-005" in text and "running SC-VDE-001 (forged)" in text
-        assert "ROC -> MASS-A    submit    route  353 B  [s1]" in text
-        assert "verdict   PASS" in text
+        # 결과 확정 후 전송 단위 세로 상세 블록(scenario_report)이 기본 출력이고,
+        # RF 활성 구간(submit→result)의 실시간 trace 행·세로 블록은 없다.
+        assert "[1/4] SC-VDE-005 — PASS" in text and "[4/4] SC-VDE-001 [forged] — PASS" in text
+        assert "[SCENARIO] SC-VDE-005 — PASS" in text and "[TRANSFER 1/1] s1" in text
+        assert "rendered_transfers_total=1 (source=trace-count)" in text
+        assert "path=ROC(222222222) -> MASS-A(111111111)" in text
+        assert "payload_format=route" in text and "application_bytes=353" in text
+        assert "+00.084s  SUBMITTED" in text and "+14.610s  DATA_RECEIVED by MASS-A" in text
+        assert "QUEUED -> TRANSMITTING -> WAITING_ACK -> COMPLETED" in text
+        assert "security_result=PASS (forged certificate correctly rejected)" in text
+        assert "verification_reason=bad-signature" in text and "verification_reason=ok" in text
+        assert "ROC -> MASS-A    submit" not in text and "verdict   PASS" not in text
         assert "[STEP" not in text and "[TX]" not in text and "[RX]" not in text
+        assert SECRET_PAYLOAD_MARKER not in text and "payload_base64" not in text
         assert "result: PASS · 87.3 s · quiescence OK" in text
         assert "Closed — cleanup PASS, residual processes 0" in text
         # non-TTY: carriage return·ANSI 오염 없음, 시나리오 구간 진행바 없음.
@@ -608,10 +742,16 @@ def test_results_list_and_show():
         lines = []
         results_cmd.main_results(paths, out=lines.append)
         assert any(run_id in l and "PASS" in l and "4/4" in l for l in lines)
+        assert any(results_cmd.LIST_HINT == l for l in lines)
         lines = []
         assert results_cmd.main_results(paths, run_id, out=lines.append) == 0
         text = "\n".join(lines)
-        assert "status:      PASS" in text and "SC-VDE-001   forged" in text
+        assert ("RUN %s — PASS" % run_id) in text and "SC-VDE-001   forged  PASS" in text
+        # 저장 evidence 재열람도 run과 같은 renderer(scenario_report)를 쓴다.
+        assert "[4/4] SC-VDE-001 [forged] — PASS" in text
+        assert "security_result=PASS (forged certificate correctly rejected)" in text
+        assert "[BINDING]" in text and "[BRING-UP]" in text and "[CLOSE-CLEANUP]" in text
+        assert SECRET_PAYLOAD_MARKER not in text and "payload_base64" not in text
         assert results_cmd.main_results(paths, "run-nope",
                                         out=lines.append) == 2
 
