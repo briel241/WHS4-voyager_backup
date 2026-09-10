@@ -60,6 +60,7 @@ _RF_ONLY_FILES = frozenset({
 _RF_AND_OPERATION_FILES = frozenset({
     "VDETER/apps/stage7_scenario_controller.py",   # scenario controller
     "apps/standalone/local_config.py",              # RF config 생성에 관여
+    "apps/standalone/hardware_profiles.py",         # host profile→template·provisioning 입력
 })
 #: 자격 tooling 명시 파일(standalone 중). setup·qualify·분류기·manifest·
 #: deploy manifest·provenance·templates.

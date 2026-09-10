@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from apps.standalone import (
+    hardware_profiles,
     identity,
     installation_manifest,
     local_config,
@@ -214,6 +215,33 @@ def compare_critical(reference: dict, *, installation: dict,
         mismatches.append("platform_profile differs (%r qualified, %r "
                           "declared)" % (critical.get("platform_profile"),
                                          hardware.get("platform_profile")))
+    # host profile + USB hub topology (2026-09-10 additive). A reference
+    # without `host_profile` is a legacy Pi reference. A powered-hub
+    # declaration is UNQUALIFIED against any reference that does not carry
+    # the same hub asset/VID:PID, role→serial/speed_class/transport and power
+    # provenance, and it requires the preflight shared-hub check to pass.
+    declared_profile = hardware_profiles.profile_of(hardware)
+    qualified_profile = (critical.get("host_profile")
+                         or hardware_profiles.LEGACY_PI_PROFILE)
+    if qualified_profile != declared_profile:
+        mismatches.append("host_profile %r qualified, %r declared — re-qualify "
+                          "on this host profile"
+                          % (qualified_profile, declared_profile))
+    elif declared_profile == hardware_profiles.PI_POWERED_HUB_PROFILE:
+        expected_topology = critical.get("usb_topology")
+        if not isinstance(expected_topology, dict) or not expected_topology:
+            mismatches.append("reference carries no USB hub topology binding "
+                              "(usb_topology) — run `vdeter qualify` on this "
+                              "powered-hub installation")
+        else:
+            topology_check = (preflight.get("checks") or {}).get(
+                "usb_topology") or {}
+            if topology_check.get("pass") is not True:
+                mismatches.append("USB hub topology preflight did not pass: "
+                                  + "; ".join((topology_check.get("errors")
+                                               or ["not checked"])[:3]))
+            mismatches.extend(hardware_profiles.topology_mismatches(
+                expected_topology, hardware_profiles.critical_topology(hardware)))
     observed = (preflight.get("checks") or {}).get("b210", {}).get(
         "observed_by_role") or {}
     for role, expected in sorted((critical.get("endpoints") or {}).items()):
@@ -406,10 +434,48 @@ def prepare(paths: StatePaths, *, repo_root=None,
         "declared_serials": [
             hardware["endpoints"][role]["serial"]
             for role in ("MASS-A", "MASS-B", "ROC")],
+        "host_profile": hardware_profiles.profile_of(hardware),
+        # observed sysfs topology path per role — provisions the powered-hub
+        # templates' usb_physical_path (recorded, not a binding value).
+        "usb_paths": {
+            role: (info or {}).get("usb_path")
+            for role, info in sorted((((preflight.get("checks") or {}).get(
+                "b210") or {}).get("observed_by_role") or {}).items())},
     }
 
 
 # ------------------------------------------------------------ 세션 실행
+
+def _topology_after_close(hardware: dict, topology_probe=None) -> dict:
+    """powered-hub profile: close 뒤 sysfs 재관측 → 세 B210이 승인 hub 아래
+    5000M로 돌아왔는지 (기록·판정, 재시도 없음)."""
+    host = hardware_profiles.host_profiles
+    probe = topology_probe or host.probe_usb_topology
+    declared = {role: ((hardware.get("endpoints") or {}).get(role) or {}).get("serial")
+                for role in hardware_profiles.ROLES}
+    try:
+        check = host.check_shared_powered_hub(
+            declared, probe(), hub_vid_pid=(hardware.get("usb_hub") or {}).get("vid_pid"))
+    except Exception as exc:  # noqa: BLE001 - 관측 실패도 정직 기록 (fail-closed)
+        return {"pass": False, "errors": [
+            "topology probe failed: %s: %s" % (type(exc).__name__, exc)],
+            "hub": None, "observed_by_role": {}}
+    return {"pass": check["pass"], "errors": check["errors"],
+            "hub": check.get("hub"), "observed_by_role": check["observed_by_role"]}
+
+
+def topology_after_line(topology_after: dict) -> str:
+    if topology_after["pass"]:
+        parts = ["%s %s@%s %sM" % (role, info.get("serial"), info.get("usb_path"),
+                                    info.get("speed_mbps"))
+                 for role, info in sorted(
+                     (topology_after.get("observed_by_role") or {}).items()) if info]
+        return ("[topology]  after close: B210s rediscovered below the approved hub "
+                "%s (%s)" % ((topology_after.get("hub") or {}).get("usb_path"),
+                             ", ".join(parts)))
+    return ("[topology]  after close: PROBLEMS — "
+            + "; ".join((topology_after.get("errors") or ["unknown"])[:3]))
+
 
 def close_notes(summary: dict) -> list:
     """close 요약의 보충 설명 — 판정은 바꾸지 않는다. coordinator는 workload가
@@ -475,7 +541,8 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
             provenance=context.get("provenance"),
             run_mode="OPERATIONAL",
             gain_input=gain_input_from_reference(reference),
-            environment_manifest=context["environment_manifest"])
+            environment_manifest=context["environment_manifest"],
+            usb_paths=context.get("usb_paths"))
     except local_config.ConfigGenerationError as exc:
         raise RunRefusal(EXIT_CONFIG, str(exc)) from exc
     gain_path = Path(generated["configs_dir"]) / "gain_artifact_input.json"
@@ -688,7 +755,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             environment_manifest=None, repo_root=None,
             hardware_path=None, out=print, input_fn=input,
             clock=time.monotonic, progress: bool = True,
-            progress_stream=None, progress_ticker: bool = True) -> int:
+            progress_stream=None, progress_ticker: bool = True,
+            topology_probe=None) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
@@ -739,6 +807,19 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             for role, info in sorted(observed.items()) if info))
         out("[preflight] identity, config schema, residual processes, "
             "installation manifest — OK")
+        if hardware_profiles.is_pi_powered_hub(context["hardware"]):
+            hub_decl = context["hardware"].get("usb_hub") or {}
+            topo = context["preflight"]["checks"].get("usb_topology") or {}
+            hub_obs = topo.get("hub") or {}
+            out("[preflight] host profile %s — hub %s (%s) at %s %sM, descriptor "
+                "self-powered=%s; operator-attested: hub supply connected=%s, "
+                "per-B210 DC=%s" % (
+                    hardware_profiles.PI_POWERED_HUB_PROFILE,
+                    hub_decl.get("asset_id"), hub_decl.get("vid_pid"),
+                    hub_obs.get("usb_path"), hub_obs.get("speed_mbps"),
+                    hub_obs.get("descriptor_self_powered"),
+                    hub_decl.get("self_powered"),
+                    hub_decl.get("individual_b210_dc")))
         if context["disk"]["status"] == "warn":
             out("[warning]   free disk space is low (%d MiB)"
                 % (context["disk"]["free_bytes"] >> 20))
@@ -882,6 +963,16 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 for note in close_notes(summary):
                     out("  note: " + note)
                 exit_code = EXIT_FAIL
+            # powered-hub profile (2026-09-10): after the B210s are released,
+            # re-observe sysfs — all three must be back below the approved hub
+            # at 5000M. Recorded in the summary; a failure is FAIL (no retry).
+            topology_after = None
+            if hardware_profiles.is_pi_powered_hub(context["hardware"]):
+                topology_after = _topology_after_close(context["hardware"],
+                                                       topology_probe)
+                out(topology_after_line(topology_after))
+                if not topology_after["pass"]:
+                    exit_code = EXIT_FAIL
             passed = sum(1 for r in results if r.get("status") == "PASS")
             planned = len(plan) if not interactive else len(results)
             if interactive:
@@ -890,6 +981,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             else:
                 overall = ("PASS" if summary["pass"] and results
                            and passed == len(plan) else "FAIL")
+            if topology_after is not None and not topology_after["pass"]:
+                overall = "FAIL"
             if overall != "PASS":
                 exit_code = exit_code or EXIT_FAIL
             if interrupted:
@@ -901,6 +994,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 "scenarios_passed": passed, "scenarios_run": len(results),
                 "scenarios_planned": planned,
                 "workloads": results, "close": summary,
+                "usb_topology_after_close": topology_after,
                 "attempts": attempts,
                 "reference_sha256": reference.get("_reference_sha256"),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",

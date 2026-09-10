@@ -23,10 +23,15 @@ import stat as stat_module
 import subprocess
 from pathlib import Path
 
+from apps.standalone import hardware_profiles
 from apps.standalone import state as state_module
 
 #: 역할별 요구 USB 속도 등급 (README §8). super=USB3(5000+), high=480.
-ROLE_SPEED_CLASS = {"MASS-A": "super", "MASS-B": "high", "ROC": "super"}
+#: legacy Pi profile 값 — MASS-A super / MASS-B high / ROC super. 2026-09-10부터
+#: 단일 정의(vdeter.stage7.host_profiles.LEGACY_PI)에서 유도하며 값은 종전과
+#: 동일하다; 다른 profile(Pi powered-USB3-hub = super/super/super)은
+#: run_required_preflight가 hardware.toml의 profile 정의에서 가져온다.
+ROLE_SPEED_CLASS = dict(hardware_profiles.host_profiles.LEGACY_PI.speed_classes)
 
 #: host 계층과 같은 잔존 프로세스 패턴 (읽기 전용 재사용).
 from apps.stage7_service_layer import _COMPETING_PROCESS_PATTERN  # noqa: E402
@@ -78,12 +83,16 @@ def probe_usb_serials(sysfs_root: str = "/sys/bus/usb/devices") -> dict:
     return observed
 
 
-def check_b210_roles(declared_serials: dict, observed: dict) -> dict:
+def check_b210_roles(declared_serials: dict, observed: dict,
+                     speed_classes: dict | None = None) -> dict:
     """serial↔역할 정확 일치 + 속도 등급 강제. 포트 경로는 기록만.
 
     declared_serials: {"MASS-A": serial, "MASS-B": ..., "ROC": ...}
     observed: probe_usb_serials() 결과.
+    speed_classes: 역할→요구 등급. 기본 ROLE_SPEED_CLASS(legacy Pi); 호출자가
+    hardware.toml의 host profile 정의에서 가져온 표를 넘긴다.
     """
+    speed_classes = speed_classes or ROLE_SPEED_CLASS
     errors = []
     by_role = {}
     for role, serial in sorted(declared_serials.items()):
@@ -94,7 +103,7 @@ def check_b210_roles(declared_serials: dict, observed: dict) -> dict:
                 "check the cable and power")
             by_role[role] = None
             continue
-        required = ROLE_SPEED_CLASS[role]
+        required = speed_classes[role]
         actual = speed_class(seen.get("speed_mbps"))
         if actual != required:
             errors.append(
@@ -222,20 +231,42 @@ def run_required_preflight(*, hardware: dict, paths, key_path=None,
                            platform_probe=platform_checks,
                            key_mode_check=check_private_key_mode,
                            key_cert_check=check_key_cert_match,
-                           disk_check=state_module.check_disk_space) -> dict:
+                           disk_check=state_module.check_disk_space,
+                           topology_probe=None) -> dict:
     """필수 preflight 일습 (결정 13). 반환 report의 `pass`가 게이트다.
 
     reference critical subset 대조(UNQUALIFIED 판정)는 이 함수 밖이다 —
     reference 적재기가 있는 계층(run_cmd, W5/W6)에서 이 report와 결합한다.
+
+    host profile(2026-09-10 additive): 역할별 요구 속도 등급은 hardware.toml이
+    가리키는 profile 정의(vdeter.stage7.host_profiles)에서 가져온다 — legacy
+    Pi = super/high/super(종전과 동일), Pi powered-USB3-hub = super/super/super
+    + 같은 self-powered USB3 hub 아래 topology 검사(`checks.usb_topology`,
+    fail-closed; `topology_probe`는 시험 주입용 sysfs 스냅샷).
     """
+    definition = hardware_profiles.definition_of(hardware)
     declared = {role: (hardware.get("endpoints") or {}).get(role, {}).get(
         "serial") for role in ("MASS-A", "MASS-B", "ROC")}
-    report = {"checks": {}}
+    report = {"checks": {}, "host_profile": definition.name}
     failures = []
 
-    usb = check_b210_roles(declared, usb_probe())
+    usb = check_b210_roles(declared, usb_probe(),
+                           speed_classes=definition.speed_classes)
     report["checks"]["b210"] = usb
     failures.extend(usb["errors"])
+
+    if definition.shared_powered_hub:
+        probe = topology_probe or hardware_profiles.host_profiles.probe_usb_topology
+        hub_vid_pid = (hardware.get("usb_hub") or {}).get("vid_pid")
+        try:
+            topology = hardware_profiles.host_profiles.check_shared_powered_hub(
+                declared, probe(), hub_vid_pid=hub_vid_pid)
+        except Exception as exc:  # noqa: BLE001 - 관측 실패도 fail-closed
+            topology = {"pass": False, "host_profile": definition.name,
+                        "errors": [f"USB topology probe failed: {type(exc).__name__}: {exc}"],
+                        "hub": None, "observed_by_role": {}}
+        report["checks"]["usb_topology"] = topology
+        failures.extend(topology["errors"])
 
     residual = residual_probe()
     report["checks"]["residual_processes"] = residual
