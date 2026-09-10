@@ -1,0 +1,5 @@
+# Stage 5 shared-medium byte-pinned IQ golden vectors: treat as binary (no CRLF/LF normalization).
+*.iq -text
+MANIFEST.sha256 text eol=lf
+PROVENANCE.md text eol=lf
+generate_fixtures.py text eol=lf
