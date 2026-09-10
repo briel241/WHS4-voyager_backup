@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat as statmod
 import sys
 from dataclasses import dataclass
@@ -35,6 +36,22 @@ class SnapshotError(Exception):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(reason)
+
+
+#: package base name은 catalog directory 바로 아래의 **단일 경로 요소**여야 한다(§6.1).
+#: path separator·`..`·선행 dot를 배제해 path traversal을 파일을 열기 **전에** 거부한다
+#: (`S8-POC-REQ-01/21`). 이전에는 manifest entrypoint 대조로 우연히만 막혔고 그 전에 이미
+#: 임의 상대경로 파일을 열어 읽었다.
+_SAFE_BASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _validate_base_name(base_name: str) -> None:
+    if not isinstance(base_name, str) or not _SAFE_BASE_RE.match(base_name):
+        raise SnapshotError("base_name이 안전한 단일 경로 요소가 아닙니다(path traversal 거부)")
+    if base_name in (".", "..") or ".." in base_name.split("."):
+        raise SnapshotError("base_name에 상위 경로 요소를 쓸 수 없습니다")
+    if os.sep in base_name or (os.altsep and os.altsep in base_name) or "/" in base_name:
+        raise SnapshotError("base_name에 경로 구분자를 쓸 수 없습니다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +164,7 @@ def create_snapshot(
     read-only mode로 고정한다. scenario_id를 주면 compatibility를 확인한다.
     """
 
+    _validate_base_name(base_name)  # 파일을 열기 전에 path traversal 거부(§6.1)
     uid = _current_uid() if uid is None else uid
     script_name = base_name + SCRIPT_SUFFIX
     manifest_name = base_name + MANIFEST_SUFFIX

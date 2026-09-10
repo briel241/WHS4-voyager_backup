@@ -113,6 +113,7 @@ class WorkloadRunner:
         self._closed_report: dict = {}
         self._lease_acquired = False
         self._result: WorkloadResult | None = None  # 한 번 세워지면 idempotent 반환값
+        self._terminal_done = False                  # workload terminal 1회 보장(§5.5)
 
     # --- lifecycle ----------------------------------------------------------
     def arm(self) -> bool:
@@ -191,8 +192,15 @@ class WorkloadRunner:
         )
 
     def _run_terminal(self) -> None:
-        """workload terminal → on_finish → quiescence(§5.1). 예외는 상위에서 잡아 finalize한다."""
+        """workload terminal → on_finish → quiescence(§5.1). 예외는 상위에서 잡아 finalize한다.
 
+        정확히 한 번만 수행한다(§5.5: 상태 전이는 단조롭고 evidence에 정확히 한 번). 중복
+        `finish()` 호출이 seam의 finish를 두 번 부르거나 전이를 중복 기록하지 않게 한다.
+        """
+
+        if self._terminal_done:
+            return
+        self._terminal_done = True
         if self._armed and self._infra_error() is None:
             self._transitions.append("WORKLOAD_TERMINAL")
             self._conn.finish()
@@ -201,13 +209,16 @@ class WorkloadRunner:
     def finish(self, scenario_verdict: ScenarioVerdict) -> WorkloadResult:
         """workload terminal → quiescence → on_finish → cleanup → 세 독립 결과 확정(§5.1, §11)."""
 
+        if self._result is not None:
+            return self._result  # 재진입: 이미 확정된 결과(중복 terminal/close 금지)
         try:
             self._run_terminal()
         except Exception as exc:  # noqa: BLE001 - 일반 실행 결함만 fail-closed 결과화
             return self._finalize(scenario_verdict, raised=exc)
-        except BaseException:
-            # KeyboardInterrupt/SystemExit/GeneratorExit: cleanup만 하고 상위로 재전달한다.
-            self._finalize(scenario_verdict, raised=None)
+        except BaseException as exc:
+            # KeyboardInterrupt/SystemExit/GeneratorExit: 인터럽트를 **결과에 기록**하고
+            # (성공으로 추정 금지, §11.2) cleanup 뒤 원형 그대로 상위로 재전달한다.
+            self._finalize(scenario_verdict, raised=exc)
             raise
         return self._finalize(scenario_verdict, raised=None)
 
@@ -220,6 +231,8 @@ class WorkloadRunner:
         다시 전달한다(사용자 Ctrl+C가 무시되지 않도록).
         """
 
+        if self._result is not None:
+            return self._result  # 재진입: 이미 확정된 결과
         try:
             armed = self.arm()
             if armed:
@@ -230,8 +243,9 @@ class WorkloadRunner:
             self._run_terminal()
         except Exception as exc:  # noqa: BLE001 - 일반 실행 결함만 fail-closed 결과화
             return self._finalize(spec.scenario_verdict, raised=exc)
-        except BaseException:
-            self._finalize(spec.scenario_verdict, raised=None)
+        except BaseException as exc:
+            # 인터럽트를 결과에 기록한 뒤(ARMED 전 ERROR / 이후 ABORTED) 원형 그대로 재전달.
+            self._finalize(spec.scenario_verdict, raised=exc)
             raise
         return self._finalize(spec.scenario_verdict, raised=None)
 

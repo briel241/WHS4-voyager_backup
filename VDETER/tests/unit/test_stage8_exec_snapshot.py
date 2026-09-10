@@ -118,6 +118,33 @@ class SnapshotTest(unittest.TestCase):
                 create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
         self.assertIn("부분 저장", ctx.exception.reason)
 
+    def test_base_name_path_traversal_rejected_before_open(self):
+        """base_name path traversal은 파일을 열기 전에 거부한다(§6.1, S8-POC-REQ-01/21).
+
+        이전에는 manifest entrypoint 대조로 **우연히만** 막혔고 그 전에 이미 catalog 밖
+        임의 상대경로 파일을 열어 읽었다.
+        """
+        write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
+        outside = os.path.join(self.dest_root, "outside")
+        os.makedirs(outside, exist_ok=True)
+        write_poc_package(outside, "secret", poc_id="secret")
+        for bad in ("../outside/secret", "..", ".", "a/b", "./x",
+                    os.path.join(outside, "secret")):
+            with self.subTest(base=bad):
+                with self.assertRaises(SnapshotError) as ctx:
+                    create_snapshot(self.poc, bad, dest_dir=self._dest("w-trav"))
+                # 경로 검증 단계에서 거부되어야 한다(manifest 검증까지 가면 안 됨).
+                self.assertTrue(
+                    ("traversal" in ctx.exception.reason
+                     or "구분자" in ctx.exception.reason
+                     or "상위 경로" in ctx.exception.reason),
+                    f"열기 전 거부가 아님: {ctx.exception.reason}")
+
+    def test_valid_base_name_still_accepted(self):
+        write_poc_package(self.poc, "good_poc", poc_id="good-poc")
+        snap = create_snapshot(self.poc, "good_poc", dest_dir=self._dest("w-ok"))
+        self.assertEqual(len(snap.script_sha256), 64)
+
     def test_dest_preexisting_file_rejected(self):
         # 목적지에 기존 파일이 있으면 덮어쓰지 않고 fail-closed(§5.3, O_EXCL).
         write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")

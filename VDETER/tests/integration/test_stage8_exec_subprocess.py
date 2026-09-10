@@ -230,6 +230,122 @@ class SubprocessExecutionTest(unittest.TestCase):
         self.assertFalse(res["socket_file_exists"])
         self.assertFalse(res["workload_dir_exists"])
 
+    def test_interrupt_paths_leave_no_real_residual(self):
+        """실 child/socket이 살아 있는 중 인터럽트 → 재전달·lease 반환·잔존 0(§13, REQ-19/20/27).
+
+        loopback matrix(test_stage8_exec_runner)가 결과 분류를 덮고, 이 시험은 **실제**
+        process/socket/workload-dir 잔존이 0인지 확인한다.
+        """
+        from vdeter.stage8.execution.lease import MassBLease
+        from vdeter.stage8.execution.runner import (
+            WorkloadRunner,
+            WorkloadSpec,
+            observation_step,
+        )
+        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.stage8.testing.execution_fakes import FakeTxExecutor
+
+        class _SupConn:
+            """실 PocSupervisor 위의 WorkloadConnection(시험 전용) + 인터럽트 주입."""
+
+            def __init__(self, sup, at, exc):
+                self._sup = sup
+                self._at = at
+                self._exc = exc
+                self._armed = False
+                self.close_calls = 0
+
+            def _maybe(self, point):
+                if self._at == point:
+                    raise self._exc
+
+            def start(self):
+                self._sup.start()
+                self._sup.run_until(lambda: self._sup.engine.state.value == "RUNNING",
+                                    timeout=15.0)
+                self._armed = self._sup.engine.state.value == "RUNNING"
+                self._maybe("after_start")  # child가 살아 있는 상태에서 인터럽트
+
+            @property
+            def armed(self):
+                return self._armed
+
+            @property
+            def running(self):
+                return self._armed
+
+            def emit_event(self, event_type, body):
+                self._maybe("emit")
+                self._sup.emit_event(event_type, body)
+
+            def emit_observation(self, record):
+                self._maybe("emit")
+                self._sup.emit_observation(record)
+
+            def pump(self):
+                self._sup.pump_once(timeout=0.05)
+
+            def poll_new_results(self):
+                return []
+
+            def submitted_action(self, request_id):
+                return None
+
+            def provide_terminal(self, request_id, *, action_execution, target_effect):
+                pass
+
+            def client_idle(self):
+                return True
+
+            def finish(self):
+                self._maybe("finish")
+
+            def close(self):
+                self.close_calls += 1
+                report = self._sup.close_workload()
+                self._maybe("close_after")  # teardown 뒤 인터럽트
+                return report
+
+            @property
+            def infrastructure_error(self):
+                return self._sup.engine.fatal_error if self._sup.engine else None
+
+            def armed_reached(self):
+                return self._armed
+
+            def evidence(self):
+                return {}
+
+        cases = [("after_start", KeyboardInterrupt), ("emit", KeyboardInterrupt),
+                 ("emit", SystemExit), ("finish", GeneratorExit),
+                 ("close_after", KeyboardInterrupt)]
+        for at, exc_type in cases:
+            with self.subTest(stage=at, interrupt=exc_type.__name__):
+                snap = self._make_snapshot("intr_%s_%s" % (at, exc_type.__name__.lower()),
+                                           "A", "w-%s-%s" % (at, exc_type.__name__.lower()))
+                sup = self._supervisor(snap, _RecordingProvider(),
+                                       "w-%s-%s" % (at, exc_type.__name__.lower()))
+                conn = _SupConn(sup, at, exc_type())
+                lease = MassBLease()
+                runner = WorkloadRunner(conn, lease, run_id="r1", workload_id="w1",
+                                        scenario_id="SC-VDE-006", snapshot=snap,
+                                        tx_executor=FakeTxExecutor())
+                obs = make_observation(source_station="ROC", destination_station="MASS-A")
+                spec = WorkloadSpec(steps=(observation_step(obs),),
+                                    scenario_verdict=ScenarioVerdict.PASS)
+                with self.assertRaises(exc_type):
+                    runner.run(spec)
+                # 실 자원 잔존 0
+                res = sup.residuals()
+                self.assertFalse(res["child_alive"], "child가 살아남음")
+                self.assertFalse(res["socket_file_exists"], "socket 파일 잔존")
+                self.assertFalse(res["workload_dir_exists"], "workload dir 잔존")
+                lease.assert_returned()
+                self.assertEqual(conn.close_calls, 1)
+                result = runner._finalize(ScenarioVerdict.PASS, raised=None)
+                self.assertIsNotNone(result)
+                self.assertNotEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+
     def test_child_callback_exception_fail_closed(self):
         # snapshot on_event가 예외 → 실제 child SDK가 abort → server infra 오류 + cleanup.
         write_poc_package(self.poc, "crashy", poc_id="crashy", script=_SCRIPT_CRASH)

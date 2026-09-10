@@ -466,6 +466,144 @@ class ExceptionCleanupTest(unittest.TestCase):
         self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
 
 
+class _InterruptConn:
+    """지정 lifecycle 지점에서 임의 예외를 던지는 WorkloadConnection(인터럽트 matrix용)."""
+
+    def __init__(self, stage, exc):
+        self._stage = stage
+        self._exc = exc
+        self._armed = False
+        self.close_calls = 0
+        self.finish_calls = 0
+
+    def _maybe(self, point):
+        if self._stage == point:
+            raise self._exc
+
+    def start(self):
+        self._maybe("start")
+        self._armed = True
+
+    @property
+    def armed(self):
+        return self._armed
+
+    @property
+    def running(self):
+        return self._armed
+
+    def emit_event(self, event_type, body):
+        self._maybe("emit")
+
+    def emit_observation(self, record):
+        self._maybe("emit")
+
+    def pump(self):
+        pass
+
+    def poll_new_results(self):
+        # action 단계 주입용: accepted 결과 한 건을 한 번만 돌려준다.
+        if self._stage == "action" and not getattr(self, "_served", False):
+            self._served = True
+            return [{"request_id": "rid-1", "admission": "accepted",
+                     "physical_channel": "lower", "broadcast_parent_id": "p1",
+                     "transfer_id": "t1", "error_code": None}]
+        return []
+
+    def submitted_action(self, request_id):
+        return {"action_kind": "REPLAY_PACKET", "target": "ROC", "schedule": {}, "payload": {}}
+
+    def provide_terminal(self, request_id, *, action_execution, target_effect):
+        pass
+
+    def client_idle(self):
+        return True
+
+    def finish(self):
+        self.finish_calls += 1
+        self._maybe("finish")
+
+    def close(self):
+        self.close_calls += 1
+        # close 단계 주입은 teardown **뒤**에 던져, cleanup이 끝난 뒤의 인터럽트를 모델링한다.
+        report = {"engine": {"event_queue": 0, "replay_ring": 0, "inflight_actions": 0}}
+        self._maybe("close")
+        return report
+
+    @property
+    def infrastructure_error(self):
+        return None
+
+    def armed_reached(self):
+        return self._armed
+
+    def evidence(self):
+        return {}
+
+
+class InterruptMatrixTest(unittest.TestCase):
+    """5개 lifecycle 지점 × 3개 BaseException: 재전달·cleanup·결과 기록(§11.2, REQ-19/20/27).
+
+    인터럽트를 성공으로 추정하지 않고(COMPLETED 금지), ARMED 전은 ERROR·이후는 ABORTED로
+    기록하며, lease 반환·close 1회·재진입 결과 non-None을 보장한다.
+    """
+
+    STAGES = ("start", "emit", "action", "finish", "close")
+    INTERRUPTS = (KeyboardInterrupt, SystemExit, GeneratorExit)
+
+    def test_interrupt_matrix(self):
+        manifest = build_manifest()
+        for stage in self.STAGES:
+            for exc_type in self.INTERRUPTS:
+                with self.subTest(stage=stage, interrupt=exc_type.__name__):
+                    conn = _InterruptConn(stage, exc_type())
+                    lease = MassBLease()
+                    executor = FakeTxExecutor()
+                    if stage == "action":
+                        def _boom(action, result, _e=exc_type):
+                            raise _e()
+                        executor = _boom
+                    runner = WorkloadRunner(conn, lease, run_id="r", workload_id="w",
+                                            scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                                            tx_executor=executor)
+                    spec = WorkloadSpec(steps=(scenario_started(),),
+                                        scenario_verdict=ScenarioVerdict.PASS)
+                    with self.assertRaises(exc_type):
+                        runner.run(spec)          # 1) 인터럽트 원형 재전달
+                    lease.assert_returned()       # 2) lease 반환
+                    self.assertEqual(conn.close_calls, 1)  # 3) close 정확히 1회
+                    result = runner._finalize(ScenarioVerdict.PASS, raised=None)
+                    self.assertIsNotNone(result)  # 4) 재진입 결과 non-None
+                    # 5) 성공으로 추정하지 않는다.
+                    self.assertNotEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+                    expected = (PocInfrastructure.ERROR if stage == "start"
+                                else PocInfrastructure.ABORTED)
+                    self.assertEqual(result.poc_infrastructure, expected)
+                    self.assertEqual(result.infrastructure_error_code,
+                                     f"EXCEPTION:{exc_type.__name__}")
+                    # scenario verdict는 인터럽트와 독립(§11.1).
+                    self.assertEqual(result.scenario_verdict, ScenarioVerdict.PASS)
+
+    def test_terminal_and_close_run_once_on_reentry(self):
+        # 중복 finish/run 재진입이 seam finish/close를 두 번 부르지 않는다(§5.5).
+        manifest = build_manifest()
+        conn = _InterruptConn("none", RuntimeError("unused"))
+        lease = MassBLease()
+        runner = WorkloadRunner(conn, lease, run_id="r", workload_id="w",
+                                scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                                tx_executor=FakeTxExecutor())
+        spec = WorkloadSpec(steps=(scenario_started(),), scenario_verdict=ScenarioVerdict.PASS)
+        first = runner.run(spec)
+        again = runner.run(spec)
+        third = runner.finish(ScenarioVerdict.PASS)
+        self.assertIs(first, again)
+        self.assertIs(first, third)
+        self.assertEqual(conn.finish_calls, 1)
+        self.assertEqual(conn.close_calls, 1)
+        self.assertEqual(list(first.lifecycle_transitions).count("WORKLOAD_TERMINAL"), 1)
+        self.assertEqual([h[0] for h in lease.history], ["ACQUIRE", "RELEASE"])
+
+
 class DualCapabilityFailClosedTest(unittest.TestCase):
     def test_required_dual_channel_unavailable_fails_closed(self):
         # observe_dual_physical_channel required인데 server 미광고 → 연결 전 fail-closed.

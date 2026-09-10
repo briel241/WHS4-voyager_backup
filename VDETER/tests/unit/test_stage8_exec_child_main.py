@@ -1,7 +1,8 @@
 """child launcher client loop 시험(실행 명세 §5.1, §5.2). platform 무관(fake transport+clock).
 
 child_main.run_client이 자체 30초 수명 제한을 두지 않고 server CLOSE·연결 손실·최후 방어
-ceiling으로만 종료함을 검증한다(기존 workload 상한 900초는 supervisor가 강제).
+ceiling으로만 종료함을 검증한다(workload 900초 상한의 실제 강제는 workload를 소유한
+기존 Stage 7 resident session의 몫이며 Stage 6에서 연결된다).
 """
 
 from __future__ import annotations
@@ -113,6 +114,52 @@ class ChildLifetimeTest(unittest.TestCase):
     def test_no_hardcoded_30s_literal(self):
         # 회귀 방지: 30초 리터럴 제거 확인(safety ceiling은 session absolute 기반).
         self.assertGreater(child_main.CHILD_SAFETY_TIMEOUT_S, 7200.0)
+
+
+class ChildEntrypointNegativeTest(unittest.TestCase):
+    """entrypoint 로딩·env 오류의 fail-closed 경로(§6.4, §11.2)."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="child-ep-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+
+    def _write(self, name, text):
+        import os
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return path
+
+    def test_loads_and_instantiates_entrypoint(self):
+        path = self._write("ok.py", "class Poc:\n    MARK = 'loaded'\n")
+        obj = child_main.load_entrypoint(path, "ok.py:Poc")
+        self.assertEqual(obj.MARK, "loaded")
+
+    def test_missing_class_rejected(self):
+        path = self._write("nocls.py", "class Other:\n    pass\n")
+        with self.assertRaises(AttributeError):
+            child_main.load_entrypoint(path, "nocls.py:Poc")
+
+    def test_malformed_entrypoint_rejected(self):
+        path = self._write("m.py", "class Poc:\n    pass\n")
+        with self.assertRaises(ValueError):
+            child_main.load_entrypoint(path, "m.py")  # ':' 없음
+
+    def test_module_raising_on_import_propagates(self):
+        path = self._write("boom.py", "raise RuntimeError('module boom')\n")
+        with self.assertRaises(RuntimeError):
+            child_main.load_entrypoint(path, "boom.py:Poc")
+
+    def test_missing_file_rejected(self):
+        import os
+        with self.assertRaises((FileNotFoundError, ImportError, OSError)):
+            child_main.load_entrypoint(os.path.join(self.dir, "absent.py"), "absent.py:Poc")
+
+    def test_main_with_empty_env_returns_nonzero(self):
+        from unittest import mock
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(child_main.main(), 2)  # env 오류 fail-closed
 
 
 if __name__ == "__main__":
