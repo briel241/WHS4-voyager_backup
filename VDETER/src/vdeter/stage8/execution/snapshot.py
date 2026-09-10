@@ -205,9 +205,28 @@ def create_snapshot(
 
 
 def _write_immutable(path: str, data: bytes) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
+    """snapshot 대상 파일을 fail-closed로 생성한다(§5.3).
+
+    O_CREAT|O_EXCL|O_NOFOLLOW로 **새 파일만** 만든다. 대상에 기존 파일·symlink가 있으면
+    덮어쓰지 않고 :class:`SnapshotError`(O_TRUNC로 남의 파일/링크를 침범하지 않는다).
+    short write를 검사해 전체가 기록됐는지 보장한다.
+    """
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        os.write(fd, data)
+        fd = os.open(path, flags, 0o400)
+    except FileExistsError:
+        raise SnapshotError(f"snapshot 대상이 이미 존재합니다: {os.path.basename(path)}")
+    except OSError as error:
+        raise SnapshotError(f"snapshot 파일 생성 실패({error.__class__.__name__})")
+    try:
+        view = memoryview(data)
+        total = 0
+        while total < len(view):
+            written = os.write(fd, view[total:])
+            if written <= 0:
+                raise SnapshotError("snapshot write가 진행되지 않음(short write)")
+            total += written
     finally:
         os.close(fd)
     try:

@@ -25,7 +25,7 @@ from typing import Callable
 from ..poc_api.errors import PocError
 from ..poc_api.types import ObservationRecord
 from .connection import WorkloadConnection
-from .lease import MassBLease
+from .lease import MassBLease, MassBRole
 from .snapshot import Snapshot
 from .verdict import (
     ActionExecution,
@@ -112,6 +112,8 @@ class WorkloadRunner:
         self._armed = False
         self._closed_report: dict = {}
         self._lease_acquired = False
+        self._finalized = False
+        self._result: WorkloadResult | None = None
 
     # --- lifecycle ----------------------------------------------------------
     def arm(self) -> bool:
@@ -189,46 +191,110 @@ class WorkloadRunner:
             reason=reason,
         )
 
+    def _run_terminal(self) -> None:
+        """workload terminal → on_finish → quiescence(§5.1). 예외는 상위에서 잡아 finalize한다."""
+
+        if self._armed and self._infra_error() is None:
+            self._transitions.append("WORKLOAD_TERMINAL")
+            self._conn.finish()
+            self._transitions.append("QUIESCENCE")
+
     def finish(self, scenario_verdict: ScenarioVerdict) -> WorkloadResult:
         """workload terminal → quiescence → on_finish → cleanup → 세 독립 결과 확정(§5.1, §11)."""
 
+        raised: BaseException | None = None
         try:
-            if self._armed and self._conn.infrastructure_error is None:
-                self._transitions.append("WORKLOAD_TERMINAL")
-                self._conn.finish()
-                self._transitions.append("QUIESCENCE")
-        finally:
-            self._closed_report = self._conn.close()
-            self._transitions.append("CLOSED")
-            # 모든 경로(정상·오류·강제 종료)에서 lease를 반환한다(잔존 0).
-            if self._lease_acquired:
-                self._lease.release(self._workload_id)
-                self._transitions.append("LEASE_RELEASED")
-
-        return self._build_result(scenario_verdict)
+            self._run_terminal()
+        except BaseException as exc:  # noqa: BLE001 - 어떤 예외에서도 자원·lease를 반환
+            raised = exc
+        return self._finalize(scenario_verdict, raised=raised)
 
     def run(self, spec: WorkloadSpec) -> WorkloadResult:
-        """arm → 모든 step 전달 → finish. 편의 진입점(§15 RF-off 대본 실행)."""
+        """arm → 모든 step 전달 → finish. 편의 진입점(§15 RF-off 대본 실행).
 
-        armed = self.arm()
-        if armed:
-            for step in spec.steps:
-                if self._conn.infrastructure_error is not None:
-                    break
-                self.deliver(step)
-        return self.finish(spec.scenario_verdict)
+        어느 단계(arm·start·deliver·finish·close)에서 예외가 나도 cleanup을 보장하고
+        MASS-B lease를 반환한다(§13, `S8-POC-REQ-20/27`, fail-closed).
+        """
+
+        raised: BaseException | None = None
+        try:
+            armed = self.arm()
+            if armed:
+                for step in spec.steps:
+                    if self._infra_error() is not None:
+                        break
+                    self.deliver(step)
+            self._run_terminal()
+        except BaseException as exc:  # noqa: BLE001 - infra 예외 fail-closed
+            raised = exc
+        return self._finalize(spec.scenario_verdict, raised=raised)
+
+    def _finalize(self, scenario_verdict: ScenarioVerdict,
+                  *, raised: BaseException | None) -> WorkloadResult:
+        """cleanup·lease 반환·결과 조립을 정확히 한 번(idempotent) 수행한다(§13).
+
+        connection.close()나 lease.release()가 실패해도 MASS-B lease를 **반드시** 정상
+        소유권으로 되돌린다(잔존 0). 이미 finalize됐으면 저장된 결과를 돌려준다.
+        """
+
+        if self._finalized:
+            return self._result
+        self._finalized = True
+
+        close_error: BaseException | None = None
+        try:
+            self._closed_report = self._conn.close()
+        except BaseException as exc:  # noqa: BLE001 - close 실패도 fail-closed로 흡수
+            close_error = exc
+            self._closed_report = {"error": repr(exc), "forced_kill": True}
+        if "CLOSED" not in self._transitions:
+            self._transitions.append("CLOSED")
+
+        # 모든 경로(정상·오류·start 실패·강제 종료·close 실패)에서 lease를 반환한다.
+        if self._lease_acquired:
+            try:
+                self._lease.release(self._workload_id)
+                self._transitions.append("LEASE_RELEASED")
+            except BaseException:  # noqa: BLE001 - 최후 방어: 강제 정상 복귀(잔존 0 보장)
+                self._lease.role = MassBRole.NORMAL
+                self._lease.holder = None
+                self._transitions.append("LEASE_FORCE_RELEASED")
+
+        self._result = self._build_result(scenario_verdict, raised=raised or close_error)
+        return self._result
 
     # --- 결과 조립 ----------------------------------------------------------
-    def _build_result(self, scenario_verdict: ScenarioVerdict) -> WorkloadResult:
-        error: PocError | None = self._conn.infrastructure_error
-        if error is None:
+    def _infra_error(self):
+        """connection.infrastructure_error를 안전하게 읽는다(broken conn도 흡수)."""
+        try:
+            return self._conn.infrastructure_error
+        except BaseException:  # noqa: BLE001
+            return None
+
+    def _armed_reached_safe(self) -> bool:
+        try:
+            return self._conn.armed_reached()
+        except BaseException:  # noqa: BLE001
+            return self._armed
+
+    def _build_result(self, scenario_verdict: ScenarioVerdict,
+                      *, raised: BaseException | None = None) -> WorkloadResult:
+        conn_error = self._infra_error()
+        if conn_error is not None:
+            error_code = conn_error.code.value if isinstance(conn_error, PocError) else repr(conn_error)
+            # ARMED 전 오류는 workload 미시작(ERROR), 이후 오류는 ABORTED(§11.2).
+            infrastructure = (PocInfrastructure.ABORTED if self._armed_reached_safe()
+                              else PocInfrastructure.ERROR)
+        elif raised is not None:
+            # connection이 code로 남기지 못한 Python 예외(start/deliver/close 등)도
+            # 성공으로 추정하지 않고 fail-closed 처리한다(§11.2, `S8-POC-REQ-19`).
+            error_code = (raised.code.value if isinstance(raised, PocError)
+                          else f"EXCEPTION:{type(raised).__name__}")
+            infrastructure = (PocInfrastructure.ABORTED if self._armed_reached_safe()
+                              else PocInfrastructure.ERROR)
+        else:
             infrastructure = PocInfrastructure.COMPLETED
             error_code = None
-        else:
-            error_code = error.code.value
-            # ARMED 전 오류는 workload 미시작(ERROR), 이후 오류는 ABORTED(§11.2).
-            infrastructure = (PocInfrastructure.ABORTED if self._conn.armed_reached()
-                              else PocInfrastructure.ERROR)
 
         desc = self._snapshot.descriptor
         evidence = {

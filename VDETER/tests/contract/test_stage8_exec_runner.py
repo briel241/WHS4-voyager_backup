@@ -261,6 +261,133 @@ class CallbackErrorTest(unittest.TestCase):
         self.assertEqual(conn.infrastructure_error.code, PocErrorCode.POC_CALLBACK_TIMEOUT)
 
 
+class _FaultyConnection:
+    """지정 지점에서 예외를 던지는 최소 WorkloadConnection(예외 경로 lease 반환 검증)."""
+
+    def __init__(self, *, on_start=False, on_emit=False, on_close=False, on_finish=False):
+        self._on_start = on_start
+        self._on_emit = on_emit
+        self._on_close = on_close
+        self._on_finish = on_finish
+        self._armed = False
+        self._reached = False
+
+    def start(self):
+        if self._on_start:
+            raise RuntimeError("boom start")
+        self._armed = True
+        self._reached = True
+
+    @property
+    def armed(self):
+        return self._armed
+
+    @property
+    def running(self):
+        return self._armed
+
+    def emit_event(self, event_type, body):
+        if self._on_emit:
+            raise RuntimeError("boom emit")
+
+    def emit_observation(self, record):
+        if self._on_emit:
+            raise RuntimeError("boom emit")
+
+    def pump(self):
+        pass
+
+    def poll_new_results(self):
+        return []
+
+    def submitted_action(self, request_id):
+        return None
+
+    def provide_terminal(self, request_id, *, action_execution, target_effect):
+        pass
+
+    def client_idle(self):
+        return True
+
+    def finish(self):
+        if self._on_finish:
+            raise RuntimeError("boom finish")
+
+    def close(self):
+        if self._on_close:
+            raise RuntimeError("boom close")
+        return {"engine": {"event_queue": 0, "replay_ring": 0, "inflight_actions": 0}}
+
+    @property
+    def infrastructure_error(self):
+        return None
+
+    def armed_reached(self):
+        return self._reached
+
+    def evidence(self):
+        return {}
+
+
+class ExceptionCleanupTest(unittest.TestCase):
+    """어느 단계에서 예외가 나도 MASS-B lease를 반환하고 fail-closed 결과를 낸다(§13, REQ-19/20/27)."""
+
+    def _run_faulty(self, **fault):
+        manifest = build_manifest()
+        conn = _FaultyConnection(**fault)
+        lease = MassBLease()
+        runner = WorkloadRunner(conn, lease, run_id="r", workload_id="w",
+                                scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                                tx_executor=FakeTxExecutor())
+        result = runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                         scenario_verdict=ScenarioVerdict.PASS))
+        return result, lease
+
+    def test_start_exception_returns_lease(self):
+        result, lease = self._run_faulty(on_start=True)
+        lease.assert_returned()  # POC_ACTOR로 남으면 예외
+        self.assertEqual(lease.role, MassBRole.NORMAL)
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ERROR)  # ARMED 전
+        self.assertIn("EXCEPTION:RuntimeError", result.infrastructure_error_code)
+
+    def test_emit_exception_returns_lease(self):
+        result, lease = self._run_faulty(on_emit=True)
+        lease.assert_returned()
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)  # ARMED 후
+
+    def test_finish_exception_returns_lease(self):
+        result, lease = self._run_faulty(on_finish=True)
+        lease.assert_returned()
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
+
+    def test_close_exception_still_returns_lease(self):
+        result, lease = self._run_faulty(on_close=True)
+        lease.assert_returned()  # close 실패에도 lease는 강제 정상 복귀
+        self.assertEqual(lease.role, MassBRole.NORMAL)
+
+    def test_tx_executor_exception_returns_lease(self):
+        # accepted action의 terminal 해석 중 예외 → lease 반환·fail-closed.
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC")]
+            return []
+        def boom_executor(action, result):
+            raise RuntimeError("boom executor")
+        manifest = build_manifest()
+        clock = FakeClock()
+        conn = LoopbackConnection(callbacks=RecordingCallbacks(event_action_fn=act),
+                                  manifest=manifest, clock=clock,
+                                  provider=ScenarioPriorityProvider())
+        lease = MassBLease()
+        runner = WorkloadRunner(conn, lease, run_id="r", workload_id="w",
+                                scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                                tx_executor=boom_executor)
+        result = runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                         scenario_verdict=ScenarioVerdict.PASS))
+        lease.assert_returned()
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
+
+
 class DualCapabilityFailClosedTest(unittest.TestCase):
     def test_required_dual_channel_unavailable_fails_closed(self):
         # observe_dual_physical_channel required인데 server 미광고 → 연결 전 fail-closed.

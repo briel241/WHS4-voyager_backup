@@ -118,6 +118,33 @@ class SnapshotTest(unittest.TestCase):
                 create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
         self.assertIn("부분 저장", ctx.exception.reason)
 
+    def test_dest_preexisting_file_rejected(self):
+        # 목적지에 기존 파일이 있으면 덮어쓰지 않고 fail-closed(§5.3, O_EXCL).
+        write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
+        dest = self._dest("w1")
+        os.makedirs(dest, exist_ok=True)
+        # snapshot이 쓸 대상(p.py)을 미리 만들어 둔다.
+        with open(os.path.join(dest, "p.py"), "wb") as fh:
+            fh.write(b"pre-existing")
+        with self.assertRaises(SnapshotError) as ctx:
+            create_snapshot(self.poc, "p", dest_dir=dest)
+        self.assertIn("이미 존재", ctx.exception.reason)
+
+    def test_dest_symlink_rejected(self):
+        # 목적지 대상이 symlink면 링크 대상으로 새지 않고 fail-closed(O_NOFOLLOW/O_EXCL).
+        write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
+        dest = self._dest("w1")
+        os.makedirs(dest, exist_ok=True)
+        outside = os.path.join(self.dest_root, "outside.py")
+        with open(outside, "wb") as fh:
+            fh.write(b"outside")
+        os.symlink(outside, os.path.join(dest, "p.py"))
+        with self.assertRaises(SnapshotError):
+            create_snapshot(self.poc, "p", dest_dir=dest)
+        # 링크 대상은 침범되지 않았다.
+        with open(outside, "rb") as fh:
+            self.assertEqual(fh.read(), b"outside")
+
     def test_replacement_race_detected(self):
         # 이름이 가리키는 inode가 fd inode와 다르면 교체 race로 거부(§5.3).
         write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
