@@ -198,8 +198,9 @@ def test_real_phase_g_binding_rejects_current_coordinator():
 
 def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
     """계약 A(함수 단위): 전체 file SHA만 현재값으로 맞추고 함수 해시는 실제
-    Phase G 값 그대로면 changed=['run_rr_p3_fault']로 거부된다 — 즉 변경된
-    함수가 정확히 하나이고 그것이 승인 대상임을 실제 결속으로 확인."""
+    Phase G 값 그대로면 changed=['run_rr_p0', 'run_rr_p3_fault']로 거부된다 —
+    즉 변경된 함수가 정확히 승인 대상 둘(Phase I run_rr_p3_fault, 2026-09-10
+    Pi powered-USB3-hub run_rr_p0)뿐임을 실제 결속으로 확인."""
     profile = _rebind_for_phase_i(_phase_g_profile_copy(),
                                   _current_coordinator_source(),
                                   pin_run_rr_p3_fault=False)
@@ -211,7 +212,7 @@ def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
     except stage7_service_layer.ServiceSessionError as exc:
         text = str(exc)
         assert "run_rr_p3_fault" in text, text
-        assert "changed=['run_rr_p3_fault']" in text, text
+        assert "changed=['run_rr_p0', 'run_rr_p3_fault']" in text, text
 
 
 def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():

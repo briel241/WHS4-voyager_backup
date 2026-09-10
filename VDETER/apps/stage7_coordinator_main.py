@@ -584,6 +584,38 @@ RR_CFO_PATHS = (
 
 #: §3 canonical transport 기대 속도 (Mbps).
 _EXPECTED_USB_SPEED = {"MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
+#: 2026-09-10 (Pi powered-USB3-hub profile): RR-P0의 승인 link speed는 resolved
+#: config의 `host_execution.usb_transport`에서 단일 정의(vdeter.stage7.host_profiles)
+#: 로 유도한다. 위 legacy Pi 고정표는 값 그대로 보존되며(legacy profile의 유도값과
+#: 동일), powered-hub profile은 세 endpoint 전부 5000 + 실시간 공유 hub topology.
+
+
+def _expected_usb_speed(resolved, endpoint_id) -> str:
+    """resolved config → 승인 sysfs `speed` 문자열 ("5000"/"480")."""
+
+    from vdeter.stage7.host_profiles import expected_sysfs_speed
+
+    return expected_sysfs_speed(resolved[endpoint_id].host_execution.usb_transport)
+
+
+def _shared_hub_topology_check(resolved, serial_by_endpoint):
+    """resolved host profile이 공유 powered hub를 요구하면 sysfs 실측 검사
+    (host_profiles.check_shared_powered_hub) 결과, 아니면 None (legacy Pi)."""
+
+    from vdeter.stage7.host_profiles import (
+        check_shared_powered_hub,
+        probe_usb_topology,
+        profile,
+    )
+
+    profiles = sorted({resolved[m].host_execution.profile for m in serial_by_endpoint})
+    if len(profiles) != 1:
+        return {"pass": False, "host_profile": None, "hub": None,
+                "observed_by_role": {},
+                "errors": ["mixed host profiles across endpoints: " + ", ".join(profiles)]}
+    if not profile(profiles[0]).shared_powered_hub:
+        return None
+    return check_shared_powered_hub(serial_by_endpoint, probe_usb_topology())
 
 
 def _live_b210_speed_map() -> dict:
@@ -654,7 +686,8 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
         speed_ok = {}
         for m in ENDPOINT_IDS:
             speeds = speed_map.get(serial_by_endpoint[m], [])
-            speed_ok[m] = speeds == [_EXPECTED_USB_SPEED[m]]
+            speed_ok[m] = speeds == [_expected_usb_speed(resolved, m)]
+        hub_topology = _shared_hub_topology_check(resolved, serial_by_endpoint)
         throttled = subprocess.run(
             ["vcgencmd", "get_throttled"], capture_output=True, text=True
         ).stdout.strip()
@@ -703,8 +736,10 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
             "inhibited": coordinator.inhibited,
             "serial_by_endpoint": serial_by_endpoint,
             "usb_speed_ok": speed_ok,
+            "expected_usb_speed": {m: _expected_usb_speed(resolved, m) for m in ENDPOINT_IDS},
             "live_speed_map": {k: v for k, v in speed_map.items()
                                if k in serial_by_endpoint.values()},
+            "usb_hub_topology": hub_topology,
             "throttled": throttled,
             "workers_running": workers_running,
             "launchers_alive_during_run": launchers_alive,
@@ -721,6 +756,7 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
             and workers_running == 3
             and (launchers_alive in (None, 3))
             and all(speed_ok.values())
+            and (hub_topology is None or hub_topology["pass"])
             and throttled == "throttled=0x0"
             and clean_exit
             and workers_after == 0

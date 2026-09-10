@@ -616,3 +616,101 @@ class TC_STAGE7_LOADER_NEGATIVE(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def build_pi_powered_hub_source(**overrides) -> str:
+    """Pi powered-USB3-hub host profile source (2026-09-10): same Pi, every endpoint
+    a 5000M hub link on hub bus power; host_machine_id/usb_physical_path provisioned."""
+    defaults = dict(usb_transport="POWERED_USB3_HUB_5000M", usb_path="5-1.2",
+                    external_power="POWERED_USB3_HUB_BUS_POWER")
+    defaults.update(overrides)
+
+    def to_hub_profile(text: str) -> str:
+        assert text.count('profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"') == 1
+        return text.replace('profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"',
+                            'profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"')
+    mutate = defaults.pop("mutate", None)
+    defaults["mutate"] = (lambda t: mutate(to_hub_profile(t))) if mutate else to_hub_profile
+    return build_source(**defaults)
+
+
+class TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB(unittest.TestCase):
+    """host_execution.profile STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1 (additive) — the
+    legacy Pi profile keeps its exact MASS-B USB2/DC-asset rules; the powered-hub
+    profile requires POWERED_USB3_HUB_5000M + POWERED_USB3_HUB_BUS_POWER on every
+    endpoint. Both rule sets come from vdeter.stage7.host_profiles."""
+
+    def setUp(self):
+        self.loader = Stage7ConfigurationLoader()
+
+    def _load(self, text):
+        return self.loader.load_endpoint_configuration(
+            text, DATA_PROFILE_17, run_id="stage7-unit-run")
+
+    def _expect_error(self, text, needle):
+        result = self._load(text)
+        self.assertTrue(result.is_err, "expected rejection: %s" % needle)
+        self.assertEqual(result.error.code, ErrorCode.CONFIG_SEMANTIC_INVALID)
+        self.assertIn(needle, str(result.error))
+
+    def test_profiles_and_transports_come_from_single_definition(self):
+        from vdeter.stage7 import configuration, host_profiles
+        self.assertEqual(configuration.STAGE7_HOST_PROFILES, host_profiles.HOST_PROFILES)
+        self.assertEqual(configuration.STAGE7_HOST_PROFILE, host_profiles.LEGACY_PI_PROFILE)
+        self.assertEqual(configuration.STAGE7_HOST_PROFILE_PI_POWERED_HUB,
+                         host_profiles.PI_POWERED_HUB_PROFILE)
+        self.assertEqual(configuration.USB_TRANSPORTS, host_profiles.USB_TRANSPORTS)
+        self.assertEqual(configuration.USB_TRANSPORTS[:2],
+                         ("DIRECT_USB3_5000M", "DIRECT_USB2_480M_EXTERNAL_DC"))
+
+    def test_mass_b_resolves_on_hub_without_dc_asset(self):
+        result = self._load(build_pi_powered_hub_source(
+            endpoint_id="MASS-B", station_id=333333333, serial="3515425", usb_path="5-1.1"))
+        self.assertTrue(result.is_ok, getattr(result, "error", None))
+        host = result.value.host_execution
+        self.assertEqual(host.profile, "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1")
+        self.assertEqual(host.usb_transport, "POWERED_USB3_HUB_5000M")
+        self.assertEqual(host.external_power_asset, "POWERED_USB3_HUB_BUS_POWER")
+        self.assertEqual(host.pi_power_profile, "PI5_5V5A_HIGH_CURRENT")
+        self.assertEqual(result.value.b210_serial, "3515425")
+
+    def test_mass_a_and_roc_resolve_on_hub(self):
+        self.assertTrue(self._load(build_pi_powered_hub_source()).is_ok)
+        roc = build_roc_source(usb_transport="POWERED_USB3_HUB_5000M", usb_path="5-1.4",
+                               external_power="POWERED_USB3_HUB_BUS_POWER",
+                               mutate=lambda t: t.replace(
+                                   'profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"',
+                                   'profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"'))
+        result = self._load(roc)
+        self.assertTrue(result.is_ok, getattr(result, "error", None))
+        self.assertEqual(result.value.host_execution.usb_transport, "POWERED_USB3_HUB_5000M")
+
+    def test_hub_profile_refuses_dc_asset_pi_bus_and_direct_transports(self):
+        for overrides, needle in (
+            (dict(external_power="AT2024T"), "POWERED_USB3_HUB_BUS_POWER"),
+            (dict(external_power="PI_BUS_POWER"), "POWERED_USB3_HUB_BUS_POWER"),
+            (dict(external_power="REQUIRED_UNSET"), "placeholder"),
+            (dict(usb_transport="DIRECT_USB3_5000M"), "canonical USB transport"),
+            (dict(usb_transport="DIRECT_USB2_480M_EXTERNAL_DC"), "canonical USB transport"),
+        ):
+            with self.subTest(overrides=overrides):
+                self._expect_error(build_pi_powered_hub_source(
+                    endpoint_id="MASS-B", station_id=333333333, serial="3515425",
+                    usb_path="5-1.1", **overrides), needle)
+
+    def test_legacy_profile_rules_are_not_relaxed(self):
+        # legacy MASS-B still needs USB2 + a real DC asset; the hub tokens are refused.
+        self._expect_error(build_mass_b_source(usb_transport="POWERED_USB3_HUB_5000M"),
+                           "canonical USB transport")
+        self._expect_error(build_mass_b_source(external_power="POWERED_USB3_HUB_BUS_POWER"),
+                           "external_power_asset")
+        self._expect_error(build_source(external_power="POWERED_USB3_HUB_BUS_POWER"),
+                           "PI_BUS_POWER")
+        self._expect_error(build_source(usb_transport="POWERED_USB3_HUB_5000M"),
+                           "canonical USB transport")
+        self.assertTrue(self._load(build_mass_b_source()).is_ok)
+
+    def test_unknown_profile_rejected(self):
+        self._expect_error(build_source(mutate=lambda t: t.replace(
+            'profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"',
+            'profile = "STAGE7_PI5_POWERED_USB3_HUB_UNKNOWN"')), "canonical Stage 7 profile")

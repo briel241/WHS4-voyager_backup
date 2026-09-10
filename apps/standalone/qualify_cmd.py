@@ -42,6 +42,7 @@ import sys
 import time
 from pathlib import Path
 
+from apps.standalone import hardware_profiles
 from apps.standalone import identity, installation_manifest, local_config
 from apps.standalone import provenance as provenance_module
 from apps.standalone import qualification_domains as domains
@@ -548,9 +549,18 @@ def issue_reference(*, ladder_id: str, installation: dict, tc_results: dict,
                     provenance: dict | None = None,
                     binding_domains: dict | None = None,
                     evidence_reuse: dict | None = None,
-                    endpoint_observations: dict | None = None) -> dict:
+                    endpoint_observations: dict | None = None,
+                    host_profile: str | None = None,
+                    usb_topology: dict | None = None,
+                    hardware_observations: dict | None = None) -> dict:
     """로컬 reference 조립 — 스키마 v2 (STAGE7_QUALIFICATION_REFERENCE,
     schema_version 2, installation/domain digest 결속).
+
+    host_profile/usb_topology/hardware_observations(2026-09-10 additive):
+    None이면 legacy 호출자 — reference 모양은 종전과 같다(legacy Pi profile).
+    Pi powered-USB3-hub profile은 세 endpoint 전부 super-speed이고 hub topology
+    critical subset(asset/VID:PID/serial/speed_class/transport/전원 출처)이
+    결속되지 않으면 발급을 거부한다.
 
     결속(필수 판정값): installation manifest SHA·rf/operation/tooling manifest
     SHA·실제 파일별 SHA map·환경/라이브러리 버전·B210 serial과 역할·USB
@@ -565,6 +575,20 @@ def issue_reference(*, ladder_id: str, installation: dict, tc_results: dict,
     # critical endpoint 스키마({serial, speed_class ∈ 허용값}) 검증 —
     # 누락·비허용이면 어느 경로든 발급 거부.
     _validate_critical_endpoints(endpoints_observed)
+    if (host_profile is not None
+            and host_profile not in hardware_profiles.HARDWARE_PROFILES):
+        raise QualifyError("reference issuance refused — unknown host_profile "
+                           f"{host_profile!r}")
+    if host_profile == hardware_profiles.PI_POWERED_HUB_PROFILE:
+        not_super = [role for role, entry in sorted((endpoints_observed or {}).items())
+                     if (entry or {}).get("speed_class") != "super"]
+        if not_super:
+            raise QualifyError(
+                "reference issuance refused — the powered-hub profile requires a "
+                f"super-speed (5000M) link on every endpoint: {not_super}")
+        if not isinstance(usb_topology, dict) or not usb_topology:
+            raise QualifyError("reference issuance refused — the powered-hub profile "
+                               "requires the USB hub topology binding")
     if not isinstance(wiring, dict) or wiring.get("approved") is not True:
         raise QualifyError("reference issuance refused — wiring approval (wiring.approved=true)"
                            " is missing")
@@ -616,6 +640,18 @@ def issue_reference(*, ladder_id: str, installation: dict, tc_results: dict,
                   "Git state and the baseline document itself are not used in judgement "
                   "and are compared only in the host audit environment."),
     }
+    if host_profile is not None:
+        reference["standalone_critical"]["host_profile"] = host_profile
+    if usb_topology is not None:
+        # qualification-critical (compared by run): hub asset/VID:PID, role→
+        # serial/speed_class/usb_transport, power provenance (operator-attested).
+        reference["standalone_critical"]["usb_topology"] = usb_topology
+    if hardware_observations is not None:
+        reference["hardware_observations"] = {
+            "note": ("observation metadata only (hub descriptor self-powered bit, "
+                     "paths, ports, device numbers, companion hubs); the binding "
+                     "values are in standalone_critical.usb_topology"),
+            **hardware_observations}
     if binding_domains is not None:
         # 이전 RF evidence manifest / 현재 operation manifest / 현재
         # qualification-tool manifest를 각각 기록.
@@ -867,6 +903,26 @@ def prepare_qualification(paths: StatePaths, *,
     endpoints_observed, endpoint_observations = (
         critical_endpoints_from_preflight(preflight))
 
+    # --- host profile binding (2026-09-10 additive) ---------------------
+    # legacy Pi: nothing extra (reference shape unchanged). powered-hub: the
+    # preflight shared-hub topology check must have passed; the approved
+    # declaration's critical subset is bound and the observation recorded.
+    # usb_paths (observed sysfs topology path per role) provisions the
+    # powered-hub templates' usb_physical_path.
+    host_profile = hardware_profiles.profile_of(hardware)
+    usb_paths = {role: (info or {}).get("usb_path")
+                 for role, info in sorted((endpoint_observations or {}).items())}
+    usb_topology = None
+    hardware_observations = None
+    if hardware_profiles.is_pi_powered_hub(hardware):
+        topology_check = (preflight.get("checks") or {}).get("usb_topology") or {}
+        if topology_check.get("pass") is not True:
+            raise QualifyError("USB hub topology check did not pass: "
+                               + "; ".join(topology_check.get("errors")
+                                           or ["not checked"]))
+        usb_topology = hardware_profiles.critical_topology(hardware)
+        hardware_observations = hardware_profiles.topology_observations(preflight)
+
     environment_manifest = (environment_manifest
                             or local_config.build_environment_manifest())
     # --- 필수 라이브러리 4종 실재 게이트 ---------------------------------
@@ -891,6 +947,10 @@ def prepare_qualification(paths: StatePaths, *,
         "endpoints_observed": endpoints_observed,
         "endpoint_observations": endpoint_observations,
         "environment_manifest": environment_manifest,
+        "host_profile": host_profile,
+        "usb_paths": usb_paths,
+        "usb_topology": usb_topology,
+        "hardware_observations": hardware_observations,
         "provenance": provenance_module.build_provenance(repo_root),
     }
 
@@ -932,6 +992,10 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
         endpoint_observations = context["endpoint_observations"]
         environment_manifest = context["environment_manifest"]
         provenance = context["provenance"]
+        host_profile = context["host_profile"]
+        usb_paths = context["usb_paths"]
+        usb_topology = context["usb_topology"]
+        hardware_observations = context["hardware_observations"]
 
         # candidate는 새 사다리마다 비운 뒤 시작한다 (승격 전 scratch).
         for entry in paths.qualification_candidate.iterdir():
@@ -985,7 +1049,8 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 installation_verified=bool(install_check["pass"]),
                 provenance=provenance, run_mode=run_mode,
                 gain_input=gain_input,
-                environment_manifest=environment_manifest)
+                environment_manifest=environment_manifest,
+                usb_paths=usb_paths)
             environment_manifest_sha256 = generated[
                 "environment_manifest_sha256"]
             resolved_config_sha256[phase] = dict(generated["resolved_sha256"])
@@ -1088,7 +1153,10 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                     phase_run_ids=dict(phase_run_ids),
                     resolved_config_sha256=dict(resolved_config_sha256),
                     evidence_sha256=dict(evidence_sha256),
-                    provenance=provenance)
+                    provenance=provenance,
+                    host_profile=host_profile,
+                    usb_topology=usb_topology,
+                    hardware_observations=hardware_observations)
                 candidate_info = write_reference(
                     paths.qualification_candidate, candidate)
                 report["candidate"] = {
@@ -1149,7 +1217,10 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
             evidence_sha256=dict(evidence_sha256),
             final_status=final_result["final_status"],
             final_result_sha256=_sha256_file(final_out),
-            provenance=provenance)
+            provenance=provenance,
+            host_profile=host_profile,
+            usb_topology=usb_topology,
+            hardware_observations=hardware_observations)
         final_info = write_reference(
             paths.qualification_candidate, final_reference)
         promotion = promote_candidate(paths, release_id=ladder_id)
@@ -1271,6 +1342,10 @@ def run_qualify_reuse(paths: StatePaths, *, prior_release_id: str,
         endpoint_observations = context["endpoint_observations"]
         environment_manifest = context["environment_manifest"]
         provenance = context["provenance"]
+        host_profile = context["host_profile"]
+        usb_paths = context["usb_paths"]
+        usb_topology = context["usb_topology"]
+        hardware_observations = context["hardware_observations"]
 
         prior = load_release_reference(paths, prior_release_id)
         prior_files, prior_rf_symbols = _prior_files_from_reference(prior)
@@ -1449,7 +1524,10 @@ def run_qualify_reuse(paths: StatePaths, *, prior_release_id: str,
             qualification_method="evidence_reuse",
             provenance=provenance,
             binding_domains=binding_domains,
-            evidence_reuse=evidence_reuse)
+            evidence_reuse=evidence_reuse,
+            host_profile=host_profile,
+            usb_topology=usb_topology,
+            hardware_observations=hardware_observations)
         final_info = write_reference(paths.qualification_candidate, reference)
         promotion = promote_candidate(paths, release_id=release)
         if progress is not None:
