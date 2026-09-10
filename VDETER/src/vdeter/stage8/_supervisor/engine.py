@@ -179,7 +179,12 @@ class SupervisorEngine:
         if parsed.type == protocol.FINISH_RESULT:
             return self._on_finish_result(parsed, now)
         if parsed.type == protocol.ERROR:
-            # client가 보낸 ERROR → PoC abort로 반영한다.
+            # ERROR도 binding+epoch를 먼저 검사한다(잘못된 session/epoch ERROR로 임의 code·중단을
+            # 주입하지 못하게 한다). 불일치는 client code 대신 POC_PROTOCOL_ERROR로 fail-closed.
+            binding_error = self._verify_post_handshake(parsed)
+            if binding_error is not None:
+                return self._fail(binding_error)
+            # binding이 맞는 client ERROR → PoC abort로 반영한다.
             code = parsed.body.get("code")
             try:
                 self.fatal_error = PocError(PocErrorCode(code), "client ERROR")

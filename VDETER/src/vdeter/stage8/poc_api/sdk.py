@@ -188,22 +188,46 @@ class SdkEngine:
         }.get(parsed.type)
         if handler is None:
             return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "unexpected message type", type=parsed.type)
+        # 양방향 binding(§6.2): WELCOME은 epoch 전이를 스스로 검사하고, 그 밖의 모든 server
+        # message는 session/workload exact + 현재 epoch 일치를 여기서 검사한다(잘못된 binding은
+        # callback·처리 전에 fail-closed).
+        if parsed.type != protocol.WELCOME and self._server_binding_mismatch(parsed):
+            return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "server message binding 불일치",
+                               session=parsed.session_id, workload=parsed.workload_id,
+                               epoch=parsed.connection_epoch, expected_epoch=self.connection_epoch)
         return handler(parsed, now)
+
+    def _server_binding_mismatch(self, parsed) -> bool:
+        return (
+            parsed.session_id != self._context.session_id
+            or parsed.workload_id != self._context.workload_id
+            or parsed.connection_epoch != self.connection_epoch
+        )
 
     def _on_welcome(self, parsed, now):
         from .types import Negotiation
 
+        if (parsed.session_id != self._context.session_id
+                or parsed.workload_id != self._context.workload_id):
+            return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "WELCOME session/workload 불일치")
         body = parsed.body
         try:
-            self.connection_epoch = int(body["connection_epoch"])
-            self.negotiation = Negotiation(
+            new_epoch = int(body["connection_epoch"])
+            negotiation = Negotiation(
                 protocol_minor=int(body["protocol_minor"]),
                 capabilities=frozenset(body["capabilities"]),
                 triggers=frozenset(body["triggers"]),
-                connection_epoch=self.connection_epoch,
+                connection_epoch=new_epoch,
             )
         except (KeyError, TypeError, ValueError):
             return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "malformed WELCOME")
+        # WELCOME은 예상 epoch 전이여야 한다: envelope == body == 현재+1(초기 0→1, reconnect N→N+1).
+        if parsed.connection_epoch != new_epoch or new_epoch != self.connection_epoch + 1:
+            return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "WELCOME connection_epoch 전이 오류",
+                               envelope=parsed.connection_epoch, body=new_epoch,
+                               expected=self.connection_epoch + 1)
+        self.connection_epoch = new_epoch
+        self.negotiation = negotiation
         self._context.negotiated_capabilities = self.negotiation.capabilities
         self._context.negotiated_triggers = self.negotiation.triggers
         if self._reconnecting:
@@ -249,9 +273,14 @@ class SdkEngine:
                                sequence=sequence, declared=payload_digest, actual=actual_digest)
         if sequence <= self.last_completed_sequence:
             # 이미 callback-completed인 sequence(replay)면 callback을 다시 호출하지 않는다(§8.2).
-            # 단, 같은 sequence는 같은 event_id·digest여야 한다(§8.1). 다르면 fail-closed(§8.3).
+            # 같은 sequence는 같은 event_id·digest여야 한다(§8.1). 다르면 fail-closed(§8.3).
             recorded = self._completed_events.get(sequence)
-            if recorded is not None and recorded != (event_id, payload_digest):
+            if recorded is None:
+                # 기록(≤256창)에서 사라진 과거 sequence의 재전송은 정상 replay일 수 없다.
+                # server replay ring도 유계이므로, 대조 불가능한 과거 replay는 fail-closed(§8.3).
+                return self._abort(PocErrorCode.POC_EVENT_REPLAY_GAP,
+                                   "replay window 밖 과거 sequence 재전송", sequence=sequence)
+            if recorded != (event_id, payload_digest):
                 return self._abort(PocErrorCode.POC_EVENT_REPLAY_GAP,
                                    "replay event_id/digest 모순", sequence=sequence)
             return self._maybe_ack(now, force=True)

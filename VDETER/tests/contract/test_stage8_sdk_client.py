@@ -214,6 +214,36 @@ class SdkClientTest(unittest.TestCase):
         self.assertEqual(len(callbacks.events), 1)
         self.assertTrue(any(m["type"] == protocol.EVENT_ACK for m in out))
 
+    def test_wrong_binding_server_event_aborts(self):
+        # SDK는 server가 보낸 message의 session/workload/connection_epoch도 검사한다(양방향 binding).
+        for kw in ({"session_id": "wrong"}, {"workload_id": "wrong"}, {"connection_epoch": 999}):
+            with self.subTest(kw=kw):
+                engine, callbacks = make_client()
+                to_armed(engine)
+                fields = {"session_id": "s1", "workload_id": "w1", "connection_epoch": 1}
+                fields.update(kw)
+                bad = build_message(protocol.EVENT, protocol_minor=0, body={
+                    "sequence": 1, "event_id": "e1", "event_type": "SCENARIO_STARTED",
+                    "payload_digest": canonical_sha256({}), "body": {}}, **fields)
+                out = engine.receive(parse_envelope(bad), 0.0)
+                self.assertEqual(out[0]["type"], protocol.ERROR)
+                self.assertEqual(engine.state, ClientState.ABORTED)
+                self.assertEqual(engine.aborted_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+                self.assertEqual(len(callbacks.events), 0)  # callback 미전달
+
+    def test_evicted_old_sequence_replay_aborts(self):
+        # 256창 밖으로 밀려난 과거 sequence의 (변조) 재전송은 대조 불가 → fail-closed.
+        engine, callbacks = make_client()
+        to_armed(engine)
+        for seq in range(1, 258):  # 257개 → seq1이 _completed_events(≤256)에서 evict
+            engine.receive(parse_envelope(event(seq, "STEP_STARTED")), 0.0)
+        self.assertEqual(engine.last_completed_sequence, 257)
+        out = engine.receive(
+            parse_envelope(event(1, "STEP_STARTED", body={"x": 1}, event_id="tampered")), 0.0)
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(engine.state, ClientState.ABORTED)
+        self.assertEqual(engine.aborted_error.code, PocErrorCode.POC_EVENT_REPLAY_GAP)
+
     def test_finish_close_flow(self):
         engine, callbacks = make_client()
         to_armed(engine)

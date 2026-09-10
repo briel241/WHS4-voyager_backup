@@ -122,6 +122,22 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(term[0]["body"]["action_execution"], "TX_COMPLETED")
         self.assertEqual(submit(eng, clock, "c", target="ROC")[0]["body"]["admission"], "accepted")
 
+    def test_wrong_binding_error_message_does_not_inject_code(self):
+        # 잘못된 session/epoch의 ERROR는 client가 고른 code(SESSION_INHIBIT)를 주입하지 못하고
+        # POC_PROTOCOL_ERROR로 fail-closed된다(binding을 code 반영 전에 검사).
+        from vdeter.stage8.poc_api.messages import build_message
+        for kw in ({"session_id": "wrong"}, {"connection_epoch": 999}):
+            with self.subTest(kw=kw):
+                eng, clock, _ = running()
+                fields = {"session_id": "s1", "workload_id": "w1", "connection_epoch": 1}
+                fields.update(kw)
+                bad = build_message(protocol.ERROR, protocol_minor=0, body={
+                    "code": "POC_TX_OUTCOME_UNKNOWN", "severity": "SESSION_INHIBIT", "detail": {}},
+                    **fields)
+                eng.receive(parse_envelope(bad), clock.monotonic())
+                self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+                self.assertNotEqual(eng.fatal_error.code, PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
+
     def test_wrong_binding_action_rejected_fail_closed(self):
         # 잘못된 session/workload/epoch ACTION_SUBMIT는 승인·provider 호출 없이 fail-closed(§6.2).
         from vdeter.stage8._supervisor.engine import EngineState as ES
