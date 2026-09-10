@@ -51,6 +51,17 @@ from ..config.models import (
 )
 from ..profiles.models import RegistryScope
 from .canonical_json import canonical_sha256, encode_canonical_json, sha256_hex
+from .host_profiles import (
+    HOST_PROFILES as _HOST_PROFILES,
+    NOT_A_DC_ASSET,
+    PI_POWERED_HUB_PROFILE,
+    POWER_EXTERNAL_DC_ASSET,
+    POWER_PI_BUS,
+    POWER_POWERED_USB3_HUB_BUS,
+    TRANSPORT_POWERED_USB3_HUB_5000M,
+    USB_TRANSPORTS as _USB_TRANSPORTS,
+)
+from .host_profiles import profile as _host_profile
 
 try:  # Python 3.11 이상
     import tomllib as _toml
@@ -63,6 +74,15 @@ STAGE7_SOURCE_SCHEMA_VERSION = 4
 STAGE7_ADAPTER_KIND = "b210-stage7-affine"
 STAGE7_HOST_PROFILE = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
 STAGE7_PI_POWER_PROFILE = "PI5_5V5A_HIGH_CURRENT"
+#: additive host profile (2026-09-10): the same Raspberry Pi 5 with all three
+#: B210s on ONE self-powered USB3 hub (every link 5000M, hub bus power, no
+#: per-B210 DC asset). The Pi profile above keeps its exact per-endpoint
+#: transport/power rules; both are defined once in `host_profiles`.
+STAGE7_HOST_PROFILE_PI_POWERED_HUB = PI_POWERED_HUB_PROFILE
+STAGE7_HOST_PROFILES = _HOST_PROFILES
+#: powered-hub profile `usb_transport` / `external_power_asset` literals.
+POWERED_USB3_HUB_TRANSPORT = TRANSPORT_POWERED_USB3_HUB_5000M
+POWERED_USB3_HUB_BUS_POWER = POWER_POWERED_USB3_HUB_BUS
 STAGE7_LANE_MAP_PROFILE = "STAGE7_C1_C6_TRIANGLE_V1"
 STAGE7_PHY_FACADE = "STAGE7_DIAGNOSTIC_PHY_V1"
 STAGE7_TIMING_STATUS_PROJECTION = "STAGE7_PUBLIC_UNAVAILABLE_PRIVATE_AFFINE_V1"
@@ -94,7 +114,8 @@ LOWER_CHANNEL_NAME = "VDETER_LOWER_100_TEST"
 UPPER_CHANNEL_NAME = "VDETER_UPPER_100_TEST"
 CANONICAL_CHANNEL_NAMES = (LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME)
 
-USB_TRANSPORTS = ("DIRECT_USB3_5000M", "DIRECT_USB2_480M_EXTERNAL_DC")
+#: canonical usb_transport values (single definition: host_profiles.USB_TRANSPORTS).
+USB_TRANSPORTS = _USB_TRANSPORTS
 
 #: §15 stage7 table의 exact 고정 정수 값.
 STAGE7_FIXED_INTEGERS = {
@@ -868,7 +889,7 @@ class Stage7ConfigurationLoader:
             if error is not None:
                 return error
             host_values[key] = value
-        if host_values["profile"] != STAGE7_HOST_PROFILE:
+        if host_values["profile"] not in STAGE7_HOST_PROFILES:
             return _semantic_error(
                 "host_execution.profile이 canonical Stage 7 profile이 아닙니다",
                 profile=host_values["profile"],
@@ -1158,26 +1179,39 @@ class Stage7ConfigurationLoader:
                 "usb_transport가 canonical mapping이 아닙니다",
                 usb_transport=host_values["usb_transport"],
             )
-        expected_transport = (
-            "DIRECT_USB2_480M_EXTERNAL_DC" if endpoint_id == "MASS-B" else "DIRECT_USB3_5000M"
-        )
+        # endpoint별 canonical transport·전원 규칙은 host profile 정의 한 곳
+        # (`host_profiles`)에서 가져온다. legacy Pi profile은 종전 값 그대로
+        # (MASS-B = USB2 480M + 실제 외부 DC asset, MASS-A/ROC = USB3 + Pi bus);
+        # powered-hub profile은 세 endpoint 전부 hub 5000M + hub bus power.
+        host_definition = _host_profile(host_values["profile"])
+        expected_transport = host_definition.usb_transport[endpoint_id]
         if host_values["usb_transport"] != expected_transport:
             return _semantic_error(
                 "endpoint별 canonical USB transport와 다릅니다",
                 endpoint_id=endpoint_id,
                 usb_transport=host_values["usb_transport"],
             )
-        if endpoint_id == "MASS-B":
-            if host_values["external_power_asset"] in ("PI_BUS_POWER", "none", REQUIRED_UNSET):
+        power_rule = host_definition.power_source[endpoint_id]
+        if power_rule == POWER_EXTERNAL_DC_ASSET:
+            # 실제 DC asset ID만 허용 — Pi bus/none/placeholder는 물론 powered-hub
+            # 전원 token도 DC asset으로 위장할 수 없다 (fail-closed).
+            if host_values["external_power_asset"] in NOT_A_DC_ASSET:
                 return _semantic_error(
                     "MASS-B external_power_asset은 실제 외부 DC asset ID여야 합니다"
                 )
-        else:
-            if host_values["external_power_asset"] != "PI_BUS_POWER":
+        elif power_rule == POWER_PI_BUS:
+            if host_values["external_power_asset"] != POWER_PI_BUS:
                 return _semantic_error(
                     "ROC/MASS-A external_power_asset은 PI_BUS_POWER여야 합니다",
                     endpoint_id=endpoint_id,
                 )
+        elif host_values["external_power_asset"] != power_rule:
+            return _semantic_error(
+                "powered-hub profile의 external_power_asset은 모든 endpoint에서 "
+                "POWERED_USB3_HUB_BUS_POWER여야 합니다 (개별 DC asset·PI_BUS_POWER 불가)",
+                endpoint_id=endpoint_id,
+                external_power_asset=host_values["external_power_asset"],
+            )
         if not is_valid_sha256(host_values["environment_manifest_sha256"]):
             return _semantic_error("environment_manifest_sha256이 sha256이 아닙니다")
 
@@ -1308,6 +1342,8 @@ __all__ = (
     "LOWER_LOGICAL_CENTER_HZ",
     "LOWER_RF_TUNE_HZ",
     "PATH_IDS",
+    "POWERED_USB3_HUB_BUS_POWER",
+    "POWERED_USB3_HUB_TRANSPORT",
     "REQUIRED_UNSET",
     "RUN_MODES",
     "STAGE7_ADAPTER_KIND",
@@ -1316,6 +1352,8 @@ __all__ = (
     "STAGE7_CLOCK_BRIDGE_PROFILE",
     "STAGE7_FIXTURE_CLASSIFICATION",
     "STAGE7_HOST_PROFILE",
+    "STAGE7_HOST_PROFILES",
+    "STAGE7_HOST_PROFILE_PI_POWERED_HUB",
     "STAGE7_LANE_MAP_PROFILE",
     "STAGE7_PHY_FACADE",
     "STAGE7_REGISTRY_FINGERPRINT",

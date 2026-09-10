@@ -37,6 +37,7 @@ try:
 except ImportError:  # Python < 3.11
     import tomli as tomllib
 
+from apps.standalone import hardware_profiles
 from apps.standalone.state import write_json_atomic
 
 ENDPOINTS = ("mass-a", "mass-b", "roc")
@@ -114,8 +115,10 @@ def parse_hardware_declaration(path: Path | str) -> dict:
     with open(path, "rb") as handle:
         declaration = tomllib.load(handle)
     errors = []
-    if declaration.get("schema_version") != 1:
-        errors.append("schema_version must be 1")
+    schema_version = declaration.get("schema_version")
+    if schema_version not in hardware_profiles.SCHEMA_VERSIONS:
+        errors.append("schema_version must be 1 (legacy Pi profile) or 2 "
+                      "(Pi powered-USB3-hub profile)")
     if declaration.get("platform_profile") not in ("pi", "generic-pc"):
         errors.append("platform_profile must be 'pi' or 'generic-pc'")
     endpoints = declaration.get("endpoints") or {}
@@ -131,10 +134,19 @@ def parse_hardware_declaration(path: Path | str) -> dict:
         errors.append(f"endpoints.{'/'.join(unfilled)}.serial is still the draft value"
                       " (REQUIRED_FILL) — fill in the B210 serial for each role "
                       "(see the detected list in the draft comments)")
-    asset = (endpoints.get("MASS-B") or {}).get("external_power_asset")
-    if not asset or asset == "REQUIRED_FILL":
-        errors.append("endpoints.MASS-B.external_power_asset is missing "
-                      "(a physical asset ID only the operator can provide)")
+    # host profile (2026-09-10 additive): schema 1 = legacy Pi profile with the
+    # MASS-B external DC asset requirement below (unchanged; powered-hub keys
+    # are contradictory there); schema 2 = Pi powered-USB3-hub profile whose
+    # contract lives in hardware_profiles (single definition).
+    if schema_version == hardware_profiles.SCHEMA_PI_POWERED_HUB:
+        errors.extend(
+            hardware_profiles.validate_pi_powered_hub_declaration(declaration))
+    else:
+        errors.extend(hardware_profiles.validate_legacy_declaration(declaration))
+        asset = (endpoints.get("MASS-B") or {}).get("external_power_asset")
+        if not asset or asset == "REQUIRED_FILL":
+            errors.append("endpoints.MASS-B.external_power_asset is missing "
+                          "(a physical asset ID only the operator can provide)")
     serials = [
         (endpoints.get(role) or {}).get("serial")
         for role in ("MASS-A", "MASS-B", "ROC")
@@ -293,6 +305,16 @@ def _ensure_vdeter_importable(repo_root: Path) -> None:
 INSTALLATION_MANIFEST_RELPATH = "var/installation/installation-manifest.json"
 
 
+def read_host_machine_id(path: str = "/etc/machine-id"):
+    """`/etc/machine-id` (powered-hub template의 host_machine_id provisioning
+    값). 읽을 수 없으면 None — 호출자가 fail-closed로 거부한다."""
+    try:
+        value = Path(path).read_text(encoding="ascii", errors="replace").strip()
+    except OSError:
+        return None
+    return value or None
+
+
 def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
                          run_id: str, rr_phase: str,
                          hardware: dict, installation: dict,
@@ -300,8 +322,17 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
                          provenance: dict | None = None,
                          run_mode: str | None = None,
                          gain_input: dict | None = None,
-                         environment_manifest: dict | None = None) -> dict:
+                         environment_manifest: dict | None = None,
+                         usb_paths: dict | None = None,
+                         host_machine_id: str | None = None) -> dict:
     """run별 resolved config 일습을 생성·검증한다 (README §6 표 구현, v2).
+
+    host profile(2026-09-10 additive): endpoint template 디렉터리와 provisioning
+    치환은 hardware.toml이 가리키는 profile 정의에서 정한다. legacy Pi는 종전
+    그대로(`endpoints/`, MASS-B DC asset 치환). Pi powered-USB3-hub는
+    `endpoints-pi-powered-usb3-hub/`에 serial(선언)·usb_physical_path(preflight
+    실측 `usb_paths`)·host_machine_id(`/etc/machine-id` 또는 주입)를 채우며,
+    셋 중 하나라도 없으면 config를 만들지 않는다 (fail-closed).
 
     `installation`은 installation_manifest.measure/load 결과(record) 또는 그
     digest 부분집합(`installation_sha256` + `domains`)이다.
@@ -347,6 +378,27 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     )
 
     template_dir = repo_root / "VDETER" / "configs" / "stage7"
+    try:
+        host_definition = hardware_profiles.definition_of(hardware)
+    except ValueError as exc:
+        raise ConfigGenerationError(str(exc)) from exc
+    endpoint_template_dir = template_dir / host_definition.endpoint_template_subdir
+    powered_hub = host_definition.shared_powered_hub
+    machine_id = None
+    if powered_hub:
+        machine_id = (host_machine_id if host_machine_id is not None
+                      else read_host_machine_id())
+        if not machine_id:
+            raise ConfigGenerationError(
+                "cannot read /etc/machine-id for host_execution.host_machine_id "
+                "(powered-hub profile) — no config is generated")
+        missing_paths = [role for role in hardware_profiles.ROLES
+                         if not (usb_paths or {}).get(role)]
+        if missing_paths:
+            raise ConfigGenerationError(
+                f"observed USB topology path unknown for {missing_paths} — the "
+                "powered-hub profile fills host_execution.usb_physical_path from "
+                "the preflight observation; no config is generated")
     out_dir = run_root / "resolved-configs"
     (out_dir / "endpoints").mkdir(parents=True, exist_ok=True)
     (out_dir / "profiles").mkdir(parents=True, exist_ok=True)
@@ -368,7 +420,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     loader = Stage7ConfigurationLoader()
     resolved_sha = {}
     for endpoint in ENDPOINTS:
-        text = (template_dir / "endpoints"
+        text = (endpoint_template_dir
                 / f"{endpoint}.toml").read_text(encoding="utf-8")
         text = text.replace(
             'environment_manifest_path = "REQUIRED_UNSET"',
@@ -386,7 +438,23 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         if run_mode is not None:
             text = re.sub(r'run_mode = "[A-Z_]+"',
                           f'run_mode = "{run_mode}"', text)
-        if endpoint == "mass-b":
+        if powered_hub:
+            # powered-hub template provisioning: exact serial from the approved
+            # declaration, observed sysfs topology path, running host machine id.
+            # No DC asset field is substituted (fixed hub-power token in template).
+            role = endpoint.upper()
+            role_decl = endpoints_decl.get(role) or {}
+            text = text.replace(
+                'device_selector = "serial=REQUIRED_UNSET"',
+                'device_selector = "serial=%s"' % role_decl.get("serial"),
+            ).replace(
+                'usb_physical_path = "REQUIRED_UNSET"',
+                'usb_physical_path = "%s"' % usb_paths[role],
+            ).replace(
+                'host_machine_id = "REQUIRED_UNSET"',
+                'host_machine_id = "%s"' % machine_id,
+            )
+        elif endpoint == "mass-b":
             asset = (endpoints_decl.get("MASS-B") or {}).get(
                 "external_power_asset")
             text = text.replace(
@@ -442,7 +510,8 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         "tooling_manifest_sha256": domain_digests["tooling"],
         "installation_verified": True,
         "environment_manifest_sha256": manifest_sha,
-        "hardware": {"usb_devices": usb_devices},
+        "hardware": {"usb_devices": usb_devices,
+                     "host_profile": host_definition.name},
         "qualification_profile": RESEARCH_READY_PROFILE,
         "rr_phase": rr_phase,
         "run_id": run_id,
@@ -461,6 +530,9 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         "domains": dict(domain_digests),
         "installation_verified": True,
         "environment_manifest_sha256": manifest_sha,
+        "host_profile": host_definition.name,
+        "endpoint_template_dir": endpoint_template_dir.relative_to(
+            repo_root).as_posix(),
         "provenance": provenance,
     }
     write_json_atomic(out_dir / "installation-state.json", installation_state)

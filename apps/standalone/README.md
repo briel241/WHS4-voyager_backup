@@ -211,6 +211,8 @@ approved = true                    # "현재 배선이 선언대로"를 사용�
   true`는 사용자만 기록한다. 초안 자동 승인 금지 (결정 1·7).
 - station identity·주파수·sample-rate·channel·판정 기준은 ②에 고정 — ①로
   변경 불가(치환 대상 필드가 아님). ② 변경은 manifest 검증이 fail-closed.
+- (2026-09-10 additive) `schema_version = 2`는 Pi powered-USB3-hub host
+  profile 전용이다 — §15. schema 1은 위 legacy Pi profile 그대로다.
 
 ## 5. standalone-binding (legacy — v2에서 필수 입력 아님)
 
@@ -397,8 +399,9 @@ RF 거부):
   변경 → `vdeter qualify`, tooling 변경 → software bundle 재실행). Git 상태는
   대조하지 않는다. v1 reference(legacy git 결속)는 run에서 거부된다.
 - (v1 이력) deploy manifest 검증 결과 (배포 tree 파일 전수 sha256)
-- B210 serial↔역할 매핑, USB **속도 등급** (MASS-A/ROC=super-speed,
-  MASS-B=high-speed)
+- B210 serial↔역할 매핑, USB **속도 등급** (legacy Pi profile: MASS-A/ROC=
+  super-speed, MASS-B=high-speed; Pi powered-USB3-hub profile: 3대 super-speed
+  + `host_profile`·`usb_topology` 결속 — §15)
 - **GNU Radio·UHD·numpy·cryptography 버전** — reference에 기록된 critical
   subset과 일치 (qualify 시점 실측이 기준)
 - gain artifact SHA, identity fingerprint, platform_profile
@@ -602,3 +605,77 @@ cleanup PASS, B210 3대 재발견(5000/480/5000 Mbps), throttled 0x0. summary의
 보증 범위는 **위 결속값과 동일한 Pi 5 arm64 배포 트리·B210 3대·identity·
 라이브러리 조합**에 한정된다. 다른 장비·다른 배포 트리는 `vdeter qualify`
 재발급 없이는 UNQUALIFIED로 거부된다.
+
+
+## 15. Pi powered-USB3-hub host profile (2026-09-10, additive)
+
+같은 Raspberry Pi 5에서 B210 3대를 **하나의 self-powered USB3 hub**(uplink =
+Pi SuperSpeed root 포트) 아래에 두는 topology를 위한 두 번째 host profile.
+기존 legacy Pi profile은 값·판정·reference 모양 모두 **그대로**다.
+
+| | legacy `STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1` | `STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1` |
+|---|---|---|
+| hardware.toml | `schema_version = 1` (hardware_profile·usb_hub 키 금지 = 모순) | `schema_version = 2` + `hardware_profile` + `[usb_hub]` |
+| speed class | MASS-A super / **MASS-B high(480M)** / ROC super | 세 endpoint 전부 **super(5000M)** |
+| 전원 | MASS-A/ROC `PI_BUS_POWER`, MASS-B 실제 외부 DC asset(`external_power_asset`) | 세 endpoint `POWERED_USB3_HUB_BUS_POWER`; 개별 DC asset 선언 금지 |
+| usb_transport | `DIRECT_USB3_5000M` / `DIRECT_USB2_480M_EXTERNAL_DC` | `POWERED_USB3_HUB_5000M` ×3 |
+| topology 검사 | serial↔역할 + 속도 등급 | + 세 장치가 **같은** class-09 SuperSpeed hub 아래, hub는 root 포트 직결, descriptor self-powered 비트, 승인 VID:PID, 초과 B210 없음 |
+| endpoint template | `VDETER/configs/stage7/endpoints/` | `VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/` (serial·usb_physical_path·host_machine_id provisioning) |
+| reference 결속 | 종전 critical subset | + `standalone_critical.host_profile`, `standalone_critical.usb_topology`(hub asset/VID:PID·역할별 serial/speed_class/transport·전원 출처), `hardware_observations`(기록만) |
+
+규칙의 단일 출처는 `VDETER/src/vdeter/stage7/host_profiles.py`다. `local_preflight.
+ROLE_SPEED_CLASS`·coordinator `_EXPECTED_USB_SPEED`는 legacy 표 값 그대로이며
+(시험이 정의와의 동일성을 고정), preflight·config loader·RR-P0는 hardware.toml /
+resolved config의 profile에서 기대값을 가져온다. RR-P0는 powered-hub profile일 때
+만 sysfs 공유 hub 검사를 추가로 수행한다(`usb_hub_topology`).
+
+관측값과 선언값의 분리: USB path·hub port·link speed·device number·hub descriptor
+`self-powered` 비트(bmAttributes bit 6)는 sysfs **관측**이며 기록만 한다(device
+number는 결속 아님). "hub 외부 전원이 연결돼 있다"와 "B210 개별 DC 전원이 없다"는
+소프트웨어가 측정할 수 없는 **operator attestation**이며 `[usb_hub]`에 출처
+(`operator_attested`)와 함께 기록한다. 둘 다 필요하다 — descriptor가 bus-powered로
+관측되면 attestation이 있어도 거부, attestation이 없으면 descriptor 비트가 있어도
+거부.
+
+```toml
+schema_version = 2
+platform_profile = "pi"
+hardware_profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"
+
+[usb_hub]
+asset_id = "HUB-VIA-2109-0817-01"     # 운용자 inventory ID (probe 불가)
+vid_pid = "2109:0817"                 # sysfs 관측값과 일치해야 함
+self_powered = true                   # operator attestation
+self_powered_source = "operator_attested"
+individual_b210_dc = false            # operator attestation
+individual_b210_dc_source = "operator_attested"
+
+[endpoints.MASS-A]
+serial = "34D03DD"
+[endpoints.MASS-B]
+serial = "3515425"                    # 5000M hub link — external_power_asset 없음
+[endpoints.ROC]
+serial = "34D03E8"
+
+[wiring]
+profile = "C1-C6-STANDARD"
+approved = true
+```
+
+`vdeter setup`은 정확히 세 B210이 하나의 self-powered SuperSpeed hub 아래에
+5000M로 관측될 때 이 schema의 초안(asset REQUIRED_FILL, attestation은 거부되는
+기본값)을 쓰고, 그 밖에는 legacy 초안을 쓴다(`var/setup-usb-topology.json`에
+관측 topology 기록). `vdeter run`은 close 뒤 sysfs를 재관측해 세 장치가 같은 hub
+아래 5000M로 돌아왔는지 기록·판정한다(`usb_topology_after_close`).
+
+fail-closed 목록(전부 RF 전 거부): 어느 장치든 480M, 다른 hub/root 아래, hub
+없음·cascade·480M link·class 비-hub·descriptor bus-powered·VID:PID 불일치, 초과
+B210, serial/역할 불일치, asset/attestation 누락·모순, 개별 `external_power_asset`
+선언, schema 1에 powered-hub 키 혼입, 알 수 없는 필드, host_machine_id/usb path
+provisioning 불가. legacy profile에서 MASS-B 5000M 또는 DC asset 누락은 종전처럼
+거부되며, hub 전원 token(`POWERED_USB3_HUB_BUS_POWER`)은 DC asset으로 받지 않는다.
+
+시험: `tests/test_standalone_pi_powered_hub.py`, `VDETER/tests/unit/
+test_stage7_configuration.py::TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB`,
+`tests/fixtures/stage7_phase_i_function_bindings.json`(run_rr_p0 재고정; CPython
+3.12.3/3.12.13 해시 동일 확인).

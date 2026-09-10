@@ -151,20 +151,37 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
 
     def test_change_is_additive_only(self):
         """변경 함수 집합은 정확히 {run_mass_roc_session(Phase G),
+        run_rr_p0(Pi powered-USB3-hub profile, 2026-09-10),
         run_rr_p3_fault(Phase I)}; 추가 함수는 Phase G helper 2개 +
-        Phase I `_p3_fault_status`로 한정."""
+        Phase I `_p3_fault_status` + powered-hub helper 2개로 한정."""
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
         self.assertEqual(changed, sorted(_phase_i_bindings()[
             "expected_changed_vs_qualified_commit"]), str(changed))
-        self.assertEqual(changed, ["run_mass_roc_session", "run_rr_p3_fault"])
+        self.assertEqual(changed, ["run_mass_roc_session", "run_rr_p0",
+                                   "run_rr_p3_fault"])
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["_p3_fault_status",
+        self.assertEqual(added, ["_expected_usb_speed",
+                                 "_p3_fault_status",
                                  "_service_session_terminal_status",
+                                 "_shared_hub_topology_check",
                                  "_terminate_process_bounded"],
                          str(added))
         self.assertEqual(_qualification_drift(self.old, self.new)[
             "unexpected_added"], [])
+
+    def test_powered_hub_rr_p0_pinned_by_hash_and_changed_vs_qualified(self):
+        """2026-09-10 계약 B(추가): run_rr_p0는 Pi powered-USB3-hub profile
+        완료본의 AST/source SHA-256과 정확히 일치해야 하며(이름 allow-list
+        아님), qualified commit 판과는 달라야 한다."""
+        pinned = _phase_i_bindings()["functions"]["run_rr_p0"]
+        self.assertEqual(self.new["run_rr_p0"],
+                         (pinned["ast_sha256"], pinned["source_sha256"]))
+        self.assertNotEqual(self.old["run_rr_p0"], self.new["run_rr_p0"])
+        # 기존 Pi 고정표는 그대로다 (legacy profile 유도값과 동일).
+        self.assertIn('_EXPECTED_USB_SPEED = {"MASS-A": "5000", "MASS-B": "480", '
+                      '"ROC": "5000"}', open(os.path.join(REPO, COORDINATOR_REL),
+                                             encoding="utf-8").read())
 
     def test_guard_detects_mutation_of_other_qualified_function(self):
         """다른 qualification 함수 하나(run_rr_p1)를 임의 변경하면 가드 실패."""
