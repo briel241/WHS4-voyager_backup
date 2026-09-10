@@ -13,7 +13,7 @@ from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
 from vdeter.stage8.poc_api.seams import ActionSubmitProvider
 from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
 from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
 
 
 def _provider(**kw):
@@ -31,7 +31,7 @@ def _action(target, *, kind=ActionKind.REPLAY_PACKET, payload=None, schedule=Non
         kind=kind,
         target=target,
         payload=payload if payload is not None else {"packet_hex": "48454c4c4f"},
-        schedule=schedule or {"slot_key": "slot-1"},
+        schedule=schedule if schedule is not None else {"kind": "NEXT_SAFE_SLOT"},
     )
 
 
@@ -110,10 +110,11 @@ class PriorityTest(unittest.TestCase):
     """WSM/POC-D14: 정상 TX가 자원을 점유하면 PoC만 거부하고 정상 TX를 취소하지 않는다."""
 
     def test_poc_rejected_on_resource_conflict(self):
+        # 기본 NEXT_SAFE_SLOT scheduler -> slot-1. 정상 TX가 lower:slot-1 점유 시 PoC 거부.
         arbiter = TD.FakeArbiter(normal_reserved={"lower:slot-1"})
         prov, sink, _f = _provider(arbiter=arbiter)
         with self.assertRaises(PocError) as ctx:
-            prov.submit(_action("ROC", schedule={"slot_key": "slot-1"}), request_id="conf")
+            prov.submit(_action("ROC"), request_id="conf")
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
         self.assertEqual(sink.submit_calls, 0)
         # 정상 예약이 유지된다(PoC가 취소하지 않는다).
@@ -122,9 +123,9 @@ class PriorityTest(unittest.TestCase):
     def test_poc_reserves_free_resource(self):
         arbiter = TD.FakeArbiter()
         prov, sink, _f = _provider(arbiter=arbiter)
-        prov.submit(_action("ROC", schedule={"slot_key": "free"}), request_id="ok")
+        prov.submit(_action("ROC"), request_id="ok")
         self.assertEqual(sink.submit_calls, 2)
-        self.assertEqual(arbiter.owner_by_key["lower:free"], "POC")
+        self.assertEqual(arbiter.owner_by_key["lower:slot-1"], "POC")
 
 
 class CapabilityTest(unittest.TestCase):
@@ -157,6 +158,79 @@ class ReadinessFailClosedTest(unittest.TestCase):
             prov.submit(_action("ROC"), request_id="nr")
         self.assertEqual(sink.submit_calls, 0)
         self.assertNotIn("lower:slot-1", arbiter.owner_by_key)  # 예약 해제됨
+
+
+class SchedulingContractTest(unittest.TestCase):
+    """§10, POC-D12: PoC는 상대 schedule만; hardware 시각은 MAC이 계산; 과거/닫힘/lead 부족은 DEADLINE_MISSED."""
+
+    def test_forbidden_timing_fields_rejected(self):
+        prov, sink, _f = _provider()
+        for field in ("scheduled_hw_timestamp_ns", "scheduled_sample", "slot_key",
+                      "hardware_timestamp", "transmit_at"):
+            with self.assertRaises(PocError) as ctx:
+                prov.submit(_action("ROC", schedule={"kind": "NEXT_SAFE_SLOT", field: 123}),
+                            request_id=f"rq-{field}")
+            self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(sink.submit_calls, 0)
+
+    def test_unknown_schedule_kind_rejected(self):
+        prov, _s, _f = _provider()
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule={"kind": "whenever"}), request_id="k")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+
+    def test_next_safe_slot_computed_by_scheduler(self):
+        prov, _s, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=5, lead_slots=2))
+        prov.submit(_action("ROC", schedule={"kind": "NEXT_SAFE_SLOT"}), request_id="r")
+        self.assertEqual(prov.parent_for("r").slot_key, "slot-7")  # 5+2, MAC이 계산
+
+    def test_after_slots_into_past_is_deadline_missed(self):
+        prov, sink, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=10, lead_slots=1))
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule={"kind": "after_slots", "slots": -5, "trigger_slot": 10}),
+                        request_id="past")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
+        self.assertEqual(sink.submit_calls, 0)  # 이동하지 않음
+
+    def test_insufficient_lead_is_deadline_missed(self):
+        prov, sink, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=10, lead_slots=2))
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule={"kind": "after_slots", "slots": 1, "trigger_slot": 10}),
+                        request_id="lead")  # slot 11 < earliest 12
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
+
+    def test_closed_slot_is_deadline_missed(self):
+        prov, sink, _f = _provider(
+            scheduler=NextSafeSlotScheduler(current_slot=10, lead_slots=1, closed_slots={11})
+        )
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule={"kind": "NEXT_SAFE_SLOT"}), request_id="closed")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
+        self.assertEqual(sink.submit_calls, 0)
+
+
+class ArbiterReleaseTest(unittest.TestCase):
+    """자원 반환: terminal·cleanup에서 PoC 예약을 release한다."""
+
+    def test_cleanup_releases_all_reservations(self):
+        arbiter = TD.FakeArbiter()
+        prov, _s, _f = _provider(arbiter=arbiter, scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1))
+        prov.submit(_action("ROC"), request_id="a")
+        self.assertIn("lower:slot-1", arbiter.owner_by_key)
+        prov.cleanup()
+        self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
+
+    def test_resolve_outcome_releases_reservation(self):
+        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+
+        arbiter = TD.FakeArbiter()
+        prov, _s, _f = _provider(arbiter=arbiter)
+        prov.submit(_action("MASS-A"), request_id="rq")
+        parent = prov.parent_for("rq")
+        terminals = {c.child_id: ChildTerminal.COMPLETED for c in parent.children}
+        outcome = prov.resolve_outcome("rq", terminals)
+        self.assertEqual(outcome, ParentOutcome.COMPLETED)
+        self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
 
 
 if __name__ == "__main__":

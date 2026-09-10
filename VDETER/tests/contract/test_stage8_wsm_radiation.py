@@ -108,13 +108,89 @@ class AtomicBarrierTest(unittest.TestCase):
         self.assertIn("ROC", required)
         self.assertNotIn("MASS-A", required)
 
-    def test_partial_submit_failure_does_not_claim_success(self):
-        sink = TD.CountingRadioSink(fail_on_index=1)  # 두 번째 child submit에서 실패
+    def test_prepare_group_failure_fires_no_child(self):
+        # group staging 실패 -> 어느 child도 방사되지 않는다(atomic).
+        sink = TD.CountingRadioSink(fail_on_prepare=True)
         ab = _broadcast(sink=sink)
         parent = _parent(ab)
         with self.assertRaises(RuntimeError):
             ab.transmit(parent)
-        self.assertEqual(ab.active_group_count, 0)  # 성공으로 남기지 않는다
+        self.assertEqual(sink.commit_calls, 0)
+        self.assertEqual(sink.submit_calls, 0)         # 방사 child 0
+        self.assertEqual(ab.active_group_count, 0)
+
+    def test_commit_group_failure_marks_outcome_unknown_no_partial(self):
+        # commit 결과 불명확 -> 성공으로 만들지 않고 OUTCOME_UNKNOWN, 부분 방사 없음(§6.1).
+        sink = TD.CountingRadioSink(fail_on_commit=True)
+        ab = _broadcast(sink=sink)
+        parent = _parent(ab)
+        with self.assertRaises(R.BroadcastAtomicityError):
+            ab.transmit(parent)
+        self.assertEqual(sink.committed_child_ids, [])  # 한쪽만 방사되는 partial 상태 없음
+        self.assertEqual(ab.outcome_of(parent.parent_id), R.ParentOutcome.OUTCOME_UNKNOWN)
+
+    def test_no_per_child_submit_api(self):
+        # RadioBurstSink에는 per-child submit 경로가 없다(구조적으로 partial 불가).
+        sink = TD.CountingRadioSink()
+        self.assertFalse(hasattr(sink, "submit_child"))
+        ab = _broadcast(sink=sink)
+        ab.transmit(_parent(ab))
+        self.assertEqual(sink.commit_calls, 1)  # 하나의 atomic group commit
+        self.assertEqual(sink.submit_calls, 2)  # 두 child 함께 방사
+
+
+class ParentTerminalAggregationTest(unittest.TestCase):
+    """§6.1: 두 child terminal을 취합해야 parent outcome이 확정된다."""
+
+    def _committed(self):
+        ab = _broadcast()
+        parent = _parent(ab)
+        result = ab.transmit(parent)
+        self.assertEqual(result.outcome, R.ParentOutcome.PENDING)  # commit 직후엔 미확정
+        return ab, parent
+
+    def test_all_completed_is_completed(self):
+        ab, parent = self._committed()
+        terminals = {c.child_id: R.ChildTerminal.COMPLETED for c in parent.children}
+        self.assertEqual(ab.resolve_outcome(parent.parent_id, terminals), R.ParentOutcome.COMPLETED)
+        self.assertEqual(ab.active_group_count, 0)
+
+    def test_one_unknown_is_outcome_unknown(self):
+        ab, parent = self._committed()
+        c0, c1 = parent.children
+        terminals = {c0.child_id: R.ChildTerminal.COMPLETED, c1.child_id: R.ChildTerminal.UNKNOWN}
+        self.assertEqual(ab.resolve_outcome(parent.parent_id, terminals), R.ParentOutcome.OUTCOME_UNKNOWN)
+
+    def test_missing_terminal_is_outcome_unknown(self):
+        ab, parent = self._committed()
+        c0, _c1 = parent.children
+        terminals = {c0.child_id: R.ChildTerminal.COMPLETED}  # 한 child terminal 누락
+        self.assertEqual(ab.resolve_outcome(parent.parent_id, terminals), R.ParentOutcome.OUTCOME_UNKNOWN)
+
+    def test_failed_without_unknown_is_failed(self):
+        ab, parent = self._committed()
+        c0, c1 = parent.children
+        terminals = {c0.child_id: R.ChildTerminal.COMPLETED, c1.child_id: R.ChildTerminal.FAILED}
+        self.assertEqual(ab.resolve_outcome(parent.parent_id, terminals), R.ParentOutcome.FAILED)
+
+
+class CapacityTest(unittest.TestCase):
+    """§10 bounded: 동시 활성 broadcast group 상한 적용."""
+
+    def test_max_active_broadcast_groups_enforced(self):
+        ab = R.AtomicBroadcast(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            waveform_factory=R.ReferenceWaveformFactory(), max_active_groups=2,
+        )
+        p1 = _parent(ab); p2 = _parent(ab); p3 = _parent(ab)
+        ab.transmit(p1); ab.transmit(p2)
+        self.assertEqual(ab.active_group_count, 2)
+        with self.assertRaises(R.BroadcastCapacityError):
+            ab.transmit(p3)
+        # 하나 resolve하면 자리가 나서 다시 방사 가능.
+        ab.resolve_outcome(p1.parent_id, {c.child_id: R.ChildTerminal.COMPLETED for c in p1.children})
+        ab.transmit(p3)
+        self.assertEqual(ab.active_group_count, 2)
 
 
 class CleanupTest(unittest.TestCase):

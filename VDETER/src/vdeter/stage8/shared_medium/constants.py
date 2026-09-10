@@ -133,9 +133,9 @@ MAX_COLLISION_GROUP_BURSTS = 8
 MAX_BURST_SAMPLES = 1 << 16  # 65536
 #: 한 parent transmission이 만드는 fan-out child 수 상한(= FANOUT_CHILDREN).
 MAX_FANOUT_CHILDREN = FANOUT_CHILDREN
-#: delivery matrix에 기록하는 endpoint entry 상한(세 station 이하).
-MAX_DELIVERY_MATRIX_ENTRIES = 16
-#: 활성 broadcast group·collision buffer·observer lease 동시 상한.
+#: delivery matrix에 기록·직렬화하는 row 상한(bounded evidence). 초과분은 dropped counter로만.
+MAX_DELIVERY_MATRIX_ENTRIES = 4096
+#: 동시에 in-flight(commit됐으나 terminal 미확정)일 수 있는 broadcast group 상한.
 MAX_ACTIVE_BROADCAST_GROUPS = 64
 
 

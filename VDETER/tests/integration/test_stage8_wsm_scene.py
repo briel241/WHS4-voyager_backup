@@ -174,5 +174,37 @@ class EvidenceCorrelationTest(unittest.TestCase):
         self.assertEqual(j["broadcast_infrastructure_result"]["submitted_child_count"], 2)
 
 
+class DeliveryMatrixCapTest(unittest.TestCase):
+    """WSM-REQ-17 bounded: delivery matrix가 무제한 증가하지 않는다(observe_scene + evidence)."""
+
+    def test_observe_scene_caps_rows_with_dropped_counter(self):
+        import unittest.mock as mock
+
+        # 작은 상한으로 강제: 2 parent(ROC upper) -> 4 row > cap 2 -> dropped 2.
+        with mock.patch.object(O, "MAX_DELIVERY_MATRIX_ENTRIES", 2):
+            parents = []
+            for i in range(2):
+                ab = _ab()
+                parents.append(_parent(ab, "ROC", PhysicalChannel.UPPER, b"PKT%d" % i, addressed="MASS-A"))
+            scene = O.observe_scene(parents)
+            self.assertEqual(len(scene.rows), 2)
+            self.assertTrue(scene.delivery_matrix_truncated)
+            self.assertEqual(scene.dropped_rows, 2)
+
+    def test_build_evidence_caps_serialized_matrix(self):
+        import unittest.mock as mock
+
+        ab = _ab()
+        parent = _parent(ab, "ROC", PhysicalChannel.UPPER, b"PKT", addressed="MASS-A")
+        result = ab.transmit(parent)
+        scene = O.observe_scene([parent])  # 2 rows
+        with mock.patch.object(EV, "MAX_DELIVERY_MATRIX_ENTRIES", 1):
+            j = EV.build_evidence([parent], scene, broadcast_results=[result]).as_json_value()
+        self.assertEqual(len(j["delivery_matrix"]), 1)
+        infra = j["broadcast_infrastructure_result"]
+        self.assertTrue(infra["delivery_matrix_truncated"])
+        self.assertEqual(infra["delivery_matrix_dropped_rows"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

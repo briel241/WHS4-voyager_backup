@@ -1,37 +1,60 @@
 """Stage 5 shared-medium 시험용 test double(spy/counter).
 
 Stage 4 track과 파일을 공유하지 않도록 shared_medium 소유 module에 둔다. UHD 없이 실행 가능한
-순수 software double이며, exactly-once·single-burst·fan-out·priority·fail-closed를 검증한다.
+순수 software double이며, atomic group commit·single-burst·fan-out·priority·fail-closed·
+deadline·terminal 취합을 검증한다.
 """
 
 from __future__ import annotations
 
-from .radiation import ReadinessDecision, ReferenceWaveformFactory
+from .radiation import GroupAdmission, ReadinessDecision
 
 
 class CountingRadioSink:
-    """RF submit spy. child submit 횟수·중복을 세어 exactly-once/no-duplicate를 증명한다.
+    """RF submit spy(atomic 2단계). group을 prepare -> commit하며 per-child 순차 제출 경로가 없다.
 
-    `fail_on_index`를 주면 그 index(0-base)의 submit에서 예외를 던져 atomic rollback을 시험한다.
+    - `fail_on_prepare`: prepare_group에서 예외 -> group 전체 거부, commit 0, 방사 child 0.
+    - `fail_on_commit`: commit_group에서 예외 -> group commit 불명확(상위가 OUTCOME_UNKNOWN 처리).
+    commit_group은 atomic이라 admission의 두 child를 모두 기록하거나(성공) 기록 전에 예외를 던진다.
     """
 
-    def __init__(self, *, fail_on_index=None) -> None:
-        self.submit_calls = 0
-        self.submitted_child_ids: list = []
+    def __init__(self, *, fail_on_prepare: bool = False, fail_on_commit: bool = False) -> None:
+        self.prepare_calls = 0
+        self.commit_calls = 0
+        self.prepared_group_ids: list = []
+        self.committed_child_ids: list = []
         self.per_child_count: dict = {}
         self.submitted_waveforms: set = set()
         self.submitted_parents: dict = {}
-        self._fail_on_index = fail_on_index
+        self._fail_prepare = fail_on_prepare
+        self._fail_commit = fail_on_commit
 
-    def submit_child(self, child) -> None:
-        index = self.submit_calls
-        self.submit_calls += 1
-        if self._fail_on_index is not None and index == self._fail_on_index:
-            raise RuntimeError(f"injected RF submit failure at index {index}")
-        self.submitted_child_ids.append(child.child_id)
-        self.per_child_count[child.child_id] = self.per_child_count.get(child.child_id, 0) + 1
-        self.submitted_waveforms.add(child.waveform_sha256)
-        self.submitted_parents.setdefault(child.parent_id, []).append(child.child_id)
+    def prepare_group(self, *, group_id: str, children) -> GroupAdmission:
+        self.prepare_calls += 1
+        if self._fail_prepare:
+            raise RuntimeError(f"injected prepare_group failure for {group_id}")
+        self.prepared_group_ids.append(group_id)
+        return GroupAdmission(group_id=group_id, children=tuple(children))
+
+    def commit_group(self, admission: GroupAdmission) -> None:
+        self.commit_calls += 1
+        if self._fail_commit:
+            raise RuntimeError(f"injected commit_group failure for {admission.group_id}")
+        # atomic: 두 child를 함께 기록(부분 기록 없음).
+        for child in admission.children:
+            self.committed_child_ids.append(child.child_id)
+            self.per_child_count[child.child_id] = self.per_child_count.get(child.child_id, 0) + 1
+            self.submitted_waveforms.add(child.waveform_sha256)
+            self.submitted_parents.setdefault(child.parent_id, []).append(child.child_id)
+
+    # 방사(commit)된 child 수. 기존 시험 호환용 별칭.
+    @property
+    def submit_calls(self) -> int:
+        return len(self.committed_child_ids)
+
+    @property
+    def submitted_child_ids(self) -> list:
+        return self.committed_child_ids
 
     @property
     def duplicate_child_submits(self) -> int:
@@ -42,9 +65,10 @@ class CountingWaveformFactory:
     """waveform 생성 횟수를 세는 factory. fan-out으로 waveform이 재생성되지 않음을 증명한다."""
 
     def __init__(self, inner=None) -> None:
+        from .radiation import ReferenceWaveformFactory
+
         self._inner = inner or ReferenceWaveformFactory()
         self.encode_calls = 0
-        self.encoded_payload_digests: list = []
 
     def encode(self, *, source_station: str, channel, payload: bytes):
         self.encode_calls += 1
@@ -102,7 +126,7 @@ class FakeArbiter:
         self.reserve_calls.append((resource_key, owner))
         existing = self.owner_by_key.get(resource_key)
         if existing is not None and existing != owner:
-            return False  # 정상 TX가 점유 중 → PoC 거부(정상 TX 유지).
+            return False
         self.owner_by_key[resource_key] = owner
         return True
 

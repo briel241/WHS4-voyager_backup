@@ -27,13 +27,18 @@ from . import (
 from .decoder import DecodeResult, DecodeStatus, build_burst, decode, encode_payload
 from .iq import CompositeResult, IqBurst, group_collisions, synthesize_same_channel
 from .observation import DeliveryRow, SceneResult, observe_scene
-from .provider import SharedMediumActionProvider
+from .provider import NextSafeSlotScheduler, SharedMediumActionProvider
 from .radiation import (
     AtomicBroadcast,
+    BroadcastAtomicityError,
+    BroadcastCapacityError,
     BroadcastError,
     BroadcastNotReady,
     ChildPath,
+    ChildTerminal,
+    ParentOutcome,
     ParentTransmission,
+    ScheduledSlot,
 )
 from .tuning import CommonLoTuningPlan, derive_dual_channel_plan, resolve_dual_channel
 
@@ -61,9 +66,15 @@ __all__ = (
     "AtomicBroadcast",
     "ParentTransmission",
     "ChildPath",
+    "ChildTerminal",
+    "ParentOutcome",
+    "ScheduledSlot",
     "BroadcastError",
     "BroadcastNotReady",
+    "BroadcastAtomicityError",
+    "BroadcastCapacityError",
     "SharedMediumActionProvider",
+    "NextSafeSlotScheduler",
     "SceneResult",
     "DeliveryRow",
     "observe_scene",

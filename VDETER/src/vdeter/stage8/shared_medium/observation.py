@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from ..poc_api.codec import sha256_hex
 from ..poc_api.types import ObservationRecord, PhysicalChannel, TuningState
 from . import constants, topology
+from .constants import MAX_DELIVERY_MATRIX_ENTRIES
 from .decoder import DecodeStatus, decode
 from .iq import IqBurst, group_collisions, synthesize_same_channel
 from .radiation import ParentTransmission, SiblingCollisionError
@@ -81,6 +82,8 @@ class SceneResult:
     poc_private_observations: tuple
     not_tuned_counter: int
     composites: tuple = field(default_factory=tuple)
+    delivery_matrix_truncated: bool = False
+    dropped_rows: int = 0
 
     def tuned_endpoints(self, parent_id: str) -> frozenset:
         return frozenset(
@@ -131,6 +134,14 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
     poc_private = []
     not_tuned_counter = 0
     composites = []
+    dropped_rows = 0
+
+    def add_row(row):
+        nonlocal dropped_rows
+        if len(rows) < MAX_DELIVERY_MATRIX_ENTRIES:
+            rows.append(row)  # bounded evidence(§10): 상한 초과분은 dropped counter로만.
+        else:
+            dropped_rows += 1
 
     for endpoint, arrivals in arrivals_by_endpoint.items():
         tuned_channels = topology.receiver_tuned_channels(
@@ -146,7 +157,7 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                 # NOT_TUNED: 물리 도달했으나 관측 안 함. bytes·event·error 없음. counter만.
                 for arrival in channel_arrivals:
                     not_tuned_counter += 1
-                    rows.append(
+                    add_row(
                         DeliveryRow(
                             parent_id=arrival.parent_id,
                             source_station=arrival.source_station,
@@ -212,7 +223,7 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                                         body={"payload_digest": arrival.payload_digest},
                                     )
                                 )
-                    rows.append(
+                    add_row(
                         DeliveryRow(
                             parent_id=arrival.parent_id,
                             source_station=arrival.source_station,
@@ -236,6 +247,8 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
         poc_private_observations=tuple(poc_private),
         not_tuned_counter=not_tuned_counter,
         composites=tuple(composites),
+        delivery_matrix_truncated=dropped_rows > 0,
+        dropped_rows=dropped_rows,
     )
 
 

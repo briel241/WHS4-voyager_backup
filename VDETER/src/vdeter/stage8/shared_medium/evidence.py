@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .constants import MAX_DELIVERY_MATRIX_ENTRIES
+
 
 @dataclass(frozen=True, slots=True)
 class SharedMediumEvidence:
@@ -38,15 +40,27 @@ def build_evidence(parents, scene, *, broadcast_results=(), scenario_result=None
     submitted_children = tuple(
         cid for r in broadcast_results for cid in r.submitted_child_ids
     )
-    delivery_matrix = tuple(row.as_evidence() for row in scene.rows)
+    # bounded evidence(§10, WSM-REQ-17): delivery_matrix 직렬화 상한을 적용하고 초과분은
+    # dropped counter/truncated flag로만 남긴다(무제한 증가 방지).
+    all_rows = tuple(row.as_evidence() for row in scene.rows)
+    delivery_matrix = all_rows[:MAX_DELIVERY_MATRIX_ENTRIES]
+    serialization_dropped = len(all_rows) - len(delivery_matrix)
+    dropped_total = serialization_dropped + getattr(scene, "dropped_rows", 0)
+    parent_outcomes = {
+        r.parent.parent_id: getattr(r.outcome, "value", str(r.outcome)) for r in broadcast_results
+    }
 
     infra = {
         "parents": parent_evidence,
         "committed_parent_ids": list(committed),
+        "parent_outcomes": parent_outcomes,
         "submitted_child_ids": list(submitted_children),
         "submitted_child_count": len(submitted_children),
         "not_tuned_counter": scene.not_tuned_counter,
         "poc_private_observation_ids": [o.observation_id for o in scene.poc_private_observations],
+        "delivery_matrix_truncated": bool(dropped_total) or getattr(scene, "delivery_matrix_truncated", False),
+        "delivery_matrix_dropped_rows": dropped_total,
+        "delivery_matrix_cap": MAX_DELIVERY_MATRIX_ENTRIES,
     }
     return SharedMediumEvidence(
         scenario_result=dict(scenario_result or {}),
