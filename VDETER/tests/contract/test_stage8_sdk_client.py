@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 
 from vdeter.stage8.poc_api import protocol
+from vdeter.stage8.poc_api.codec import canonical_sha256
 from vdeter.stage8.poc_api.errors import PocErrorCode
 from vdeter.stage8.poc_api.messages import build_message, parse_envelope
 from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine
@@ -36,10 +37,12 @@ def start(epoch=1):
     return _srv(protocol.START, {"scenario_id": "SC-VDE-006"}, epoch=epoch)
 
 
-def event(seq, etype, body=None, epoch=1):
+def event(seq, etype, body=None, epoch=1, event_id=None, payload_digest=None):
+    body = body or {}
     return _srv(protocol.EVENT, {
-        "sequence": seq, "event_id": f"ev{seq}", "event_type": etype,
-        "payload_digest": "d", "body": body or {},
+        "sequence": seq, "event_id": event_id or f"ev{seq}", "event_type": etype,
+        "payload_digest": payload_digest if payload_digest is not None else canonical_sha256(body),
+        "body": body,
     }, epoch=epoch)
 
 
@@ -178,6 +181,38 @@ class SdkClientTest(unittest.TestCase):
         self.assertEqual(out[0]["type"], protocol.ERROR)
         self.assertEqual(engine.state, ClientState.ABORTED)
         self.assertEqual(engine.aborted_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+
+    def test_S8_POC_API_REQ_13_wrong_payload_digest_new_event_aborts(self):
+        engine, callbacks = make_client()
+        to_armed(engine)
+        out = engine.receive(parse_envelope(event(1, "SCENARIO_STARTED", payload_digest="bogus")), 0.0)
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(engine.state, ClientState.ABORTED)
+        self.assertEqual(engine.aborted_error.code, PocErrorCode.POC_EVENT_REPLAY_GAP)
+        self.assertEqual(len(callbacks.events), 0)  # callback 미실행
+
+    def test_S8_POC_API_REQ_13_replay_different_body_same_sequence_aborts(self):
+        engine, callbacks = make_client()
+        to_armed(engine)
+        engine.receive(parse_envelope(event(1, "SCENARIO_STARTED")), 0.0)
+        self.assertEqual(len(callbacks.events), 1)
+        # 같은 sequence를 다른 event_id·다른 body(자체 digest는 정상)로 재전송 → 모순 abort.
+        out = engine.receive(
+            parse_envelope(event(1, "SCENARIO_STARTED", body={"x": 1}, event_id="tampered")), 0.0)
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(engine.state, ClientState.ABORTED)
+        self.assertEqual(engine.aborted_error.code, PocErrorCode.POC_EVENT_REPLAY_GAP)
+        self.assertEqual(len(callbacks.events), 1)  # 재호출 없음
+
+    def test_replay_same_event_ok(self):
+        # 동일 sequence·동일 event_id·동일 body 재전송은 정상(dedup, re-ACK).
+        engine, callbacks = make_client()
+        to_armed(engine)
+        engine.receive(parse_envelope(event(1, "SCENARIO_STARTED")), 0.0)
+        out = engine.receive(parse_envelope(event(1, "SCENARIO_STARTED")), 0.0)
+        self.assertNotEqual(engine.state, ClientState.ABORTED)
+        self.assertEqual(len(callbacks.events), 1)
+        self.assertTrue(any(m["type"] == protocol.EVENT_ACK for m in out))
 
     def test_finish_close_flow(self):
         engine, callbacks = make_client()

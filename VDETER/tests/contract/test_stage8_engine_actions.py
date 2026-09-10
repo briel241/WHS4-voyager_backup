@@ -122,6 +122,20 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(term[0]["body"]["action_execution"], "TX_COMPLETED")
         self.assertEqual(submit(eng, clock, "c", target="ROC")[0]["body"]["admission"], "accepted")
 
+    def test_wrong_binding_action_rejected_fail_closed(self):
+        # 잘못된 session/workload/epoch ACTION_SUBMIT는 승인·provider 호출 없이 fail-closed(§6.2).
+        from vdeter.stage8._supervisor.engine import EngineState as ES
+        from vdeter.stage8.testing.server_harness import action_submit_message
+        for kw in ({"session": "wrong"}, {"workload": "wrong"}, {"epoch": 999}):
+            with self.subTest(kw=kw):
+                eng, clock, provider = running()
+                out = eng.receive(parse_envelope(action_submit_message("a", target="ROC", **kw)),
+                                  clock.monotonic())
+                self.assertEqual(out[0]["type"], protocol.ERROR)
+                self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+                self.assertEqual(eng.state, ES.ABORTED)
+                self.assertEqual(provider.submit_calls, 0)  # provider 미호출
+
     def test_S8_POC_API_REQ_24_provider_reject_not_infra_failure(self):
         provider = FakeActionSubmitProvider(reject_reason=PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
         eng, clock, provider = running(provider=provider)

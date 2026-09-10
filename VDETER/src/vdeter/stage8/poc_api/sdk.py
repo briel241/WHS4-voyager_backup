@@ -23,6 +23,7 @@ from .limits import (
     CALLBACK_ON_FINISH_DEADLINE_S,
     CALLBACK_ON_START_DEADLINE_S,
     MAX_ACTION_DESCRIPTOR_BYTES,
+    MAX_REPLAY_RING_MESSAGES,
 )
 from .messages import build_message, parse_envelope
 from .types import ActionDescriptor, ActionKind, Event
@@ -127,6 +128,8 @@ class SdkEngine:
         self.last_completed_sequence = 0
         self._unacked_since = None  # 첫 미ACK event 처리 시각(fake clock 기준)
         self._events_since_ack = 0
+        # 완료 event의 (event_id, payload_digest) — replay 무결성 대조용(bounded).
+        self._completed_events: dict[int, tuple[str, str]] = {}
         # action 멱등성
         self._submitted: dict[str, _Submitted] = {}
         self._pending_descriptors: list[ActionDescriptor] = []
@@ -232,11 +235,25 @@ class SdkEngine:
         body = parsed.body
         try:
             sequence = int(body["sequence"])
-            event_id = body["event_type"] and body["event_id"]
+            event_id = str(body["event_id"])
+            event_type = str(body["event_type"])
+            event_body = dict(body.get("body") or {})
+            payload_digest = str(body.get("payload_digest") or "")
         except (KeyError, TypeError, ValueError):
             return self._abort(PocErrorCode.POC_PROTOCOL_ERROR, "malformed EVENT")
+        # payload_digest는 event body의 canonical SHA-256과 일치해야 한다(§8.1). 모순은
+        # fail-closed(REQ-13): 잘못된 digest의 event는 성공으로 추정하지 않는다.
+        actual_digest = canonical_sha256(event_body)
+        if payload_digest != actual_digest:
+            return self._abort(PocErrorCode.POC_EVENT_REPLAY_GAP, "payload digest 모순",
+                               sequence=sequence, declared=payload_digest, actual=actual_digest)
         if sequence <= self.last_completed_sequence:
-            # 이미 callback-completed인 sequence면 callback을 다시 호출하지 않는다(§8.2).
+            # 이미 callback-completed인 sequence(replay)면 callback을 다시 호출하지 않는다(§8.2).
+            # 단, 같은 sequence는 같은 event_id·digest여야 한다(§8.1). 다르면 fail-closed(§8.3).
+            recorded = self._completed_events.get(sequence)
+            if recorded is not None and recorded != (event_id, payload_digest):
+                return self._abort(PocErrorCode.POC_EVENT_REPLAY_GAP,
+                                   "replay event_id/digest 모순", sequence=sequence)
             return self._maybe_ack(now, force=True)
         if sequence != self.last_completed_sequence + 1:
             # 연속 증가가 아니면 gap. server는 순서대로 replay하므로 client 측 gap은 오류.
@@ -244,17 +261,21 @@ class SdkEngine:
                                expected=self.last_completed_sequence + 1, got=sequence)
         event = Event(
             sequence=sequence,
-            event_id=str(body["event_id"]),
-            type=str(body["event_type"]),
-            body=dict(body.get("body") or {}),
-            payload_digest=str(body.get("payload_digest") or ""),
+            event_id=event_id,
+            type=event_type,
+            body=event_body,
+            payload_digest=payload_digest,
         )
         try:
             descriptors = self._callbacks.on_event(event, self._context) or []
         except Exception as error:  # noqa: BLE001
             return self._abort(PocErrorCode.POC_CALLBACK_EXCEPTION, f"on_event raised: {error!r}")
-        # callback-completed sequence 전진
+        # callback-completed sequence 전진 + replay 대조용 (event_id, digest) 기록(bounded).
         self.last_completed_sequence = sequence
+        self._completed_events[sequence] = (event_id, payload_digest)
+        if len(self._completed_events) > MAX_REPLAY_RING_MESSAGES:
+            oldest = min(self._completed_events)
+            self._completed_events.pop(oldest, None)
         if self._unacked_since is None:
             self._unacked_since = now
         self._events_since_ack += 1

@@ -42,6 +42,10 @@ from .token import constant_time_equals
 #: on_event deadline + ACK one-shot delay. 초과하면 callback hang으로 간주한다.
 SERVER_EVENT_ACK_GRACE_S = CALLBACK_ON_EVENT_DEADLINE_S + ACK_MAX_DELAY_S
 
+#: delivery_matrix evidence 항목 상한(bounded trace, §3.3/§16). NOT_TUNED counter는 무제한
+#: int로 유지하되 상세 항목 list는 이 값에서 멈추고 drop 수만 센다.
+MAX_DELIVERY_MATRIX_ENTRIES = MAX_REPLAY_RING_MESSAGES
+
 
 class EngineState(str, Enum):
     SETUP = "SETUP"
@@ -135,6 +139,8 @@ class SupervisorEngine:
             "actions_cached_hits": 0,
             "reconnects": 0,
             "delivery_matrix": [],
+            "delivery_matrix_dropped": 0,
+            "delivery_matrix_truncated": False,
         }
 
     # --- 메시지 helper ------------------------------------------------------
@@ -190,6 +196,22 @@ class SupervisorEngine:
                             detail={"session": parsed.session_id, "workload": parsed.workload_id})
         return None
 
+    def _verify_post_handshake(self, parsed) -> PocError | None:
+        """handshake 뒤 모든 message의 session/workload/connection_epoch 대조(§6.2).
+
+        HELLO/ARMED 외 message(EVENT_ACK·ACTION_SUBMIT·FINISH_RESULT)도 exact binding과
+        현재 epoch에 결속돼야 한다. 불일치는 `POC_PROTOCOL_ERROR`(fail-closed).
+        """
+
+        binding_error = self._verify_envelope_binding(parsed)
+        if binding_error is not None:
+            return binding_error
+        if parsed.connection_epoch != self.connection_epoch:
+            return PocError(PocErrorCode.POC_PROTOCOL_ERROR, "connection_epoch 불일치",
+                            detail={"expected_epoch": self.connection_epoch,
+                                    "got_epoch": parsed.connection_epoch})
+        return None
+
     def _on_hello(self, parsed, now):
         if self.state not in (EngineState.AWAIT_HELLO, EngineState.RECONNECTING):
             return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR, "예상치 못한 HELLO"))
@@ -209,6 +231,18 @@ class SupervisorEngine:
             last_completed = int(require_body_field(body, "last_completed_sequence", int))
         except PocError as error:
             return self._fail(error)
+
+        # connect_kind는 initial/reconnect만 허용하고 상태와 일치해야 한다.
+        # (오타 등 unknown kind를 신규 연결로 처리해 WELCOME/START를 재발행하지 않는다.)
+        if connect_kind not in ("initial", "reconnect"):
+            return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                       "알 수 없는 connect_kind", detail={"connect_kind": connect_kind}))
+        if self.state == EngineState.AWAIT_HELLO and connect_kind != "initial":
+            return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                       "최초 연결은 connect_kind=initial이어야 합니다"))
+        if self.state == EngineState.RECONNECTING and connect_kind != "reconnect":
+            return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                       "reconnect 중에는 connect_kind=reconnect만 허용합니다"))
 
         # token 인증(§5.2, constant-time).
         try:
@@ -294,6 +328,13 @@ class SupervisorEngine:
                 outbound.append(self._msg(protocol.ACTION_RESULT, cached.result_body))
                 if cached.terminal_body is not None:
                     outbound.append(self._msg(protocol.ACTION_TERMINAL, cached.terminal_body))
+        # reconnect가 주장하는 last_completed는 실제 emit한 최고 sequence를 넘을 수 없다.
+        highest_emitted = self._next_sequence - 1
+        if last_completed < 0 or last_completed > highest_emitted:
+            return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                       "reconnect last_completed_sequence가 emit 범위를 벗어남",
+                                       detail={"last_completed": last_completed,
+                                               "highest_emitted": highest_emitted}))
         # 마지막 completed sequence 이후 event replay(§12.3.3, §8.3)
         replay = self._replay_from(last_completed)
         if isinstance(replay, PocError):
@@ -374,23 +415,29 @@ class SupervisorEngine:
 
         if record.tuning_state == TuningState.NOT_TUNED:
             self.evidence["not_tuned_count"] += 1
-            self.evidence["delivery_matrix"].append({
-                "physical_channel": record.physical_channel.value,
-                "tuning_state": TuningState.NOT_TUNED.value,
-                "observation_id": record.observation_id,
-                "source_station": record.source_station,
-                "emitted_event": False,
-            })
+            self._record_delivery_matrix(record, TuningState.NOT_TUNED, emitted=False)
             return []
         self.evidence["tuned_observer_count"] += 1
-        self.evidence["delivery_matrix"].append({
+        self._record_delivery_matrix(record, TuningState.TUNED_OBSERVER, emitted=True)
+        return self.enqueue_event("PACKET_OBSERVED", record.as_event_body(), now)
+
+    def _record_delivery_matrix(self, record, tuning_state, *, emitted: bool) -> None:
+        """delivery_matrix 상세 항목을 bounded list에 기록(§3.3/§16). 상한 초과분은
+        counter(not_tuned_count·tuned_observer_count)로만 남기고 drop 수를 센다.
+        counter는 무제한 int로 유지하므로 관측 수가 커도 메모리는 유계다."""
+
+        matrix = self.evidence["delivery_matrix"]
+        if len(matrix) >= MAX_DELIVERY_MATRIX_ENTRIES:
+            self.evidence["delivery_matrix_dropped"] += 1
+            self.evidence["delivery_matrix_truncated"] = True
+            return
+        matrix.append({
             "physical_channel": record.physical_channel.value,
-            "tuning_state": TuningState.TUNED_OBSERVER.value,
+            "tuning_state": tuning_state.value,
             "observation_id": record.observation_id,
             "source_station": record.source_station,
-            "emitted_event": True,
+            "emitted_event": emitted,
         })
-        return self.enqueue_event("PACKET_OBSERVED", record.as_event_body(), now)
 
     def _emit_event_message(self, item: _QueuedEvent) -> dict:
         body = {
@@ -436,6 +483,9 @@ class SupervisorEngine:
         return outbound
 
     def _on_event_ack(self, parsed, now):
+        binding_error = self._verify_post_handshake(parsed)
+        if binding_error is not None:
+            return self._fail(binding_error)
         body = parsed.body
         try:
             cumulative = int(require_body_field(body, "cumulative_sequence", int))
@@ -443,6 +493,13 @@ class SupervisorEngine:
             return self._fail(error)
         if cumulative < self.last_acked_sequence:
             return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR, "ACK sequence 후퇴"))
+        # 아직 emit하지 않은 미래 sequence를 ACK할 수 없다(전달 안 된 event를 evict 금지).
+        highest_emitted = self._next_sequence - 1
+        if cumulative > highest_emitted:
+            return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                       "ACK가 emit 범위를 초과",
+                                       detail={"cumulative": cumulative,
+                                               "highest_emitted": highest_emitted}))
         self.last_acked_sequence = cumulative
         # ring에서 ACK된 event를 evict.
         kept = []
@@ -458,6 +515,10 @@ class SupervisorEngine:
 
     # --- action -------------------------------------------------------------
     def _on_action_submit(self, parsed, now):
+        binding_error = self._verify_post_handshake(parsed)
+        if binding_error is not None:
+            # 잘못된 session/workload/epoch action은 protocol 위반으로 fail-closed(provider 미호출).
+            return self._fail(binding_error)
         if self.state != EngineState.RUNNING:
             # ARMED 전/종료 후 action은 허용하지 않는다.
             return [self._reject_action(parsed.body.get("request_id"),
@@ -593,6 +654,9 @@ class SupervisorEngine:
         return [self._msg(protocol.FINISH, {"cumulative_sequence": self.last_acked_sequence})]
 
     def _on_finish_result(self, parsed, now):
+        binding_error = self._verify_post_handshake(parsed)
+        if binding_error is not None:
+            return self._fail(binding_error)
         if self.state != EngineState.FINISHING:
             return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR, "예상치 못한 FINISH_RESULT"))
         self.state = EngineState.CLOSING

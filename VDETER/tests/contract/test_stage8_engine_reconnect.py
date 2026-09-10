@@ -79,6 +79,34 @@ class ReconnectTest(unittest.TestCase):
         result = next(m for m in out if m["type"] == protocol.ACTION_RESULT)
         self.assertEqual(result["body"]["request_id"], "a")
 
+    def test_connect_kind_typo_rejected(self):
+        # 오타 connect_kind를 신규 연결로 처리해 WELCOME/START를 재발행하지 않는다.
+        eng, clock, _ = running()
+        eng.begin_reconnect_window(clock.monotonic())
+        out = eng.receive(parse_envelope(hello_message(connect_kind="typo")), clock.monotonic())
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        self.assertNotIn(protocol.WELCOME, [m["type"] for m in out])
+
+    def test_initial_hello_during_reconnect_rejected(self):
+        eng, clock, _ = running()
+        eng.begin_reconnect_window(clock.monotonic())
+        out = eng.receive(parse_envelope(hello_message(connect_kind="initial")), clock.monotonic())
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+
+    def test_reconnect_last_completed_beyond_emitted_rejected(self):
+        eng, clock, _ = running()
+        for i in range(2):
+            eng.enqueue_event("STEP_STARTED", {"i": i}, clock.monotonic())
+        eng.drain(clock.monotonic())  # highest_emitted = 2
+        eng.begin_reconnect_window(clock.monotonic())
+        out = eng.receive(
+            parse_envelope(hello_message(connect_kind="reconnect", last_completed=999)),
+            clock.monotonic())
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+
     def test_S8_POC_API_REQ_27_reconnect_capability_change_rejected(self):
         eng, clock, _ = running()  # 최초 caps = observe_packet, replay_packet
         eng.begin_reconnect_window(clock.monotonic())

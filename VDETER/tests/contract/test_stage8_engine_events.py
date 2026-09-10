@@ -109,6 +109,38 @@ class EventPipelineTest(unittest.TestCase):
         self.assertEqual(out[0]["body"]["body"]["tuning_state"], "TUNED_OBSERVER")
         self.assertEqual(eng.evidence["tuned_observer_count"], 1)
 
+    def test_ack_beyond_emitted_rejected(self):
+        # 아직 emit하지 않은 미래 sequence ACK는 거부하고 ring을 evict하지 않는다.
+        eng, clock = running()
+        eng.enqueue_event("STEP_STARTED", {}, clock.monotonic())
+        eng.drain(clock.monotonic())  # seq1 emit, highest_emitted=1
+        out = eng.receive(parse_envelope(ack_message(999)), clock.monotonic())
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        self.assertEqual(eng.residual_snapshot()["replay_ring"], 1)  # 미전달 event 보존
+
+    def test_wrong_epoch_ack_rejected(self):
+        eng, clock = running()
+        out = eng.receive(parse_envelope(ack_message(0, epoch=999)), clock.monotonic())
+        self.assertEqual(out[0]["type"], protocol.ERROR)
+        self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
+
+    def test_delivery_matrix_bounded(self):
+        from vdeter.stage8._supervisor.engine import MAX_DELIVERY_MATRIX_ENTRIES
+        eng, clock = running()
+        for _ in range(10000):
+            eng.enqueue_observation(
+                make_observation(tuning_state=TuningState.NOT_TUNED,
+                                 physical_channel=PhysicalChannel.UPPER, source_station="ROC"),
+                clock.monotonic())
+        self.assertEqual(eng.state, EngineState.RUNNING)  # fatal 아님
+        self.assertIsNone(eng.fatal_error)
+        self.assertEqual(eng.evidence["not_tuned_count"], 10000)  # counter는 정확
+        self.assertEqual(len(eng.evidence["delivery_matrix"]), MAX_DELIVERY_MATRIX_ENTRIES)
+        self.assertTrue(eng.evidence["delivery_matrix_truncated"])
+        self.assertEqual(eng.evidence["delivery_matrix_dropped"], 10000 - MAX_DELIVERY_MATRIX_ENTRIES)
+        self.assertEqual(eng.residual_snapshot()["event_queue"], 0)  # NOT_TUNED는 event 미생성
+
     def test_S8_POC_API_REQ_18_burst_producer_nonblocking(self):
         eng, clock = running()
         for i in range(200):
