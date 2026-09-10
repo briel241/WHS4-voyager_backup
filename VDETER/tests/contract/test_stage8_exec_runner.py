@@ -264,13 +264,17 @@ class CallbackErrorTest(unittest.TestCase):
 class _FaultyConnection:
     """지정 지점에서 예외를 던지는 최소 WorkloadConnection(예외 경로 lease 반환 검증)."""
 
-    def __init__(self, *, on_start=False, on_emit=False, on_close=False, on_finish=False):
+    def __init__(self, *, on_start=False, on_emit=False, on_close=False, on_finish=False,
+                 emit_exc=None, evidence_error=False):
         self._on_start = on_start
         self._on_emit = on_emit
         self._on_close = on_close
         self._on_finish = on_finish
+        self._emit_exc = emit_exc          # 특정 예외 인스턴스(KeyboardInterrupt 등)
+        self._evidence_error = evidence_error
         self._armed = False
         self._reached = False
+        self.closed = False
 
     def start(self):
         if self._on_start:
@@ -286,13 +290,17 @@ class _FaultyConnection:
     def running(self):
         return self._armed
 
-    def emit_event(self, event_type, body):
+    def _maybe_emit_raise(self):
+        if self._emit_exc is not None:
+            raise self._emit_exc
         if self._on_emit:
             raise RuntimeError("boom emit")
 
+    def emit_event(self, event_type, body):
+        self._maybe_emit_raise()
+
     def emit_observation(self, record):
-        if self._on_emit:
-            raise RuntimeError("boom emit")
+        self._maybe_emit_raise()
 
     def pump(self):
         pass
@@ -314,6 +322,7 @@ class _FaultyConnection:
             raise RuntimeError("boom finish")
 
     def close(self):
+        self.closed = True
         if self._on_close:
             raise RuntimeError("boom close")
         return {"engine": {"event_queue": 0, "replay_ring": 0, "inflight_actions": 0}}
@@ -326,6 +335,8 @@ class _FaultyConnection:
         return self._reached
 
     def evidence(self):
+        if self._evidence_error:
+            raise RuntimeError("boom evidence")
         return {}
 
 
@@ -364,6 +375,53 @@ class ExceptionCleanupTest(unittest.TestCase):
         result, lease = self._run_faulty(on_close=True)
         lease.assert_returned()  # close 실패에도 lease는 강제 정상 복귀
         self.assertEqual(lease.role, MassBRole.NORMAL)
+
+    def _runner_with(self, conn):
+        manifest = build_manifest()
+        lease = MassBLease()
+        runner = WorkloadRunner(conn, lease, run_id="r", workload_id="w",
+                                scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                                tx_executor=FakeTxExecutor())
+        return runner, lease
+
+    def test_keyboard_interrupt_reraised_after_cleanup(self):
+        # 사용자 Ctrl+C: cleanup(lease 반환·close)은 하되 KeyboardInterrupt는 상위로 재전달.
+        conn = _FaultyConnection(emit_exc=KeyboardInterrupt())
+        runner, lease = self._runner_with(conn)
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                    scenario_verdict=ScenarioVerdict.PASS))
+        lease.assert_returned()
+        self.assertTrue(conn.closed)  # cleanup은 수행됨
+
+    def test_system_exit_reraised_after_cleanup(self):
+        conn = _FaultyConnection(emit_exc=SystemExit(2))
+        runner, lease = self._runner_with(conn)
+        with self.assertRaises(SystemExit):
+            runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                    scenario_verdict=ScenarioVerdict.PASS))
+        lease.assert_returned()
+        self.assertTrue(conn.closed)
+
+    def test_generator_exit_reraised_after_cleanup(self):
+        conn = _FaultyConnection(emit_exc=GeneratorExit())
+        runner, lease = self._runner_with(conn)
+        with self.assertRaises(GeneratorExit):
+            runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                    scenario_verdict=ScenarioVerdict.PASS))
+        lease.assert_returned()
+        self.assertTrue(conn.closed)
+
+    def test_evidence_error_does_not_lose_result(self):
+        # _build_result의 evidence 수집이 실패해도 _result가 None으로 남지 않는다.
+        conn = _FaultyConnection(evidence_error=True)
+        runner, lease = self._runner_with(conn)
+        result = runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                         scenario_verdict=ScenarioVerdict.PASS))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+        self.assertEqual(result.evidence["connection"], {"error": "evidence unavailable"})
+        lease.assert_returned()
 
     def test_tx_executor_exception_returns_lease(self):
         # accepted action의 terminal 해석 중 예외 → lease 반환·fail-closed.

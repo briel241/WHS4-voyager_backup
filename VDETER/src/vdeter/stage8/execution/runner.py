@@ -202,21 +202,25 @@ class WorkloadRunner:
     def finish(self, scenario_verdict: ScenarioVerdict) -> WorkloadResult:
         """workload terminal → quiescence → on_finish → cleanup → 세 독립 결과 확정(§5.1, §11)."""
 
-        raised: BaseException | None = None
         try:
             self._run_terminal()
-        except BaseException as exc:  # noqa: BLE001 - 어떤 예외에서도 자원·lease를 반환
-            raised = exc
-        return self._finalize(scenario_verdict, raised=raised)
+        except Exception as exc:  # noqa: BLE001 - 일반 실행 결함만 fail-closed 결과화
+            return self._finalize(scenario_verdict, raised=exc)
+        except BaseException:
+            # KeyboardInterrupt/SystemExit/GeneratorExit: cleanup만 하고 상위로 재전달한다.
+            self._finalize(scenario_verdict, raised=None)
+            raise
+        return self._finalize(scenario_verdict, raised=None)
 
     def run(self, spec: WorkloadSpec) -> WorkloadResult:
         """arm → 모든 step 전달 → finish. 편의 진입점(§15 RF-off 대본 실행).
 
-        어느 단계(arm·start·deliver·finish·close)에서 예외가 나도 cleanup을 보장하고
-        MASS-B lease를 반환한다(§13, `S8-POC-REQ-20/27`, fail-closed).
+        일반 실행 결함(Exception)은 어느 단계(arm·start·deliver·finish·close)에서 나도 cleanup을
+        보장하고 MASS-B lease를 반환하며 fail-closed 결과로 변환한다(§13, `S8-POC-REQ-19/20/27`).
+        `KeyboardInterrupt`·`SystemExit`·`GeneratorExit`은 삼키지 않고 cleanup 뒤 상위 coordinator로
+        다시 전달한다(사용자 Ctrl+C가 무시되지 않도록).
         """
 
-        raised: BaseException | None = None
         try:
             armed = self.arm()
             if armed:
@@ -225,16 +229,20 @@ class WorkloadRunner:
                         break
                     self.deliver(step)
             self._run_terminal()
-        except BaseException as exc:  # noqa: BLE001 - infra 예외 fail-closed
-            raised = exc
-        return self._finalize(spec.scenario_verdict, raised=raised)
+        except Exception as exc:  # noqa: BLE001 - 일반 실행 결함만 fail-closed 결과화
+            return self._finalize(spec.scenario_verdict, raised=exc)
+        except BaseException:
+            self._finalize(spec.scenario_verdict, raised=None)
+            raise
+        return self._finalize(spec.scenario_verdict, raised=None)
 
     def _finalize(self, scenario_verdict: ScenarioVerdict,
                   *, raised: BaseException | None) -> WorkloadResult:
         """cleanup·lease 반환·결과 조립을 정확히 한 번(idempotent) 수행한다(§13).
 
-        connection.close()나 lease.release()가 실패해도 MASS-B lease를 **반드시** 정상
-        소유권으로 되돌린다(잔존 0). 이미 finalize됐으면 저장된 결과를 돌려준다.
+        connection.close()가 실패·중단돼도 lease는 finally에서 **반드시** 정상 소유권으로
+        되돌린다(잔존 0). 결과 조립(evidence 포함)은 예외를 삼켜 `_result`가 None으로 남지
+        않게 한다. 이미 finalize됐으면 저장된 결과를 돌려준다.
         """
 
         if self._finalized:
@@ -243,22 +251,23 @@ class WorkloadRunner:
 
         close_error: BaseException | None = None
         try:
-            self._closed_report = self._conn.close()
-        except BaseException as exc:  # noqa: BLE001 - close 실패도 fail-closed로 흡수
-            close_error = exc
-            self._closed_report = {"error": repr(exc), "forced_kill": True}
-        if "CLOSED" not in self._transitions:
-            self._transitions.append("CLOSED")
-
-        # 모든 경로(정상·오류·start 실패·강제 종료·close 실패)에서 lease를 반환한다.
-        if self._lease_acquired:
             try:
-                self._lease.release(self._workload_id)
-                self._transitions.append("LEASE_RELEASED")
-            except BaseException:  # noqa: BLE001 - 최후 방어: 강제 정상 복귀(잔존 0 보장)
-                self._lease.role = MassBRole.NORMAL
-                self._lease.holder = None
-                self._transitions.append("LEASE_FORCE_RELEASED")
+                self._closed_report = self._conn.close()
+            except Exception as exc:  # noqa: BLE001 - 일반 close 결함 흡수(인터럽트는 전달)
+                close_error = exc
+                self._closed_report = {"error": repr(exc), "forced_kill": True}
+            if "CLOSED" not in self._transitions:
+                self._transitions.append("CLOSED")
+        finally:
+            # close가 예외·인터럽트로 끝나도 lease는 반드시 반환한다(모든 terminal 경로 잔존 0).
+            if self._lease_acquired:
+                try:
+                    self._lease.release(self._workload_id)
+                    self._transitions.append("LEASE_RELEASED")
+                except Exception:  # noqa: BLE001 - 최후 방어: 강제 정상 복귀
+                    self._lease.role = MassBRole.NORMAL
+                    self._lease.holder = None
+                    self._transitions.append("LEASE_FORCE_RELEASED")
 
         self._result = self._build_result(scenario_verdict, raised=raised or close_error)
         return self._result
@@ -268,14 +277,22 @@ class WorkloadRunner:
         """connection.infrastructure_error를 안전하게 읽는다(broken conn도 흡수)."""
         try:
             return self._conn.infrastructure_error
-        except BaseException:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return None
 
     def _armed_reached_safe(self) -> bool:
         try:
             return self._conn.armed_reached()
-        except BaseException:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return self._armed
+
+    @staticmethod
+    def _safe(fn, fallback):
+        """evidence 수집 등 결과 조립 중 예외를 삼켜 `_result`가 None으로 남지 않게 한다."""
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return fallback
 
     def _build_result(self, scenario_verdict: ScenarioVerdict,
                       *, raised: BaseException | None = None) -> WorkloadResult:
@@ -298,10 +315,10 @@ class WorkloadRunner:
 
         desc = self._snapshot.descriptor
         evidence = {
-            "connection": self._conn.evidence(),
+            "connection": self._safe(self._conn.evidence, {"error": "evidence unavailable"}),
             "cleanup": dict(self._closed_report),
-            "lease": self._lease.as_evidence(),
-            "snapshot": self._snapshot.as_evidence(),
+            "lease": self._safe(self._lease.as_evidence, {}),
+            "snapshot": self._safe(self._snapshot.as_evidence, {}),
         }
         return WorkloadResult(
             run_id=self._run_id,

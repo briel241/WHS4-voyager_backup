@@ -29,10 +29,17 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from vdeter.stage8.execution.limits import SESSION_ABSOLUTE_DEADLINE_S  # noqa: E402
 from vdeter.stage8.poc_api.codec import decode_wire_packet, encode_wire_packet  # noqa: E402
 from vdeter.stage8.poc_api.messages import parse_envelope  # noqa: E402
 from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
-from vdeter.stage8.poc_api.transport import connect  # noqa: E402
+from vdeter.stage8.poc_api.transport import OversizedPacket, connect  # noqa: E402
+
+#: child의 자체 수명 제한을 두지 않는다. workload/close deadline은 supervisor가 강제하고
+#: (workload 900초·close 600초, 종료는 CLOSE→SIGTERM→SIGKILL), 정상 종료는 server의 CLOSE로만
+#: 온다. 아래 값은 supervisor가 사라져 CLOSE도 SIGKILL도 오지 않는 경우의 **최후 방어** ceiling일
+#: 뿐이며, session absolute(7200초)보다 커서 정상 workload를 조기 종료시키지 않는다(§5.2).
+CHILD_SAFETY_TIMEOUT_S = SESSION_ABSOLUTE_DEADLINE_S + 600.0
 
 #: child가 받는 env 이름(supervisor child.ENV_* 와 Stage 4 추가분).
 ENV_TOKEN_FD = "VDETER_POC_TOKEN_FD"
@@ -80,30 +87,46 @@ def _build_hello_payload(token: bytes, run_id: str, manifest_hello: dict) -> dic
     }
 
 
-def run_client(callbacks, *, socket_path: str, token: bytes, run_id: str,
+def run_client(callbacks, transport, *, token: bytes, run_id: str,
                session_id: str, workload_id: str, scenario_id: str,
-               manifest_hello: dict, timeout: float = 30.0, poll: float = 0.05) -> int:
-    """SDK client loop을 돈다(§7~§13). 정상 종료 0, 그 외 non-zero."""
+               manifest_hello: dict, poll: float = 0.05,
+               now_fn=time.monotonic, safety_timeout_s: float = CHILD_SAFETY_TIMEOUT_S) -> int:
+    """SDK client loop을 돈다(§7~§13). 정상 종료(server CLOSE) 0, 그 외 non-zero.
+
+    child는 자체 수명 제한을 두지 않는다. server가 CLOSE를 보내(engine CLOSED) 또는 abort
+    (ABORTED), 혹은 연결이 끊길 때까지 실행한다. `safety_timeout_s`는 supervisor가 사라진
+    경우의 최후 방어일 뿐 정상 workload(≤900초)나 session(≤7200초)을 조기 종료시키지 않는다.
+    """
 
     context = PocContext(session_id=session_id, workload_id=workload_id, scenario_id=scenario_id)
     engine = SdkEngine(callbacks, context)
-    transport = connect(socket_path)
+    connection_lost = False
     try:
         for message in [engine.build_hello(_build_hello_payload(token, run_id, manifest_hello))]:
             transport.send_packet(encode_wire_packet(message))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and engine.state not in (
-            ClientState.CLOSED, ClientState.ABORTED
-        ):
-            data = transport.recv_packet(timeout=poll)
-            now = time.monotonic()
+        deadline = now_fn() + safety_timeout_s
+        while engine.state not in (ClientState.CLOSED, ClientState.ABORTED):
+            if now_fn() > deadline:
+                break  # 최후 방어(§5.2): supervisor가 CLOSE/SIGKILL을 못 보낸 극단 상황
+            try:
+                data = transport.recv_packet(timeout=poll)
+            except (ConnectionError, OversizedPacket, OSError):
+                connection_lost = True  # peer(server) 종료/연결 손실 → child도 종료
+                break
+            now = now_fn()
             outbound = []
             if data is not None:
                 parsed = parse_envelope(decode_wire_packet(data))
                 outbound.extend(engine.receive(parsed, now))
             outbound.extend(engine.tick(now))
             for message in outbound:
-                transport.send_packet(encode_wire_packet(message))
+                try:
+                    transport.send_packet(encode_wire_packet(message))
+                except (ConnectionError, OSError):
+                    connection_lost = True
+                    break
+            if connection_lost:
+                break
     finally:
         transport.close()
     return 0 if engine.state == ClientState.CLOSED else 1
@@ -133,14 +156,20 @@ def main() -> int:
         return 3
 
     try:
+        transport = connect(socket_path)
+    except Exception as error:  # noqa: BLE001 - 연결 실패 fail-closed
+        sys.stderr.write(f"POC socket 연결 실패: {error.__class__.__name__}\n")
+        return 4
+
+    try:
         return run_client(
-            callbacks, socket_path=socket_path, token=token, run_id=run_id,
+            callbacks, transport, token=token, run_id=run_id,
             session_id=session_id, workload_id=workload_id, scenario_id=scenario_id,
             manifest_hello=manifest_hello,
         )
     except Exception as error:  # noqa: BLE001
         sys.stderr.write(f"POC client 오류: {error.__class__.__name__}\n")
-        return 4
+        return 5
 
 
 if __name__ == "__main__":
