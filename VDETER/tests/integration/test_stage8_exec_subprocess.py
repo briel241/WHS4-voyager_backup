@@ -196,6 +196,40 @@ class SubprocessExecutionTest(unittest.TestCase):
         sup_b.close_workload()
         self.assertEqual(pb.descriptors[0].payload.get("marker"), "A2")  # child B는 B code 실행
 
+    def test_workload_deadline_drives_close_of_real_child(self):
+        # session workload-deadline 만료가 살아 있는 실 child의 close→종료→cleanup을 구동함을
+        # 보인다(enforcement mechanism, 짧은 cap 주입). 900초 literal과 비협조 child의
+        # SIGKILL-at-900s는 Stage 6 hard gate로 이관(spec §5.2: 900초는 기존 Stage 7 세션 상한).
+        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired
+        from vdeter.stage8.testing.fakes import FakeClock
+
+        snap = self._make_snapshot("idle_poc", "A", "w-d")  # on_event []: child는 ARMED 후 idle 유지
+        provider = _RecordingProvider()
+        sup = self._supervisor(snap, provider, "w-d")
+        clock = FakeClock(0.0)
+        session = ResidentSession(clock=clock,
+                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+        session.start()
+        clock.set(0.5)
+        session.complete_bringup()
+        sup.start()
+        self.assertTrue(sup.run_until(lambda: sup.engine.state.value == "RUNNING", timeout=15.0))
+        session.begin_workload()
+        # child는 살아 idle 상태(연결 유지). deadline이 아니라 child 스스로 끝난 게 아님을 확인.
+        self.assertTrue(sup.residuals()["child_alive"])
+        # session workload cap(1초) 초과 → WORKLOAD deadline 만료.
+        clock.set(2.0)
+        with self.assertRaises(SessionExpired) as ctx:
+            session.check_deadlines()
+        self.assertEqual(ctx.exception.deadline, Deadline.WORKLOAD)
+        # deadline 만료 → 실 child를 close(CLOSE→SIGTERM→SIGKILL). 협조 child라 voluntary 종료.
+        report = sup.close_workload()
+        res = report["residual"]
+        self.assertFalse(res["child_alive"])       # deadline-driven close가 실 child를 종료
+        self.assertFalse(res["socket_file_exists"])
+        self.assertFalse(res["workload_dir_exists"])
+
     def test_child_callback_exception_fail_closed(self):
         # snapshot on_event가 예외 → 실제 child SDK가 abort → server infra 오류 + cleanup.
         write_poc_package(self.poc, "crashy", poc_id="crashy", script=_SCRIPT_CRASH)

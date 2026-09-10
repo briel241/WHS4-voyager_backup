@@ -265,16 +265,18 @@ class _FaultyConnection:
     """지정 지점에서 예외를 던지는 최소 WorkloadConnection(예외 경로 lease 반환 검증)."""
 
     def __init__(self, *, on_start=False, on_emit=False, on_close=False, on_finish=False,
-                 emit_exc=None, evidence_error=False):
+                 emit_exc=None, close_exc=None, evidence_error=False):
         self._on_start = on_start
         self._on_emit = on_emit
         self._on_close = on_close
         self._on_finish = on_finish
         self._emit_exc = emit_exc          # 특정 예외 인스턴스(KeyboardInterrupt 등)
+        self._close_exc = close_exc        # close() 중 인터럽트 주입
         self._evidence_error = evidence_error
         self._armed = False
         self._reached = False
         self.closed = False
+        self.close_calls = 0
 
     def start(self):
         if self._on_start:
@@ -322,7 +324,10 @@ class _FaultyConnection:
             raise RuntimeError("boom finish")
 
     def close(self):
+        self.close_calls += 1
         self.closed = True
+        if self._close_exc is not None:
+            raise self._close_exc
         if self._on_close:
             raise RuntimeError("boom close")
         return {"engine": {"event_queue": 0, "replay_ring": 0, "inflight_actions": 0}}
@@ -411,6 +416,21 @@ class ExceptionCleanupTest(unittest.TestCase):
                                     scenario_verdict=ScenarioVerdict.PASS))
         lease.assert_returned()
         self.assertTrue(conn.closed)
+
+    def test_close_interrupt_reentry_returns_result(self):
+        # close() 중 KeyboardInterrupt → 첫 호출은 인터럽트 재전달·lease 반환, 재진입은 유효 결과.
+        conn = _FaultyConnection(close_exc=KeyboardInterrupt())
+        runner, lease = self._runner_with(conn)
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(WorkloadSpec(steps=(scenario_started(),),
+                                    scenario_verdict=ScenarioVerdict.PASS))
+        lease.assert_returned()  # close 인터럽트에도 lease는 정상 복귀
+        # 재진입: _result가 None이 아니라 유효 결과를 돌려준다(finding 2).
+        second = runner._finalize(ScenarioVerdict.PASS, raised=None)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.poc_infrastructure, PocInfrastructure.ABORTED)
+        # close는 한 번만 호출됐다(재진입이 다시 close하지 않음).
+        self.assertEqual(conn.close_calls, 1)
 
     def test_evidence_error_does_not_lose_result(self):
         # _build_result의 evidence 수집이 실패해도 _result가 None으로 남지 않는다.

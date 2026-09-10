@@ -35,10 +35,13 @@ from vdeter.stage8.poc_api.messages import parse_envelope  # noqa: E402
 from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
 from vdeter.stage8.poc_api.transport import OversizedPacket, connect  # noqa: E402
 
-#: child의 자체 수명 제한을 두지 않는다. workload/close deadline은 supervisor가 강제하고
-#: (workload 900초·close 600초, 종료는 CLOSE→SIGTERM→SIGKILL), 정상 종료는 server의 CLOSE로만
-#: 온다. 아래 값은 supervisor가 사라져 CLOSE도 SIGKILL도 오지 않는 경우의 **최후 방어** ceiling일
-#: 뿐이며, session absolute(7200초)보다 커서 정상 workload를 조기 종료시키지 않는다(§5.2).
+#: child는 자체 수명 제한을 두지 않는다. 정상 종료는 server의 CLOSE(engine CLOSED)로만 온다.
+#: workload/close 상한(workload 900초·close 600초, 기존 Stage 7 코드 상한, `apps/stage7_session.py`)의
+#: **실제 강제와 종료(CLOSE→SIGTERM→SIGKILL)** 는 workload를 소유한 runtime(기존 Stage 7 resident
+#: session)이 수행하며, 이는 Stage 6 통합에서 Stage 8 실행 layer에 연결된다(Stage 4는 이 deadline을
+#: session.py 모델로만 표현한다). 아래 값은 그 runtime이 사라져 CLOSE도 SIGKILL도 오지 않는 극단의
+#: **최후 방어** ceiling일 뿐이며, session absolute(7200초)보다 커서 정상 workload를 조기 종료시키지
+#: 않는다(§5.2).
 CHILD_SAFETY_TIMEOUT_S = SESSION_ABSOLUTE_DEADLINE_S + 600.0
 
 #: child가 받는 env 이름(supervisor child.ENV_* 와 Stage 4 추가분).

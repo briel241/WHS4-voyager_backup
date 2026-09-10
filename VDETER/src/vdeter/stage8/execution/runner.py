@@ -112,8 +112,7 @@ class WorkloadRunner:
         self._armed = False
         self._closed_report: dict = {}
         self._lease_acquired = False
-        self._finalized = False
-        self._result: WorkloadResult | None = None
+        self._result: WorkloadResult | None = None  # 한 번 세워지면 idempotent 반환값
 
     # --- lifecycle ----------------------------------------------------------
     def arm(self) -> bool:
@@ -240,36 +239,54 @@ class WorkloadRunner:
                   *, raised: BaseException | None) -> WorkloadResult:
         """cleanup·lease 반환·결과 조립을 정확히 한 번(idempotent) 수행한다(§13).
 
-        connection.close()가 실패·중단돼도 lease는 finally에서 **반드시** 정상 소유권으로
-        되돌린다(잔존 0). 결과 조립(evidence 포함)은 예외를 삼켜 `_result`가 None으로 남지
-        않게 한다. 이미 finalize됐으면 저장된 결과를 돌려준다.
+        재진입 안전: `_result`가 세워지면 그 값을 돌려준다. cleanup 시작 전에 evidence 없는
+        **최소 결과**를 먼저 확정해, close/lease-release가 인터럽트(KeyboardInterrupt 등)로
+        중단돼도 재진입 시 `_result`가 None으로 남지 않게 한다(그 뒤 전체 결과로 덮어씀).
+        lease는 close가 어떻게 끝나든 반드시 정상 소유권으로 반환하고, 인터럽트는 cleanup·
+        결과 저장 뒤 상위로 재전달한다.
         """
 
-        if self._finalized:
+        if self._result is not None:
             return self._result
-        self._finalized = True
 
+        # 1) 최소 결과 선확정(evidence 미수집 → 예외 없이 항상 성공). 재진입 None 방지.
+        self._result = self._build_result(scenario_verdict, raised=raised, evidence=False)
+
+        # 2) cleanup: close + lease 반환. 인터럽트는 포착만 하고 아래에서 재전달.
         close_error: BaseException | None = None
+        pending_interrupt: BaseException | None = None
         try:
             try:
                 self._closed_report = self._conn.close()
-            except Exception as exc:  # noqa: BLE001 - 일반 close 결함 흡수(인터럽트는 전달)
+            except Exception as exc:  # noqa: BLE001 - 일반 close 결함 흡수
                 close_error = exc
                 self._closed_report = {"error": repr(exc), "forced_kill": True}
             if "CLOSED" not in self._transitions:
                 self._transitions.append("CLOSED")
-        finally:
-            # close가 예외·인터럽트로 끝나도 lease는 반드시 반환한다(모든 terminal 경로 잔존 0).
             if self._lease_acquired:
                 try:
                     self._lease.release(self._workload_id)
                     self._transitions.append("LEASE_RELEASED")
-                except Exception:  # noqa: BLE001 - 최후 방어: 강제 정상 복귀
+                except Exception:  # noqa: BLE001 - 강제 정상 복귀
                     self._lease.role = MassBRole.NORMAL
                     self._lease.holder = None
                     self._transitions.append("LEASE_FORCE_RELEASED")
+        except BaseException as exc:  # noqa: BLE001 - close/release 중 인터럽트
+            pending_interrupt = exc
+        finally:
+            # 인터럽트로 lease-release를 건너뛰었으면 최후 강제 반환(잔존 0 보장).
+            if (self._lease_acquired and self._lease.is_leased
+                    and self._lease.holder == self._workload_id):
+                self._lease.role = MassBRole.NORMAL
+                self._lease.holder = None
+                self._transitions.append("LEASE_FORCE_RELEASED")
 
-        self._result = self._build_result(scenario_verdict, raised=raised or close_error)
+        # 3) 전체 결과(evidence 포함)로 덮어쓴다. evidence는 _safe로 보호되어 실패하지 않는다.
+        self._result = self._build_result(
+            scenario_verdict, raised=raised or close_error or pending_interrupt, evidence=True)
+
+        if pending_interrupt is not None:
+            raise pending_interrupt  # cleanup·결과 저장 뒤 인터럽트 재전달
         return self._result
 
     # --- 결과 조립 ----------------------------------------------------------
@@ -294,32 +311,36 @@ class WorkloadRunner:
         except Exception:  # noqa: BLE001
             return fallback
 
-    def _build_result(self, scenario_verdict: ScenarioVerdict,
-                      *, raised: BaseException | None = None) -> WorkloadResult:
+    def _infra_and_code(self, raised: BaseException | None):
+        """(poc_infrastructure, error_code) 판정(§11.2). ARMED 전 오류는 ERROR, 이후는 ABORTED."""
         conn_error = self._infra_error()
         if conn_error is not None:
-            error_code = conn_error.code.value if isinstance(conn_error, PocError) else repr(conn_error)
-            # ARMED 전 오류는 workload 미시작(ERROR), 이후 오류는 ABORTED(§11.2).
-            infrastructure = (PocInfrastructure.ABORTED if self._armed_reached_safe()
-                              else PocInfrastructure.ERROR)
-        elif raised is not None:
-            # connection이 code로 남기지 못한 Python 예외(start/deliver/close 등)도
-            # 성공으로 추정하지 않고 fail-closed 처리한다(§11.2, `S8-POC-REQ-19`).
-            error_code = (raised.code.value if isinstance(raised, PocError)
-                          else f"EXCEPTION:{type(raised).__name__}")
-            infrastructure = (PocInfrastructure.ABORTED if self._armed_reached_safe()
-                              else PocInfrastructure.ERROR)
-        else:
-            infrastructure = PocInfrastructure.COMPLETED
-            error_code = None
+            code = conn_error.code.value if isinstance(conn_error, PocError) else repr(conn_error)
+            return (PocInfrastructure.ABORTED if self._armed_reached_safe()
+                    else PocInfrastructure.ERROR), code
+        if raised is not None:
+            # connection이 code로 남기지 못한 Python 예외/인터럽트도 성공으로 추정하지 않는다.
+            code = (raised.code.value if isinstance(raised, PocError)
+                    else f"EXCEPTION:{type(raised).__name__}")
+            return (PocInfrastructure.ABORTED if self._armed_reached_safe()
+                    else PocInfrastructure.ERROR), code
+        return PocInfrastructure.COMPLETED, None
 
+    def _build_result(self, scenario_verdict: ScenarioVerdict,
+                      *, raised: BaseException | None = None,
+                      evidence: bool = True) -> WorkloadResult:
+        infrastructure, error_code = self._infra_and_code(raised)
         desc = self._snapshot.descriptor
-        evidence = {
-            "connection": self._safe(self._conn.evidence, {"error": "evidence unavailable"}),
-            "cleanup": dict(self._closed_report),
-            "lease": self._safe(self._lease.as_evidence, {}),
-            "snapshot": self._safe(self._snapshot.as_evidence, {}),
-        }
+        if evidence:
+            evidence_dict = {
+                "connection": self._safe(self._conn.evidence, {"error": "evidence unavailable"}),
+                "cleanup": dict(self._closed_report),
+                "lease": self._safe(self._lease.as_evidence, {}),
+                "snapshot": self._safe(self._snapshot.as_evidence, {}),
+            }
+        else:
+            # evidence 미수집(최소 결과): connection.evidence() 등 예외 가능 경로를 건드리지 않는다.
+            evidence_dict = {}
         return WorkloadResult(
             run_id=self._run_id,
             workload_id=self._workload_id,
@@ -336,7 +357,7 @@ class WorkloadRunner:
             attacks=tuple(self._attacks),
             infrastructure_error_code=error_code,
             lifecycle_transitions=tuple(self._transitions),
-            evidence=evidence,
+            evidence=evidence_dict,
         )
 
 
