@@ -175,11 +175,27 @@ class NextSafeSlotScheduler:
         self._triggers = dict(triggers or {})
 
     def register_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns: int | None = None) -> None:
-        """VDETER가 관측 event를 낼 때 그 trigger 기준 slot/timestamp를 등록한다(client 아님)."""
+        """VDETER가 관측 event를 낼 때 그 trigger 기준 slot/timestamp를 등록한다(client 아님).
 
+        registry는 workload당 bounded다(§10). 상한 초과 시 가장 오래된 trigger부터 evict한다
+        (오래된 trigger는 이미 과거 deadline이라 재사용 시 POC_DEADLINE_MISSED로 걸린다).
+        """
+
+        if observation_id not in self._triggers and len(self._triggers) >= constants.MAX_TRIGGER_REGISTRY:
+            oldest = next(iter(self._triggers))  # dict insertion order = FIFO
+            del self._triggers[oldest]
         self._triggers[observation_id] = (
             int(slot), int(hw_timestamp_ns if hw_timestamp_ns is not None else slot * self._slot_samples)
         )
+
+    def clear_triggers(self) -> None:
+        """workload cleanup: 등록된 trigger를 모두 제거한다(잔존 0)."""
+
+        self._triggers.clear()
+
+    @property
+    def trigger_count(self) -> int:
+        return len(self._triggers)
 
     def resolve(self, action: ActionDescriptor, *, request_id: str) -> ScheduledSlot:
         kind, value = validate_schedule(action)
@@ -374,12 +390,25 @@ class SharedMediumActionProvider:
 
     # --- terminal 취합 + 자원 회수 -----------------------------------------
     def resolve_outcome(self, request_id: str, terminals: dict):
-        """parent outcome을 확정하고 PoC 자원 예약을 release한다(§6.1, §10). evidence에 반영."""
+        """parent outcome을 확정하고 PoC 자원 예약을 release한다(§6.1, §10). evidence에 반영.
+
+        이미 확정된 parent의 재-resolve는 raw 예외 대신 저장된 결과를 idempotent하게 돌려준다
+        (public 경계 밖으로 PocError 외 예외를 내지 않는다).
+        """
 
         parent = self._parents.get(request_id)
         if parent is None:
             raise PocError(PocErrorCode.POC_NOT_RUNNING, f"알 수 없는 request_id: {request_id}")
-        outcome = self._broadcast.resolve_outcome(parent.parent_id, terminals)
+        try:
+            outcome = self._broadcast.resolve_outcome(parent.parent_id, terminals)
+        except BroadcastError:
+            prior = self._outcomes.get(parent.parent_id) or self._broadcast.outcome_of(parent.parent_id)
+            if prior is None:
+                raise PocError(
+                    PocErrorCode.POC_PROTOCOL_ERROR, f"resolve 불가 parent: {parent.parent_id}"
+                )
+            self._release_reservation(request_id)
+            return prior
         self._outcomes[parent.parent_id] = outcome
         self._release_reservation(request_id)
         return outcome
@@ -388,6 +417,36 @@ class SharedMediumActionProvider:
         """parent_id -> ParentOutcome. evidence 조립에 넘겨 최신 결과를 반영한다."""
 
         return dict(self._outcomes)
+
+    def register_observation_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns=None) -> None:
+        """VDETER 관측 event → scheduler trigger 등록 production hook(§10).
+
+        Stage 6 supervisor가 관측 event(PACKET_OBSERVED·SCENARIO_STARTED·STEP_STARTED)를 낼 때
+        이 hook으로 trigger 기준 slot/timestamp를 등록한다. client는 trigger를 직접 만들 수 없다.
+        scheduler가 register_trigger를 제공하지 않으면 reactive scheduling을 광고하지 않는 것이다.
+        """
+
+        register = getattr(self._scheduler, "register_trigger", None)
+        if register is None:
+            raise PocError(
+                PocErrorCode.POC_PROTOCOL_ERROR,
+                "scheduler가 trigger 등록을 지원하지 않습니다(reactive scheduling 미지원)",
+            )
+        register(observation_id, slot=slot, hw_timestamp_ns=hw_timestamp_ns)
+
+    def build_evidence(self, parents, scene, *, broadcast_results=(), scenario_result=None, poc_result=None):
+        """확정 outcome을 자동 반영해 evidence를 조립한다(PENDING 회귀 방지).
+
+        `evidence.build_evidence`에 `outcomes=self.outcomes_by_parent()`를 주입하므로 호출자가
+        outcomes 인자를 잊어도 확정된 terminal이 PENDING으로 되돌아가지 않는다.
+        """
+
+        from . import evidence as _evidence
+
+        return _evidence.build_evidence(
+            parents, scene, broadcast_results=broadcast_results,
+            outcomes=self.outcomes_by_parent(), scenario_result=scenario_result, poc_result=poc_result,
+        )
 
     def _abort_attempt(self, request_id: str) -> None:
         """RF 방사 전/구조 실패: 예약을 반환하고 correlation 시도 기록을 지운다."""
@@ -424,6 +483,10 @@ class SharedMediumActionProvider:
             for key in list(self._reservations.values()):
                 self._arbiter.release(resource_key=key, owner="POC")
         self._broadcast.cleanup()
+        # scheduler trigger registry도 workload 잔존 0으로 정리(bounded·cleanup).
+        clear = getattr(self._scheduler, "clear_triggers", None)
+        if clear is not None:
+            clear()
         self._cache.clear()
         self._parents.clear()
         self._reservations.clear()

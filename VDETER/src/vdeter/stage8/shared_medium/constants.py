@@ -137,6 +137,8 @@ MAX_FANOUT_CHILDREN = FANOUT_CHILDREN
 MAX_DELIVERY_MATRIX_ENTRIES = 4096
 #: 동시에 in-flight(commit됐으나 terminal 미확정)일 수 있는 broadcast group 상한.
 MAX_ACTIVE_BROADCAST_GROUPS = 64
+#: MAC scheduler trigger registry 상한(workload당 bounded; 초과 시 가장 오래된 것부터 evict).
+MAX_TRIGGER_REGISTRY = 4096
 
 
 __all__ = (
@@ -170,4 +172,5 @@ __all__ = (
     "MAX_FANOUT_CHILDREN",
     "MAX_DELIVERY_MATRIX_ENTRIES",
     "MAX_ACTIVE_BROADCAST_GROUPS",
+    "MAX_TRIGGER_REGISTRY",
 )

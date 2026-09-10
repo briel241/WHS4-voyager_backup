@@ -466,5 +466,92 @@ class ConstructorFailClosedTest(unittest.TestCase):
         self.assertEqual(prov.parent_for("inj").slot_key, "slot-1")
 
 
+class TriggerRegistryTest(unittest.TestCase):
+    """finding A: trigger registry는 workload당 bounded·cleanup되어야 하고 VDETER hook으로만 등록된다."""
+
+    def test_registry_is_bounded_with_eviction(self):
+        from vdeter.stage8.shared_medium.constants import MAX_TRIGGER_REGISTRY
+
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        for i in range(MAX_TRIGGER_REGISTRY + 500):
+            sched.register_trigger(f"obs{i}", slot=1)
+        self.assertLessEqual(sched.trigger_count, MAX_TRIGGER_REGISTRY)
+
+    def test_clear_triggers(self):
+        sched = NextSafeSlotScheduler()
+        sched.register_trigger("o", slot=1)
+        self.assertEqual(sched.trigger_count, 1)
+        sched.clear_triggers()
+        self.assertEqual(sched.trigger_count, 0)
+
+    def test_provider_cleanup_clears_scheduler_triggers(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.register_observation_trigger("obs-1", slot=5)
+        self.assertEqual(sched.trigger_count, 1)
+        prov.cleanup()
+        self.assertEqual(sched.trigger_count, 0)  # workload cleanup 시 잔존 0
+
+    def test_register_observation_trigger_hook_enables_reactive(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.register_observation_trigger("obs-42", slot=10)
+        prov.submit(_action("ROC", source_observation_id="obs-42",
+                            schedule={"kind": "after_slots", "slots": 2}), request_id="r")
+        self.assertEqual(prov.parent_for("r").slot_key, "slot-12")
+
+
+class ResolveIdempotencyTest(unittest.TestCase):
+    """finding C: 재-resolve/unknown resolve는 raw 예외가 아니라 PocError/저장결과여야 한다."""
+
+    def test_double_resolve_returns_same_outcome_no_raw(self):
+        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+
+        prov, _s, _f = _provider()
+        prov.submit(_action("ROC"), request_id="r1")
+        parent = prov.parent_for("r1")
+        terms = {c.child_id: ChildTerminal.COMPLETED for c in parent.children}
+        first = prov.resolve_outcome("r1", terms)
+        second = prov.resolve_outcome("r1", terms)  # 재-resolve: raw 예외 없이 idempotent
+        self.assertEqual(first, ParentOutcome.COMPLETED)
+        self.assertEqual(second, ParentOutcome.COMPLETED)
+
+    def test_resolve_unknown_request_is_pocerror(self):
+        prov, _s, _f = _provider()
+        with self.assertRaises(PocError) as ctx:
+            prov.resolve_outcome("nope", {})
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_NOT_RUNNING)
+
+
+class ProviderEvidenceTest(unittest.TestCase):
+    """finding B: provider.build_evidence는 outcomes 인자 없이도 확정 outcome을 반영한다."""
+
+    def test_build_evidence_reflects_resolved_outcome_without_explicit_outcomes(self):
+        from vdeter.stage8.shared_medium import observation as O
+        from vdeter.stage8.shared_medium.radiation import ChildTerminal
+
+        sink = TD.CountingRadioSink()
+        prov = SharedMediumActionProvider(
+            radio_sink=sink, rx_readiness=TD.ReadyReadiness(),
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+            waveform_factory=TD.CountingWaveformFactory(),
+        )
+        prov.submit(_action("ROC"), request_id="e1")
+        parent = prov.parent_for("e1")
+        # terminal resolve 후 evidence 조립: outcomes 인자 없이도 provider가 확정 결과를 주입한다.
+        prov.resolve_outcome("e1", {c.child_id: ChildTerminal.COMPLETED for c in parent.children})
+        scene = O.observe_scene([parent])
+        from vdeter.stage8.shared_medium.radiation import BroadcastResult, ParentOutcome
+        pending_result = BroadcastResult(
+            parent=parent, committed=True,
+            submitted_child_ids=tuple(c.child_id for c in parent.children),
+            outcome=ParentOutcome.PENDING,
+        )
+        j = prov.build_evidence([parent], scene, broadcast_results=[pending_result]).as_json_value()
+        self.assertEqual(
+            j["broadcast_infrastructure_result"]["parent_outcomes"][parent.parent_id], "COMPLETED"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

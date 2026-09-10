@@ -54,9 +54,22 @@ class SlotScheduler(Protocol):
     입력은 NEXT_SAFE_SLOT / after_slots / after_ms 세 표현뿐이며, 반환은
     :class:`~vdeter.stage8.shared_medium.radiation.ScheduledSlot`이다. 과거·닫힌·lead 부족 slot은
     이동하지 않고 `PocError(POC_DEADLINE_MISSED)`로 거부한다.
+
+    반응형(after_slots/after_ms)의 trigger 기준 slot/timestamp는 client가 아니라 **VDETER가
+    관측 event에서 `register_trigger`로 등록**한다(hardware timestamp 조작 방지). Stage 6 supervisor는
+    관측 event(PACKET_OBSERVED·SCENARIO_STARTED·STEP_STARTED)를 낼 때 이 hook을 호출하고,
+    workload cleanup에서 `clear_triggers`로 registry를 비운다(bounded·per-workload). trigger registry는
+    구현이 bounded로 유지해야 한다(§10). scheduler가 register_trigger를 제공하지 않으면 reactive
+    scheduling을 지원하지 않는 것으로 간주한다.
     """
 
     def resolve(self, action, *, request_id: str):
+        ...
+
+    def register_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns=None) -> None:
+        ...
+
+    def clear_triggers(self) -> None:
         ...
 
 
