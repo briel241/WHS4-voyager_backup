@@ -54,6 +54,10 @@ class SessionExpired(Exception):
         super().__init__(f"{deadline.value}: {detail}" if detail else deadline.value)
 
 
+class SessionStateError(Exception):
+    """현재 session 상태에서 허용되지 않는 조작(§6.1: rescan/menu는 READY에서만)."""
+
+
 @dataclass
 class ResidentSession:
     """resident session의 순수 상태·deadline 모델(§5.2). 실제 bring-up/RF는 Stage 6."""
@@ -165,12 +169,17 @@ class ResidentSession:
         self._enter_ready(now)  # 정상 workload 뒤 idle timer 다시 시작(§5.2)
 
     # --- rescan / menu (읽기 전용; 상한 연장 없음) ---------------------------
-    def note_control_plane_activity(self) -> None:
+    def note_control_plane_activity(self, *, require_ready: bool = True) -> None:
         """rescan·menu render 같은 control-plane 활동. deadline을 확인만 하고 연장하지 않는다.
 
-        idle timer(ready_since)와 absolute를 **건드리지 않는다**(§5.2: PoC 활동으로 연장 금지).
+        - idle timer(ready_since)와 absolute를 **건드리지 않는다**(§5.2: PoC 활동으로 연장 금지).
+        - rescan/menu는 `READY` 상태에서만 허용한다(§6.1). 진행 중 workload(RUNNING)에서
+          호출하면 :class:`SessionStateError`로 거부해 실행 중 workload에 영향을 주지 않는다.
         """
 
+        if require_ready and self.state != SessionState.READY:
+            raise SessionStateError(
+                f"rescan/menu는 READY에서만 허용합니다(현재 {self.state.value})")
         self.check_deadlines()
 
     # --- close --------------------------------------------------------------
@@ -210,5 +219,6 @@ __all__ = (
     "SessionState",
     "Deadline",
     "SessionExpired",
+    "SessionStateError",
     "ResidentSession",
 )

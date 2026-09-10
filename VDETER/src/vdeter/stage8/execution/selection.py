@@ -14,12 +14,47 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 from ..poc_api.negotiation import ServerCapabilityConfig
 from .catalog import Catalog, PackageEntry
 
 NONE_CHOICE = "none"
 SHA_PREFIX_LEN = 12
+
+
+class SelectionError(Exception):
+    """PoC source 선택 계약 위반(§5.3, §6.1). fail-closed."""
+
+
+class SourceMode(str, Enum):
+    """PoC source 지정 방식(§5.3, §6.1)."""
+
+    OFF = "OFF"          # --poc/--poc-dir 없음 → PoC 기능 기본 OFF(구조적 부하 0)
+    DIRECT = "DIRECT"    # --poc <file.py>: 비대화형 고정 재현
+    CATALOG = "CATALOG"  # --poc-dir <dir>: 대화형 workload별 선택
+
+
+def resolve_source_mode(*, poc: str | None = None, poc_dir: str | None = None,
+                        interactive: bool = True) -> SourceMode:
+    """`--poc`/`--poc-dir`를 mode로 해석한다(§5.3, §6.1). 위반은 :class:`SelectionError`.
+
+    - 두 option을 동시에 쓸 수 없다(§5.3).
+    - `--poc-dir`는 대화형 mode에서만 쓴다. `run all`이나 scenario를 명시한 비대화형 실행에서
+      prompt를 열지 않는다(§6.1).
+    - 둘 다 없으면 catalog를 암묵 탐색하지 않고 PoC 기능은 기본 OFF다(§6.1).
+    """
+
+    if poc and poc_dir:
+        raise SelectionError("--poc와 --poc-dir는 동시에 사용할 수 없습니다(§5.3)")
+    if poc_dir:
+        if not interactive:
+            raise SelectionError(
+                "--poc-dir는 대화형 mode 전용입니다(비대화형에서 prompt 금지, §6.1)")
+        return SourceMode.CATALOG
+    if poc:
+        return SourceMode.DIRECT
+    return SourceMode.OFF
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +254,9 @@ def rescan_summary(previous: Catalog, current: Catalog) -> RescanSummary:
 
 __all__ = (
     "NONE_CHOICE",
+    "SelectionError",
+    "SourceMode",
+    "resolve_source_mode",
     "SHA_PREFIX_LEN",
     "SelectableItem",
     "ExcludedItem",

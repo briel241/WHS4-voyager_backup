@@ -14,6 +14,7 @@ renderer 오류는 이미 확정된 verdict를 바꾸지 않는다(§12.2). 이 
 from __future__ import annotations
 
 import copy
+import json
 
 from .lease import MASS_B_SERIAL
 from .verdict import ActionExecution, WorkloadResult
@@ -99,9 +100,42 @@ def render_results(evidence_value: dict) -> str:
     return render_detailed(result)
 
 
+def save_result(result: WorkloadResult, path: str) -> str:
+    """workload 결과를 evidence 파일로 확정 저장한다(§12.4). terminal·quiescence 뒤 1회.
+
+    RF 활성 구간에서 호출하지 않는다(§12.1: per-event write 금지). 반환은 기록한 경로.
+    """
+
+    payload = json.dumps(result.as_json_value(), ensure_ascii=False,
+                         sort_keys=True, indent=2) + "\n"
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(payload)
+    return path
+
+
+def load_result(path: str) -> WorkloadResult:
+    """저장 evidence 파일을 **읽기 전용**으로 불러온다(§12.3). 파일을 수정하지 않는다."""
+
+    with open(path, encoding="utf-8") as fh:
+        return WorkloadResult.from_json_value(json.load(fh))
+
+
+def render_results_file(path: str) -> str:
+    """`vdeter results <run-id>` 경계: 저장 evidence만 읽어 같은 renderer로 재생한다(§12.3).
+
+    evidence의 content·SHA-256·size·mtime을 바꾸지 않는다(열기 mode가 read-only이며 쓰기
+    경로가 없다). run 시점과 동일한 model(:class:`WorkloadResult`)·renderer를 쓴다.
+    """
+
+    return render_detailed(load_result(path))
+
+
 __all__ = (
     "NOT_RECORDED",
     "render_rf_console",
     "render_detailed",
     "render_results",
+    "save_result",
+    "load_result",
+    "render_results_file",
 )

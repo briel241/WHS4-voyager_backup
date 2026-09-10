@@ -9,7 +9,13 @@ import unittest
 
 from vdeter.stage8.execution.catalog import Catalog, FileFacts, InvalidPackage, PackageEntry
 from vdeter.stage8.execution.manifest import parse_and_validate
-from vdeter.stage8.execution.selection import build_menu, rescan_summary
+from vdeter.stage8.execution.selection import (
+    SelectionError,
+    SourceMode,
+    build_menu,
+    rescan_summary,
+    resolve_source_mode,
+)
 from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
 from vdeter.stage8.testing.execution_fakes import poc_toml
 
@@ -94,6 +100,33 @@ class MenuTest(unittest.TestCase):
         self.assertEqual(text, menu.render())
         self.assertIn("session remaining", text)
         self.assertIn("select poc >", text)
+
+
+class SourceModeTest(unittest.TestCase):
+    """`--poc`/`--poc-dir` 해석 계약(§5.3, §6.1)."""
+
+    def test_off_when_neither_given(self):
+        # 둘 다 없으면 catalog를 암묵 탐색하지 않고 PoC 기능은 기본 OFF(§6.1).
+        self.assertEqual(resolve_source_mode(), SourceMode.OFF)
+
+    def test_direct_mode(self):
+        self.assertEqual(resolve_source_mode(poc="./replay_attack.py"), SourceMode.DIRECT)
+
+    def test_catalog_mode_interactive(self):
+        self.assertEqual(resolve_source_mode(poc_dir="/home/u/vdeter-pocs"), SourceMode.CATALOG)
+
+    def test_both_options_rejected(self):
+        # §5.3: 두 option은 동시에 사용할 수 없다.
+        with self.assertRaises(SelectionError):
+            resolve_source_mode(poc="./a.py", poc_dir="/poc")
+
+    def test_poc_dir_rejected_when_non_interactive(self):
+        # §6.1: run all·비대화형 실행에서 prompt를 열지 않는다.
+        with self.assertRaises(SelectionError):
+            resolve_source_mode(poc_dir="/poc", interactive=False)
+
+    def test_direct_mode_allowed_when_non_interactive(self):
+        self.assertEqual(resolve_source_mode(poc="./a.py", interactive=False), SourceMode.DIRECT)
 
 
 class RescanTest(unittest.TestCase):

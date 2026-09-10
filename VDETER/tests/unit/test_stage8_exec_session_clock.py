@@ -23,6 +23,7 @@ from vdeter.stage8.execution.session import (
     ResidentSession,
     SessionExpired,
     SessionState,
+    SessionStateError,
 )
 from vdeter.stage8.testing.fakes import FakeClock
 
@@ -133,6 +134,32 @@ class ReadyIdleDeadlineTest(unittest.TestCase):
         with self.assertRaises(SessionExpired) as ctx:
             s.check_deadlines()
         self.assertEqual(ctx.exception.deadline, Deadline.READY_IDLE)
+
+
+class ControlPlaneStateTest(unittest.TestCase):
+    """rescan/menu는 READY에서만 허용한다(§6.1: 진행 중 workload에 영향 금지)."""
+
+    def test_allowed_in_ready(self):
+        clock = FakeClock(1000.0)
+        s = _ready_session(clock)
+        s.note_control_plane_activity()  # 예외 없음
+        self.assertEqual(s.state, SessionState.READY)
+
+    def test_rejected_while_workload_running(self):
+        clock = FakeClock(1000.0)
+        s = _ready_session(clock)
+        s.begin_workload()
+        with self.assertRaises(SessionStateError):
+            s.note_control_plane_activity()
+        # 거부돼도 진행 중 workload 상태는 그대로다.
+        self.assertEqual(s.state, SessionState.RUNNING)
+
+    def test_rejected_before_bringup(self):
+        clock = FakeClock(0.0)
+        s = ResidentSession(clock=clock)
+        s.start()
+        with self.assertRaises(SessionStateError):
+            s.note_control_plane_activity()
 
 
 class WorkloadDeadlineTest(unittest.TestCase):

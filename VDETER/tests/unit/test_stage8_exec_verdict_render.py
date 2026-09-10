@@ -10,9 +10,12 @@ import unittest
 
 from vdeter.stage8.execution.render import (
     NOT_RECORDED,
+    load_result,
     render_detailed,
     render_results,
+    render_results_file,
     render_rf_console,
+    save_result,
 )
 from vdeter.stage8.execution.verdict import (
     ActionExecution,
@@ -127,6 +130,49 @@ class ResultsReadOnlyTest(unittest.TestCase):
         self.assertEqual(out, render_detailed(r))
         # read-only: 입력 dict 불변(§12.3).
         self.assertEqual(serialized, snapshot)
+
+
+class ResultsFileReadOnlyTest(unittest.TestCase):
+    """`vdeter results` 파일 경계: 재출력이 evidence 파일을 바꾸지 않는다(§12.3, REQ-18)."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="results-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+
+    def test_render_results_file_does_not_modify_evidence(self):
+        import hashlib
+        import os
+        import time
+        result = _result(attacks=(_attack(),))
+        path = os.path.join(self.dir, "result.json")
+        save_result(result, path)
+
+        def facts():
+            st = os.stat(path)
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            return digest, st.st_size, st.st_mtime_ns
+
+        before = facts()
+        time.sleep(0.01)
+        text = render_results_file(path)
+        text_again = render_results_file(path)
+        after = facts()
+        # run 시점과 같은 model·renderer로 동일 출력.
+        self.assertEqual(text, render_detailed(result))
+        self.assertEqual(text, text_again)
+        # content·SHA-256·size·mtime 불변.
+        self.assertEqual(before, after)
+
+    def test_load_result_roundtrip(self):
+        import os
+        result = _result(attacks=(_attack(), _attack(request_id="r2", target="MASS-A")))
+        path = os.path.join(self.dir, "r.json")
+        save_result(result, path)
+        restored = load_result(path)
+        self.assertEqual(render_detailed(restored), render_detailed(result))
+        self.assertEqual(restored.attacks_requested, 2)
 
 
 if __name__ == "__main__":
