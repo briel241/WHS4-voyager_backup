@@ -1,0 +1,281 @@
+"""workload 실행 lifecycle 오케스트레이션 시험(실행 명세 §5.1, §9~§11, §13).
+
+`S8-POC-REQ-02/06/07/13/14/15/16/17/19` 관련. LoopbackConnection(fake-clock, socket 없음)으로
+결정적으로 검증한다. platform 무관.
+"""
+
+from __future__ import annotations
+
+import unittest
+
+from vdeter.stage8.execution.lease import MassBLease, MassBRole
+from vdeter.stage8.execution.runner import (
+    WorkloadRunner,
+    WorkloadSpec,
+    observation_step,
+    scenario_started,
+    step_started,
+)
+from vdeter.stage8.execution.snapshot import Snapshot
+from vdeter.stage8.execution.verdict import (
+    ActionExecution,
+    PocInfrastructure,
+    ScenarioVerdict,
+    TargetEffect,
+)
+from vdeter.stage8.poc_api.errors import PocErrorCode
+from vdeter.stage8.poc_api.limits import ACK_MAX_DELAY_S, CALLBACK_ON_EVENT_DEADLINE_S
+from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
+from vdeter.stage8.poc_api.types import PhysicalChannel, TuningState
+from vdeter.stage8.testing.client_runner import RecordingCallbacks
+from vdeter.stage8.testing.fakes import FakeClock, build_manifest, make_observation
+from vdeter.stage8.testing.execution_fakes import (
+    FakeTxExecutor,
+    LoopbackConnection,
+    ScenarioPriorityProvider,
+)
+
+GRACE = CALLBACK_ON_EVENT_DEADLINE_S + ACK_MAX_DELAY_S
+
+
+def _snap(desc):
+    return Snapshot(
+        snapshot_dir="/snap", script_path="/snap/p.py", manifest_path="/snap/p.poc.toml",
+        script_sha256="ab" * 32, manifest_sha256="cd" * 32, binding_digest="ef" * 32,
+        descriptor=desc, interpreter="/usr/bin/python3", interpreter_version="3.12",
+        source_script_ino=1, source_manifest_ino=2,
+    )
+
+
+def _run(callbacks, *, manifest=None, provider=None, executor=None, steps=(),
+         scenario_verdict=ScenarioVerdict.PASS, server_config=None, auto_ack=True):
+    manifest = manifest or build_manifest()
+    clock = FakeClock()
+    conn = LoopbackConnection(callbacks=callbacks, manifest=manifest, clock=clock,
+                              provider=provider or ScenarioPriorityProvider(),
+                              server_config=server_config, auto_ack=auto_ack)
+    lease = MassBLease()
+    runner = WorkloadRunner(conn, lease, run_id="run1", workload_id="w-1",
+                            scenario_id="SC-VDE-006", snapshot=_snap(manifest),
+                            tx_executor=executor or FakeTxExecutor())
+    result = runner.run(WorkloadSpec(steps=tuple(steps), scenario_verdict=scenario_verdict))
+    return result, conn, lease
+
+
+class LifecycleOrderingTest(unittest.TestCase):
+    def test_normal_lifecycle_completes(self):
+        cb = RecordingCallbacks()
+        result, conn, lease = _run(cb, steps=(scenario_started(),))
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+        self.assertTrue(cb.started)
+        self.assertTrue(cb.finished)
+        self.assertIn("ARMED", result.lifecycle_transitions)
+        self.assertIn("LEASE_RELEASED", result.lifecycle_transitions)
+        lease.assert_returned()
+
+    def test_transitions_in_order(self):
+        result, _, _ = _run(RecordingCallbacks(), steps=(scenario_started(),))
+        t = list(result.lifecycle_transitions)
+        self.assertLess(t.index("LEASE_ACQUIRED"), t.index("ARMED"))
+        self.assertLess(t.index("ARMED"), t.index("WORKLOAD_TERMINAL"))
+        self.assertLess(t.index("WORKLOAD_TERMINAL"), t.index("CLOSED"))
+        self.assertLess(t.index("CLOSED"), t.index("LEASE_RELEASED"))
+
+    def test_on_start_returning_actions_aborts_before_workload(self):
+        # on_start는 action을 제출하지 않는다(§7.3). 반환하면 POC_PROTOCOL_ERROR로 abort.
+        cb = RecordingCallbacks(start_actions=["not-allowed"])
+        result, conn, lease = _run(cb, steps=(scenario_started(),))
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ERROR)
+        self.assertEqual(result.infrastructure_error_code, PocErrorCode.POC_PROTOCOL_ERROR.value)
+        self.assertEqual(result.attacks_requested, 0)
+        lease.assert_returned()
+
+
+class PreemptiveReactiveTest(unittest.TestCase):
+    def test_preemptive_action_on_scenario_started(self):
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC")]
+            return []
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act), steps=(scenario_started(),))
+        self.assertEqual(result.attacks_requested, 1)
+        self.assertEqual(result.attacks[0].trigger, "SCENARIO_STARTED")
+
+    def test_reactive_replay_on_packet_observed(self):
+        def act(event, ctx):
+            if event.type == "PACKET_OBSERVED":
+                return [ctx.replay(target="ROC",
+                                   source_observation_id=event.body.get("observation_id"))]
+            return []
+        obs = make_observation(source_station="ROC", destination_station="MASS-A")
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act),
+                            steps=(scenario_started(), observation_step(obs)))
+        self.assertEqual(result.attacks_requested, 1)
+        self.assertEqual(result.attacks[0].trigger, "PACKET_OBSERVED")
+        self.assertEqual(result.attacks[0].source_observation_id, obs.observation_id)
+
+
+class TargetChannelMappingTest(unittest.TestCase):
+    def test_roc_lower_massa_upper(self):
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC"), ctx.replay(target="MASS-A")]
+            return []
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act), steps=(scenario_started(),))
+        by_target = {a.target: a.physical_channel for a in result.attacks}
+        self.assertEqual(by_target["ROC"], PhysicalChannel.LOWER.value)
+        self.assertEqual(by_target["MASS-A"], PhysicalChannel.UPPER.value)
+
+
+class ActionSerializationTest(unittest.TestCase):
+    def test_two_actions_serialized(self):
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC"), ctx.replay(target="MASS-A")]
+            return []
+        provider = ScenarioPriorityProvider()
+        result, conn, _ = _run(RecordingCallbacks(event_action_fn=act),
+                               provider=provider, steps=(scenario_started(),))
+        self.assertEqual(result.attacks_requested, 2)
+        self.assertTrue(all(a.action_execution == ActionExecution.TX_COMPLETED
+                            for a in result.attacks))
+        # provider는 두 번 호출(각 request_id 정확히 1회, in-flight 1 직렬).
+        self.assertEqual(provider.submit_calls, 2)
+
+
+class ScenarioPriorityTest(unittest.TestCase):
+    def test_conflict_rejects_poc_not_scenario(self):
+        # 정상 TX가 ROC 채널을 점유 → PoC action은 RADIO_RESOURCE_CONFLICT로 거부.
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC")]
+            return []
+        provider = ScenarioPriorityProvider(blocked_targets={"ROC"})
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act),
+                            provider=provider, steps=(scenario_started(),),
+                            scenario_verdict=ScenarioVerdict.PASS)
+        # scenario는 그대로 PASS. PoC action만 거부.
+        self.assertEqual(result.scenario_verdict, ScenarioVerdict.PASS)
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+        self.assertEqual(result.attacks[0].action_execution, ActionExecution.REJECTED_BEFORE_TX)
+        self.assertEqual(result.attacks[0].reason, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT.value)
+        self.assertEqual(result.attacks[0].target_effect, TargetEffect.NOT_APPLICABLE)
+
+    def test_rejection_does_not_change_scenario_fail(self):
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC")]
+            return []
+        provider = ScenarioPriorityProvider(blocked_targets={"ROC"})
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act),
+                            provider=provider, steps=(scenario_started(),),
+                            scenario_verdict=ScenarioVerdict.FAIL)
+        # scenario verdict는 공격 거부와 독립(§11.1).
+        self.assertEqual(result.scenario_verdict, ScenarioVerdict.FAIL)
+
+
+class ForbiddenFieldTest(unittest.TestCase):
+    def test_forbidden_rf_field_rejected(self):
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC", payload={"frequency": 2450000000})]
+            return []
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act), steps=(scenario_started(),))
+        self.assertEqual(result.attacks[0].action_execution, ActionExecution.REJECTED_BEFORE_TX)
+        self.assertEqual(result.attacks[0].reason, PocErrorCode.POC_ACTION_SCHEMA_INVALID.value)
+
+
+class TargetEffectCombosTest(unittest.TestCase):
+    def test_forge_rejected_by_target_is_not_infra_failure(self):
+        def act(event, ctx):
+            if event.type == "PACKET_OBSERVED":
+                return [ctx.forge(target="ROC")]
+            return []
+        executor = FakeTxExecutor(effect_by_kind={
+            "FORGE_PACKET": (TargetEffect.REJECTED_BY_TARGET, "bad-signature"),
+        })
+        manifest = build_manifest(
+            requested_capabilities=("observe_packet", "forge_packet"),
+            requested_triggers=("SCENARIO_STARTED", "PACKET_OBSERVED"))
+        obs = make_observation(source_station="ROC", destination_station="MASS-A")
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act), manifest=manifest,
+                            executor=executor,
+                            steps=(scenario_started(), observation_step(obs)))
+        a = result.attacks[0]
+        self.assertEqual(a.action_execution, ActionExecution.TX_COMPLETED)
+        self.assertEqual(a.target_effect, TargetEffect.REJECTED_BY_TARGET)
+        self.assertEqual(a.reason, "bad-signature")
+        # target 보안 거부는 infra 실패가 아니다(§11.1, §11.2).
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
+        self.assertEqual(result.scenario_verdict, ScenarioVerdict.PASS)
+
+    def test_effect_observed_not_assumed_from_tx(self):
+        # 기본 executor는 TX_COMPLETED여도 NO_EFFECT. 전송=성공으로 추정하지 않음(§11.1).
+        def act(event, ctx):
+            if event.type == "SCENARIO_STARTED":
+                return [ctx.replay(target="ROC")]
+            return []
+        result, _, _ = _run(RecordingCallbacks(event_action_fn=act), steps=(scenario_started(),))
+        self.assertEqual(result.effects_observed, 0)
+
+
+class NotTunedTest(unittest.TestCase):
+    def test_not_tuned_no_event_no_attack_counter_only(self):
+        def act(event, ctx):
+            if event.type == "PACKET_OBSERVED":  # NOT_TUNED는 이 event를 만들지 않는다
+                return [ctx.replay(target="ROC")]
+            return []
+        obs = make_observation(tuning_state=TuningState.NOT_TUNED,
+                               physical_channel=PhysicalChannel.UPPER,
+                               source_station="ROC", destination_station="MASS-A")
+        result, conn, _ = _run(RecordingCallbacks(event_action_fn=act),
+                               steps=(scenario_started(), observation_step(obs)))
+        self.assertEqual(result.attacks_requested, 0)
+        ev = conn.evidence()["engine_evidence"]
+        self.assertEqual(ev["not_tuned_count"], 1)
+        self.assertEqual(ev["tuned_observer_count"], 0)
+
+
+class CallbackErrorTest(unittest.TestCase):
+    def test_callback_exception_aborts_no_success(self):
+        cb = RecordingCallbacks(raise_on={"PACKET_OBSERVED"})
+        obs = make_observation(source_station="ROC", destination_station="MASS-A")
+        result, _, lease = _run(cb, steps=(scenario_started(), observation_step(obs)))
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
+        self.assertEqual(result.infrastructure_error_code,
+                         PocErrorCode.POC_CALLBACK_EXCEPTION.value)
+        # 오류를 성공으로 추정하지 않음: effect 0.
+        self.assertEqual(result.effects_observed, 0)
+        lease.assert_returned()
+
+    def test_callback_timeout_classified(self):
+        # ACK 유예를 넘긴 callback hang은 POC_CALLBACK_TIMEOUT(§11.2). auto_ack off로 모델링.
+        cb = RecordingCallbacks()
+        manifest = build_manifest()
+        clock = FakeClock()
+        conn = LoopbackConnection(callbacks=cb, manifest=manifest, clock=clock, auto_ack=False)
+        conn.start()
+        conn.emit_event("PACKET_OBSERVED", {"observation_id": "obs-x"})
+        conn.advance_clock(GRACE + 1.0)
+        self.assertIsNotNone(conn.infrastructure_error)
+        self.assertEqual(conn.infrastructure_error.code, PocErrorCode.POC_CALLBACK_TIMEOUT)
+
+
+class DualCapabilityFailClosedTest(unittest.TestCase):
+    def test_required_dual_channel_unavailable_fails_closed(self):
+        # observe_dual_physical_channel required인데 server 미광고 → 연결 전 fail-closed.
+        manifest = build_manifest(
+            requested_capabilities=("observe_packet", "observe_dual_physical_channel"),
+            required_capabilities=("observe_dual_physical_channel",))
+        cb = RecordingCallbacks()
+        result, conn, lease = _run(cb, manifest=manifest,
+                                   server_config=ServerCapabilityConfig(),
+                                   steps=(scenario_started(),))
+        self.assertIn(result.poc_infrastructure, (PocInfrastructure.ERROR, PocInfrastructure.ABORTED))
+        self.assertEqual(result.infrastructure_error_code,
+                         PocErrorCode.POC_CAPABILITY_UNAVAILABLE.value)
+        lease.assert_returned()
+
+
+if __name__ == "__main__":
+    unittest.main()
