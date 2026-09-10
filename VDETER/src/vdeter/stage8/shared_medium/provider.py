@@ -5,15 +5,16 @@
 atomic fan-out으로 방사한다. client는 논리 target과 상대 schedule만 싣고, frequency·lane·gain·
 waveform·hardware timestamp·slot·**trigger 기준시각**·동시 lower+upper TX를 직접 지정할 수 없다.
 
-scheduling: PoC는 NEXT_SAFE_SLOT / after_slots / after_ms만 표현하고, trigger 기준 slot/timestamp는
-**VDETER가 관측 event에서 제공**한다(client의 trigger_slot 등은 거부). 실제 hardware 시각은 기존
-MAC scheduler(:class:`SlotScheduler`)가 계산하며, 과거·닫힌·lead 부족 slot은 이동하지 않고
-`POC_DEADLINE_MISSED`로 거부한다.
+scheduling(§10.2): PoC는 NEXT_SAFE_SLOT / after_slots / after_ms만 표현한다.
+- trigger 기준 slot/timestamp는 **VDETER가 관측 event에서 제공**한다(client trigger field는 거부).
+- `after_slots`는 trigger **slot** 기준 N개 뒤, `after_ms`는 trigger **hardware timestamp** + N ms
+  이후의 첫 합법 slot(올림)이다. 과거·닫힌·lead 부족 slot은 이동하지 않고 `POC_DEADLINE_MISSED`.
+- schedule의 key·type·범위를 먼저 검증해 `POC_ACTION_SCHEMA_INVALID`로 구조화한다(raw 예외 금지).
 
 오류는 Stage 3 오류 계약(`PocError`)으로만 표출한다: group commit 불명확은
 `POC_TX_OUTCOME_UNKNOWN`(SESSION_INHIBIT)으로 변환하고 request→parent correlation과 cleanup을
 보존한다. RF 방사 전 거부(readiness·staging·capacity)는 `POC_RADIO_RESOURCE_CONFLICT`로 자원을
-반환한다.
+반환한다. parent 생성부터 transmit까지는 하나의 보호 구간이라 어떤 예외에서도 예약이 누수되지 않는다.
 """
 
 from __future__ import annotations
@@ -60,6 +61,17 @@ FORBIDDEN_SCHEDULE_FIELDS = frozenset(
 #: 허용 상대 schedule 표현(§10.2).
 SCHEDULE_KINDS = frozenset({"NEXT_SAFE_SLOT", "after_slots", "after_ms"})
 
+#: kind별 허용 key allowlist. 그 밖의 key는 모두 거부한다(오타·우회 차단).
+SCHEDULE_ALLOWED_KEYS = {
+    "NEXT_SAFE_SLOT": frozenset({"kind"}),
+    "after_slots": frozenset({"kind", "slots"}),
+    "after_ms": frozenset({"kind", "ms"}),
+}
+
+#: 상대 offset 상한(bounded). 시험 통과 목적으로 완화하지 않는다.
+MAX_AFTER_SLOTS = 4096
+MAX_AFTER_MS = 600_000
+
 #: MAC slot grid(기존 Stage 7 harness와 동일 규약: 8192 samples/slot).
 _SLOT_SAMPLES = 8192
 
@@ -67,6 +79,59 @@ _SLOT_SAMPLES = 8192
 @dataclass(frozen=True, slots=True)
 class _CachedSubmission:
     submission: ProviderSubmission
+
+
+def validate_schedule(action: ActionDescriptor) -> tuple:
+    """schedule의 kind·허용 key·type·범위를 검증해 `(kind, value)`를 돌려준다.
+
+    위반은 모두 `POC_ACTION_SCHEMA_INVALID`로 구조화한다(raw ValueError/TypeError 금지).
+    `value`는 after_slots의 slots, after_ms의 ms이며 NEXT_SAFE_SLOT에서는 None이다.
+    """
+
+    schedule = action.schedule
+    if schedule is None:
+        schedule = {}
+    if not isinstance(schedule, dict):
+        raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID, "schedule은 object여야 합니다")
+
+    kind = schedule.get("kind", "NEXT_SAFE_SLOT")
+    if not isinstance(kind, str) or kind not in SCHEDULE_KINDS:
+        raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID, f"schedule.kind 미지원: {kind!r}")
+
+    allowed = SCHEDULE_ALLOWED_KEYS[kind]
+    for key in schedule:
+        if key in FORBIDDEN_ACTION_FIELDS or key in FORBIDDEN_SCHEDULE_FIELDS:
+            raise PocError(
+                PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+                f"schedule에 직접 지정할 수 없는 field: {key!r} (hardware 시각·trigger 기준은 VDETER가 결정)",
+            )
+        if key not in allowed:
+            raise PocError(
+                PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+                f"schedule.kind={kind}에 허용되지 않은 key: {key!r}",
+            )
+
+    if kind == "NEXT_SAFE_SLOT":
+        return kind, None
+
+    field = "slots" if kind == "after_slots" else "ms"
+    limit = MAX_AFTER_SLOTS if kind == "after_slots" else MAX_AFTER_MS
+    if field not in schedule:
+        raise PocError(
+            PocErrorCode.POC_ACTION_SCHEMA_INVALID, f"schedule.{field}가 필요합니다(kind={kind})"
+        )
+    value = schedule[field]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PocError(
+            PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+            f"schedule.{field}는 정수여야 합니다(받은 값 type={type(value).__name__})",
+        )
+    if value < 0 or value > limit:
+        raise PocError(
+            PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+            f"schedule.{field}={value}가 허용 범위 0..{limit}를 벗어납니다",
+        )
+    return kind, value
 
 
 def _default_packet_resolver(action: ActionDescriptor, request_id: str) -> bytes:
@@ -89,11 +154,14 @@ def _default_packet_resolver(action: ActionDescriptor, request_id: str) -> bytes
 class NextSafeSlotScheduler:
     """RF-off 기본 MAC scheduler stub. 상대 schedule을 결정적 slot으로 계산한다.
 
-    실장비에서는 기존 Stage 7 MAC scheduler가 이 역할을 한다. 반응형(after_slots/after_ms)의 trigger
-    기준 slot은 **VDETER가 register_trigger로 등록한 관측 event**에서만 온다(client가 조작 불가).
-    과거·닫힌·lead 부족 slot은 이동하지 않고 `POC_DEADLINE_MISSED`로 거부한다(§10).
+    실장비에서는 기존 Stage 7 MAC scheduler가 이 역할을 한다. 반응형 trigger 기준은 **VDETER가
+    register_trigger로 등록한 관측 event**에서만 온다(client 조작 불가).
 
-    시험은 이 계약을 만족하는 fake scheduler(closed slot·lead·trigger 등록)로 대체한다.
+    - `after_slots`: trigger **slot** + N.
+    - `after_ms`: trigger **hardware timestamp** + N ms 이후의 첫 slot(올림) → 인과성 보장.
+    - 과거·닫힌·lead 부족 slot은 이동하지 않고 `POC_DEADLINE_MISSED`.
+
+    이 stub은 hardware timestamp를 sample 좌표와 같은 단위로 모델링한다(RF-off 결정적 근사).
     """
 
     def __init__(self, *, current_slot: int = 0, lead_slots: int = 1, samples_per_slot: int = _SLOT_SAMPLES,
@@ -114,26 +182,31 @@ class NextSafeSlotScheduler:
         )
 
     def resolve(self, action: ActionDescriptor, *, request_id: str) -> ScheduledSlot:
-        schedule = action.schedule or {}
-        kind = schedule.get("kind", "NEXT_SAFE_SLOT")
-        if kind not in SCHEDULE_KINDS:
-            raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID, f"schedule.kind 미지원: {kind!r}")
+        kind, value = validate_schedule(action)
         earliest = self._current + self._lead
+
         if kind == "NEXT_SAFE_SLOT":
             slot = earliest
         else:
-            # 반응형: trigger 기준은 VDETER가 등록한 관측에서만 얻는다(client trigger 무시·거부).
+            # 반응형: trigger 기준은 VDETER가 등록한 관측에서만 얻는다.
             obs = action.source_observation_id
             if obs is None or obs not in self._triggers:
                 raise PocError(
                     PocErrorCode.POC_ACTION_SCHEMA_INVALID,
                     "반응형 schedule에는 VDETER가 제공한 유효한 trigger 관측(source_observation_id)이 필요합니다",
                 )
-            trigger_slot, _trigger_ns = self._triggers[obs]
+            trigger_slot, trigger_ns = self._triggers[obs]
             if kind == "after_slots":
-                slot = trigger_slot + int(schedule.get("slots", 0))
-            else:  # after_ms
-                slot = trigger_slot + (int(schedule.get("ms", 0)) * self._samples_per_ms) // self._slot_samples
+                slot = trigger_slot + value            # trigger slot 기준
+            else:  # after_ms: trigger hardware timestamp 기준 + N ms, 이후 첫 slot(올림)
+                target_ns = trigger_ns + value * self._samples_per_ms
+                slot = -(-target_ns // self._slot_samples)  # ceil division
+                if slot * self._slot_samples < target_ns:   # 방어적 인과성 검사
+                    raise PocError(
+                        PocErrorCode.POC_DEADLINE_MISSED,
+                        f"after_ms 인과성 위반(slot {slot} < target {target_ns}) — 이동하지 않음",
+                    )
+
         if slot < earliest:
             raise PocError(
                 PocErrorCode.POC_DEADLINE_MISSED,
@@ -149,7 +222,12 @@ class NextSafeSlotScheduler:
 
 
 class SharedMediumActionProvider:
-    """`ActionSubmitProvider` 계약(derive_physical_channel + submit)의 production 구현."""
+    """`ActionSubmitProvider` 계약(derive_physical_channel + submit)의 production 구현.
+
+    scheduler와 waveform_factory는 주입이 원칙이다. RF-off 기본값(stub scheduler·참조 modem)을 쓰려면
+    `allow_rf_off_defaults=True`로 **명시 허용**해야 하며, 그렇지 않으면 생성 자체가 실패한다
+    (production 조립에서 실물 주입 누락이 조용히 통과하지 않도록 fail-closed).
+    """
 
     def __init__(
         self,
@@ -161,7 +239,17 @@ class SharedMediumActionProvider:
         arbiter=None,
         dual_channel_installed: bool = False,
         packet_resolver=None,
+        allow_rf_off_defaults: bool = False,
     ) -> None:
+        missing = [
+            name for name, value in (("scheduler", scheduler), ("waveform_factory", waveform_factory))
+            if value is None
+        ]
+        if missing and not allow_rf_off_defaults:
+            raise ValueError(
+                f"{', '.join(missing)}를 주입하거나 allow_rf_off_defaults=True로 RF-off 기본값을 "
+                "명시 허용해야 합니다(production fail-closed)"
+            )
         self._broadcast = AtomicBroadcast(
             radio_sink=radio_sink,
             rx_readiness=rx_readiness,
@@ -173,18 +261,14 @@ class SharedMediumActionProvider:
         self._dual_channel_installed = bool(dual_channel_installed)
         self._packet_resolver = packet_resolver or _default_packet_resolver
         self._cache: dict = {}          # request_id -> _CachedSubmission (exactly-once, 성공만)
-        self._parents: dict = {}        # request_id -> parent (correlation, 시도 시점부터)
+        self._parents: dict = {}        # request_id -> parent (correlation)
         self._reservations: dict = {}   # request_id -> resource_key (자원 반환용)
         self._outcomes: dict = {}       # parent_id -> ParentOutcome (evidence 반영)
 
     @classmethod
     def for_production(cls, *, radio_sink, rx_readiness, scheduler, waveform_factory,
                        arbiter=None, dual_channel_installed: bool = False, packet_resolver=None):
-        """production 조립용 fail-closed 생성자.
-
-        Stage 6에서 실물 MAC scheduler와 frozen PHY waveform factory 주입을 빠뜨리면 RF-off stub이
-        조용히 동작하지 않도록, scheduler와 waveform_factory를 **필수 인자**로 강제한다.
-        """
+        """production 조립용 fail-closed 생성자. scheduler·frozen PHY factory가 필수다."""
 
         if scheduler is None:
             raise ValueError("production provider에는 실물 MAC scheduler가 필수입니다(fail-closed)")
@@ -194,6 +278,7 @@ class SharedMediumActionProvider:
             radio_sink=radio_sink, rx_readiness=rx_readiness, scheduler=scheduler,
             waveform_factory=waveform_factory, arbiter=arbiter,
             dual_channel_installed=dual_channel_installed, packet_resolver=packet_resolver,
+            allow_rf_off_defaults=False,
         )
 
     # --- ActionSubmitProvider 계약 -----------------------------------------
@@ -208,20 +293,28 @@ class SharedMediumActionProvider:
         if request_id in self._cache:
             return self._cache[request_id].submission
 
-        target = action.target
-        if target not in constants.ATTACK_ALLOWED_TARGETS:
-            raise PocError(PocErrorCode.POC_TARGET_DENIED, f"허용되지 않은 target: {target!r}")
+        # --- 1. 자원 확보 전 검증(보유 자원 없음). 예상 밖 예외도 PocError로 구조화. ---
+        try:
+            target = action.target
+            if target not in constants.ATTACK_ALLOWED_TARGETS:
+                raise PocError(PocErrorCode.POC_TARGET_DENIED, f"허용되지 않은 target: {target!r}")
+            self._reject_forbidden_fields(action)
+            validate_schedule(action)
+            channel = self.derive_physical_channel(target)
+            packet = self._packet_resolver(action, request_id)
+            slot = self._scheduler.resolve(action, request_id=request_id)
+            if not isinstance(slot, ScheduledSlot):
+                raise PocError(
+                    PocErrorCode.POC_ACTION_SCHEMA_INVALID, "scheduler가 ScheduledSlot을 반환하지 않음"
+                )
+        except PocError:
+            raise
+        except Exception as error:  # noqa: BLE001 - raw 예외를 Stage 3로 올리지 않는다
+            raise PocError(
+                PocErrorCode.POC_ACTION_SCHEMA_INVALID, f"action 검증/스케줄 계산 실패: {error}"
+            ) from error
 
-        self._reject_forbidden_fields(action)
-
-        channel = self.derive_physical_channel(target)
-        packet = self._packet_resolver(action, request_id)
-
-        # PoC는 hardware 시각·trigger 기준을 만들지 않는다: MAC scheduler가 slot을 계산.
-        slot = self._scheduler.resolve(action, request_id=request_id)
-        if not isinstance(slot, ScheduledSlot):
-            raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID, "scheduler가 ScheduledSlot을 반환하지 않음")
-
+        # --- 2. 자원 예약(정상 TX 우선) ---
         resource_key = f"{channel.value}:{slot.slot_key}"
         if self._arbiter is not None:
             if not self._arbiter.reserve(resource_key=resource_key, owner="POC"):
@@ -230,19 +323,20 @@ class SharedMediumActionProvider:
                 )
             self._reservations[request_id] = resource_key
 
-        parent = self._broadcast.build_parent(
-            source_station=constants.ATTACKER_STATION,
-            channel=channel,
-            payload=packet,
-            scheduled_sample=slot.scheduled_sample,
-            scheduled_hw_timestamp_ns=slot.scheduled_hw_timestamp_ns,
-            slot_key=slot.slot_key,
-            addressed_destination=target,
-        )
-        # correlation을 방사 시도 시점부터 보존한다(OUTCOME_UNKNOWN 시 evidence·cleanup 위해).
-        self._parents[request_id] = parent
-
+        # --- 3. parent 생성 + atomic 방사: 하나의 보호 구간(예약 누수 0, PocError 변환 보장) ---
+        parent = None
         try:
+            parent = self._broadcast.build_parent(
+                source_station=constants.ATTACKER_STATION,
+                channel=channel,
+                payload=packet,
+                scheduled_sample=slot.scheduled_sample,
+                scheduled_hw_timestamp_ns=slot.scheduled_hw_timestamp_ns,
+                slot_key=slot.slot_key,
+                addressed_destination=target,
+            )
+            # correlation을 방사 시도 시점부터 보존한다(OUTCOME_UNKNOWN 시 evidence·cleanup 위해).
+            self._parents[request_id] = parent
             self._broadcast.transmit(parent)
         except BroadcastOutcomeUnknown as error:
             # commit 불명확 -> SESSION_INHIBIT. 자원 해제하지 않고(불확실) correlation 보존.
@@ -254,19 +348,21 @@ class SharedMediumActionProvider:
             ) from error
         except (BroadcastNotReady, BroadcastNotAdmitted, BroadcastCapacityError) as error:
             # RF 방사 전 거부(안전): 자원 반환하고 PoC action만 거부(정상 TX 유지).
-            self._release_reservation(request_id)
-            self._parents.pop(request_id, None)
+            self._abort_attempt(request_id)
             raise PocError(
                 PocErrorCode.POC_RADIO_RESOURCE_CONFLICT, f"RF 방사 전 거부: {error}"
             ) from error
         except BroadcastError as error:
-            self._release_reservation(request_id)
-            self._parents.pop(request_id, None)
+            self._abort_attempt(request_id)
             raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, f"broadcast 구조 오류: {error}") from error
         except PocError:
-            self._release_reservation(request_id)
-            self._parents.pop(request_id, None)
+            self._abort_attempt(request_id)
             raise
+        except Exception as error:  # noqa: BLE001 - waveform factory 등 임의 예외도 구조화 + 자원 반환
+            self._abort_attempt(request_id)
+            raise PocError(
+                PocErrorCode.POC_PROTOCOL_ERROR, f"parent 생성/방사 실패: {error}"
+            ) from error
 
         submission = ProviderSubmission(
             physical_channel=channel,
@@ -292,6 +388,12 @@ class SharedMediumActionProvider:
         """parent_id -> ParentOutcome. evidence 조립에 넘겨 최신 결과를 반영한다."""
 
         return dict(self._outcomes)
+
+    def _abort_attempt(self, request_id: str) -> None:
+        """RF 방사 전/구조 실패: 예약을 반환하고 correlation 시도 기록을 지운다."""
+
+        self._release_reservation(request_id)
+        self._parents.pop(request_id, None)
 
     def _release_reservation(self, request_id: str) -> None:
         key = self._reservations.pop(request_id, None)
@@ -335,18 +437,15 @@ class SharedMediumActionProvider:
                 raise PocError(
                     PocErrorCode.POC_ACTION_SCHEMA_INVALID, f"금지된 RF field 요청: {key!r}"
                 )
-        schedule = action.schedule or {}
-        for key in schedule:
-            if key in FORBIDDEN_ACTION_FIELDS or key in FORBIDDEN_SCHEDULE_FIELDS:
-                raise PocError(
-                    PocErrorCode.POC_ACTION_SCHEMA_INVALID,
-                    f"schedule에 직접 지정할 수 없는 field: {key!r} (hardware 시각·trigger 기준은 VDETER가 결정)",
-                )
 
 
 __all__ = (
     "FORBIDDEN_SCHEDULE_FIELDS",
     "SCHEDULE_KINDS",
+    "SCHEDULE_ALLOWED_KEYS",
+    "MAX_AFTER_SLOTS",
+    "MAX_AFTER_MS",
+    "validate_schedule",
     "NextSafeSlotScheduler",
     "SharedMediumActionProvider",
 )

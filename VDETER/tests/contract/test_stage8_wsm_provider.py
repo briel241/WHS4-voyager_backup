@@ -20,6 +20,8 @@ def _provider(**kw):
     sink = kw.pop("sink", None) or TD.CountingRadioSink()
     factory = kw.pop("factory", None) or TD.CountingWaveformFactory()
     readiness = kw.pop("readiness", None) or TD.ReadyReadiness()
+    # RF-off 시험 harness는 stub scheduler 기본값 사용을 명시 허용한다(production은 fail-closed).
+    kw.setdefault("allow_rf_off_defaults", True)
     prov = SharedMediumActionProvider(
         radio_sink=sink, rx_readiness=readiness, waveform_factory=factory, **kw
     )
@@ -187,12 +189,13 @@ class SchedulingContractTest(unittest.TestCase):
         self.assertEqual(prov.parent_for("r").slot_key, "slot-7")  # 5+2, MAC이 계산
 
     def test_after_slots_into_past_is_deadline_missed(self):
-        sched = NextSafeSlotScheduler(current_slot=10, lead_slots=1)
-        sched.register_trigger("obs-1", slot=10)  # VDETER가 제공한 trigger
+        # 과거 trigger(slot 2)에 결속된 요청은 현재(slot 100) 기준 과거 -> 이동 없이 거부.
+        sched = NextSafeSlotScheduler(current_slot=100, lead_slots=1)
+        sched.register_trigger("obs-old", slot=2)  # VDETER가 제공한 과거 trigger
         prov, sink, _f = _provider(scheduler=sched)
         with self.assertRaises(PocError) as ctx:
-            prov.submit(_action("ROC", source_observation_id="obs-1",
-                                schedule={"kind": "after_slots", "slots": -5}), request_id="past")
+            prov.submit(_action("ROC", source_observation_id="obs-old",
+                                schedule={"kind": "after_slots", "slots": 1}), request_id="past")
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
         self.assertEqual(sink.submit_calls, 0)  # 이동하지 않음
 
@@ -321,6 +324,146 @@ class ForProductionTest(unittest.TestCase):
         )
         prov.submit(_action("ROC"), request_id="p")
         self.assertEqual(prov.parent_for("p").slot_key, "slot-1")
+
+
+class _BoomFactory:
+    """parent waveform 생성에서 실패하는 factory(자원 누수 시험용)."""
+
+    def encode(self, *, source_station, channel, payload):
+        raise RuntimeError("waveform factory boom")
+
+
+class ReservationLeakTest(unittest.TestCase):
+    """finding 1: parent 생성 실패에서도 예약 누수 0 + PocError 변환."""
+
+    def test_build_parent_failure_releases_reservation_and_maps_pocerror(self):
+        arbiter = TD.FakeArbiter()
+        prov, sink, _f = _provider(factory=_BoomFactory(), arbiter=arbiter)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC"), request_id="r")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        # 예약·correlation 잔존 0, 방사 0.
+        self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
+        self.assertIsNone(prov.parent_for("r"))
+        self.assertEqual(sink.submit_calls, 0)
+
+    def test_packet_resolver_failure_holds_no_reservation(self):
+        arbiter = TD.FakeArbiter()
+        prov, sink, _f = _provider(arbiter=arbiter)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", payload={}), request_id="np")  # packet 내용 없음
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(arbiter.owner_by_key, {})
+        self.assertEqual(sink.submit_calls, 0)
+
+
+class AfterMsCausalityTest(unittest.TestCase):
+    """finding 2: after_ms는 trigger hardware timestamp + N ms 이후 첫 slot(올림)이어야 한다."""
+
+    def test_after_ms_zero_is_causal_to_trigger_timestamp(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        sched.register_trigger("obs", slot=10, hw_timestamp_ns=85920)
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.submit(_action("ROC", source_observation_id="obs",
+                            schedule={"kind": "after_ms", "ms": 0}), request_id="c")
+        parent = prov.parent_for("c")
+        self.assertGreaterEqual(parent.scheduled_hw_timestamp_ns, 85920)  # 과거로 가지 않는다
+        self.assertEqual(parent.slot_key, "slot-11")  # ceil(85920/8192)=11
+
+    def test_after_ms_offset_is_applied_from_timestamp(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1, samples_per_ms=307)
+        sched.register_trigger("obs", slot=0, hw_timestamp_ns=0)
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.submit(_action("ROC", source_observation_id="obs",
+                            schedule={"kind": "after_ms", "ms": 100}), request_id="m")
+        parent = prov.parent_for("m")
+        self.assertGreaterEqual(parent.scheduled_hw_timestamp_ns, 100 * 307)
+
+    def test_after_slots_still_uses_trigger_slot(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        sched.register_trigger("obs", slot=10, hw_timestamp_ns=85920)
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.submit(_action("ROC", source_observation_id="obs",
+                            schedule={"kind": "after_slots", "slots": 2}), request_id="s")
+        self.assertEqual(prov.parent_for("s").slot_key, "slot-12")  # trigger slot 10 + 2
+
+
+class ScheduleValidationTest(unittest.TestCase):
+    """finding 3: schedule의 key·type·범위를 먼저 검증해 POC_ACTION_SCHEMA_INVALID로 구조화한다."""
+
+    def _expect_invalid(self, schedule, request_id, *, obs="obs"):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        sched.register_trigger(obs, slot=5)
+        prov, sink, _f = _provider(scheduler=sched)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", source_observation_id=obs, schedule=schedule),
+                        request_id=request_id)
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(sink.submit_calls, 0)
+
+    def test_non_integer_slots_rejected(self):
+        self._expect_invalid({"kind": "after_slots", "slots": "bad"}, "s1")
+
+    def test_non_integer_ms_rejected(self):
+        self._expect_invalid({"kind": "after_ms", "ms": "bad"}, "m1")
+
+    def test_float_and_bool_rejected(self):
+        self._expect_invalid({"kind": "after_slots", "slots": 1.5}, "s2")
+        self._expect_invalid({"kind": "after_slots", "slots": True}, "s3")
+
+    def test_negative_and_out_of_range_rejected(self):
+        self._expect_invalid({"kind": "after_slots", "slots": -5}, "s4")
+        self._expect_invalid({"kind": "after_ms", "ms": 10_000_000}, "m2")
+
+    def test_missing_required_offset_rejected(self):
+        self._expect_invalid({"kind": "after_slots"}, "s5")
+        self._expect_invalid({"kind": "after_ms"}, "m3")
+
+    def test_unknown_schedule_key_rejected(self):
+        self._expect_invalid({"kind": "NEXT_SAFE_SLOT", "surprise": 1}, "u1")
+        self._expect_invalid({"kind": "after_slots", "slots": 1, "ms": 5}, "u2")
+
+    def test_non_dict_schedule_rejected(self):
+        prov, sink, _f = _provider()
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule=["not", "a", "dict"]), request_id="nd")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(sink.submit_calls, 0)
+
+
+class ConstructorFailClosedTest(unittest.TestCase):
+    """추가 제안: 일반 생성자도 RF-off 기본값을 명시 허용하지 않으면 생성 실패."""
+
+    def test_missing_scheduler_without_optin_raises(self):
+        with self.assertRaises(ValueError):
+            SharedMediumActionProvider(
+                radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+                waveform_factory=TD.CountingWaveformFactory(),  # scheduler 누락
+            )
+
+    def test_missing_waveform_factory_without_optin_raises(self):
+        with self.assertRaises(ValueError):
+            SharedMediumActionProvider(
+                radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+                scheduler=NextSafeSlotScheduler(),  # waveform_factory 누락
+            )
+
+    def test_explicit_optin_allows_rf_off_defaults(self):
+        prov = SharedMediumActionProvider(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            allow_rf_off_defaults=True,
+        )
+        prov.submit(_action("ROC"), request_id="ok")
+        self.assertEqual(prov.parent_for("ok").slot_key, "slot-1")
+
+    def test_both_injected_needs_no_optin(self):
+        prov = SharedMediumActionProvider(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+            waveform_factory=TD.CountingWaveformFactory(),
+        )
+        prov.submit(_action("ROC"), request_id="inj")
+        self.assertEqual(prov.parent_for("inj").slot_key, "slot-1")
 
 
 if __name__ == "__main__":
