@@ -45,6 +45,14 @@ class BroadcastCapacityError(BroadcastError):
     """동시 활성 broadcast group 상한 초과(§10 bounded)."""
 
 
+class BroadcastNotAdmitted(BroadcastError):
+    """group staging(prepare_group) 실패 — RF 방사 전 거부(안전, TX 0)."""
+
+
+class BroadcastOutcomeUnknown(BroadcastError):
+    """group commit 결과 불명확 — TX가 발생했는지 확실치 않음(§6.1, SESSION_INHIBIT 대상)."""
+
+
 class ChildTerminal(str, Enum):
     """child path의 최종 상태."""
 
@@ -224,6 +232,8 @@ class AtomicBroadcast:
         #: parent_id -> {"parent": ParentTransmission, "outcome": ParentOutcome}
         #: commit됐지만 아직 terminal 미확정인 in-flight group만 담는다(resolve/cleanup에서 제거).
         self._active_groups: dict = {}
+        #: parent_id -> ParentOutcome. resolve_outcome이 확정한 결과를 persist한다(evidence 반영).
+        self._resolved: dict = {}
 
     # --- parent/child 생성 -------------------------------------------------
     def build_parent(
@@ -387,8 +397,13 @@ class AtomicBroadcast:
         # 1) readiness barrier (실패 시 RF 전 fail-closed, 방사 0).
         self.prepare(parent, dual_channel_active=dual_channel_active)
 
-        # 2) group staging: 두 child를 함께 admission. 실패 시 아무 것도 방사되지 않는다.
-        admission = self._sink.prepare_group(group_id=parent.parent_id, children=parent.children)
+        # 2) group staging: 두 child를 함께 admission. 실패 시 RF 방사 전 거부(안전, TX 0).
+        try:
+            admission = self._sink.prepare_group(group_id=parent.parent_id, children=parent.children)
+        except Exception as error:
+            raise BroadcastNotAdmitted(
+                f"group staging 거부 -> RF 방사 전 fail-closed (parent {parent.parent_id}): {error}"
+            ) from error
 
         # 3) atomic commit: 하나의 호출로 두 child를 같은 hardware time에 방사(all-or-nothing).
         self._active_groups[parent.parent_id] = {"parent": parent, "outcome": ParentOutcome.PENDING}
@@ -396,8 +411,10 @@ class AtomicBroadcast:
             self._sink.commit_group(admission)
         except Exception as error:
             # commit 결과가 불명확하다: 성공으로 만들지 않고 OUTCOME_UNKNOWN으로 남긴다(§6.1).
+            # in-flight group을 유지해 correlation·cleanup을 보존한다(SESSION_INHIBIT 경로).
             self._active_groups[parent.parent_id]["outcome"] = ParentOutcome.OUTCOME_UNKNOWN
-            raise BroadcastAtomicityError(
+            self._resolved[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
+            raise BroadcastOutcomeUnknown(
                 f"group commit 결과 불명확 -> OUTCOME_UNKNOWN (parent {parent.parent_id}): {error}"
             ) from error
 
@@ -433,11 +450,16 @@ class AtomicBroadcast:
         else:
             outcome = ParentOutcome.COMPLETED
         entry["outcome"] = outcome
-        # 확정된 parent는 in-flight에서 내린다(자원 회수는 상위 provider가 arbiter로).
+        # 확정된 parent는 in-flight에서 내리고 결과를 persist한다(evidence 반영·자원 회수는 provider).
+        self._resolved[parent_id] = outcome
         self._active_groups.pop(parent_id, None)
         return outcome
 
     def outcome_of(self, parent_id: str) -> ParentOutcome | None:
+        """확정된 결과(우선) 또는 in-flight PENDING/OUTCOME_UNKNOWN을 돌려준다."""
+
+        if parent_id in self._resolved:
+            return self._resolved[parent_id]
         entry = self._active_groups.get(parent_id)
         return entry["outcome"] if entry else None
 
@@ -449,6 +471,7 @@ class AtomicBroadcast:
         """fan-out group·collision buffer·observer lease·dual-tune 잔존 0으로 정리."""
 
         self._active_groups.clear()
+        self._resolved.clear()
 
     @property
     def active_group_count(self) -> int:
@@ -461,6 +484,8 @@ __all__ = (
     "BroadcastAtomicityError",
     "SiblingCollisionError",
     "BroadcastCapacityError",
+    "BroadcastNotAdmitted",
+    "BroadcastOutcomeUnknown",
     "ChildTerminal",
     "ParentOutcome",
     "ScheduledSlot",

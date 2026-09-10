@@ -26,10 +26,12 @@ def _provider(**kw):
     return prov, sink, factory
 
 
-def _action(target, *, kind=ActionKind.REPLAY_PACKET, payload=None, schedule=None):
+def _action(target, *, kind=ActionKind.REPLAY_PACKET, payload=None, schedule=None,
+            source_observation_id=None):
     return ActionDescriptor(
         kind=kind,
         target=target,
+        source_observation_id=source_observation_id,
         payload=payload if payload is not None else {"packet_hex": "48454c4c4f"},
         schedule=schedule if schedule is not None else {"kind": "NEXT_SAFE_SLOT"},
     )
@@ -152,10 +154,10 @@ class ReadinessFailClosedTest(unittest.TestCase):
         prov, sink, _f = _provider(
             arbiter=arbiter, readiness=TD.SelectiveReadiness(not_ready_endpoints={"ROC"})
         )
-        from vdeter.stage8.shared_medium.radiation import BroadcastNotReady
-
-        with self.assertRaises(BroadcastNotReady):
+        # readiness 실패는 RF 방사 전 거부 -> PocError(POC_RADIO_RESOURCE_CONFLICT)로 변환(Stage 3 계약).
+        with self.assertRaises(PocError) as ctx:
             prov.submit(_action("ROC"), request_id="nr")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
         self.assertEqual(sink.submit_calls, 0)
         self.assertNotIn("lower:slot-1", arbiter.owner_by_key)  # 예약 해제됨
 
@@ -185,19 +187,50 @@ class SchedulingContractTest(unittest.TestCase):
         self.assertEqual(prov.parent_for("r").slot_key, "slot-7")  # 5+2, MAC이 계산
 
     def test_after_slots_into_past_is_deadline_missed(self):
-        prov, sink, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=10, lead_slots=1))
+        sched = NextSafeSlotScheduler(current_slot=10, lead_slots=1)
+        sched.register_trigger("obs-1", slot=10)  # VDETER가 제공한 trigger
+        prov, sink, _f = _provider(scheduler=sched)
         with self.assertRaises(PocError) as ctx:
-            prov.submit(_action("ROC", schedule={"kind": "after_slots", "slots": -5, "trigger_slot": 10}),
-                        request_id="past")
+            prov.submit(_action("ROC", source_observation_id="obs-1",
+                                schedule={"kind": "after_slots", "slots": -5}), request_id="past")
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
         self.assertEqual(sink.submit_calls, 0)  # 이동하지 않음
 
     def test_insufficient_lead_is_deadline_missed(self):
-        prov, sink, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=10, lead_slots=2))
+        sched = NextSafeSlotScheduler(current_slot=10, lead_slots=2)
+        sched.register_trigger("obs-1", slot=10)
+        prov, sink, _f = _provider(scheduler=sched)
         with self.assertRaises(PocError) as ctx:
-            prov.submit(_action("ROC", schedule={"kind": "after_slots", "slots": 1, "trigger_slot": 10}),
+            prov.submit(_action("ROC", source_observation_id="obs-1",
+                                schedule={"kind": "after_slots", "slots": 1}),
                         request_id="lead")  # slot 11 < earliest 12
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
+
+    def test_client_trigger_slot_is_rejected(self):
+        # 반응형 기준시각을 PoC가 조작할 수 없다: trigger_slot 등 field는 거부한다(finding 1).
+        sched = NextSafeSlotScheduler(current_slot=10, lead_slots=1)
+        prov, sink, _f = _provider(scheduler=sched)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", schedule={"kind": "after_slots", "slots": 1, "trigger_slot": 1000000}),
+                        request_id="evil")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(sink.submit_calls, 0)
+
+    def test_reactive_uses_vdeter_registered_trigger(self):
+        sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
+        sched.register_trigger("obs-42", slot=10)  # VDETER가 관측 event에서 등록
+        prov, _s, _f = _provider(scheduler=sched)
+        prov.submit(_action("ROC", source_observation_id="obs-42",
+                            schedule={"kind": "after_slots", "slots": 2}), request_id="r")
+        self.assertEqual(prov.parent_for("r").slot_key, "slot-12")  # trigger(10)+2, client 조작 불가
+
+    def test_reactive_without_registered_trigger_rejected(self):
+        prov, sink, _f = _provider(scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1))
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC", source_observation_id="unknown",
+                                schedule={"kind": "after_slots", "slots": 2}), request_id="notrig")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
+        self.assertEqual(sink.submit_calls, 0)
 
     def test_closed_slot_is_deadline_missed(self):
         prov, sink, _f = _provider(
@@ -231,6 +264,63 @@ class ArbiterReleaseTest(unittest.TestCase):
         outcome = prov.resolve_outcome("rq", terminals)
         self.assertEqual(outcome, ParentOutcome.COMPLETED)
         self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
+
+
+class CommitUnknownErrorContractTest(unittest.TestCase):
+    """finding 2: group commit 불명확은 Stage 3 PocError(POC_TX_OUTCOME_UNKNOWN)로 변환·correlation 보존."""
+
+    def test_commit_unknown_maps_to_session_inhibit_pocerror(self):
+        from vdeter.stage8.poc_api.errors import Severity
+
+        sink = TD.CountingRadioSink(fail_on_commit=True)
+        prov, _s, _f = _provider(sink=sink)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC"), request_id="u")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
+        self.assertEqual(ctx.exception.severity, Severity.SESSION_INHIBIT)
+        # correlation 보존: request->parent 결속이 남는다.
+        parent = prov.parent_for("u")
+        self.assertIsNotNone(parent)
+        self.assertEqual(ctx.exception.detail.get("broadcast_parent_id"), parent.parent_id)
+        # in-flight group이 남아 cleanup으로 회수된다.
+        self.assertEqual(prov.active_group_count, 1)
+        prov.cleanup()
+        self.assertEqual(prov.active_group_count, 0)
+
+    def test_staging_failure_maps_to_request_rejected(self):
+        sink = TD.CountingRadioSink(fail_on_prepare=True)
+        prov, _s, _f = _provider(sink=sink)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC"), request_id="s")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
+        self.assertEqual(sink.submit_calls, 0)
+
+
+class ForProductionTest(unittest.TestCase):
+    """production 조립은 scheduler·frozen PHY waveform factory를 필수로 fail-closed한다(제안)."""
+
+    def test_requires_scheduler(self):
+        with self.assertRaises(ValueError):
+            SharedMediumActionProvider.for_production(
+                radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+                scheduler=None, waveform_factory=TD.CountingWaveformFactory(),
+            )
+
+    def test_requires_waveform_factory(self):
+        with self.assertRaises(ValueError):
+            SharedMediumActionProvider.for_production(
+                radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+                scheduler=NextSafeSlotScheduler(), waveform_factory=None,
+            )
+
+    def test_both_present_builds_provider(self):
+        prov = SharedMediumActionProvider.for_production(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+            waveform_factory=TD.CountingWaveformFactory(),
+        )
+        prov.submit(_action("ROC"), request_id="p")
+        self.assertEqual(prov.parent_for("p").slot_key, "slot-1")
 
 
 if __name__ == "__main__":

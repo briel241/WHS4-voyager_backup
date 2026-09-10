@@ -173,6 +173,23 @@ class EvidenceCorrelationTest(unittest.TestCase):
         self.assertIn(parent.payload_digest, blob)
         self.assertEqual(j["broadcast_infrastructure_result"]["submitted_child_count"], 2)
 
+    def test_resolved_terminal_outcome_reflected_in_evidence(self):
+        # finding 3: resolve 후 evidence는 PENDING이 아니라 확정 outcome을 기록한다.
+        ab = _ab()
+        parent = _parent(ab, "MASS-B", PhysicalChannel.LOWER, b"PKT", addressed="ROC")
+        result = ab.transmit(parent)
+        self.assertEqual(result.outcome.value, "PENDING")  # 최초 BroadcastResult
+        outcome = ab.resolve_outcome(
+            parent.parent_id, {c.child_id: R.ChildTerminal.COMPLETED for c in parent.children}
+        )
+        scene = O.observe_scene([parent])
+        j = EV.build_evidence(
+            [parent], scene, broadcast_results=[result], outcomes={parent.parent_id: outcome}
+        ).as_json_value()
+        self.assertEqual(
+            j["broadcast_infrastructure_result"]["parent_outcomes"][parent.parent_id], "COMPLETED"
+        )
+
 
 class DeliveryMatrixCapTest(unittest.TestCase):
     """WSM-REQ-17 bounded: delivery matrix가 무제한 증가하지 않는다(observe_scene + evidence)."""

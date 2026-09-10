@@ -124,10 +124,11 @@ class AtomicBarrierTest(unittest.TestCase):
         sink = TD.CountingRadioSink(fail_on_commit=True)
         ab = _broadcast(sink=sink)
         parent = _parent(ab)
-        with self.assertRaises(R.BroadcastAtomicityError):
+        with self.assertRaises(R.BroadcastOutcomeUnknown):
             ab.transmit(parent)
         self.assertEqual(sink.committed_child_ids, [])  # 한쪽만 방사되는 partial 상태 없음
         self.assertEqual(ab.outcome_of(parent.parent_id), R.ParentOutcome.OUTCOME_UNKNOWN)
+        self.assertEqual(ab.active_group_count, 1)  # correlation·cleanup 보존(in-flight 유지)
 
     def test_no_per_child_submit_api(self):
         # RadioBurstSink에는 per-child submit 경로가 없다(구조적으로 partial 불가).

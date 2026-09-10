@@ -29,10 +29,13 @@ class SharedMediumEvidence:
         }
 
 
-def build_evidence(parents, scene, *, broadcast_results=(), scenario_result=None, poc_result=None):
+def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
+                   scenario_result=None, poc_result=None):
     """네 판정을 분리 기록한 :class:`SharedMediumEvidence`를 만든다(RF 밖 조립).
 
     delivery_matrix의 각 row는 parent_id로 broadcast parent evidence와 correlation된다.
+    `outcomes`(parent_id -> ParentOutcome)를 주면 최초 PENDING BroadcastResult 대신 그 확정 결과를
+    기록한다(terminal 취합 반영). provider.outcomes_by_parent()를 넘길 수 있다.
     """
 
     parent_evidence = [p.as_evidence() for p in parents]
@@ -46,9 +49,14 @@ def build_evidence(parents, scene, *, broadcast_results=(), scenario_result=None
     delivery_matrix = all_rows[:MAX_DELIVERY_MATRIX_ENTRIES]
     serialization_dropped = len(all_rows) - len(delivery_matrix)
     dropped_total = serialization_dropped + getattr(scene, "dropped_rows", 0)
-    parent_outcomes = {
-        r.parent.parent_id: getattr(r.outcome, "value", str(r.outcome)) for r in broadcast_results
-    }
+    outcomes = outcomes or {}
+
+    def _effective(result):
+        # 확정된 outcome(terminal 취합)을 우선하고, 없으면 BroadcastResult의 최초 값을 쓴다.
+        value = outcomes.get(result.parent.parent_id, result.outcome)
+        return getattr(value, "value", str(value))
+
+    parent_outcomes = {r.parent.parent_id: _effective(r) for r in broadcast_results}
 
     infra = {
         "parents": parent_evidence,
