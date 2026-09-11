@@ -40,6 +40,7 @@ from .radiation import (
     BroadcastNotAdmitted,
     BroadcastNotReady,
     BroadcastOutcomeUnknown,
+    BroadcastResult,
     ParentOutcome,
     ScheduledSlot,
 )
@@ -83,6 +84,7 @@ _SLOT_SAMPLES = 8192
 class _CachedSubmission:
     submission: ProviderSubmission
     digest: str
+    broadcast_result: BroadcastResult
 
 
 def _action_digest(action: ActionDescriptor) -> str:
@@ -438,7 +440,7 @@ class SharedMediumActionProvider:
             )
             # correlation을 방사 시도 시점부터 보존한다(OUTCOME_UNKNOWN 시 evidence·cleanup 위해).
             self._parents[request_id] = parent
-            self._broadcast.transmit(parent)
+            broadcast_result = self._broadcast.transmit(parent)
         except BroadcastOutcomeUnknown as error:
             # commit 불명확 -> SESSION_INHIBIT. 자원 해제하지 않고(불확실) correlation 보존.
             self._outcomes[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
@@ -470,7 +472,14 @@ class SharedMediumActionProvider:
             # 그대로 재전달한다(SESSION_INHIBIT). commit 진입 전(pre-fire)이면 예약을 반환한다.
             if parent is not None and self._broadcast.is_resolved(parent.parent_id):
                 self._outcomes[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
-                raise
+                # Keep the same operator interruption, but hand known correlation
+                # across the engine boundary before workload cleanup clears it.
+                failure = PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN,
+                    "interrupted group commit", detail={
+                        "broadcast_parent_id": parent.parent_id,
+                        "transfer_id": parent.transfer_id})
+                failure.__cause__ = error.__cause__
+                raise error from failure
             try:
                 self._abort_attempt(request_id)
             except BaseException as cleanup_error:
@@ -484,7 +493,11 @@ class SharedMediumActionProvider:
             broadcast_parent_id=parent.parent_id,
             transfer_id=parent.transfer_id,
         )
-        self._cache[request_id] = _CachedSubmission(submission=submission, digest=digest)
+        # Keep the real readiness result in the existing workload-bounded cache;
+        # exactly-once reuse and cleanup retain/clear the same evidence snapshot.
+        self._cache[request_id] = _CachedSubmission(
+            submission=submission, digest=digest, broadcast_result=broadcast_result
+        )
         return submission
 
     # --- terminal 취합 + 자원 회수 -----------------------------------------
@@ -559,7 +572,7 @@ class SharedMediumActionProvider:
             )
         register(observation_id, slot=slot, hw_timestamp_ns=hw_timestamp_ns)
 
-    def build_evidence(self, parents, scene, *, broadcast_results=(), scenario_result=None, poc_result=None):
+    def build_evidence(self, parents, scene, *, broadcast_results=None, scenario_result=None, poc_result=None):
         """확정 outcome을 자동 반영해 evidence를 조립한다(PENDING 회귀 방지).
 
         `evidence.build_evidence`에 `outcomes=self.outcomes_by_parent()`를 주입하므로 호출자가
@@ -568,8 +581,19 @@ class SharedMediumActionProvider:
 
         from . import evidence as _evidence
 
+        parents = tuple(parents)
+        if broadcast_results is None:
+            parent_ids = {parent.parent_id for parent in parents}
+            broadcast_results = tuple(
+                cached.broadcast_result for cached in self._cache.values()
+                if cached.broadcast_result.parent.parent_id in parent_ids
+            )
         return _evidence.build_evidence(
             parents, scene, broadcast_results=broadcast_results,
+            readiness_by_parent={
+                parent.parent_id: proof for parent in parents
+                if (proof := self._broadcast.readiness_of(parent.parent_id))
+            },
             outcomes=self.outcomes_by_parent(), unresolved_ownership=self.unresolved_ownership(),
             scenario_result=scenario_result, poc_result=poc_result,
         )

@@ -16,10 +16,13 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 
 from ..poc_api.codec import sha256_hex
+from ..poc_api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
 from ..poc_api.types import PhysicalChannel
 from . import constants, topology
 from .iq import IqBurst
@@ -194,6 +197,51 @@ class BroadcastResult:
     submitted_child_ids: tuple
     outcome: ParentOutcome = ParentOutcome.PENDING
     reason: str = ""
+    readiness_proofs: dict = field(default_factory=dict)
+
+
+def _snapshot_readiness(decision: ReadinessDecision) -> ReadinessDecision:
+    """Copy only bounded JSON proof metadata before staging; never render JSON here.
+
+    Reuse the existing wire byte/depth limits. The byte budget is a conservative
+    escaped-JSON upper bound, including container punctuation. Raw signal/payload
+    fields are not readiness evidence and fail closed before any sink operation.
+    """
+
+    remaining = MAX_WIRE_PACKET_BYTES
+
+    def copy_value(value, depth=1):
+        nonlocal remaining
+        if depth > MAX_JSON_NESTING:
+            raise BroadcastNotReady("readiness proof exceeds JSON nesting limit")
+        remaining -= 2  # separators/container delimiters
+        if isinstance(value, str):
+            remaining -= 2 + 12 * len(value)  # includes escaped Unicode pairs
+        elif value is None or isinstance(value, bool):
+            remaining -= 5
+        elif isinstance(value, int):
+            remaining -= 1 + value.bit_length()  # safe decimal upper bound
+        elif isinstance(value, float) and isfinite(value):
+            remaining -= 32
+        elif not isinstance(value, (dict, list, tuple)):
+            raise BroadcastNotReady("readiness proof contains non-JSON metadata")
+        if remaining < 0:
+            raise BroadcastNotReady("readiness proof exceeds wire byte limit")
+        if isinstance(value, dict):
+            copied = {}
+            for key, item in value.items():
+                if (not isinstance(key, str) or key.lower() in
+                        {"samples", "iq", "raw_iq", "cf32le", "payload", "raw_payload"}):
+                    raise BroadcastNotReady("readiness proof contains raw signal/payload or invalid key")
+                copied[copy_value(key, depth)] = copy_value(item, depth + 1)
+            return copied
+        if isinstance(value, (list, tuple)):
+            return [copy_value(item, depth + 1) for item in value]
+        return value
+
+    if not isinstance(decision.proof, dict) or not isinstance(decision.reason, str):
+        raise BroadcastNotReady("readiness proof/reason has invalid metadata type")
+    return ReadinessDecision(decision.ready, copy_value(decision.reason), copy_value(decision.proof))
 
 
 class ReferenceWaveformFactory:
@@ -413,7 +461,12 @@ class AtomicBroadcast:
             )
 
         # 1) readiness barrier (실패 시 RF 전 fail-closed, 방사 0).
-        self.prepare(parent, dual_channel_active=dual_channel_active)
+        readiness_proofs = {
+            endpoint: _snapshot_readiness(decision)
+            for endpoint, decision in self.prepare(
+                parent, dual_channel_active=dual_channel_active
+            ).items()
+        }
 
         # 2) group staging: 두 child를 함께 admission. 실패 시 RF 방사 전 거부(안전, TX 0).
         try:
@@ -424,7 +477,10 @@ class AtomicBroadcast:
             ) from error
 
         # 3) atomic commit: 하나의 호출로 두 child를 같은 hardware time에 방사(all-or-nothing).
-        self._active_groups[parent.parent_id] = {"parent": parent, "outcome": ParentOutcome.PENDING}
+        self._active_groups[parent.parent_id] = {
+            "parent": parent, "outcome": ParentOutcome.PENDING,
+            "readiness_proofs": readiness_proofs,
+        }
         try:
             self._sink.commit_group(admission)
         except BaseException as error:
@@ -446,6 +502,7 @@ class AtomicBroadcast:
             submitted_child_ids=tuple(c.child_id for c in parent.children),
             outcome=ParentOutcome.PENDING,
             reason="COMMITTED",
+            readiness_proofs=readiness_proofs,
         )
 
     # --- terminal 취합 ------------------------------------------------------
@@ -518,6 +575,15 @@ class AtomicBroadcast:
         """parent가 이미 확정(resolve/commit-unknown)됐는지."""
 
         return parent_id in self._resolved
+
+    def readiness_of(self, parent_id: str) -> dict:
+        """Snapshot pre-commit proof even when commit never returns a result.
+
+        Stored within the already bounded active group, not a new history/cache.
+        This is metadata only: it proves readiness, not RF commit or reception.
+        """
+        entry = self._active_groups.get(parent_id)
+        return deepcopy(entry.get("readiness_proofs", {})) if entry else {}
 
     # --- cleanup -----------------------------------------------------------
     def release(self, parent_id: str) -> None:

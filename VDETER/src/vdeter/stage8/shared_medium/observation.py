@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from ..poc_api.codec import sha256_hex
@@ -56,6 +57,7 @@ class DeliveryRow:
     collision_input_count: int
     overlap_sample_count: int
     clip_count: int
+    composite: dict | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -73,6 +75,7 @@ class DeliveryRow:
             "collision_input_count": self.collision_input_count,
             "overlap_sample_count": self.overlap_sample_count,
             "clip_count": self.clip_count,
+            "composite": deepcopy(self.composite),
         }
 
 
@@ -190,6 +193,22 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                     )
                 composite = synthesize_same_channel(group)
                 composites.append((endpoint, composite))
+                # Capture metrics while the real group-to-parent mapping is available.
+                # No raw IQ is retained on bounded delivery rows; sample coordinates
+                # describe this software composite, not an invented hardware window.
+                composite_evidence = {
+                    "start_sample": composite.base_start_sample,
+                    "end_sample": composite.base_start_sample + len(composite.samples),
+                    "pre_clip_peak": composite.pre_clip_peak,
+                    "post_clip_peak": composite.post_clip_peak,
+                    "frontend_version": composite.frontend_version,
+                    "per_source_peak": [
+                        {"parent_id": index[id(burst)].parent_id,
+                         "source_station": index[id(burst)].source_station,
+                         "peak": peak}
+                        for burst, peak in zip(group, composite.per_source_peak)
+                    ],
+                }
                 result = decode(composite.samples)
                 recovered_digest = (
                     sha256_hex(result.payload) if result.recovered and result.payload is not None else None
@@ -239,6 +258,7 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                             collision_input_count=composite.input_count,
                             overlap_sample_count=composite.overlap_sample_count,
                             clip_count=composite.clip_count,
+                            composite=composite_evidence,
                         )
                     )
 

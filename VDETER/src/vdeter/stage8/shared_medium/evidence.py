@@ -23,6 +23,12 @@ class SharedMediumEvidence:
 
     def as_json_value(self) -> dict:
         return deepcopy({
+            "model_boundary": {
+                "model": "WIRED_SHARED_MEDIUM_EMULATION",
+                "virtual_clipping": "deterministic_approximation",
+                "single_antenna_adc_equivalence_proven": False,
+                "analog_adc_saturation_proven": False,
+            },
             "scenario_result": dict(self.scenario_result),
             "broadcast_infrastructure_result": dict(self.broadcast_infrastructure_result),
             "poc_result": dict(self.poc_result),
@@ -30,7 +36,7 @@ class SharedMediumEvidence:
         })
 
 
-def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
+def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None, readiness_by_parent=None,
                    unresolved_ownership=(), scenario_result=None, poc_result=None):
     """네 판정을 분리 기록한 :class:`SharedMediumEvidence`를 만든다(RF 밖 조립).
 
@@ -39,6 +45,7 @@ def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
     기록한다(terminal 취합 반영). provider.outcomes_by_parent()를 넘길 수 있다.
     """
 
+    broadcast_results = tuple(broadcast_results)
     parent_evidence = [p.as_evidence() for p in parents]
     committed = tuple(r.parent.parent_id for r in broadcast_results if r.committed)
     submitted_children = tuple(
@@ -46,9 +53,31 @@ def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
     )
     # bounded evidence(§10, WSM-REQ-17): delivery_matrix 직렬화 상한을 적용하고 초과분은
     # dropped counter/truncated flag로만 남긴다(무제한 증가 방지).
-    all_rows = tuple(row.as_evidence() for row in scene.rows)
-    delivery_matrix = all_rows[:MAX_DELIVERY_MATRIX_ENTRIES]
-    serialization_dropped = len(all_rows) - len(delivery_matrix)
+    results_by_parent = {r.parent.parent_id: r for r in broadcast_results}
+    proofs_by_parent = {pid: result.readiness_proofs for pid, result in results_by_parent.items()}
+    proofs_by_parent.update(readiness_by_parent or {})
+
+    def readiness_value(decision):
+        return {
+            "state": "REQUIRED_READY" if decision.ready else "NOT_READY",
+            "ready": decision.ready,
+            "reason": decision.reason,
+            "proof": deepcopy(decision.proof),
+        }
+
+    # Readiness exists before commit and does not require a successful RX row.
+    readiness_evidence = {
+        parent["parent_id"]: {endpoint: readiness_value(decision)
+                              for endpoint, decision in proofs_by_parent[parent["parent_id"]].items()}
+        for parent in parent_evidence if parent["parent_id"] in proofs_by_parent
+    }
+    delivery_matrix = []
+    for row in scene.rows[:MAX_DELIVERY_MATRIX_ENTRIES]:
+        row_evidence = row.as_evidence()
+        row_evidence["readiness"] = deepcopy(readiness_evidence.get(row.parent_id, {}).get(row.endpoint))
+        delivery_matrix.append(row_evidence)
+    delivery_matrix = tuple(delivery_matrix)
+    serialization_dropped = len(scene.rows) - len(delivery_matrix)
     dropped_total = serialization_dropped + getattr(scene, "dropped_rows", 0)
     outcomes = outcomes or {}
 
@@ -66,6 +95,7 @@ def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
         "parents": parent_evidence,
         "committed_parent_ids": list(committed),
         "parent_outcomes": parent_outcomes,
+        "readiness_by_parent": readiness_evidence,
         "submitted_child_ids": list(submitted_children),
         "submitted_child_count": len(submitted_children),
         "not_tuned_counter": scene.not_tuned_counter,
