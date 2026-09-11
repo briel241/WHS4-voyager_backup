@@ -136,6 +136,31 @@ class ChildEntrypointNegativeTest(unittest.TestCase):
         obj = child_main.load_entrypoint(path, "ok.py:Poc")
         self.assertEqual(obj.MARK, "loaded")
 
+    def test_dataclass_with_postponed_annotations_loads(self):
+        path = self._write("data.py", "from __future__ import annotations\n"
+                           "from dataclasses import dataclass\n"
+                           "@dataclass\nclass Poc:\n    marker: str = 'loaded'\n")
+        obj = child_main.load_entrypoint(path, "data.py:Poc")
+        self.assertEqual(obj.marker, "loaded")
+
+    def test_failed_load_restores_previous_module(self):
+        import sys
+        from unittest import mock
+        prior = object()
+        path = self._write("fail.py", "raise RuntimeError('load failed')\n")
+        with mock.patch.dict(sys.modules, {child_main._SNAPSHOT_MODULE: prior}):
+            with self.assertRaises(RuntimeError):
+                child_main.load_entrypoint(path, "fail.py:Poc")
+            self.assertIs(sys.modules[child_main._SNAPSHOT_MODULE], prior)
+
+    def test_token_read_failure_closes_inherited_fd(self):
+        from unittest import mock
+        with mock.patch.dict("os.environ", {child_main.ENV_TOKEN_FD: "99"}, clear=True), \
+                mock.patch.object(child_main.os, "read", side_effect=OSError("read failure")), \
+                mock.patch.object(child_main.os, "close") as close:
+            self.assertEqual(child_main.main(), 2)
+        close.assert_called_once_with(99)
+
     def test_missing_class_rejected(self):
         path = self._write("nocls.py", "class Other:\n    pass\n")
         with self.assertRaises(AttributeError):

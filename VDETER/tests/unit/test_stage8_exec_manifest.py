@@ -102,6 +102,21 @@ class ManifestFailClosedTest(unittest.TestCase):
     def test_bad_toml(self):
         self._assert_bad("this is = = not toml", "TOML")
 
+    def test_trailing_newline_in_identifiers_rejected(self):
+        for value, field in (("replay-attack", "poc_id"), ("1.0.0", "version"),
+                             ("replay_attack.py:Poc", "entrypoint"),
+                             ("SC-VDE-006", "compatible_scenarios")):
+            with self.subTest(field=field):
+                text = poc_toml().replace(value + '"', value + '\\n"')
+                self._assert_bad(text, field)
+
+    def test_deeply_nested_toml_is_bounded_failure(self):
+        self._assert_bad(poc_toml() + "\nnested = " + "[" * 2000 + "0" + "]" * 2000,
+                         "TOML")
+
+    def test_oversized_integer_is_bounded_failure(self):
+        self._assert_bad(poc_toml() + "\nhuge = " + "9" * 5000, "TOML")
+
     def test_missing_required_field(self):
         text = poc_toml()
         text = "\n".join(l for l in text.splitlines() if not l.startswith("poc_id"))

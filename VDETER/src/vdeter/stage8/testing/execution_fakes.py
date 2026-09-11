@@ -289,11 +289,20 @@ class LoopbackConnection:
         self.pump()
 
     def close(self) -> dict:
-        residual = self.server.residual_snapshot()
+        before = self.server.residual_snapshot()
+        # Dispose memory-only delivery state on close, as a real supervisor does.
+        # Outstanding RF ownership is not inferred away: keep inflight actions.
+        self.server._queue.clear()
+        self.server._queue_bytes = 0
+        self.server._ring.clear()
+        self.server._ring_bytes = 0
+        self.client._pending_descriptors.clear()
         self.server.mark_closed()
         self._closed = True
+        residual = self.server.residual_snapshot()
         return {
             "engine": residual,
+            "before_close": before,
             "child_alive": False,
             "socket_file_exists": False,
             "workload_dir_exists": False,

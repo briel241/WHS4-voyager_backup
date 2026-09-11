@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -106,8 +107,10 @@ class SnapshotTest(unittest.TestCase):
                 self.st_mtime_ns = mtime if mtime is not None else st.st_mtime_ns
 
         def fake_fstat(fd):
-            calls["n"] += 1
             st = real_fstat(fd)
+            if stat.S_ISDIR(st.st_mode):
+                return st
+            calls["n"] += 1
             # 첫 파일(script)의 'after' 호출(=2번째)에서 size가 커진 것처럼.
             if calls["n"] == 2:
                 return _St(st, size=st.st_size + 10)
@@ -128,7 +131,7 @@ class SnapshotTest(unittest.TestCase):
         outside = os.path.join(self.dest_root, "outside")
         os.makedirs(outside, exist_ok=True)
         write_poc_package(outside, "secret", poc_id="secret")
-        for bad in ("../outside/secret", "..", ".", "a/b", "./x",
+        for bad in ("../outside/secret", "..", ".", "a/b", "./x", "p\n",
                     os.path.join(outside, "secret")):
             with self.subTest(base=bad):
                 with self.assertRaises(SnapshotError) as ctx:
@@ -144,6 +147,77 @@ class SnapshotTest(unittest.TestCase):
         write_poc_package(self.poc, "good_poc", poc_id="good-poc")
         snap = create_snapshot(self.poc, "good_poc", dest_dir=self._dest("w-ok"))
         self.assertEqual(len(snap.script_sha256), 64)
+
+    def test_source_directory_permission_rechecked(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        os.chmod(self.poc, 0o777)
+        with self.assertRaises(SnapshotError), mock.patch.object(snapmod.os, "read") as read:
+            create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
+        read.assert_not_called()
+
+    def test_source_directory_owner_rechecked(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        with self.assertRaises(SnapshotError), mock.patch.object(snapmod.os, "read") as read:
+            create_snapshot(self.poc, "p", dest_dir=self._dest("w1"), uid=os.getuid() + 1)
+        read.assert_not_called()
+
+    def test_source_mode_changed_during_read_rejected(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        real_read = os.read
+
+        def change_mode(fd, count):
+            data = real_read(fd, count)
+            os.chmod(os.path.join(self.poc, "p.py"), 0o666)
+            return data
+
+        with mock.patch.object(snapmod.os, "read", side_effect=change_mode):
+            with self.assertRaises(SnapshotError):
+                create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
+
+    def test_read_io_failure_is_snapshot_error(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        with mock.patch.object(snapmod.os, "read", side_effect=OSError("read failure")):
+            with self.assertRaises(SnapshotError):
+                create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
+
+    def test_script_mutation_while_manifest_is_read_rejected(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        script_path = os.path.join(self.poc, "p.py")
+        manifest_ino = os.stat(os.path.join(self.poc, "p.poc.toml")).st_ino
+        real_read = os.read
+        changed = False
+
+        def mutate_script(fd, count):
+            nonlocal changed
+            data = real_read(fd, count)
+            if not changed and os.fstat(fd).st_ino == manifest_ino:
+                changed = True
+                with open(script_path, "ab") as fh:
+                    fh.write(b"\n# changed while manifest was read\n")
+            return data
+
+        with mock.patch.object(snapmod.os, "read", side_effect=mutate_script):
+            with self.assertRaises(SnapshotError):
+                create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
+        self.assertFalse(os.path.exists(self._dest("w1")))
+
+    def test_destination_directory_symlink_rejected(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        outside = self._dest("outside")
+        os.mkdir(outside)
+        os.symlink(outside, self._dest("w1"))
+        with self.assertRaises(SnapshotError):
+            create_snapshot(self.poc, "p", dest_dir=self._dest("w1"))
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_destination_directory_writable_rejected(self):
+        write_poc_package(self.poc, "p", poc_id="p")
+        dest = self._dest("w1")
+        os.mkdir(dest)
+        os.chmod(dest, 0o777)
+        with self.assertRaises(SnapshotError):
+            create_snapshot(self.poc, "p", dest_dir=dest)
+        self.assertEqual(os.listdir(dest), [])
 
     def test_dest_preexisting_file_rejected(self):
         # 목적지에 기존 파일이 있으면 덮어쓰지 않고 fail-closed(§5.3, O_EXCL).

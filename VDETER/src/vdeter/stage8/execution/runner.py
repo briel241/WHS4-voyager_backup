@@ -22,8 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from ..poc_api.errors import PocError
-from ..poc_api.types import ObservationRecord
+from ..poc_api.errors import PocError, PocErrorCode, SEVERITY_RANK
+from ..poc_api.limits import MAX_WORKLOAD_ACTION_REQUESTS
+from ..poc_api.types import ObservationRecord, TARGET_TO_PHYSICAL_CHANNEL
 from .connection import WorkloadConnection
 from .lease import MassBLease, MassBRole
 from .snapshot import Snapshot
@@ -107,32 +108,63 @@ class WorkloadRunner:
         self._executor = tx_executor
 
         self._attacks: list[AttackRecord] = []
-        self._processed: set[str] = set()
+        self._processed: dict[str, dict] = {}
         self._transitions: list[str] = []
         self._armed = False
         self._closed_report: dict = {}
         self._lease_acquired = False
         self._result: WorkloadResult | None = None  # 한 번 세워지면 idempotent 반환값
         self._terminal_done = False                  # workload terminal 1회 보장(§5.5)
+        self._failure: BaseException | None = None
+        self._interrupt: BaseException | None = None
+        self._failure_codes: list[str] = []
+        self._arm_started = False
 
     # --- lifecycle ----------------------------------------------------------
     def arm(self) -> bool:
         """lease 독점 → 연결 시작 → ARMED. 실패 시 workload를 시작하지 않는다(§5.1)."""
 
+        try:
+            return self._arm_once()
+        except BaseException as exc:
+            self._record_failure(exc)
+            raise
+
+    def _arm_once(self) -> bool:
+
+        if self._arm_started or self._result is not None:
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "runner cannot be armed twice")
+        self._arm_started = True
         self._lease.acquire(self._workload_id)
         self._lease_acquired = True
         self._transitions.append("LEASE_ACQUIRED")
         self._conn.start()
-        self._armed = self._conn.armed
+        self._armed = self._boolean(self._conn.armed)
         if self._armed:
             self._transitions.append("ARMED")
-        return self._armed
+        if not self._armed:
+            error = self._infra_error()
+            raise error or PocError(PocErrorCode.POC_PROTOCOL_ERROR, "start returned before ARMED")
+        return True
 
     def deliver(self, step: WorkloadStep) -> None:
         """자극 하나를 전달하고 그로 인한 action을 terminal까지 배관·기록한다(§8~§10)."""
 
-        if not self._conn.running:
-            return
+        try:
+            self._deliver_step(step)
+        except BaseException as exc:
+            self._record_failure(exc)
+            raise
+
+    def _deliver_step(self, step: WorkloadStep) -> None:
+
+        if self._failure is not None:
+            raise self._failure
+        if self._result is not None or self._terminal_done or not self._armed:
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "event outside running workload")
+        if not self._boolean(self._conn.running):
+            raise self._infra_error() or PocError(
+                PocErrorCode.POC_CONNECTION_LOST, "connection stopped before event delivery")
         trigger = step.event_type or "PACKET_OBSERVED"
         if step.kind == "observation":
             self._conn.emit_observation(step.observation)
@@ -143,29 +175,68 @@ class WorkloadRunner:
 
     def _drain_actions(self, trigger: str) -> None:
         for _ in range(_DRAIN_ITER_CAP):
-            if self._conn.infrastructure_error is not None:
+            if self._infra_error() is not None:
                 return
             results = self._conn.poll_new_results()
-            fresh = [r for r in results if r.get("request_id") not in self._processed]
-            if not fresh and self._conn.client_idle():
+            if not isinstance(results, list) or len(results) > MAX_WORKLOAD_ACTION_REQUESTS:
+                raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid action result batch")
+            if not results and self._boolean(self._conn.client_idle()):
                 return
-            for result in fresh:
+            for result in results:
+                if (not isinstance(result, dict)
+                        or not isinstance(result.get("request_id"), str)
+                        or not result["request_id"]
+                        or result.get("admission") not in ("accepted", "rejected")):
+                    raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid action result")
                 request_id = result.get("request_id")
-                self._processed.add(request_id)
-                action = self._conn.submitted_action(request_id) or {}
+                if request_id in self._processed:
+                    if result != self._processed[request_id]:
+                        raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "conflicting action replay")
+                    continue
+                if len(self._processed) >= MAX_WORKLOAD_ACTION_REQUESTS:
+                    raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "action result limit exceeded")
+                self._processed[request_id] = dict(result)
+                action = self._conn.submitted_action(request_id)
+                if not isinstance(action, dict):
+                    raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "action binding missing")
                 if result.get("admission") == "accepted":
-                    resolution = self._executor(action, result)
+                    # Preserve accepted parent correlation even if the executor or
+                    # terminal delivery is interrupted after transmission.
+                    index = len(self._attacks)
+                    self._attacks.append(self._make_attack(
+                        request_id, trigger, action, result,
+                        ActionExecution.TX_UNKNOWN, TargetEffect.INDETERMINATE,
+                        "terminal not confirmed"))
+                    expected_channel = TARGET_TO_PHYSICAL_CHANNEL.get(action.get("target"))
+                    if (not isinstance(result.get("broadcast_parent_id"), str)
+                            or not result["broadcast_parent_id"]
+                            or not isinstance(result.get("transfer_id"), str)
+                            or not result["transfer_id"]
+                            or expected_channel is None
+                            or result.get("physical_channel") != expected_channel.value):
+                        raise PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN,
+                                       "accepted action correlation is invalid")
+                    try:
+                        resolution = self._executor(action, result)
+                    except BaseException as exc:
+                        self._record_failure(exc)
+                        self._record_failure(PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN))
+                        raise
+                    if (not isinstance(resolution, TxResolution)
+                            or not isinstance(resolution.action_execution, ActionExecution)
+                            or not isinstance(resolution.target_effect, TargetEffect)):
+                        raise PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN, "invalid TX terminal")
+                    self._attacks[index] = self._make_attack(
+                        request_id, trigger, action, result,
+                        resolution.action_execution, resolution.target_effect, resolution.reason)
+                    if resolution.action_execution == ActionExecution.TX_UNKNOWN:
+                        raise PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
                     self._conn.provide_terminal(
                         request_id,
                         action_execution=resolution.action_execution.value,
                         target_effect=(resolution.target_effect.value
                                        if resolution.target_effect is not None else None),
                     )
-                    self._attacks.append(self._make_attack(
-                        request_id, trigger, action, result,
-                        resolution.action_execution, resolution.target_effect,
-                        resolution.reason,
-                    ))
                 else:
                     # RF 전 거부(scheduler·admission). scenario 실패로 재계산하지 않는다(§11.1).
                     self._attacks.append(self._make_attack(
@@ -174,6 +245,13 @@ class WorkloadRunner:
                         result.get("error_code"),
                     ))
             self._conn.pump()
+        raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "action drain did not become idle")
+
+    @staticmethod
+    def _boolean(value) -> bool:
+        if type(value) is not bool:
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid lifecycle state")
+        return value
 
     def _make_attack(self, request_id, trigger, action, result, execution, effect, reason):
         return AttackRecord(
@@ -201,7 +279,13 @@ class WorkloadRunner:
         if self._terminal_done:
             return
         self._terminal_done = True
-        if self._armed and self._infra_error() is None:
+        if self._failure is not None:
+            return
+        if not self._armed:
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "finish before ARMED")
+        if self._infra_error() is None:
+            if not self._boolean(self._conn.client_idle()):
+                raise PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN, "outstanding action at finish")
             self._transitions.append("WORKLOAD_TERMINAL")
             self._conn.finish()
             self._transitions.append("QUIESCENCE")
@@ -263,114 +347,144 @@ class WorkloadRunner:
         if self._result is not None:
             return self._result
 
-        # 1) 최소 결과 선확정(evidence 미수집 → 예외 없이 항상 성공). 재진입 None 방지.
-        self._result = self._build_result(scenario_verdict, raised=raised, evidence=False)
-
-        # 2) cleanup: close + lease 반환. 인터럽트는 포착만 하고 아래에서 재전달.
-        close_error: BaseException | None = None
-        pending_interrupt: BaseException | None = None
+        # Result construction reads cached state only. All external queries are guarded
+        # below, so neither a broken query nor malformed evidence can bypass cleanup.
+        if raised is not None:
+            self._record_failure(raised)
+        self._result = self._build_result(scenario_verdict, provisional=True)
+        self._collect(self._infra_error, None)
+        reached = self._collect(lambda: self._boolean(self._conn.armed_reached()), self._armed)
+        self._armed = self._armed or reached
+        if self._failure is not None and self._armed:
+            self._collect(self._harvest_pending, None)
         try:
-            try:
-                self._closed_report = self._conn.close()
-            except Exception as exc:  # noqa: BLE001 - 일반 close 결함 흡수
-                close_error = exc
-                self._closed_report = {"error": repr(exc), "forced_kill": True}
-            if "CLOSED" not in self._transitions:
+            self._closed_report = self._collect(
+                lambda: self._checked_close(), {"error": "cleanup unconfirmed"})
+            if "error" not in self._closed_report:
                 self._transitions.append("CLOSED")
+            else:
+                self._transitions.append("CLEANUP_UNCONFIRMED")
+        finally:
             if self._lease_acquired:
                 try:
                     self._lease.release(self._workload_id)
+                    self._lease.assert_returned()
                     self._transitions.append("LEASE_RELEASED")
-                except Exception:  # noqa: BLE001 - 강제 정상 복귀
-                    self._lease.role = MassBRole.NORMAL
-                    self._lease.holder = None
-                    self._transitions.append("LEASE_FORCE_RELEASED")
-        except BaseException as exc:  # noqa: BLE001 - close/release 중 인터럽트
-            pending_interrupt = exc
-        finally:
-            # 인터럽트로 lease-release를 건너뛰었으면 최후 강제 반환(잔존 0 보장).
-            if (self._lease_acquired and self._lease.is_leased
-                    and self._lease.holder == self._workload_id):
-                self._lease.role = MassBRole.NORMAL
-                self._lease.holder = None
-                self._transitions.append("LEASE_FORCE_RELEASED")
+                except BaseException as exc:
+                    self._record_failure(exc)
+                    # This lease is a local state model, not proof of radio cleanup.
+                    # Never overwrite another workload's ownership.
+                    if self._lease.holder == self._workload_id:
+                        self._lease.role = MassBRole.NORMAL
+                        self._lease.holder = None
+                        self._transitions.append("LEASE_FORCE_RELEASED")
+                    self._record_failure(PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN))
 
-        # 3) 전체 결과(evidence 포함)로 덮어쓴다. evidence 수집의 일반 예외는 _safe가 흡수하지만,
-        #    인터럽트(BaseException)는 흡수하지 않으므로 여기서 포착해 **결과에 반영**한 뒤
-        #    재전달한다(중단을 COMPLETED로 남기지 않는다).
-        try:
-            self._result = self._build_result(
-                scenario_verdict, raised=raised or close_error or pending_interrupt, evidence=True)
-        except BaseException as exc:  # noqa: BLE001 - evidence 조립 중 인터럽트/치명 오류
-            if pending_interrupt is None:
-                pending_interrupt = exc
-            # evidence 없는 경로는 외부 seam을 부르지 않아 다시 실패하지 않는다.
-            self._result = self._build_result(
-                scenario_verdict, raised=raised or close_error or pending_interrupt,
-                evidence=False)
-
-        if pending_interrupt is not None:
-            raise pending_interrupt  # cleanup·결과 저장 뒤 인터럽트 재전달
+        evidence_dict = {
+            "connection": self._collect(self._conn.evidence,
+                                        {"error": "evidence unavailable"}, diagnostic=True),
+            "cleanup": dict(self._closed_report),
+            "lease": self._collect(self._lease.as_evidence, {}, diagnostic=True),
+            "snapshot": self._collect(self._snapshot.as_evidence, {}, diagnostic=True),
+        }
+        self._collect(self._infra_error, None)  # close may have reported a new failure
+        evidence_dict["failure_codes"] = list(self._failure_codes)
+        self._result = self._build_result(scenario_verdict, evidence=evidence_dict)
+        if self._interrupt is not None:
+            raise self._interrupt
         return self._result
 
     # --- 결과 조립 ----------------------------------------------------------
+    def _harvest_pending(self) -> None:
+        """Preserve accepted results after an abort without submitting any new TX."""
+        pending = self._conn.poll_new_results()
+        if not isinstance(pending, list) or len(pending) > MAX_WORKLOAD_ACTION_REQUESTS:
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid pending result batch")
+        recorded = {attack.request_id for attack in self._attacks}
+        for result in list(self._processed.values()) + pending:
+            if (not isinstance(result, dict) or not isinstance(result.get("request_id"), str)
+                    or not result["request_id"]
+                    or result.get("admission") not in ("accepted", "rejected")):
+                self._record_failure(PocError(PocErrorCode.POC_PROTOCOL_ERROR))
+                continue
+            request_id = result["request_id"]
+            if request_id in recorded:
+                continue
+            if len(recorded) >= MAX_WORKLOAD_ACTION_REQUESTS:
+                self._record_failure(PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN))
+                break
+            accepted = result["admission"] == "accepted"
+            if accepted:
+                self._record_failure(PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN))
+            self._attacks.append(self._make_attack(
+                request_id, "not recorded", {}, result,
+                ActionExecution.TX_UNKNOWN if accepted else ActionExecution.REJECTED_BEFORE_TX,
+                TargetEffect.INDETERMINATE if accepted else TargetEffect.NOT_APPLICABLE,
+                "terminal not confirmed" if accepted else result.get("error_code")))
+            recorded.add(request_id)
+
     def _infra_error(self):
-        """connection.infrastructure_error를 안전하게 읽는다(broken conn도 흡수).
+        """Live query: failure is never converted to 'no error'."""
+        error = self._conn.infrastructure_error
+        if error is not None:
+            if not isinstance(error, PocError):
+                raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid infrastructure error")
+            self._record_failure(error)
+        return error
 
-        **BaseException까지 흡수한다.** 이 helper는 결과 조립·cleanup 경로에서 호출되는
-        *질의*이므로, 여기서 나온 인터럽트가 cleanup(close·lease 반환)을 중단시키면 안 된다.
-        실제 인터럽트는 run()/finish()가 이미 포착해 `raised`로 전달하고 finalize 뒤 재전달한다.
-        """
+    def _collect(self, fn, fallback, *, diagnostic=False):
+        """Continue cleanup after a failure, retaining interrupts for rethrow."""
         try:
-            return self._conn.infrastructure_error
-        except BaseException:  # noqa: BLE001 - 질의 실패가 cleanup을 막지 못하게 한다
-            return None
-
-    def _armed_reached_safe(self) -> bool:
-        """ARMED 도달 여부 질의. 위와 같은 이유로 BaseException까지 흡수한다."""
-        try:
-            return self._conn.armed_reached()
-        except BaseException:  # noqa: BLE001
-            return self._armed
-
-    @staticmethod
-    def _safe(fn, fallback):
-        """evidence 수집 등 결과 조립 중 예외를 삼켜 `_result`가 None으로 남지 않게 한다."""
-        try:
-            return fn()
-        except Exception:  # noqa: BLE001
+            value = fn()
+            if diagnostic and not isinstance(value, dict):
+                raise ValueError("invalid evidence mapping")
+            return value
+        except BaseException as exc:
+            if not diagnostic or not isinstance(exc, Exception):
+                self._record_failure(exc)
             return fallback
 
-    def _infra_and_code(self, raised: BaseException | None):
-        """(poc_infrastructure, error_code) 판정(§11.2). ARMED 전 오류는 ERROR, 이후는 ABORTED."""
-        conn_error = self._infra_error()
-        if conn_error is not None:
-            code = conn_error.code.value if isinstance(conn_error, PocError) else repr(conn_error)
-            return (PocInfrastructure.ABORTED if self._armed_reached_safe()
-                    else PocInfrastructure.ERROR), code
-        if raised is not None:
-            # connection이 code로 남기지 못한 Python 예외/인터럽트도 성공으로 추정하지 않는다.
-            code = (raised.code.value if isinstance(raised, PocError)
-                    else f"EXCEPTION:{type(raised).__name__}")
-            return (PocInfrastructure.ABORTED if self._armed_reached_safe()
-                    else PocInfrastructure.ERROR), code
-        return PocInfrastructure.COMPLETED, None
+    @staticmethod
+    def _error_code(error):
+        return error.code.value if isinstance(error, PocError) else f"EXCEPTION:{type(error).__name__}"
+
+    def _record_failure(self, error: BaseException) -> None:
+        code = self._error_code(error)
+        if code not in self._failure_codes and len(self._failure_codes) < 32:
+            self._failure_codes.append(code)
+        if not isinstance(error, Exception) and self._interrupt is None:
+            self._interrupt = error
+        def rank(exc):
+            return SEVERITY_RANK[exc.severity] if isinstance(exc, PocError) else 2
+        if self._failure is None or rank(error) > rank(self._failure):
+            self._failure = error
+
+    def _checked_close(self) -> dict:
+        report = self._conn.close()
+        if not isinstance(report, dict):
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid cleanup report")
+        if report.get("error"):
+            raise PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN, "cleanup reported failure")
+        for key in ("child_alive", "socket_file_exists", "workload_dir_exists"):
+            if key in report and (type(report[key]) is not bool or report[key]):
+                raise PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN, "cleanup residue")
+        engine = report.get("engine")
+        if not isinstance(engine, dict):
+            raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid cleanup counters")
+        for key in ("event_queue", "replay_ring", "inflight_actions"):
+            if type(engine.get(key)) is not int or engine[key] != 0:
+                raise PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN, "cleanup residue")
+        return report
 
     def _build_result(self, scenario_verdict: ScenarioVerdict,
-                      *, raised: BaseException | None = None,
-                      evidence: bool = True) -> WorkloadResult:
-        infrastructure, error_code = self._infra_and_code(raised)
+                       *, evidence: dict | None = None,
+                       provisional: bool = False) -> WorkloadResult:
+        failure = self._failure
+        infrastructure = (PocInfrastructure.ABORTED if self._armed else PocInfrastructure.ERROR)
+        if failure is None and not provisional:
+            infrastructure = PocInfrastructure.COMPLETED
+        error_code = self._error_code(failure) if failure is not None else None
         desc = self._snapshot.descriptor
-        if evidence:
-            evidence_dict = {
-                "connection": self._safe(self._conn.evidence, {"error": "evidence unavailable"}),
-                "cleanup": dict(self._closed_report),
-                "lease": self._safe(self._lease.as_evidence, {}),
-                "snapshot": self._safe(self._snapshot.as_evidence, {}),
-            }
-        else:
-            # evidence 미수집(최소 결과): connection.evidence() 등 예외 가능 경로를 건드리지 않는다.
-            evidence_dict = {}
         return WorkloadResult(
             run_id=self._run_id,
             workload_id=self._workload_id,
@@ -387,7 +501,7 @@ class WorkloadRunner:
             attacks=tuple(self._attacks),
             infrastructure_error_code=error_code,
             lifecycle_transitions=tuple(self._transitions),
-            evidence=evidence_dict,
+            evidence=evidence or {},
         )
 
 

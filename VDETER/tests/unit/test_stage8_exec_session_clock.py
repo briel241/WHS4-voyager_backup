@@ -186,6 +186,49 @@ class WorkloadDeadlineTest(unittest.TestCase):
 
 
 class BringupCloseDeadlineTest(unittest.TestCase):
+    def test_poll_enforces_bringup_deadline(self):
+        clock = FakeClock(0.0)
+        s = ResidentSession(clock=clock)
+        s.start()
+        clock.set(STAGE7_BRINGUP_TIMEOUT_S + 0.001)
+        with self.assertRaises(SessionExpired) as ctx:
+            s.check_deadlines()
+        self.assertEqual(ctx.exception.deadline, Deadline.BRINGUP)
+
+    def test_repeated_begin_close_does_not_reset_deadline(self):
+        clock = FakeClock(0.0)
+        s = _ready_session(clock)
+        s.begin_close()
+        clock.set(STAGE7_CLOSE_TIMEOUT_S)
+        s.begin_close()
+        clock.set(STAGE7_CLOSE_TIMEOUT_S + 0.001)
+        with self.assertRaises(SessionExpired) as ctx:
+            s.complete_close()
+        self.assertEqual(ctx.exception.deadline, Deadline.CLOSE)
+
+    def test_close_timeout_still_releases_lease(self):
+        clock = FakeClock(0.0)
+        s = _ready_session(clock)
+        s.lease.acquire("w-1")
+        s.begin_close()
+        clock.set(STAGE7_CLOSE_TIMEOUT_S + 0.001)
+        with self.assertRaises(SessionExpired):
+            s.complete_close()
+        s.lease.assert_returned()
+        self.assertEqual(s.state, SessionState.EXPIRED)
+
+    def test_close_checks_absolute_deadline_and_releases_lease(self):
+        clock = FakeClock(0.0)
+        s = _ready_session(clock)
+        s.lease.acquire("w-1")
+        clock.set(SESSION_ABSOLUTE_DEADLINE_S - 10.0)
+        s.begin_close()
+        clock.set(SESSION_ABSOLUTE_DEADLINE_S + 0.001)
+        with self.assertRaises(SessionExpired) as ctx:
+            s.complete_close()
+        self.assertEqual(ctx.exception.deadline, Deadline.SESSION_ABSOLUTE)
+        s.lease.assert_returned()
+
     def test_bringup_boundary(self):
         clock = FakeClock(0.0)
         s = ResidentSession(clock=clock)

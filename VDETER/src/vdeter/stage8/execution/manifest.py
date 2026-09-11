@@ -74,7 +74,7 @@ def parse_and_validate(
         raise ManifestError("manifest가 UTF-8이 아닙니다")
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, RecursionError, ValueError) as error:
         raise ManifestError(f"TOML parse 실패: {error.__class__.__name__}")
 
     _require(isinstance(data, dict), "manifest 최상위는 table이어야 합니다")
@@ -84,16 +84,16 @@ def parse_and_validate(
              f"schema는 {SUPPORTED_SCHEMA}여야 합니다")
 
     poc_id = data.get("poc_id")
-    _require(isinstance(poc_id, str) and bool(_POC_ID_RE.match(poc_id)),
+    _require(isinstance(poc_id, str) and bool(_POC_ID_RE.fullmatch(poc_id)),
              "poc_id 형식 오류(소문자·숫자·하이픈, 최대 63자)")
 
     version = data.get("version")
-    _require(isinstance(version, str) and bool(_VERSION_RE.match(version)),
+    _require(isinstance(version, str) and bool(_VERSION_RE.fullmatch(version)),
              "version은 X.Y.Z 형식이어야 합니다")
 
     entrypoint = data.get("entrypoint")
     _require(isinstance(entrypoint, str), "entrypoint는 문자열이어야 합니다")
-    ep = _ENTRYPOINT_RE.match(entrypoint)
+    ep = _ENTRYPOINT_RE.fullmatch(entrypoint)
     _require(ep is not None, "entrypoint는 '<file>.py:<Class>' 형식이어야 합니다")
     _require(ep.group("file") == script_basename,
              "entrypoint의 파일명이 sidecar script 파일명과 다릅니다")
@@ -101,7 +101,7 @@ def parse_and_validate(
     compatible = _str_list(data.get("compatible_scenarios", []), "compatible_scenarios")
     _require(len(compatible) >= 1, "compatible_scenarios는 최소 1개여야 합니다")
     for scenario in compatible:
-        _require(bool(_SCENARIO_RE.match(scenario)),
+        _require(bool(_SCENARIO_RE.fullmatch(scenario)),
                  "compatible_scenarios 원소 형식 오류")
 
     attacker = data.get("attacker_endpoint")

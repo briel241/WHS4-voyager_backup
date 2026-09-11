@@ -15,6 +15,7 @@ owner/mode/symlink 검사는 POSIX(os.open dir_fd, O_NOFOLLOW, st_uid, st_mode)�
 from __future__ import annotations
 
 import hashlib
+import heapq
 import os
 import stat as statmod
 from dataclasses import dataclass
@@ -129,7 +130,7 @@ def _open_dir(poc_dir: str) -> int:
         raise CatalogError(f"catalog directory 열기 실패: {error.__class__.__name__}")
 
 
-def _read_regular_file(dir_fd: int, name: str, max_bytes: int):
+def _read_regular_file(dir_fd: int, name: str, max_bytes: int, *, uid: int):
     """dir_fd 기준 openat + O_NOFOLLOW로 regular file을 bounded read하고 facts 계산.
 
     symlink면 ELOOP로 예외, oversize면 예외. ((facts, data), None) 또는 (None, reason).
@@ -147,6 +148,10 @@ def _read_regular_file(dir_fd: int, name: str, max_bytes: int):
         st = os.fstat(fd)
         if not statmod.S_ISREG(st.st_mode):
             return None, "regular file이 아닙니다"
+        if st.st_uid != uid:
+            return None, "파일 소유자가 현재 UID가 아닙니다"
+        if st.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH):
+            return None, "파일이 group/other writable입니다"
         if st.st_size > max_bytes:
             return None, "파일이 크기 상한을 초과했습니다"
         h = hashlib.sha256()
@@ -162,6 +167,13 @@ def _read_regular_file(dir_fd: int, name: str, max_bytes: int):
             h.update(chunk)
             chunks.append(chunk)
         data = b"".join(chunks)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode", "st_uid")
+        if total != st.st_size or any(getattr(st, f) != getattr(after, f) for f in fields):
+            return None, "파일이 읽는 동안 변경되었습니다"
+        path_st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if any(getattr(st, f) != getattr(path_st, f) for f in fields):
+            return None, "파일이 읽는 동안 교체 또는 변경되었습니다"
         facts = FileFacts(
             path=name,
             size=st.st_size,
@@ -173,6 +185,8 @@ def _read_regular_file(dir_fd: int, name: str, max_bytes: int):
             sha256=h.hexdigest(),
         )
         return (facts, data), None
+    except OSError as error:
+        return None, f"파일 읽기 실패({error.__class__.__name__})"
     finally:
         os.close(fd)
 
@@ -195,11 +209,18 @@ def scan_catalog(poc_dir: str, *, uid: int | None = None) -> Catalog:
         if dst.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH):
             raise CatalogError("catalog directory가 group/other writable입니다")
 
-        names = sorted(os.listdir(dir_fd))
-        manifest_names = [n for n in names if n.endswith(MANIFEST_SUFFIX)]
-        total = len(manifest_names)
+        total = 0
+        # Count every candidate without retaining an unbounded directory listing.
+        with os.scandir(dir_fd) as entries:
+            def manifest_names():
+                nonlocal total
+                for entry in entries:
+                    if entry.name.endswith(MANIFEST_SUFFIX):
+                        total += 1
+                        yield entry.name
+
+            examine = heapq.nsmallest(MAX_CATALOG_PACKAGES, manifest_names())
         truncated = total > MAX_CATALOG_PACKAGES
-        examine = manifest_names[:MAX_CATALOG_PACKAGES]
 
         valid: list = []
         invalid: list = []
@@ -213,12 +234,12 @@ def scan_catalog(poc_dir: str, *, uid: int | None = None) -> Catalog:
                 invalid.append(InvalidPackage(base, manifest_name, "빈 basename"))
                 continue
 
-            script_res, script_reason = _read_regular_file(dir_fd, script_name, MAX_SCRIPT_BYTES)
+            script_res, script_reason = _read_regular_file(dir_fd, script_name, MAX_SCRIPT_BYTES, uid=uid)
             if script_res is None:
                 invalid.append(InvalidPackage(base, manifest_name,
                                               f"script {script_name}: {script_reason}"))
                 continue
-            manifest_res, manifest_reason = _read_regular_file(dir_fd, manifest_name, MAX_MANIFEST_BYTES)
+            manifest_res, manifest_reason = _read_regular_file(dir_fd, manifest_name, MAX_MANIFEST_BYTES, uid=uid)
             if manifest_res is None:
                 invalid.append(InvalidPackage(base, manifest_name,
                                               f"manifest: {manifest_reason}"))

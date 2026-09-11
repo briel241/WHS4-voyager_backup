@@ -108,6 +108,26 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(any(l.startswith("POC ARMED") for l in lines))
         self.assertTrue(any("TERMINAL" in l for l in lines))
 
+    def test_prearmed_failure_does_not_claim_validated_or_armed(self):
+        r = _result(lifecycle_transitions=("LEASE_ACQUIRED", "ERROR", "CLOSED"),
+                    poc_infrastructure=PocInfrastructure.ERROR)
+        text = "\n".join(render_rf_console(r))
+        self.assertNotIn("VALIDATED", text)
+        self.assertNotIn("ARMED", text)
+        self.assertIn("infrastructure=ERROR", text)
+
+    def test_rejected_attack_does_not_claim_scheduled(self):
+        r = _result(attacks=(_attack(action_execution=ActionExecution.REJECTED_BEFORE_TX,
+                                     target_effect=TargetEffect.NOT_APPLICABLE),))
+        text = "\n".join(render_rf_console(r))
+        self.assertNotIn("SCHEDULED", text)
+        self.assertIn("REJECTED_BEFORE_TX", text)
+
+    def test_missing_poc_identity_is_not_recorded(self):
+        text = render_detailed(_result(poc_id=None, poc_version=None))
+        self.assertIn("poc: not recorded", text)
+        self.assertNotIn("None@None", text)
+
     def test_bounded_lines_scale_with_attacks(self):
         r0 = _result(attacks=())
         r5 = _result(attacks=tuple(_attack(request_id=f"r{i}") for i in range(5)))

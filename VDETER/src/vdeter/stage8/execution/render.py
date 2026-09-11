@@ -29,14 +29,14 @@ NOT_RECORDED = "not recorded"
 def render_rf_console(result: WorkloadResult) -> list:
     """RF 활성 중 저부하 투영 줄 목록(§12.1, §16.2). 상태 전이·terminal만."""
 
-    lines = [
-        f"POC VALIDATED {result.poc_id}@{result.poc_version}",
-        f"POC ARMED attacker={result.attacker_endpoint} scenario={result.scenario_id}",
-    ]
+    lines = []
+    if "VALIDATED" in result.lifecycle_transitions:
+        lines.append(f"POC VALIDATED {_poc_identity(result)}")
+    if "ARMED" in result.lifecycle_transitions:
+        lines.append(f"POC ARMED attacker={result.attacker_endpoint} scenario={result.scenario_id}")
     for i, attack in enumerate(result.attacks, start=1):
         tag = f"{i:04d}"
-        lines.append(f"POC attack={tag} SCHEDULED target={attack.target}")
-        lines.append(f"POC attack={tag} {attack.action_execution.value}")
+        lines.append(f"POC attack={tag} {attack.action_execution.value} target={attack.target}")
     lines.append(f"POC TERMINAL infrastructure={result.poc_infrastructure.value}")
     return lines
 
@@ -47,6 +47,12 @@ def _attacker_line(result: WorkloadResult) -> str:
     return result.attacker_endpoint or NOT_RECORDED
 
 
+def _poc_identity(result: WorkloadResult) -> str:
+    if result.poc_id is None:
+        return NOT_RECORDED
+    return f"{result.poc_id}@{result.poc_version or NOT_RECORDED}"
+
+
 def render_detailed(result: WorkloadResult) -> str:
     """종료 후 세로형 상세 보고(§12.2). bounded, 없는 값은 not recorded."""
 
@@ -54,7 +60,7 @@ def render_detailed(result: WorkloadResult) -> str:
         "[POC RUN]",
         f"  run: {result.run_id}",
         f"  workload: {result.workload_id}",
-        f"  poc: {result.poc_id}@{result.poc_version}",
+        f"  poc: {_poc_identity(result)}",
         f"  attacker: {_attacker_line(result)}",
         f"  scenario: {result.scenario_id}",
         f"  script_sha256: {result.script_sha256 or NOT_RECORDED}",

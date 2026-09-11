@@ -579,8 +579,11 @@ class InterruptMatrixTest(unittest.TestCase):
                     expected = (PocInfrastructure.ERROR if stage == "start"
                                 else PocInfrastructure.ABORTED)
                     self.assertEqual(result.poc_infrastructure, expected)
+                    self.assertIn(f"EXCEPTION:{exc_type.__name__}",
+                                  result.evidence["failure_codes"])
                     self.assertEqual(result.infrastructure_error_code,
-                                     f"EXCEPTION:{exc_type.__name__}")
+                                     PocErrorCode.POC_TX_OUTCOME_UNKNOWN.value if stage == "action"
+                                     else f"EXCEPTION:{exc_type.__name__}")
                     # scenario verdict는 인터럽트와 독립(§11.1).
                     self.assertEqual(result.scenario_verdict, ScenarioVerdict.PASS)
 

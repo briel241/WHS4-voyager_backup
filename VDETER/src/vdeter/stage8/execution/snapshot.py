@@ -46,7 +46,7 @@ _SAFE_BASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def _validate_base_name(base_name: str) -> None:
-    if not isinstance(base_name, str) or not _SAFE_BASE_RE.match(base_name):
+    if not isinstance(base_name, str) or not _SAFE_BASE_RE.fullmatch(base_name):
         raise SnapshotError("base_name이 안전한 단일 경로 요소가 아닙니다(path traversal 거부)")
     if base_name in (".", "..") or ".." in base_name.split("."):
         raise SnapshotError("base_name에 상위 경로 요소를 쓸 수 없습니다")
@@ -87,7 +87,7 @@ class Snapshot:
 def _consistent_read(dir_fd: int, name: str, max_bytes: int, *, uid: int):
     """O_NOFOLLOW openat + read 전후 대조로 일관된 bytes를 얻는다(§5.3).
 
-    반환 (data, sha256, dev, ino). 부분 저장·교체·symlink·비정규 파일은 SnapshotError.
+    반환 (data, sha256, stat). 부분 저장·교체·symlink·비정규 파일은 SnapshotError.
     """
 
     # O_NONBLOCK: scan 이후 원본이 FIFO/특수 파일로 교체(TOCTOU)되어도 O_RDONLY open이
@@ -127,7 +127,9 @@ def _consistent_read(dir_fd: int, name: str, max_bytes: int, *, uid: int):
         if (after.st_size != before.st_size
                 or after.st_mtime_ns != before.st_mtime_ns
                 or after.st_ino != before.st_ino
-                or after.st_dev != before.st_dev):
+                or after.st_dev != before.st_dev
+                or after.st_mode != before.st_mode
+                or after.st_uid != before.st_uid):
             raise SnapshotError(f"{name}이 읽는 동안 변경되었습니다(부분 저장)")
         if after.st_size != total:
             raise SnapshotError(f"{name} 크기와 읽은 byte 수가 다릅니다")
@@ -139,8 +141,13 @@ def _consistent_read(dir_fd: int, name: str, max_bytes: int, *, uid: int):
             raise SnapshotError(f"{name} 재stat 실패({error.__class__.__name__})")
         if (path_st.st_ino != before.st_ino) or (path_st.st_dev != before.st_dev):
             raise SnapshotError(f"{name}이 읽는 동안 교체되었습니다(replacement race)")
+        if any(getattr(path_st, field) != getattr(before, field)
+               for field in ("st_size", "st_mtime_ns", "st_mode", "st_uid")):
+            raise SnapshotError(f"{name}이 읽는 동안 변경되었습니다(부분 저장)")
 
-        return data, h.hexdigest(), before.st_dev, before.st_ino
+        return data, h.hexdigest(), before
+    except OSError as error:
+        raise SnapshotError(f"{name} 읽기 실패({error.__class__.__name__})") from error
     finally:
         os.close(fd)
 
@@ -177,14 +184,28 @@ def create_snapshot(
     except OSError as error:
         raise SnapshotError(f"catalog directory 열기 실패({error.__class__.__name__})")
     try:
-        script_data, script_sha, s_dev, s_ino = _consistent_read(
+        directory = os.fstat(dir_fd)
+        if not statmod.S_ISDIR(directory.st_mode) or directory.st_uid != uid:
+            raise SnapshotError("catalog directory 소유자 또는 종류가 잘못되었습니다")
+        if directory.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH):
+            raise SnapshotError("catalog directory가 group/other writable입니다")
+        script_data, script_sha, script_stat = _consistent_read(
             dir_fd, script_name, MAX_SCRIPT_BYTES, uid=uid)
-        manifest_data, manifest_sha, m_dev, m_ino = _consistent_read(
+        manifest_data, manifest_sha, manifest_stat = _consistent_read(
             dir_fd, manifest_name, MAX_MANIFEST_BYTES, uid=uid)
+        # Recheck both names after the pair has been read. A script change while
+        # reading the manifest must not silently bind bytes from different edits.
+        for name, before in ((script_name, script_stat), (manifest_name, manifest_stat)):
+            after = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if any(getattr(before, field) != getattr(after, field)
+                   for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode", "st_uid")):
+                raise SnapshotError(f"{name}이 snapshot pair를 읽는 동안 변경되었습니다")
+    except OSError as error:
+        raise SnapshotError(f"snapshot source 확인 실패({error.__class__.__name__})") from error
     finally:
         os.close(dir_fd)
 
-    if (s_dev, s_ino) == (m_dev, m_ino):
+    if (script_stat.st_dev, script_stat.st_ino) == (manifest_stat.st_dev, manifest_stat.st_ino):
         raise SnapshotError("script와 manifest가 같은 inode입니다")
 
     try:
@@ -203,11 +224,22 @@ def create_snapshot(
     bind = binding_digest(script_sha, manifest_sha)
 
     # snapshot 복사(immutable): dest_dir에 script/manifest를 쓰고 read-only로 고정.
-    os.makedirs(dest_dir, exist_ok=True)
     snap_script = os.path.join(dest_dir, script_name)
     snap_manifest = os.path.join(dest_dir, manifest_name)
-    _write_immutable(snap_script, script_data)
-    _write_immutable(snap_manifest, manifest_data)
+    try:
+        os.makedirs(dest_dir, mode=0o700, exist_ok=True)
+        dest_fd = os.open(dest_dir, flags)
+    except OSError as error:
+        raise SnapshotError(f"snapshot directory 생성 또는 열기 실패({error.__class__.__name__})") from error
+    try:
+        destination = os.fstat(dest_fd)
+        if (not statmod.S_ISDIR(destination.st_mode) or destination.st_uid != uid
+                or destination.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH)):
+            raise SnapshotError("snapshot directory 소유자 또는 mode가 안전하지 않습니다")
+        _write_immutable(script_name, script_data, dir_fd=dest_fd)
+        _write_immutable(manifest_name, manifest_data, dir_fd=dest_fd)
+    finally:
+        os.close(dest_fd)
 
     return Snapshot(
         snapshot_dir=dest_dir,
@@ -219,12 +251,12 @@ def create_snapshot(
         descriptor=descriptor,
         interpreter=sys.executable or "",
         interpreter_version=sys.version.split()[0],
-        source_script_ino=s_ino,
-        source_manifest_ino=m_ino,
+        source_script_ino=script_stat.st_ino,
+        source_manifest_ino=manifest_stat.st_ino,
     )
 
 
-def _write_immutable(path: str, data: bytes) -> None:
+def _write_immutable(path: str, data: bytes, *, dir_fd: int | None = None) -> None:
     """snapshot 대상 파일을 fail-closed로 생성한다(§5.3).
 
     O_CREAT|O_EXCL|O_NOFOLLOW로 **새 파일만** 만든다. 대상에 기존 파일·symlink가 있으면
@@ -234,7 +266,7 @@ def _write_immutable(path: str, data: bytes) -> None:
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags, 0o400)
+        fd = os.open(path, flags, 0o400, dir_fd=dir_fd)
     except FileExistsError:
         raise SnapshotError(f"snapshot 대상이 이미 존재합니다: {os.path.basename(path)}")
     except OSError as error:
@@ -247,12 +279,11 @@ def _write_immutable(path: str, data: bytes) -> None:
             if written <= 0:
                 raise SnapshotError("snapshot write가 진행되지 않음(short write)")
             total += written
+        os.fchmod(fd, 0o400)
+    except OSError as error:
+        raise SnapshotError(f"snapshot 파일 기록 실패({error.__class__.__name__})") from error
     finally:
         os.close(fd)
-    try:
-        os.chmod(path, 0o400)
-    except OSError:
-        pass
 
 
 def verify_snapshot(snapshot: Snapshot) -> bool:

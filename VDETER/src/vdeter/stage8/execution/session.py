@@ -128,6 +128,10 @@ class ResidentSession:
 
         now = self.clock.monotonic() if now is None else now
         self._check_absolute(now)
+        if self.state == SessionState.BRINGUP and self.bringup_started_at is not None:
+            if now - self.bringup_started_at > self.policy.stage7.bringup_s:
+                self.state = SessionState.EXPIRED
+                raise SessionExpired(Deadline.BRINGUP, "bring-up 상한 초과")
         if self.state == SessionState.READY and self.ready_since is not None:
             if now - self.ready_since > self.policy.ready_idle_s:
                 self.state = SessionState.EXPIRED
@@ -184,21 +188,26 @@ class ResidentSession:
 
     # --- close --------------------------------------------------------------
     def begin_close(self) -> None:
-        if self.state in (SessionState.CLOSED, SessionState.EXPIRED):
+        if self.state in (SessionState.CLOSING, SessionState.CLOSED, SessionState.EXPIRED):
             return
         self.closing_started_at = self.clock.monotonic()
         self.state = SessionState.CLOSING
 
     def complete_close(self) -> None:
-        if self.state == SessionState.CLOSING and self.closing_started_at is not None:
-            now = self.clock.monotonic()
-            if now - self.closing_started_at > self.policy.stage7.close_s:
-                self.state = SessionState.EXPIRED
-                raise SessionExpired(Deadline.CLOSE, "close 상한 초과")
-        # session close에서 lease를 정상 소유권으로 반환(잔존 0, §13.9).
-        self.lease.release()
-        self.lease.assert_returned()
-        self.state = SessionState.CLOSED
+        try:
+            if self.state != SessionState.CLOSED:
+                now = self.clock.monotonic()
+                self._check_absolute(now)
+                if (self.closing_started_at is not None
+                        and now - self.closing_started_at > self.policy.stage7.close_s):
+                    self.state = SessionState.EXPIRED
+                    raise SessionExpired(Deadline.CLOSE, "close 상한 초과")
+        finally:
+            # Expiry must not bypass lease cleanup (§13.9).
+            self.lease.release()
+            self.lease.assert_returned()
+        if self.state != SessionState.EXPIRED:
+            self.state = SessionState.CLOSED
 
     def evidence(self) -> dict:
         return {

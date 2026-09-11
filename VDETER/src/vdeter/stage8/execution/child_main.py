@@ -72,11 +72,20 @@ def load_entrypoint(script_path: str, entrypoint: str):
     if spec is None or spec.loader is None:
         raise ImportError(f"snapshot module spec 실패: {script_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # 연구자 snapshot 코드 실행(§6.1: scan이 아니라 실행 시점)
-    cls = getattr(module, class_name, None)
-    if cls is None:
-        raise AttributeError(f"entrypoint class {class_name}가 snapshot에 없습니다")
-    return cls()
+    previous = sys.modules.get(_SNAPSHOT_MODULE)
+    sys.modules[_SNAPSHOT_MODULE] = module
+    try:
+        spec.loader.exec_module(module)  # 연구자 snapshot 코드 실행(§6.1: scan이 아니라 실행 시점)
+        cls = getattr(module, class_name, None)
+        if cls is None:
+            raise AttributeError(f"entrypoint class {class_name}가 snapshot에 없습니다")
+        return cls()
+    except BaseException:
+        if previous is None:
+            sys.modules.pop(_SNAPSHOT_MODULE, None)
+        else:
+            sys.modules[_SNAPSHOT_MODULE] = previous
+        raise
 
 
 def _build_hello_payload(token: bytes, run_id: str, manifest_hello: dict) -> dict:
@@ -138,8 +147,10 @@ def run_client(callbacks, transport, *, token: bytes, run_id: str,
 def main() -> int:
     try:
         token_fd = int(os.environ[ENV_TOKEN_FD])
-        token = os.read(token_fd, 4096)
-        os.close(token_fd)
+        try:
+            token = os.read(token_fd, 4096)
+        finally:
+            os.close(token_fd)
         socket_path = os.environ[ENV_SOCKET_PATH]
         script_path = os.environ[ENV_SNAPSHOT_SCRIPT]
         entrypoint = os.environ[ENV_ENTRYPOINT]

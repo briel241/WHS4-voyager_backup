@@ -12,10 +12,13 @@ import stat as statmod
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 _POSIX = hasattr(os, "getuid") and sys.platform != "win32"
 
 if _POSIX:
+    from vdeter.stage8.execution import catalog as catmod
     from vdeter.stage8.execution.catalog import (
         CatalogError,
         binding_digest,
@@ -91,6 +94,56 @@ class CatalogScanTest(unittest.TestCase):
         self.assertEqual(len(cat.invalid), 1)
         self.assertIn("sneaky", cat.invalid[0].name)
 
+    def test_writable_package_files_are_invalid(self):
+        for filename in ("p.py", "p.poc.toml"):
+            with self.subTest(filename=filename):
+                write_poc_package(self.dir, "p", poc_id="p")
+                os.chmod(os.path.join(self.dir, filename), 0o666)
+                cat = scan_catalog(self.dir)
+                self.assertFalse(cat.valid)
+                self.assertIn("writable", cat.invalid[0].reason)
+                os.chmod(os.path.join(self.dir, filename), 0o600)
+
+    def test_file_owner_mismatch_is_invalid(self):
+        write_poc_package(self.dir, "p", poc_id="p")
+        real_fstat = os.fstat
+
+        def foreign_owner(fd):
+            st = real_fstat(fd)
+            if statmod.S_ISREG(st.st_mode):
+                return SimpleNamespace(st_mode=st.st_mode, st_uid=os.getuid() + 1)
+            return st
+
+        with mock.patch.object(catmod.os, "fstat", side_effect=foreign_owner):
+            cat = scan_catalog(self.dir)
+        self.assertFalse(cat.valid)
+        self.assertIn("소유자", cat.invalid[0].reason)
+
+    def test_read_failure_is_invalid_package(self):
+        write_poc_package(self.dir, "p", poc_id="p")
+        with mock.patch.object(catmod.os, "read", side_effect=OSError("I/O failure")):
+            cat = scan_catalog(self.dir)
+        self.assertFalse(cat.valid)
+        self.assertEqual(len(cat.invalid), 1)
+
+    def test_inplace_mutation_during_read_is_invalid(self):
+        write_poc_package(self.dir, "p", poc_id="p")
+        real_read = os.read
+        changed = False
+
+        def change_mode(fd, count):
+            nonlocal changed
+            data = real_read(fd, count)
+            if not changed:
+                changed = True
+                os.chmod(os.path.join(self.dir, "p.py"), 0o666)
+            return data
+
+        with mock.patch.object(catmod.os, "read", side_effect=change_mode):
+            cat = scan_catalog(self.dir)
+        self.assertFalse(cat.valid)
+        self.assertIn("변경", cat.invalid[0].reason)
+
     def test_non_recursive(self):
         sub = os.path.join(self.dir, "sub")
         os.makedirs(sub)
@@ -133,6 +186,15 @@ class CatalogScanTest(unittest.TestCase):
         self.assertEqual(cat.total_manifests_found, MAX_CATALOG_PACKAGES + 1)
         self.assertEqual(cat.examined, MAX_CATALOG_PACKAGES)
         self.assertTrue(cat.truncated)
+
+    def test_count_cap_preserves_sorted_selection_without_full_listing(self):
+        for i in reversed(range(MAX_CATALOG_PACKAGES + 3)):
+            write_poc_package(self.dir, f"pkg{i:03d}", poc_id=f"pkg-{i:03d}")
+        with mock.patch.object(catmod.os, "listdir", side_effect=AssertionError("unbounded listing")):
+            cat = scan_catalog(self.dir)
+        self.assertEqual(cat.total_manifests_found, MAX_CATALOG_PACKAGES + 3)
+        self.assertEqual([p.poc_id for p in cat.valid],
+                         [f"pkg-{i:03d}" for i in range(MAX_CATALOG_PACKAGES)])
 
     def test_script_size_boundary(self):
         big = b"# " + b"x" * MAX_SCRIPT_BYTES  # > 1 MiB
