@@ -30,7 +30,7 @@ class SharedMediumEvidence:
 
 
 def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
-                   scenario_result=None, poc_result=None):
+                   unresolved_ownership=(), scenario_result=None, poc_result=None):
     """네 판정을 분리 기록한 :class:`SharedMediumEvidence`를 만든다(RF 밖 조립).
 
     delivery_matrix의 각 row는 parent_id로 broadcast parent evidence와 correlation된다.
@@ -69,6 +69,8 @@ def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
         "delivery_matrix_truncated": bool(dropped_total) or getattr(scene, "delivery_matrix_truncated", False),
         "delivery_matrix_dropped_rows": dropped_total,
         "delivery_matrix_cap": MAX_DELIVERY_MATRIX_ENTRIES,
+        # release 실패로 소유권이 불확실한 자원(§ fault-injection): 식별자를 evidence에 보존한다.
+        "unresolved_ownership": sorted(unresolved_ownership),
     }
     return SharedMediumEvidence(
         scenario_result=dict(scenario_result or {}),

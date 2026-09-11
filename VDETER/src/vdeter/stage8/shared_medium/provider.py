@@ -289,6 +289,8 @@ class SharedMediumActionProvider:
         self._parents: dict = {}        # request_id -> parent (correlation)
         self._reservations: dict = {}   # request_id -> resource_key (자원 반환용)
         self._outcomes: dict = {}       # parent_id -> ParentOutcome (evidence 반영)
+        #: release가 실패해 소유권이 불확실한 resource_key(복구 정보 보존·evidence). cleanup으로 지우지 않는다.
+        self._unresolved_ownership: set = set()
 
     @classmethod
     def for_production(cls, *, radio_sink, rx_readiness, scheduler, waveform_factory,
@@ -342,7 +344,16 @@ class SharedMediumActionProvider:
         # --- 2. 자원 예약(정상 TX 우선) ---
         resource_key = f"{channel.value}:{slot.slot_key}"
         if self._arbiter is not None:
-            if not self._arbiter.reserve(resource_key=resource_key, owner="POC"):
+            # arbiter.reserve의 raw 예외도 public 경계 밖으로 내보내지 않는다(예약 미보유 → 누수 없음).
+            try:
+                reserved = self._arbiter.reserve(resource_key=resource_key, owner="POC")
+            except PocError:
+                raise
+            except Exception as error:  # noqa: BLE001
+                raise PocError(
+                    PocErrorCode.POC_RADIO_RESOURCE_CONFLICT, f"arbiter reserve 실패: {error}"
+                ) from error
+            if not reserved:
                 raise PocError(
                     PocErrorCode.POC_RADIO_RESOURCE_CONFLICT, f"자원 {resource_key}를 정상 TX가 점유 중"
                 )
@@ -388,6 +399,11 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_PROTOCOL_ERROR, f"parent 생성/방사 실패: {error}"
             ) from error
+        except BaseException:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 등: 자원 반환 후 그대로 전파
+            # BaseException은 PocError로 바꾸지 않고 전파하되, 예약 누수는 막는다(release 실패는
+            # _unresolved_ownership에 기록). 운영자 중단 의도를 삼키지 않는다.
+            self._abort_attempt(request_id)
+            raise
 
         submission = ProviderSubmission(
             physical_channel=channel,
@@ -424,7 +440,8 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
                 f"arbiter release 실패 — 자원 소유권 불확실 (parent {parent.parent_id})",
-                detail={"broadcast_parent_id": parent.parent_id},
+                detail={"broadcast_parent_id": parent.parent_id,
+                        "unresolved_ownership": sorted(self._unresolved_ownership)},
             )
         return outcome
 
@@ -432,6 +449,11 @@ class SharedMediumActionProvider:
         """parent_id -> ParentOutcome. evidence 조립에 넘겨 최신 결과를 반영한다."""
 
         return dict(self._outcomes)
+
+    def unresolved_ownership(self) -> tuple:
+        """release 실패로 소유권이 불확실한 resource_key 목록(evidence·복구용)."""
+
+        return tuple(sorted(self._unresolved_ownership))
 
     def register_observation_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns=None) -> None:
         """VDETER 관측 event → scheduler trigger 등록 production hook(§10).
@@ -460,7 +482,8 @@ class SharedMediumActionProvider:
 
         return _evidence.build_evidence(
             parents, scene, broadcast_results=broadcast_results,
-            outcomes=self.outcomes_by_parent(), scenario_result=scenario_result, poc_result=poc_result,
+            outcomes=self.outcomes_by_parent(), unresolved_ownership=self.unresolved_ownership(),
+            scenario_result=scenario_result, poc_result=poc_result,
         )
 
     def _abort_attempt(self, request_id: str) -> None:
@@ -473,11 +496,12 @@ class SharedMediumActionProvider:
         """예약을 반환한다. tracking은 항상 pop하고, arbiter.release 예외는 삼켜 False를 돌려준다
         (release 실패로 나머지 정리가 중단되지 않게 한다)."""
 
-        key = self._reservations.pop(request_id, None)
+        key = self._reservations.pop(request_id, None)  # 복구 정보를 잃지 않도록 먼저 pop
         if self._arbiter is not None and key is not None:
             try:
                 self._arbiter.release(resource_key=key, owner="POC")
             except Exception:  # noqa: BLE001 - release 실패는 상위에서 OWNERSHIP_UNCERTAIN으로 승격
+                self._unresolved_ownership.add(key)  # 실패 식별자 보존(evidence)
                 return False
         return True
 
@@ -513,6 +537,7 @@ class SharedMediumActionProvider:
                         self._arbiter.release(resource_key=key, owner="POC")
                     except Exception:  # noqa: BLE001 - 개별 실패는 승격, 정리는 계속
                         failed = True
+                        self._unresolved_ownership.add(key)  # 실패 식별자 보존(evidence)
         finally:
             self._reservations.clear()
             try:
@@ -532,6 +557,7 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
                 "cleanup 중 arbiter release/정리 실패 — 자원 소유권 불확실(정리는 완료됨)",
+                detail={"unresolved_ownership": sorted(self._unresolved_ownership)},
             )
 
     # --- 내부 ---------------------------------------------------------------
