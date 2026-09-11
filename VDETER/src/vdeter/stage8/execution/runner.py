@@ -19,12 +19,13 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Callable
 
 from ..poc_api.errors import PocError, PocErrorCode, SEVERITY_RANK
 from ..poc_api.limits import MAX_WORKLOAD_ACTION_REQUESTS
-from ..poc_api.types import ObservationRecord, TARGET_TO_PHYSICAL_CHANNEL
+from ..poc_api.types import ActionKind, ObservationRecord, TARGET_TO_PHYSICAL_CHANNEL
 from .connection import WorkloadConnection
 from .lease import MassBLease, MassBRole
 from .snapshot import Snapshot
@@ -109,6 +110,7 @@ class WorkloadRunner:
 
         self._attacks: list[AttackRecord] = []
         self._processed: dict[str, dict] = {}
+        self._uncertain_submissions: dict[str, dict] = {}
         self._transitions: list[str] = []
         self._armed = False
         self._closed_report: dict = {}
@@ -365,7 +367,9 @@ class WorkloadRunner:
             else:
                 self._transitions.append("CLEANUP_UNCONFIRMED")
         finally:
-            if self._lease_acquired:
+            # acquire may take ownership and then be interrupted before the local
+            # success flag is assigned. Recover only this workload's actual holder.
+            if self._lease_acquired or self._lease.holder == self._workload_id:
                 try:
                     self._lease.release(self._workload_id)
                     self._lease.assert_returned()
@@ -389,6 +393,7 @@ class WorkloadRunner:
         }
         self._collect(self._infra_error, None)  # close may have reported a new failure
         evidence_dict["failure_codes"] = list(self._failure_codes)
+        evidence_dict["uncertain_submissions"] = copy.deepcopy(list(self._uncertain_submissions.values()))
         self._result = self._build_result(scenario_verdict, evidence=evidence_dict)
         if self._interrupt is not None:
             raise self._interrupt
@@ -430,7 +435,47 @@ class WorkloadRunner:
             if not isinstance(error, PocError):
                 raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "invalid infrastructure error")
             self._record_failure(error)
+            self._capture_uncertain_submission(error)
         return error
+
+    def _capture_uncertain_submission(self, error: PocError) -> None:
+        """Retain a server-bound failed attempt without inventing accepted admission.
+
+        This is separate from ACTION_RESULT replay: a provider can have an unknown
+        physical outcome before that message exists. Repeated error queries must
+        neither duplicate the attack nor cause an executor/terminal callback.
+        """
+        if error.code != PocErrorCode.POC_TX_OUTCOME_UNKNOWN:
+            return
+        attempt = error.detail.get("action_attempt")
+        if not isinstance(attempt, dict) or attempt.get("admission") != "unknown":
+            return
+        request_id = attempt.get("request_id")
+        if not isinstance(request_id, str) or not request_id or request_id in self._uncertain_submissions:
+            return
+        if len(self._uncertain_submissions) >= MAX_WORKLOAD_ACTION_REQUESTS:
+            return  # already SESSION_INHIBIT; retain the bounded records we have
+        target = attempt.get("target")
+        channel = TARGET_TO_PHYSICAL_CHANNEL.get(target) if isinstance(target, str) else None
+        if (channel is None or attempt.get("physical_channel") != channel.value
+                or attempt.get("action_kind") not in tuple(kind.value for kind in ActionKind)
+                or not isinstance(attempt.get("schedule"), dict)):
+            return
+        # Copy only the server-defined metadata; never arbitrary provider detail/payload.
+        captured = {key: copy.deepcopy(attempt.get(key)) for key in (
+            "request_id", "action_kind", "target", "physical_channel",
+            "source_observation_id", "schedule", "action_digest", "admission")}
+        for key in ("broadcast_parent_id", "transfer_id"):
+            value = attempt.get(key)
+            captured[key] = value if isinstance(value, str) and value else None
+        self._uncertain_submissions[request_id] = captured
+        if not any(a.request_id == request_id for a in self._attacks):
+            if len(self._attacks) >= MAX_WORKLOAD_ACTION_REQUESTS:
+                return
+            self._attacks.append(self._make_attack(
+                request_id, "not recorded", captured, captured,
+                ActionExecution.TX_UNKNOWN, TargetEffect.INDETERMINATE,
+                "provider outcome unconfirmed before accepted ACTION_RESULT"))
 
     def _collect(self, fn, fallback, *, diagnostic=False):
         """Continue cleanup after a failure, retaining interrupts for rethrow."""

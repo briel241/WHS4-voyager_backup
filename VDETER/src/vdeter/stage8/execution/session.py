@@ -73,6 +73,7 @@ class ResidentSession:
     workload_started_at: float | None = None
     closing_started_at: float | None = None
     workloads_run: int = 0
+    expired_deadline: Deadline | None = None  # first expiry survives cleanup deadlines
 
     # --- 시작 / bring-up ----------------------------------------------------
     def start(self) -> None:
@@ -92,8 +93,7 @@ class ResidentSession:
         now = self.clock.monotonic()
         self._check_absolute(now)
         if now - self.bringup_started_at > self.policy.stage7.bringup_s:
-            self.state = SessionState.EXPIRED
-            raise SessionExpired(Deadline.BRINGUP, "bring-up 상한 초과")
+            self._expire(Deadline.BRINGUP, "bring-up 상한 초과")
         self._enter_ready(now)
 
     def _enter_ready(self, now: float) -> None:
@@ -113,12 +113,22 @@ class ResidentSession:
             return self.policy.ready_idle_s
         return self.policy.ready_idle_s - (now - self.ready_since)
 
+    def _expire(self, deadline: Deadline, detail: str) -> None:
+        if self.expired_deadline is None:
+            self.expired_deadline = deadline
+        self.state = SessionState.EXPIRED
+        raise SessionExpired(deadline, detail)
+
+    def _check_close(self, now: float) -> None:
+        if (self.state != SessionState.CLOSED and self.closing_started_at is not None
+                and now - self.closing_started_at > self.policy.stage7.close_s):
+            self._expire(Deadline.CLOSE, "close 상한 초과")
+
     def _check_absolute(self, now: float) -> None:
         if self.started_at is None:
             return
         if now - self.started_at > self.policy.session_absolute_s:
-            self.state = SessionState.EXPIRED
-            raise SessionExpired(Deadline.SESSION_ABSOLUTE, "session absolute 상한 초과")
+            self._expire(Deadline.SESSION_ABSOLUTE, "session absolute 상한 초과")
 
     def check_deadlines(self, now: float | None = None) -> None:
         """현재 상태에서 적용되는 상한을 확인한다(§5.2). 초과 시 :class:`SessionExpired`.
@@ -127,23 +137,17 @@ class ResidentSession:
         """
 
         now = self.clock.monotonic() if now is None else now
+        self._check_close(now)
         self._check_absolute(now)
         if self.state == SessionState.BRINGUP and self.bringup_started_at is not None:
             if now - self.bringup_started_at > self.policy.stage7.bringup_s:
-                self.state = SessionState.EXPIRED
-                raise SessionExpired(Deadline.BRINGUP, "bring-up 상한 초과")
+                self._expire(Deadline.BRINGUP, "bring-up 상한 초과")
         if self.state == SessionState.READY and self.ready_since is not None:
             if now - self.ready_since > self.policy.ready_idle_s:
-                self.state = SessionState.EXPIRED
-                raise SessionExpired(Deadline.READY_IDLE, "READY idle 상한 초과")
+                self._expire(Deadline.READY_IDLE, "READY idle 상한 초과")
         if self.state == SessionState.RUNNING and self.workload_started_at is not None:
             if now - self.workload_started_at > self.policy.stage7.workload_s:
-                self.state = SessionState.EXPIRED
-                raise SessionExpired(Deadline.WORKLOAD, "workload 상한 초과")
-        if self.state == SessionState.CLOSING and self.closing_started_at is not None:
-            if now - self.closing_started_at > self.policy.stage7.close_s:
-                self.state = SessionState.EXPIRED
-                raise SessionExpired(Deadline.CLOSE, "close 상한 초과")
+                self._expire(Deadline.WORKLOAD, "workload 상한 초과")
 
     # --- workload 경계 ------------------------------------------------------
     def begin_workload(self) -> None:
@@ -166,8 +170,7 @@ class ResidentSession:
         now = self.clock.monotonic()
         self._check_absolute(now)
         if now - self.workload_started_at > self.policy.stage7.workload_s:
-            self.state = SessionState.EXPIRED
-            raise SessionExpired(Deadline.WORKLOAD, "workload 상한 초과")
+            self._expire(Deadline.WORKLOAD, "workload 상한 초과")
         self.workloads_run += 1
         self.workload_started_at = None
         self._enter_ready(now)  # 정상 workload 뒤 idle timer 다시 시작(§5.2)
@@ -188,20 +191,18 @@ class ResidentSession:
 
     # --- close --------------------------------------------------------------
     def begin_close(self) -> None:
-        if self.state in (SessionState.CLOSING, SessionState.CLOSED, SessionState.EXPIRED):
+        if self.state == SessionState.CLOSED or self.closing_started_at is not None:
             return
         self.closing_started_at = self.clock.monotonic()
-        self.state = SessionState.CLOSING
+        if self.state != SessionState.EXPIRED:
+            self.state = SessionState.CLOSING
 
     def complete_close(self) -> None:
         try:
             if self.state != SessionState.CLOSED:
                 now = self.clock.monotonic()
+                self._check_close(now)
                 self._check_absolute(now)
-                if (self.closing_started_at is not None
-                        and now - self.closing_started_at > self.policy.stage7.close_s):
-                    self.state = SessionState.EXPIRED
-                    raise SessionExpired(Deadline.CLOSE, "close 상한 초과")
         finally:
             # Expiry must not bypass lease cleanup (§13.9).
             self.lease.release()
@@ -212,6 +213,8 @@ class ResidentSession:
     def evidence(self) -> dict:
         return {
             "state": self.state.value,
+            "expired_deadline": (self.expired_deadline.value
+                                 if self.expired_deadline is not None else None),
             "workloads_run": self.workloads_run,
             "policy": {
                 "session_absolute_s": self.policy.session_absolute_s,

@@ -51,13 +51,21 @@ class MassBLease:
     def acquire(self, workload_id: str) -> None:
         """정상 역할을 중지하고 `POC_ACTOR` lease를 독점한다(§4.2). 중복 acquire는 오류."""
 
-        if self.role == MassBRole.POC_ACTOR:
+        if self.role != MassBRole.NORMAL or self.holder is not None:
             raise LeaseError(
                 f"MASS-B lease가 이미 {self.holder}에 보유됨(배타성 위반)"
             )
-        self.role = MassBRole.POC_ACTOR
-        self.holder = workload_id
-        self.history.append(("ACQUIRE", workload_id))
+        try:
+            # Establish identity before changing role so every partial acquisition
+            # can be recovered without claiming an unidentified/foreign holder.
+            self.holder = workload_id
+            self.role = MassBRole.POC_ACTOR
+            self.history.append(("ACQUIRE", workload_id))
+        except BaseException:
+            if self.holder == workload_id:
+                self.role = MassBRole.NORMAL
+                self.holder = None
+            raise
 
     def release(self, workload_id: str | None = None) -> bool:
         """정상 소유권을 기존 runtime에 반환한다(§4.2). 보유 중이었으면 True.

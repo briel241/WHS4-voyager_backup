@@ -10,6 +10,7 @@ overflow를 fake clock·fake provider로 sleep 없이 검증한다(§18).
 
 from __future__ import annotations
 
+import copy
 import uuid
 from enum import Enum
 
@@ -33,6 +34,7 @@ from ..poc_api.messages import build_message, require_body_field
 from ..poc_api.negotiation import HelloRequest, negotiate, restore_matches
 from ..poc_api.types import (
     FORBIDDEN_ACTION_FIELDS,
+    TARGET_TO_PHYSICAL_CHANNEL,
     ActionKind,
     TuningState,
 )
@@ -573,13 +575,37 @@ class SupervisorEngine:
             schedule=dict(action.get("schedule") or {}),
             payload=dict(action.get("payload") or {}),
         )
+        # Snapshot server-owned identity before calling a provider that may commit
+        # and then fail without producing an accepted ACTION_RESULT. No packet
+        # contents are copied into this diagnostic record.
+        attempt = {
+            "request_id": request_id,
+            "action_kind": descriptor.kind.value,
+            "target": descriptor.target,
+            "physical_channel": TARGET_TO_PHYSICAL_CHANNEL[descriptor.target].value,
+            "source_observation_id": descriptor.source_observation_id,
+            "schedule": copy.deepcopy(descriptor.schedule),
+            "action_digest": digest,
+            "admission": "unknown",
+        }
+        self.evidence["provider_submit_calls"] += 1  # attempts, including raising calls
         try:
             submission = self._provider.submit(descriptor, request_id=request_id)
         except PocError as error:
+            if error.code == PocErrorCode.POC_TX_OUTCOME_UNKNOWN:
+                error = self._provider_outcome_error(error, attempt)
             return self._fail(error) if error.severity.value != "REQUEST_REJECTED" else [
                 self._reject_action(request_id, error.code, cache=False)
             ]
-        self.evidence["provider_submit_calls"] += 1
+        except BaseException as error:
+            # Preserve the operator's exact interruption while recording uncertainty
+            # before control leaves the engine. A provider may attach known IDs as
+            # a structured cause, without converting the interruption into PocError.
+            cause = error.__cause__
+            if not isinstance(cause, PocError) or cause.code != PocErrorCode.POC_TX_OUTCOME_UNKNOWN:
+                cause = PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
+            self._fail(self._provider_outcome_error(cause, attempt))
+            raise
         self.evidence["actions_accepted"] += 1
         result_body = {
             "request_id": request_id,
@@ -593,6 +619,17 @@ class SupervisorEngine:
         self._cache[request_id] = cache_entry
         self._inflight.add(request_id)
         return [self._msg(protocol.ACTION_RESULT, result_body)]
+
+    @staticmethod
+    def _provider_outcome_error(error, attempt):
+        # Parent identity comes from the provider; request identity comes only from
+        # this validated envelope. Do not mutate or trust provider request metadata.
+        attempt = copy.deepcopy(attempt)
+        for key in ("broadcast_parent_id", "transfer_id"):
+            value = error.detail.get(key)
+            attempt[key] = value if isinstance(value, str) and value else None
+        return PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN, "provider outcome unconfirmed",
+                        detail={**error.detail, "action_attempt": attempt})
 
     def _validate_action_content(self, action: dict) -> PocErrorCode | None:
         # canonical size(§10.1).
