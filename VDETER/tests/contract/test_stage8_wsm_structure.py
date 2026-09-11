@@ -16,6 +16,13 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
 _STAGE8 = os.path.join(_SRC, "vdeter", "stage8")
 _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 
+# Stage 6 RF-off 통합에서 명시 승인된 shared-medium adapter: PoC provider seam을 실 Stage 7 객체에
+# 결속해 `SharedMediumActionProvider.for_production`을 조립한다(하드웨어 경계만 double). "기능 OFF
+# 구조적 0"은 PoC 미사용 경로에 대한 것이고, 이 adapter는 RF-off 통합 검증에서만 import된다.
+_SANCTIONED_SHARED_MEDIUM_ADAPTERS = frozenset({
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py")),
+})
+
 
 def _run_py(code: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -101,7 +108,8 @@ class ImportBoundaryTest(unittest.TestCase):
                     path = os.path.join(dirpath, name)
                     with open(path, "r", encoding="utf-8", errors="replace") as fh:
                         text = fh.read()
-                    if "shared_medium" in text:
+                    if "shared_medium" in text and os.path.normpath(path) not in \
+                            _SANCTIONED_SHARED_MEDIUM_ADAPTERS:
                         offenders.append(os.path.relpath(path, _PROJECT_ROOT))
         self.assertEqual(offenders, [], f"기존 소스가 shared_medium을 참조함: {offenders}")
 

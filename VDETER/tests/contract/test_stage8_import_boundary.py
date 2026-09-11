@@ -26,9 +26,13 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
 # production CLI adapter(poc_run)와 달리, 이것은 `--rf-off-software`에서만 진입하는 **명시적
 # 하드웨어 경계 double** harness다(실장비 실행에서는 진입하지 않는다). 따라서 rf_off·testing seam을
 # 의도적으로 import하며(그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
-# 광범위 allowlist가 아니라 정확히 이 한 파일만 추가한다(실제 결선에 필요한 최소 범위).
+# 광범위 allowlist가 아니라 실제 결선에 필요한 파일만 명시 추가한다.
+# - stage8_rf_off_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
+# - stage8_stage7_seams.py: Stage 8 PoC provider seam을 **실 Stage 7 객체**(worker·frozen PHY·MAC
+#   hardware clock·route sidecar·수신기)에 결속하는 RF-off 통합 adapter(하드웨어 경계만 double).
 _SANCTIONED_RF_OFF_SESSION = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py")),
 })
 
 _STAGE8_ADAPTERS = _SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
@@ -97,19 +101,27 @@ class ImportBoundaryTest(unittest.TestCase):
             self.assertNotIn(path, hits,
                              f"{name}은 stage8을 직접 참조하면 안 됨(poc_run adapter로만)")
 
-    def test_rf_off_session_adapter_is_exact_and_verification_only(self):
-        """RF-off software 세션 host는 정확히 apps/stage8_rf_off_session.py 하나이며, 실제로 stage8을
-        참조하는 명시적 RF-off harness다(하드웨어 경계 double; `--rf-off-software`에서만 진입).
+    def test_rf_off_session_adapters_are_exact_and_verification_only(self):
+        """RF-off 통합 adapter는 정확히 이 파일들이며, 실제로 stage8을 참조하는 검증 전용 harness다
+        (하드웨어 경계 double; production 실장비 경로에서 진입하지 않는다).
 
-        production CLI 파일(cli/run_cmd/local_session)은 이 host를 통해서도 stage8을 직접 참조하지
-        않는다(여전히 stage8 문자열 0). coordinator(VDETER/apps)는 scan root 밖이라 여기서 검사하지 않는다.
+        production CLI 파일(cli/run_cmd/local_session)은 이들을 통해서도 stage8을 직접 참조하지 않는다
+        (여전히 stage8 문자열 0). coordinator(VDETER/apps)는 scan root 밖이라 여기서 검사하지 않는다.
+        각 파일은 하드웨어 경계 double 성격을 명시한다: rf_off_session은 명시적 RF-off double(rf_off),
+        stage7_seams는 실 Stage 7 객체 결속 + fake medium worker 경계다.
         """
         hits = set(self._stage8_referencing_files())
         for adapter in _SANCTIONED_RF_OFF_SESSION:
-            self.assertIn(adapter, hits, "RF-off 세션 host가 stage8을 실제로 import해야 함")
-            with open(adapter, "r", encoding="utf-8") as fh:
-                text = fh.read()
-            self.assertIn("rf_off", text, "RF-off 세션 host는 명시적 RF-off double(rf_off)을 쓴다")
+            self.assertIn(adapter, hits, "RF-off 통합 adapter가 stage8을 실제로 import해야 함")
+        session_host = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps",
+                                                     "stage8_rf_off_session.py"))
+        with open(session_host, "r", encoding="utf-8") as fh:
+            self.assertIn("rf_off", fh.read(), "RF-off 세션 host는 명시적 RF-off double(rf_off)을 쓴다")
+        seams = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py"))
+        with open(seams, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("Phy11Transmitter", text, "seams adapter는 실 frozen PHY에 결속한다")
+        self.assertIn("for_production", text, "seams adapter는 stub 아닌 production provider를 조립한다")
 
     def test_sanctioned_adapter_does_not_import_testing_or_rf_off(self):
         """production adapter는 어떤 .testing이나 RF-off harness(rf_off)도 import하지 않는다(§4).
