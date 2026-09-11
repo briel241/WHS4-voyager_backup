@@ -484,6 +484,13 @@ class TriggerRegistryTest(unittest.TestCase):
         sched.clear_triggers()
         self.assertEqual(sched.trigger_count, 0)
 
+    def test_constructor_initial_triggers_respect_cap(self):
+        from vdeter.stage8.shared_medium.constants import MAX_TRIGGER_REGISTRY
+
+        init = {f"o{i}": (1, 1) for i in range(MAX_TRIGGER_REGISTRY + 50)}
+        sched = NextSafeSlotScheduler(triggers=init)
+        self.assertLessEqual(sched.trigger_count, MAX_TRIGGER_REGISTRY)
+
     def test_provider_cleanup_clears_scheduler_triggers(self):
         sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
         prov, _s, _f = _provider(scheduler=sched)
@@ -521,6 +528,82 @@ class ResolveIdempotencyTest(unittest.TestCase):
         with self.assertRaises(PocError) as ctx:
             prov.resolve_outcome("nope", {})
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_NOT_RUNNING)
+
+
+class _ReleaseBoomArbiter(TD.FakeArbiter):
+    """release()가 항상 예외를 던지는 arbiter(자원 반환 실패 시험용)."""
+
+    def release(self, *, resource_key, owner):
+        raise RuntimeError("release boom")
+
+
+class CleanupRobustnessTest(unittest.TestCase):
+    """finding 1: arbiter release 실패가 cleanup 전체를 중단시키면 안 되고 SESSION_INHIBIT로 승격."""
+
+    def test_cleanup_release_failure_still_clears_and_inhibits(self):
+        arb = _ReleaseBoomArbiter()
+        prov = SharedMediumActionProvider(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            waveform_factory=TD.CountingWaveformFactory(), arbiter=arb,
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+        )
+        prov.submit(_action("ROC"), request_id="r")
+        with self.assertRaises(PocError) as ctx:
+            prov.cleanup()
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN)
+        # 잔존 0: release 실패에도 나머지 정리는 finally에서 완료된다.
+        self.assertEqual(prov._reservations, {})
+        self.assertEqual(prov.active_group_count, 0)
+        self.assertIsNone(prov.parent_for("r"))
+
+    def test_resolve_outcome_release_failure_inhibits_no_raw(self):
+        from vdeter.stage8.shared_medium.radiation import ChildTerminal
+
+        arb = _ReleaseBoomArbiter()
+        prov = SharedMediumActionProvider(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            waveform_factory=TD.CountingWaveformFactory(), arbiter=arb,
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+        )
+        prov.submit(_action("ROC"), request_id="r")
+        parent = prov.parent_for("r")
+        with self.assertRaises(PocError) as ctx:
+            prov.resolve_outcome("r", {c.child_id: ChildTerminal.COMPLETED for c in parent.children})
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN)
+
+
+class ChildTerminalValidationTest(unittest.TestCase):
+    """finding 2: 잘못된 child terminal은 raw ValueError가 아니라 PocError, parent 성공/해제 없음."""
+
+    def test_bogus_terminal_is_pocerror_not_success(self):
+        arb = TD.FakeArbiter()
+        prov = SharedMediumActionProvider(
+            radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
+            waveform_factory=TD.CountingWaveformFactory(), arbiter=arb,
+            scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
+        )
+        prov.submit(_action("ROC"), request_id="r")
+        parent = prov.parent_for("r")
+        with self.assertRaises(PocError) as ctx:
+            prov.resolve_outcome("r", {parent.children[0].child_id: "BOGUS",
+                                       parent.children[1].child_id: "COMPLETED"})
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        # parent를 성공/확정 처리하지 않고, reservation도 해제하지 않는다.
+        self.assertFalse(prov._broadcast.is_resolved(parent.parent_id))
+        self.assertEqual(prov._broadcast.active_group_count, 1)
+        self.assertIn("r", prov._reservations)
+
+    def test_none_terminal_is_outcome_unknown(self):
+        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+
+        prov, _s, _f = _provider()
+        prov.submit(_action("ROC"), request_id="r")
+        parent = prov.parent_for("r")
+        outcome = prov.resolve_outcome(
+            "r", {parent.children[0].child_id: ChildTerminal.COMPLETED,
+                  parent.children[1].child_id: None},
+        )
+        self.assertEqual(outcome, ParentOutcome.OUTCOME_UNKNOWN)
 
 
 class ProviderEvidenceTest(unittest.TestCase):

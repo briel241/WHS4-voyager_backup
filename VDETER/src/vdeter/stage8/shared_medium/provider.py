@@ -172,7 +172,21 @@ class NextSafeSlotScheduler:
         self._samples_per_ms = int(samples_per_ms)
         self._closed = set(closed_slots)
         #: observation_id -> (trigger_slot, trigger_hw_timestamp_ns). VDETER가 등록한다.
-        self._triggers = dict(triggers or {})
+        #: 초기 주입 triggers도 register_trigger와 동일한 bound·evict 경로를 거친다(상한 우회 금지).
+        self._triggers: dict = {}
+        for obs, value in (triggers or {}).items():
+            slot, hw = value if isinstance(value, (tuple, list)) else (value, None)
+            self._put_trigger(str(obs), int(slot), None if hw is None else int(hw))
+
+    def _put_trigger(self, observation_id: str, slot: int, hw_timestamp_ns: int | None) -> None:
+        """trigger 등록의 단일 경로. workload당 bounded(§10); 상한 초과 시 가장 오래된 것부터 evict."""
+
+        if observation_id not in self._triggers and len(self._triggers) >= constants.MAX_TRIGGER_REGISTRY:
+            oldest = next(iter(self._triggers))  # dict insertion order = FIFO
+            del self._triggers[oldest]
+        self._triggers[observation_id] = (
+            int(slot), int(hw_timestamp_ns if hw_timestamp_ns is not None else slot * self._slot_samples)
+        )
 
     def register_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns: int | None = None) -> None:
         """VDETER가 관측 event를 낼 때 그 trigger 기준 slot/timestamp를 등록한다(client 아님).
@@ -181,12 +195,7 @@ class NextSafeSlotScheduler:
         (오래된 trigger는 이미 과거 deadline이라 재사용 시 POC_DEADLINE_MISSED로 걸린다).
         """
 
-        if observation_id not in self._triggers and len(self._triggers) >= constants.MAX_TRIGGER_REGISTRY:
-            oldest = next(iter(self._triggers))  # dict insertion order = FIFO
-            del self._triggers[oldest]
-        self._triggers[observation_id] = (
-            int(slot), int(hw_timestamp_ns if hw_timestamp_ns is not None else slot * self._slot_samples)
-        )
+        self._put_trigger(observation_id, slot, hw_timestamp_ns)
 
     def clear_triggers(self) -> None:
         """workload cleanup: 등록된 trigger를 모두 제거한다(잔존 0)."""
@@ -399,18 +408,24 @@ class SharedMediumActionProvider:
         parent = self._parents.get(request_id)
         if parent is None:
             raise PocError(PocErrorCode.POC_NOT_RUNNING, f"알 수 없는 request_id: {request_id}")
+        # 이미 확정된 parent → 저장 결과를 idempotent 반환(재-resolve 안전, 재해제 없음).
+        if self._broadcast.is_resolved(parent.parent_id):
+            return self._outcomes.get(parent.parent_id) or self._broadcast.outcome_of(parent.parent_id)
         try:
             outcome = self._broadcast.resolve_outcome(parent.parent_id, terminals)
-        except BroadcastError:
-            prior = self._outcomes.get(parent.parent_id) or self._broadcast.outcome_of(parent.parent_id)
-            if prior is None:
-                raise PocError(
-                    PocErrorCode.POC_PROTOCOL_ERROR, f"resolve 불가 parent: {parent.parent_id}"
-                )
-            self._release_reservation(request_id)
-            return prior
+        except BroadcastError as error:
+            # invalid terminal·unknown parent: 성공 처리·reservation 해제 없이 구조화 오류로 변환.
+            raise PocError(
+                PocErrorCode.POC_PROTOCOL_ERROR, f"terminal 취합 실패: {error}"
+            ) from error
         self._outcomes[parent.parent_id] = outcome
-        self._release_reservation(request_id)
+        if not self._release_reservation(request_id):
+            # 예약 반환 실패 → 자원 소유권 불확실(SESSION_INHIBIT). outcome은 이미 저장됨.
+            raise PocError(
+                PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
+                f"arbiter release 실패 — 자원 소유권 불확실 (parent {parent.parent_id})",
+                detail={"broadcast_parent_id": parent.parent_id},
+            )
         return outcome
 
     def outcomes_by_parent(self) -> dict:
@@ -454,10 +469,17 @@ class SharedMediumActionProvider:
         self._release_reservation(request_id)
         self._parents.pop(request_id, None)
 
-    def _release_reservation(self, request_id: str) -> None:
+    def _release_reservation(self, request_id: str) -> bool:
+        """예약을 반환한다. tracking은 항상 pop하고, arbiter.release 예외는 삼켜 False를 돌려준다
+        (release 실패로 나머지 정리가 중단되지 않게 한다)."""
+
         key = self._reservations.pop(request_id, None)
         if self._arbiter is not None and key is not None:
-            self._arbiter.release(resource_key=key, owner="POC")
+            try:
+                self._arbiter.release(resource_key=key, owner="POC")
+            except Exception:  # noqa: BLE001 - release 실패는 상위에서 OWNERSHIP_UNCERTAIN으로 승격
+                return False
+        return True
 
     # --- capability ---------------------------------------------------------
     def advertised_capabilities(self) -> frozenset:
@@ -477,20 +499,40 @@ class SharedMediumActionProvider:
         return self._broadcast.active_group_count
 
     def cleanup(self) -> None:
-        """모든 PoC 자원 예약을 release하고 fan-out group·cache·correlation 잔존을 0으로 정리한다."""
+        """모든 PoC 자원 예약을 release하고 fan-out group·cache·correlation·trigger 잔존을 0으로 정리한다.
 
-        if self._arbiter is not None:
-            for key in list(self._reservations.values()):
-                self._arbiter.release(resource_key=key, owner="POC")
-        self._broadcast.cleanup()
-        # scheduler trigger registry도 workload 잔존 0으로 정리(bounded·cleanup).
-        clear = getattr(self._scheduler, "clear_triggers", None)
-        if clear is not None:
-            clear()
-        self._cache.clear()
-        self._parents.clear()
-        self._reservations.clear()
-        self._outcomes.clear()
+        개별 release/정리 실패가 나머지 정리를 중단시키지 않는다(잔존 0 보장). 하나라도 실패하면
+        정리를 모두 마친 뒤 `POC_RADIO_OWNERSHIP_UNCERTAIN`(SESSION_INHIBIT)으로 승격한다.
+        """
+
+        failed = False
+        try:
+            if self._arbiter is not None:
+                for key in list(self._reservations.values()):
+                    try:
+                        self._arbiter.release(resource_key=key, owner="POC")
+                    except Exception:  # noqa: BLE001 - 개별 실패는 승격, 정리는 계속
+                        failed = True
+        finally:
+            self._reservations.clear()
+            try:
+                self._broadcast.cleanup()
+            except Exception:  # noqa: BLE001
+                failed = True
+            clear = getattr(self._scheduler, "clear_triggers", None)
+            if clear is not None:
+                try:
+                    clear()
+                except Exception:  # noqa: BLE001
+                    failed = True
+            self._cache.clear()
+            self._parents.clear()
+            self._outcomes.clear()
+        if failed:
+            raise PocError(
+                PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
+                "cleanup 중 arbiter release/정리 실패 — 자원 소유권 불확실(정리는 완료됨)",
+            )
 
     # --- 내부 ---------------------------------------------------------------
     def _reject_forbidden_fields(self, action: ActionDescriptor) -> None:

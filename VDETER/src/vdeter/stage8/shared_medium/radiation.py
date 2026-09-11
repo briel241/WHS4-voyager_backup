@@ -436,13 +436,27 @@ class AtomicBroadcast:
         확정된 parent는 in-flight active group에서 제거한다.
         """
 
+        # 입력 검증 우선: 잘못된 terminal 값은 상태 변경 없이 구조화 오류로 거부한다
+        # (parent를 성공 처리하거나 in-flight에서 내리지 않는다; raw ValueError 누출 금지).
+        terminals = terminals or {}
+        coerced = {}
+        for cid, value in terminals.items():
+            if value is None:
+                continue
+            try:
+                coerced[cid] = ChildTerminal(value)
+            except ValueError as error:
+                raise BroadcastError(
+                    f"알 수 없는 child terminal 값: {value!r} (child {cid})"
+                ) from error
+
         entry = self._active_groups.get(parent_id)
         if entry is None:
             raise BroadcastError(f"알 수 없거나 이미 확정된 parent: {parent_id}")
         parent = entry["parent"]
-        seen = {ChildTerminal(t) for t in (terminals.get(c.child_id) for c in parent.children)
-                if t is not None}
-        missing = any(c.child_id not in terminals for c in parent.children)
+        seen = {coerced[c.child_id] for c in parent.children if c.child_id in coerced}
+        # 키가 없거나 값이 None이면 terminal 미보고 → OUTCOME_UNKNOWN.
+        missing = any(terminals.get(c.child_id) is None for c in parent.children)
         if missing or ChildTerminal.UNKNOWN in seen:
             outcome = ParentOutcome.OUTCOME_UNKNOWN
         elif ChildTerminal.FAILED in seen:
@@ -462,6 +476,11 @@ class AtomicBroadcast:
             return self._resolved[parent_id]
         entry = self._active_groups.get(parent_id)
         return entry["outcome"] if entry else None
+
+    def is_resolved(self, parent_id: str) -> bool:
+        """parent가 이미 확정(resolve/commit-unknown)됐는지."""
+
+        return parent_id in self._resolved
 
     # --- cleanup -----------------------------------------------------------
     def release(self, parent_id: str) -> None:

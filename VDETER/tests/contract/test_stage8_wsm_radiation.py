@@ -174,6 +174,15 @@ class ParentTerminalAggregationTest(unittest.TestCase):
         terminals = {c0.child_id: R.ChildTerminal.COMPLETED, c1.child_id: R.ChildTerminal.FAILED}
         self.assertEqual(ab.resolve_outcome(parent.parent_id, terminals), R.ParentOutcome.FAILED)
 
+    def test_invalid_terminal_value_is_structured_error_no_state_change(self):
+        # 잘못된 terminal 값은 raw ValueError가 아니라 BroadcastError; parent는 확정/제거되지 않는다.
+        ab, parent = self._committed()
+        c0, c1 = parent.children
+        with self.assertRaises(R.BroadcastError):
+            ab.resolve_outcome(parent.parent_id, {c0.child_id: "BOGUS", c1.child_id: R.ChildTerminal.COMPLETED})
+        self.assertFalse(ab.is_resolved(parent.parent_id))
+        self.assertEqual(ab.active_group_count, 1)  # 여전히 in-flight
+
 
 class CapacityTest(unittest.TestCase):
     """§10 bounded: 동시 활성 broadcast group 상한 적용."""
