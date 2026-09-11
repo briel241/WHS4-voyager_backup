@@ -409,14 +409,18 @@ class AtomicBroadcast:
         self._active_groups[parent.parent_id] = {"parent": parent, "outcome": ParentOutcome.PENDING}
         try:
             self._sink.commit_group(admission)
-        except Exception as error:
-            # commit 결과가 불명확하다: 성공으로 만들지 않고 OUTCOME_UNKNOWN으로 남긴다(§6.1).
-            # in-flight group을 유지해 correlation·cleanup을 보존한다(SESSION_INHIBIT 경로).
+        except BaseException as error:
+            # commit에 진입한 뒤의 어떤 실패(Exception·BaseException)도 TX outcome은 불명확하다.
+            # 성공으로 만들지 않고 OUTCOME_UNKNOWN으로 남기며 in-flight group을 유지해 correlation·
+            # cleanup을 보존한다(§6.1, SESSION_INHIBIT 경로). BaseException(인터럽트)은 PocError로
+            # 바꾸지 않고 상태만 남긴 채 그대로 전파한다(부분 방사를 잃지 않음).
             self._active_groups[parent.parent_id]["outcome"] = ParentOutcome.OUTCOME_UNKNOWN
             self._resolved[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
-            raise BroadcastOutcomeUnknown(
-                f"group commit 결과 불명확 -> OUTCOME_UNKNOWN (parent {parent.parent_id}): {error}"
-            ) from error
+            if isinstance(error, Exception):
+                raise BroadcastOutcomeUnknown(
+                    f"group commit 결과 불명확 -> OUTCOME_UNKNOWN (parent {parent.parent_id}): {error}"
+                ) from error
+            raise
 
         return BroadcastResult(
             parent=parent,
@@ -436,9 +440,28 @@ class AtomicBroadcast:
         확정된 parent는 in-flight active group에서 제거한다.
         """
 
-        # 입력 검증 우선: 잘못된 terminal 값은 상태 변경 없이 구조화 오류로 거부한다
-        # (parent를 성공 처리하거나 in-flight에서 내리지 않는다; raw ValueError 누출 금지).
-        terminals = terminals or {}
+        # 입력 검증 우선: 잘못된 terminal은 상태 변경 없이 구조화 오류로 거부한다
+        # (parent를 성공 처리하거나 in-flight에서 내리지 않는다; raw 예외 누출 금지).
+        # (a) container type: dict가 아니면 거부(list 등 → AttributeError 금지).
+        if terminals is None:
+            terminals = {}
+        if not isinstance(terminals, dict):
+            raise BroadcastError(
+                f"terminals는 dict여야 합니다(받은 값 type={type(terminals).__name__})"
+            )
+
+        entry = self._active_groups.get(parent_id)
+        if entry is None:
+            raise BroadcastError(f"알 수 없거나 이미 확정된 parent: {parent_id}")
+        parent = entry["parent"]
+
+        # (b) child id 집합 검증: parent에 없는 child id는 무시하지 않고 거부한다.
+        valid_ids = {c.child_id for c in parent.children}
+        unknown_ids = [cid for cid in terminals if cid not in valid_ids]
+        if unknown_ids:
+            raise BroadcastError(f"parent {parent_id}에 없는 child id: {sorted(unknown_ids)}")
+
+        # (c) terminal 값 검증/coerce: 잘못된 값은 BroadcastError.
         coerced = {}
         for cid, value in terminals.items():
             if value is None:
@@ -449,11 +472,6 @@ class AtomicBroadcast:
                 raise BroadcastError(
                     f"알 수 없는 child terminal 값: {value!r} (child {cid})"
                 ) from error
-
-        entry = self._active_groups.get(parent_id)
-        if entry is None:
-            raise BroadcastError(f"알 수 없거나 이미 확정된 parent: {parent_id}")
-        parent = entry["parent"]
         seen = {coerced[c.child_id] for c in parent.children if c.child_id in coerced}
         # 키가 없거나 값이 None이면 terminal 미보고 → OUTCOME_UNKNOWN.
         missing = any(terminals.get(c.child_id) is None for c in parent.children)

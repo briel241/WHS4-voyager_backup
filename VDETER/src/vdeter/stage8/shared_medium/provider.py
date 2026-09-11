@@ -344,16 +344,22 @@ class SharedMediumActionProvider:
         # --- 2. 자원 예약(정상 TX 우선) ---
         resource_key = f"{channel.value}:{slot.slot_key}"
         if self._arbiter is not None:
-            # arbiter.reserve의 raw 예외도 public 경계 밖으로 내보내지 않는다(예약 미보유 → 누수 없음).
+            # arbiter.reserve가 예외를 내면 자원을 이미 잡았는지 불확실하다. "미예약"으로 가정하지 않고
+            # OWNERSHIP_UNCERTAIN(SESSION_INHIBIT)으로 처리하며, 잡혔을 수 있는 식별자를
+            # _unresolved_ownership에 보존한다(cleanup이 회수 재시도). BaseException은 그대로 전파.
             try:
                 reserved = self._arbiter.reserve(resource_key=resource_key, owner="POC")
             except PocError:
                 raise
             except Exception as error:  # noqa: BLE001
+                self._unresolved_ownership.add(resource_key)
                 raise PocError(
-                    PocErrorCode.POC_RADIO_RESOURCE_CONFLICT, f"arbiter reserve 실패: {error}"
+                    PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
+                    f"arbiter reserve 예외 — 자원 소유권 불확실: {error}",
+                    detail={"unresolved_ownership": sorted(self._unresolved_ownership)},
                 ) from error
             if not reserved:
+                # 명확히 미예약(정상 TX 점유) → conflict.
                 raise PocError(
                     PocErrorCode.POC_RADIO_RESOURCE_CONFLICT, f"자원 {resource_key}를 정상 TX가 점유 중"
                 )
@@ -399,9 +405,13 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_PROTOCOL_ERROR, f"parent 생성/방사 실패: {error}"
             ) from error
-        except BaseException:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 등: 자원 반환 후 그대로 전파
-            # BaseException은 PocError로 바꾸지 않고 전파하되, 예약 누수는 막는다(release 실패는
-            # _unresolved_ownership에 기록). 운영자 중단 의도를 삼키지 않는다.
+        except BaseException:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 등
+            # commit에 진입한 뒤의 인터럽트는 pre-fire 취소가 아니라 TX outcome unknown이다: 부분 방사를
+            # 잃지 않도록 correlation·reservation을 유지하고 OUTCOME_UNKNOWN을 기록한 뒤 인터럽트를
+            # 그대로 재전달한다(SESSION_INHIBIT). commit 진입 전(pre-fire)이면 예약을 반환한다.
+            if parent is not None and self._broadcast.is_resolved(parent.parent_id):
+                self._outcomes[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
+                raise
             self._abort_attempt(request_id)
             raise
 
@@ -523,40 +533,44 @@ class SharedMediumActionProvider:
         return self._broadcast.active_group_count
 
     def cleanup(self) -> None:
-        """모든 PoC 자원 예약을 release하고 fan-out group·cache·correlation·trigger 잔존을 0으로 정리한다.
+        """PoC 자원 예약을 release하고 fan-out group·cache·correlation·trigger 잔존을 0으로 정리한다.
 
-        개별 release/정리 실패가 나머지 정리를 중단시키지 않는다(잔존 0 보장). 하나라도 실패하면
-        정리를 모두 마친 뒤 `POC_RADIO_OWNERSHIP_UNCERTAIN`(SESSION_INHIBIT)으로 승격한다.
+        - 추적 중인 예약 + 과거 미반환(unresolved) 식별자를 모두 release **재시도**한다(복구 시도).
+          release가 성공한 식별자는 unresolved에서 제거하고, 여전히 실패하면 unresolved로 남긴다.
+        - 개별 release/정리 실패가 나머지 정리를 중단시키지 않는다(tracking 잔존 0 보장).
+        - unresolved ownership이 남아 있는 동안에는 **매 cleanup마다** `POC_RADIO_OWNERSHIP_UNCERTAIN`
+          (SESSION_INHIBIT)으로 승격한다(거짓 성공 반환 금지). 전부 회수돼야 조용히 성공한다.
         """
 
-        failed = False
+        # 재시도 대상 = 현재 추적 예약 ∪ 과거 미반환 식별자.
+        retry_keys = set(self._reservations.values()) | set(self._unresolved_ownership)
         try:
             if self._arbiter is not None:
-                for key in list(self._reservations.values()):
+                for key in sorted(retry_keys):
                     try:
                         self._arbiter.release(resource_key=key, owner="POC")
-                    except Exception:  # noqa: BLE001 - 개별 실패는 승격, 정리는 계속
-                        failed = True
-                        self._unresolved_ownership.add(key)  # 실패 식별자 보존(evidence)
+                        self._unresolved_ownership.discard(key)  # 회수 성공
+                    except Exception:  # noqa: BLE001 - 개별 실패는 미반환 유지, 정리는 계속
+                        self._unresolved_ownership.add(key)
         finally:
             self._reservations.clear()
             try:
                 self._broadcast.cleanup()
             except Exception:  # noqa: BLE001
-                failed = True
+                self._unresolved_ownership.add("__broadcast_cleanup_failed__")
             clear = getattr(self._scheduler, "clear_triggers", None)
             if clear is not None:
                 try:
                     clear()
                 except Exception:  # noqa: BLE001
-                    failed = True
+                    self._unresolved_ownership.add("__trigger_cleanup_failed__")
             self._cache.clear()
             self._parents.clear()
             self._outcomes.clear()
-        if failed:
+        if self._unresolved_ownership:
             raise PocError(
                 PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
-                "cleanup 중 arbiter release/정리 실패 — 자원 소유권 불확실(정리는 완료됨)",
+                "미반환 자원 소유권이 남아 있음 — 외부 복구 완료 전까지 SESSION_INHIBIT(정리 재시도됨)",
                 detail={"unresolved_ownership": sorted(self._unresolved_ownership)},
             )
 

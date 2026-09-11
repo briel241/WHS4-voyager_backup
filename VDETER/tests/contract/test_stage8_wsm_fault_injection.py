@@ -150,11 +150,24 @@ class SeamExceptionTest(unittest.TestCase):
         self.assertEqual(err.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
         self.assertEqual(_poc_holds(arb), [])
 
-    def test_reserve_exception(self):
+    def test_reserve_exception_is_ownership_uncertain(self):
+        # reserve 예외는 자원 확보 여부가 불확실 → conflict가 아니라 OWNERSHIP_UNCERTAIN + 식별자 보존.
         prov, arb, err = self._run(arbiter=FaultArbiter(reserve_exc=RuntimeError("reserve boom")))
-        self.assertEqual(err.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
-        self.assertEqual(_poc_holds(arb), [])
+        self.assertEqual(err.code, PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN)
         self.assertEqual(prov._reservations, {})
+        self.assertIn("lower:slot-1", prov.unresolved_ownership())
+        self.assertIn("lower:slot-1", err.detail["unresolved_ownership"])
+
+    def test_reserve_holds_then_raises_tracks_unresolved(self):
+        # 실제로 잡은 뒤 예외를 내는 경우: 소유권이 실제로 남으므로 반드시 unresolved로 추적.
+        class ReserveHoldThenRaise(TD.FakeArbiter):
+            def reserve(self, *, resource_key, owner):
+                self.owner_by_key[resource_key] = owner
+                raise RuntimeError("boom after holding")
+
+        prov, arb, err = self._run(arbiter=ReserveHoldThenRaise())
+        self.assertEqual(err.code, PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN)
+        self.assertIn("lower:slot-1", prov.unresolved_ownership())
 
     def test_readiness_exception(self):
         prov, arb, err = self._run(readiness=FaultReadiness(exc=RuntimeError("rdy boom")))
@@ -214,8 +227,35 @@ class SeamBaseExceptionTest(unittest.TestCase):
     def test_waveform_factory_baseexception(self):
         self._expect_baseexc(factory=FaultFactory(exc=KeyboardInterrupt()))
 
-    def test_commit_baseexception(self):
-        self._expect_baseexc(sink=FaultSink(commit_exc=KeyboardInterrupt()))
+
+class CommitBaseExceptionTest(unittest.TestCase):
+    """commit 진입 후 BaseException은 pre-fire 취소가 아니라 TX outcome unknown이다.
+
+    인터럽트를 재전달하되 correlation·reservation·OUTCOME_UNKNOWN 상태를 보존하고, 부분 방사를
+    잃지 않는다. 이후 cleanup으로만 회수한다.
+    """
+
+    def test_commit_baseexception_preserves_outcome_unknown(self):
+        class CommitFireThenKB(TD.CountingRadioSink):
+            def commit_group(self, admission):
+                self.commit_calls += 1
+                self.committed_child_ids.append(admission.children[0].child_id)  # 한쪽 방사
+                raise KeyboardInterrupt("ctrl-c mid-commit")
+
+        sink = CommitFireThenKB()
+        arb = FaultArbiter()
+        prov = _provider(sink=sink, arbiter=arb)
+        with self.assertRaises(KeyboardInterrupt):
+            prov.submit(_action(), request_id="r")
+        parent = prov.parent_for("r")
+        self.assertIsNotNone(parent)                              # correlation 보존
+        self.assertIn("r", prov._reservations)                   # reservation 보존
+        self.assertEqual(prov._broadcast.outcome_of(parent.parent_id), ParentOutcome.OUTCOME_UNKNOWN)
+        self.assertEqual(len(sink.committed_child_ids), 1)       # 부분 방사 사실 보존
+        # cleanup으로만 회수(정상 arbiter이므로 잔존 0).
+        prov.cleanup()
+        self.assertEqual(prov.active_group_count, 0)
+        self.assertEqual(prov._reservations, {})
 
 
 # --- reject / timeout / malformed-result ------------------------------------
@@ -300,9 +340,10 @@ class ReleaseFailureMatrixTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.released = []
+                self.recovered = False  # True가 되면 fail_key release도 성공(외부 복구 모사)
 
             def release(self, *, resource_key, owner):
-                if resource_key == fail_key:
+                if resource_key == fail_key and not self.recovered:
                     raise RuntimeError("release boom " + resource_key)
                 self.released.append(resource_key)
                 super().release(resource_key=resource_key, owner=owner)
@@ -328,8 +369,15 @@ class ReleaseFailureMatrixTest(unittest.TestCase):
         self.assertIn(fail_key, ctx.exception.detail["unresolved_ownership"])
         self.assertEqual(prov._reservations, {})                     # tracking 잔존 0
         self.assertEqual(prov.active_group_count, 0)
-        # 재-cleanup은 남은 tracking이 없으므로 조용히 통과(거짓 성공 주장 아님).
+        # 미반환 자원이 남아 있는 한 재-cleanup도 조용히 성공하지 않는다(거짓 잔존 0 금지).
+        with self.assertRaises(PocError) as ctx2:
+            prov.cleanup()
+        self.assertEqual(ctx2.exception.code, PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN)
+        self.assertIn(fail_key, prov.unresolved_ownership())
+        # 외부 복구 후에는 cleanup이 회수(release 재시도 성공)하고 조용히 통과한다.
+        arb.recovered = True
         prov.cleanup()
+        self.assertEqual(prov.unresolved_ownership(), ())
 
     def test_first_release_fails(self):
         self._check("lower:slot-1", ["lower:slot-2", "lower:slot-3"])
@@ -361,6 +409,23 @@ class TerminalFaultTest(unittest.TestCase):
         prov, parent = self._committed_provider()
         outcome = prov.resolve_outcome("r", {parent.children[0].child_id: ChildTerminal.COMPLETED})
         self.assertEqual(outcome, ParentOutcome.OUTCOME_UNKNOWN)
+
+    def test_non_dict_terminals_is_pocerror(self):
+        prov, parent = self._committed_provider()
+        for bad in (["a", "b"], "COMPLETED", 5):
+            with self.assertRaises(PocError) as ctx:
+                prov.resolve_outcome("r", bad)
+            self.assertEqual(ctx.exception.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        self.assertFalse(prov._broadcast.is_resolved(parent.parent_id))  # 미확정 유지
+
+    def test_unknown_child_id_in_terminals_is_pocerror(self):
+        prov, parent = self._committed_provider()
+        terminals = {c.child_id: ChildTerminal.COMPLETED for c in parent.children}
+        terminals["ghost-child-id"] = ChildTerminal.COMPLETED  # parent에 없는 child id
+        with self.assertRaises(PocError) as ctx:
+            prov.resolve_outcome("r", terminals)
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_PROTOCOL_ERROR)
+        self.assertFalse(prov._broadcast.is_resolved(parent.parent_id))
 
     def test_resolve_release_failure_is_ownership_uncertain(self):
         arb = FaultArbiter(release_exc=RuntimeError("release boom"))
