@@ -335,15 +335,32 @@ class WorkloadRunner:
             raise
         return self._finalize(spec.scenario_verdict, raised=None)
 
+    def abort(self, scenario_verdict: ScenarioVerdict, *, cause: BaseException | None = None) -> WorkloadResult:
+        """cleanup-only 종료(N1/N2): step 전달·신규 action 제출·FINISH 없이 cleanup만 수행한다.
+
+        `finish()`/`run()`과 달리 `_run_terminal`을 부르지 않으므로 FINISH·scenario event·
+        provider.submit이 발생하지 않는다(취소·인터럽트·arm 실패의 안전한 정리 경로). `cause`를
+        실패로 기록해 결과를 ERROR/ABORTED로 확정하고(성공 합성 금지), 이미 제출된 action은 신규
+        제출 없이 terminal·소유권만 추적한다(`_harvest_pending`). 인터럽트는 여기서 재전달하지
+        않고 결과를 돌려준다 — 원형 재전달은 caller가 관장한다(cleanup 오류로 원인을 덮지 않도록)."""
+        if self._result is not None:
+            return self._result
+        self._terminal_done = True  # FINISH·terminal 억제(신규 event/action 없음)
+        if cause is not None:
+            self._record_failure(cause)
+        return self._finalize(scenario_verdict, raised=None, reraise_interrupt=False)
+
     def _finalize(self, scenario_verdict: ScenarioVerdict,
-                  *, raised: BaseException | None) -> WorkloadResult:
+                  *, raised: BaseException | None,
+                  reraise_interrupt: bool = True) -> WorkloadResult:
         """cleanup·lease 반환·결과 조립을 정확히 한 번(idempotent) 수행한다(§13).
 
         재진입 안전: `_result`가 세워지면 그 값을 돌려준다. cleanup 시작 전에 evidence 없는
         **최소 결과**를 먼저 확정해, close/lease-release가 인터럽트(KeyboardInterrupt 등)로
         중단돼도 재진입 시 `_result`가 None으로 남지 않게 한다(그 뒤 전체 결과로 덮어씀).
         lease는 close가 어떻게 끝나든 반드시 정상 소유권으로 반환하고, 인터럽트는 cleanup·
-        결과 저장 뒤 상위로 재전달한다.
+        결과 저장 뒤 상위로 재전달한다. `reraise_interrupt=False`(abort 경로)면 재전달을 caller에
+        맡기고 결과만 돌려준다.
         """
 
         if self._result is not None:
@@ -395,7 +412,7 @@ class WorkloadRunner:
         evidence_dict["failure_codes"] = list(self._failure_codes)
         evidence_dict["uncertain_submissions"] = copy.deepcopy(list(self._uncertain_submissions.values()))
         self._result = self._build_result(scenario_verdict, evidence=evidence_dict)
-        if self._interrupt is not None:
+        if self._interrupt is not None and reraise_interrupt:
             raise self._interrupt
         return self._result
 

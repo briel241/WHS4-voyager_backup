@@ -41,7 +41,7 @@ if _LINUX:
     from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
     from vdeter.stage8.poc_api.messages import build_message
     from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.poc_api.protocol import ACTION_SUBMIT
+    from vdeter.stage8.poc_api.protocol import ACTION_RESULT, ACTION_SUBMIT
     from vdeter.stage8.testing.execution_fakes import write_poc_package
     from vdeter.stage8.testing.fakes import FakeClock, make_observation
 
@@ -459,6 +459,106 @@ class R11BoundedTeeTest(_Base):
         # cleanup 뒤에도 accepted correlation 기록은 폐기되지 않는다(unresolved/accepted 보존).
         self.assertIn(rid, conn._accepted)
         self.assertIn(rid, conn._results)
+        self._assert_no_residue(conn)
+
+
+class N3AcceptedReplayTee(_Base):
+    """N3: accepted/unknown replay가 pending result 상한을 우회하던 문제. 같은 request를 반복 전달해도
+    _new_results는 rid별 1개로 coalesce하고 provider는 정확히 1회만 호출한다(멱등성·correlation 보존)."""
+
+    def _accepted_submit(self, conn, rid="same-request", extra=None):
+        action = {"action_kind": "REPLAY_PACKET", "target": "ROC", "payload": {"packet_hex": "0102"}}
+        if extra:
+            action.update(extra)
+        msg = build_message(ACTION_SUBMIT, session_id="s1", workload_id=conn.engine.workload_id,
+                            connection_epoch=conn.engine.connection_epoch, protocol_minor=0,
+                            body={"request_id": rid, "action": action})
+        conn._handle_inbound(json.dumps(msg).encode())
+
+    def test_n3_repeated_accepted_replay_coalesces_provider_once(self):
+        conn, provider, seams, snap = self._connection("wn3a", script=_REACTIVE, base="react")
+        conn.start()
+        self.assertTrue(conn.running)
+        conn._server.send_packet = lambda packet: None  # 배압 회피(엔진·tee·parser는 실제)
+        for _ in range(1000):
+            self._accepted_submit(conn)
+        info = {"new_results": len(conn._new_results),
+                "cached_requests": conn.engine.residual_snapshot()["cached_requests"],
+                "provider_calls": conn.engine.evidence["provider_submit_calls"],
+                "coalesced": conn.tee_overflow["results_coalesced"]}
+        # 멱등성: engine cache 1, provider 정확히 1회. 큐는 rid 1개로 유계(1000 미보관).
+        self.assertEqual(info["cached_requests"], 1, info)
+        self.assertEqual(info["provider_calls"], 1, info)
+        self.assertLessEqual(info["new_results"], 32, info)
+        self.assertEqual(info["new_results"], 1, info)
+        self.assertGreaterEqual(info["coalesced"], 990, info)
+        # accepted correlation은 보존된다(삭제 아님).
+        self.assertIn("same-request", conn._results)
+        self.assertIn("same-request", conn._accepted)
+        conn.close()
+        self._assert_no_residue(conn)
+
+    def test_n3_poll_resets_pending_then_single_redeliver(self):
+        # poll로 drain하면 pending이 초기화되고, 이후 같은 accepted가 다시 정확히 1회만 큐에 오른다
+        # (poll 사이 반복은 다시 coalesce). runner의 _processed가 재제출 없이 중복을 흡수한다.
+        conn, provider, seams, snap = self._connection("wn3b", script=_REACTIVE, base="react")
+        conn.start()
+        conn._server.send_packet = lambda packet: None
+        for _ in range(10):
+            self._accepted_submit(conn)
+        first = conn.poll_new_results()
+        self.assertEqual(len(first), 1)
+        for _ in range(10):
+            self._accepted_submit(conn)
+        second = conn.poll_new_results()
+        self.assertEqual(len(second), 1)                     # poll 뒤 다시 1개(중복 아님)
+        self.assertEqual(conn.engine.evidence["provider_submit_calls"], 1)  # 여전히 1회
+        conn.close()
+        self._assert_no_residue(conn)
+
+    def test_n3_contradictory_replay_is_fail_closed(self):
+        # 같은 rid에 다른 결과 body가 오면 성공으로 덮지 않고 fail-closed 카운트(방어적; 정상 engine은
+        # cache로 동일 body를 돌려주므로 발생하지 않는다). _observe_outbound를 직접 구동해 검증.
+        conn, provider, seams, snap = self._connection("wn3c")
+        conn.start()
+        base = {"type": ACTION_RESULT, "body": {"request_id": "rid-x", "admission": "accepted",
+                                                "physical_channel": "lower", "error_code": None}}
+        conn._observe_outbound(base)
+        self.assertIn("rid-x", conn._results)
+        prior = dict(conn._results["rid-x"])
+        contradictory = {"type": ACTION_RESULT, "body": {"request_id": "rid-x", "admission": "accepted",
+                                                         "physical_channel": "upper", "error_code": None}}
+        conn._observe_outbound(contradictory)
+        self.assertEqual(conn._results["rid-x"], prior)      # 원 결과 보존(덮어쓰기 없음)
+        self.assertEqual(conn.tee_overflow["contradictory_result"], 1)
+        conn.close()
+        self._assert_no_residue(conn)
+
+    def test_n3_unknown_replay_coalesces_and_preserves_correlation(self):
+        # unknown admission replay도 coalesce하고 correlation(_results)을 유지한다. 직접 구동.
+        conn, provider, seams, snap = self._connection("wn3d")
+        conn.start()
+        msg = {"type": ACTION_RESULT, "body": {"request_id": "rid-u", "admission": "unknown",
+                                               "physical_channel": "lower", "error_code": None}}
+        for _ in range(500):
+            conn._observe_outbound(dict(msg))
+        self.assertEqual(len(conn._new_results), 1)          # 1개로 coalesce
+        self.assertGreaterEqual(conn.tee_overflow["results_coalesced"], 499)
+        self.assertIn("rid-u", conn._results)                # unknown correlation 보존
+        conn.close()
+        self._assert_no_residue(conn)
+
+    def test_n3_distinct_accepted_preserved_within_engine_cap(self):
+        # 서로 다른 accepted rid는 correlation을 위해 각각 1회 전달·보존된다(engine cap 32 이내).
+        conn, provider, seams, snap = self._connection("wn3e")
+        conn.start()
+        for i in range(20):
+            conn._observe_outbound({"type": ACTION_RESULT, "body": {
+                "request_id": f"rid-{i}", "admission": "accepted",
+                "physical_channel": "lower", "error_code": None}})
+        self.assertEqual(len(conn._new_results), 20)
+        self.assertEqual(len(conn._accepted), 20)
+        conn.close()
         self._assert_no_residue(conn)
 
 

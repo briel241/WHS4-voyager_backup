@@ -19,7 +19,6 @@ production surface(`poc_api`)가 아니다.
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import tempfile
@@ -28,7 +27,7 @@ from dataclasses import dataclass, field
 
 from .._supervisor.engine import EngineState, SupervisorEngine
 from ..poc_api import protocol
-from ..poc_api.codec import CodecError, decode_wire_packet, encode_wire_packet
+from ..poc_api.codec import decode_wire_packet, encode_wire_packet
 from ..poc_api.errors import PocError, PocErrorCode
 from ..poc_api.limits import ACK_MAX_DELAY_S
 from ..poc_api.messages import parse_envelope
@@ -161,14 +160,10 @@ class LoopbackConnection:
 
     # --- routing ------------------------------------------------------------
     def _wire(self, msg: dict):
-        # 정상 message는 실제 wire codec을 통과시켜 직렬화 경계를 흉내 낸다. 단, Stage 3
-        # deadline abort ERROR의 detail에는 float(grace_s 등)가 들어갈 수 있는데 canonical
-        # codec은 float를 금지한다. 이는 기존 Stage 3 특성(Stage 4 범위 밖)이므로, 그런
-        # message는 structural deep-copy로만 전달해 fail-closed 의미를 유지한다.
-        try:
-            return parse_envelope(decode_wire_packet(encode_wire_packet(msg)))
-        except CodecError:
-            return parse_envelope(copy.deepcopy(msg))
+        # 모든 message는 **실제 wire codec**(canonical, float 금지)을 통과한다. R13 전에는 timeout
+        # ERROR의 float detail 때문에 CodecError를 deep-copy로 우회했으나, 그 우회는 실 wire가 동작한다는
+        # 증거가 아니었다. 이제 engine이 ms 정수 detail만 내므로 우회 없이 인코딩 실패는 그대로 드러낸다.
+        return parse_envelope(decode_wire_packet(encode_wire_packet(msg)))
 
     def _route(self, origin: str, messages: list) -> None:
         """origin('client'|'server')이 낸 message를 상대에 전달하고 cascade한다."""

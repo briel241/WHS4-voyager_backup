@@ -154,6 +154,15 @@ class PocWorkload:
         """child spawn + on_start → ARMED. 실패 시 예외(scenario submit 금지)."""
         return self._runner.arm()
 
+    def abort(self, scenario_verdict: ScenarioVerdict = ScenarioVerdict.NOT_RUN, *,
+              cause: BaseException | None = None):
+        """cleanup-only 종료(N1/N2): step 전달·신규 action·FINISH 없이 정리만 한다.
+
+        arm 실패·취소·submit/wait 예외·인터럽트에서 쓴다. `cause`를 실패로 기록해 ERROR/ABORTED로
+        확정하고(COMPLETED 금지), 인터럽트는 재전달하지 않고 결과를 돌려준다 — 원형 재전달은 caller가
+        관장한다. `PocWorkload.run`과 달리 저장된 scenario step을 전달하지 않는다."""
+        return self._runner.abort(scenario_verdict, cause=cause)
+
     def run(self, scenario_verdict: ScenarioVerdict):
         """ARMED 후: workload event 전달 → terminal → finish → evidence → cleanup. fail-closed 결과."""
         try:

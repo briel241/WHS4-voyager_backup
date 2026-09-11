@@ -186,13 +186,20 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
         server_config=server_config or ServerCapabilityConfig(), src_path=src_path)
     try:
         armed = workload.arm()
-    except BaseException as exc:  # noqa: BLE001 - arm 실패: 자원 정리 후 fail-closed 보고
-        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN)
+    except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+        # N2: 취소·인터럽트는 cleanup-only(신규 event/action·FINISH 없음) 뒤 **원형 그대로** 재전달한다.
+        # PocRunError로 변환하지 않고, cleanup 과정에서 scenario step을 전달하지 않는다(COMPLETED 금지).
+        workload.abort(ScenarioVerdict.NOT_RUN, cause=exc)
+        raise
+    except Exception as exc:  # noqa: BLE001 - arm 실패(일반 예외): 자원 정리 후 fail-closed 보고
+        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN, cause=exc)
         error = PocRunError(f"PoC arm 실패: {type(exc).__name__}: {exc}")
         error.evidence = evidence
         raise error from exc
     if not armed:
-        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN)
+        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN,
+                                      cause=PocError(PocErrorCode.POC_PROTOCOL_ERROR,
+                                                     "ARMED 미도달"))
         error = PocRunError("PoC가 ARMED에 도달하지 못했습니다(scenario submit 금지)")
         error.evidence = evidence
         raise error
@@ -214,10 +221,43 @@ def finish_workload(workload, *, scenario_verdict: ScenarioVerdict) -> dict:
     return _result_evidence(result, workload)
 
 
-def _finalize_evidence(workload, scenario_verdict: ScenarioVerdict) -> dict:
-    """arm 실패 등에서 cleanup·evidence만 확정한다(deliver 없이 finish)."""
-    result = workload.run(scenario_verdict)  # steps 없이도 finish→cleanup을 수행
+def _finalize_evidence(workload, scenario_verdict: ScenarioVerdict, *,
+                       cause: BaseException | None = None) -> dict:
+    """arm 실패·취소 등에서 **cleanup-only**로 evidence만 확정한다(N2).
+
+    이전에는 `workload.run`을 불러 저장된 scenario step을 전달했고, 그 결과 취소 cleanup 중에도
+    SCENARIO_STARTED가 전달돼 RF-off TX group이 생성되고 evidence가 COMPLETED로 남는 결함이 있었다.
+    이제 `workload.abort`(step 전달·신규 provider.submit·FINISH 없음)를 써서 정리만 하고 `cause`를
+    실패로 기록해 ERROR/ABORTED로 확정한다. 이미 제출된 action은 신규 제출 없이 소유권만 추적한다."""
+    result = workload.abort(scenario_verdict, cause=cause)
     return _result_evidence(result, workload)
+
+
+def abort_prepared(prep: dict, *, cause: BaseException, out) -> dict | None:
+    """N1: 이미 ARMED된 PoC를 scenario submit/wait/render 실패·인터럽트에서 cleanup-only로 정리한다.
+
+    신규 event/action 없이 child·socket·workload dir·provider 예약을 정리하고, `cause`를 실패로
+    기록해 ERROR/ABORTED evidence를 만든다. **원래 예외/인터럽트를 cleanup 오류로 덮지 않도록** 자체
+    예외(재전달된 인터럽트 포함)는 삼키고 evidence를 `prep["evidence"]`에 남긴다 — 원형 재전달은
+    caller가 한다. coordinator session.close만으로 PoC가 정리됐다고 추정하지 않는다."""
+    workload = (prep or {}).get("workload")
+    if workload is None:
+        return None
+    evidence = None
+    try:
+        result = workload.abort(cause=cause)
+        evidence = _result_evidence(result, workload)
+    except BaseException as cleanup_exc:  # noqa: BLE001 - 원래 예외 보존; cleanup 오류는 evidence로만
+        evidence = {"status": "ERROR", "poc_infrastructure": "ABORTED",
+                    "infrastructure_error_code": "POC_RADIO_OWNERSHIP_UNCERTAIN",
+                    "cleanup_error": type(cleanup_exc).__name__}
+    prep["evidence"] = evidence
+    try:
+        out("  poc aborted (scenario path %s) infrastructure=%s severity=%s"
+            % (type(cause).__name__, evidence.get("poc_infrastructure"), poc_severity(evidence)))
+    except Exception:  # noqa: BLE001 - 로그 실패가 정리·재전달을 막지 않는다
+        pass
+    return evidence
 
 
 def _result_evidence(result, workload) -> dict:
@@ -291,6 +331,7 @@ __all__ = (
     "select_snapshot",
     "resolve_catalog_selection",
     "prepare_workload",
+    "abort_prepared",
     "scenario_verdict_from_status",
     "finish_workload",
     "poc_severity",

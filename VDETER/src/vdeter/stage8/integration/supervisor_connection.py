@@ -73,8 +73,10 @@ class SupervisorConnection(PocSupervisor):
         self._slot_counter = 0          # 반응형 trigger용 단조 정수 slot
         # R11: tee overflow 계수(임의 유실을 감추지 않고 요약으로 노출). byte 예산 누적.
         self._tee_bytes = 0
+        self._pending_rids: set = set()  # N3: _new_results에 아직 poll되지 않은 request_id(중복 큐 방지)
         self._tee_overflow = {"submitted_overflow": 0, "submitted_duplicate": 0,
-                              "results_overflow": 0, "new_results_overflow": 0}
+                              "results_overflow": 0, "new_results_overflow": 0,
+                              "results_coalesced": 0, "contradictory_result": 0}
 
     # --- outbound/inbound tee ----------------------------------------------
     def _send_all(self, messages) -> None:
@@ -99,16 +101,28 @@ class SupervisorConnection(PocSupervisor):
             admission = body.get("admission")
             must_keep = admission in ("accepted", "unknown")  # correlation 보존 대상(R11)
             record = dict(body)
-            # _results: accepted/unknown은 항상 보존; rejected는 entry·byte 예산 안에서만.
-            if rid in self._results:
-                self._results[rid] = record  # 멱등 갱신(reconnect 재emit 등)
+            prior = self._results.get(rid)
+            # N3: 같은 rid에 **모순된** 결과(다른 body)가 오면 성공으로 덮지 않고 fail-closed로 센다.
+            # 정상 replay는 engine cache가 동일 body를 돌려주므로 이 경로는 방어적이다.
+            if prior is not None and prior != record:
+                self._tee_overflow["contradictory_result"] += 1
+                return
+            # _results: rid별 1개(dict). accepted/unknown은 상한과 무관히 correlation을 보존하고,
+            # rejected 신규 rid는 entry·byte 예산 안에서만 보존한다. 재emit(동일 body)은 멱등 갱신.
+            if prior is not None:
+                self._results[rid] = record
             elif must_keep or self._tee_admit(record):
                 self._results[rid] = record
             else:
                 self._tee_overflow["results_overflow"] += 1
-            # _new_results: accepted/unknown은 항상 전달; rejected는 큐 상한 안에서만.
-            if must_keep or len(self._new_results) < _TEE_MAX_ENTRIES:
+            # N3: _new_results는 **rid별 최대 1개 pending**으로 coalesce한다. 같은 accepted/unknown을
+            # 1,000회 replay해도 pending이 이미 있으면 중복 큐 보관하지 않는다(멱등성·correlation은 유지,
+            # 상한 회피 아님). accepted/unknown 신규 rid는 correlation을 위해 상한과 무관히 1회 전달한다.
+            if rid in self._pending_rids:
+                self._tee_overflow["results_coalesced"] += 1
+            elif must_keep or len(self._new_results) < _TEE_MAX_ENTRIES:
                 self._new_results.append(record)
+                self._pending_rids.add(rid)
             else:
                 self._tee_overflow["new_results_overflow"] += 1
             if admission == "accepted" and isinstance(rid, str) and rid not in self._accepted:
@@ -237,6 +251,7 @@ class SupervisorConnection(PocSupervisor):
     def poll_new_results(self) -> list:
         out = list(self._new_results)
         self._new_results.clear()
+        self._pending_rids.clear()  # N3: drain 뒤 pending 초기화(다음 상태 갱신은 다시 전달 가능)
         return out
 
     def submitted_action(self, request_id: str):
@@ -257,7 +272,9 @@ class SupervisorConnection(PocSupervisor):
         if self.engine is None or self.engine.state != EngineState.RUNNING:
             return
         self._send_all(self.engine.begin_finish(self._clock.monotonic()))
-        # on_finish(child) 완료까지 pump(bounded). 완료 못 해도 close가 force_close로 처리한다.
+        # on_finish(child) 완료까지 pump. R12: on_finish 예산(2초)은 engine의 FINISHING deadline이
+        # 직접 강제한다(초과 → POC_CALLBACK_TIMEOUT, ABORTED). 아래 timeout은 그 deadline을 연장하는
+        # 값이 아니라 serve loop의 상한일 뿐이다(예산 초과는 pump timeout 이전에 확정된다).
         self.run_until(lambda: self.engine.state != EngineState.FINISHING, timeout=self._pump_timeout)
 
     def close(self) -> dict:

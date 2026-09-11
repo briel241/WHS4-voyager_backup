@@ -701,30 +701,45 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
     out("  running " + label)
-    workload_id = session.submit_workload(
-        scenario_id, certificate_case,
-        on_settle=lambda remaining, prev: out(
-            "  settling %.0f s (RX pipeline drain after %s)"
-            % (remaining, prev)))
-    started = clock()
-    trace_rows = []
-    result = session.wait_result(workload_id, on_trace=trace_rows.append)
-    result.setdefault("wall_clock_s", round(clock() - started, 1))
-    result.setdefault("workload_id", workload_id)
-    result.setdefault("scenario_id", scenario_id)
-    result.setdefault("certificate_case", certificate_case)
-    # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
-    for line in scenario_report.workload_report_lines(
-            trace_rows, result, run_root=getattr(session, "run_root", None),
-            index=index, total=total):
-        out(line)
-    out(result_line(result))
+    # N1: PoC를 arm한 뒤 scenario submit·wait·render·finish 중 어디서 예외·인터럽트가 나도 armed PoC를
+    # cleanup-only로 정리한다(신규 action 없음). 원래 예외/인터럽트를 cleanup 오류로 덮지 않고 재전달하며,
+    # coordinator session.close만으로 PoC가 정리됐다고 추정하지 않는다.
+    _poc_armed = prep is not None and prep["kind"] == "armed"
+    try:
+        workload_id = session.submit_workload(
+            scenario_id, certificate_case,
+            on_settle=lambda remaining, prev: out(
+                "  settling %.0f s (RX pipeline drain after %s)"
+                % (remaining, prev)))
+        started = clock()
+        trace_rows = []
+        result = session.wait_result(workload_id, on_trace=trace_rows.append)
+        result.setdefault("wall_clock_s", round(clock() - started, 1))
+        result.setdefault("workload_id", workload_id)
+        result.setdefault("scenario_id", scenario_id)
+        result.setdefault("certificate_case", certificate_case)
+        # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
+        for line in scenario_report.workload_report_lines(
+                trace_rows, result, run_root=getattr(session, "run_root", None),
+                index=index, total=total):
+            out(line)
+        out(result_line(result))
+    except BaseException as exc:  # noqa: BLE001 - scenario 경로 실패: armed PoC 정리 후 원형 재전달
+        if _poc_armed:
+            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
+        raise
     # R1/R4: 실 scenario 실행 뒤 PoC를 종료하고, 실제 scenario verdict(§11.1)를 명시 전달한다.
-    # scenario 판정과 PoC 판정은 독립이며 서로 재계산하지 않는다.
-    if prep is not None and prep["kind"] == "armed":
-        # stage8 직접 import 금지(import 경계): 권위 verdict 매핑은 poc_run adapter가 담당한다.
-        scenario_verdict = poc_ctx["module"].scenario_verdict_from_status(result.get("status"))
-        poc_evidence = _finish_poc(poc_ctx, prep, scenario_verdict=scenario_verdict, out=out)
+    # scenario 판정과 PoC 판정은 독립이며 서로 재계산하지 않는다. finish 중 실패도 cleanup으로 정리한다.
+    if _poc_armed:
+        try:
+            # stage8 직접 import 금지(import 경계): 권위 verdict 매핑은 poc_run adapter가 담당한다.
+            scenario_verdict = poc_ctx["module"].scenario_verdict_from_status(result.get("status"))
+            poc_evidence = _finish_poc(poc_ctx, prep, scenario_verdict=scenario_verdict, out=out)
+        except BaseException as exc:  # noqa: BLE001 - finish 중 예외·인터럽트도 cleanup-only 정리
+            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
+            result["poc"] = prep.get("evidence")
+            result["poc_severity"] = poc_ctx["module"].poc_severity(prep.get("evidence"))
+            raise
         result["poc"] = poc_evidence
         result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
     return result

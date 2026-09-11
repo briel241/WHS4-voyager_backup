@@ -15,11 +15,12 @@ import uuid
 from enum import Enum
 
 from ..poc_api import protocol
-from ..poc_api.codec import canonical_sha256, encode_canonical
+from ..poc_api.codec import CodecError, canonical_sha256, encode_canonical
 from ..poc_api.errors import PocError, PocErrorCode
 from ..poc_api.limits import (
     ARMED_DEADLINE_S,
     CALLBACK_ON_EVENT_DEADLINE_S,
+    CALLBACK_ON_FINISH_DEADLINE_S,
     ACK_MAX_DELAY_S,
     HELLO_DEADLINE_S,
     MAX_ACTION_DESCRIPTOR_BYTES,
@@ -114,6 +115,7 @@ class SupervisorEngine:
         self._hello_deadline: float | None = None
         self._armed_deadline: float | None = None
         self._oldest_unacked_sent_at: float | None = None
+        self._finish_deadline: float | None = None  # R12: on_finish(FINISHING) 예산(§11)
 
         # event pipeline
         self._queue: list[_QueuedEvent] = []
@@ -160,7 +162,23 @@ class SupervisorEngine:
     def _fail(self, error: PocError) -> list:
         self.fatal_error = error
         self.state = EngineState.ABORTED
-        return [self._msg(protocol.ERROR, error.as_json_value())]
+        message = self._msg(protocol.ERROR, error.as_json_value())
+        # R13: 구조화된 실패는 반드시 실 wire(canonical codec, float 금지)를 건너야 한다. detail이
+        # 비정규(float 등)면 code·severity를 보존한 채 detail을 명시적 encoding 오류 요약으로
+        # 대체한다(삼키지 않음; 원래 detail은 fatal_error에 그대로 남는다). codec은 완화하지 않는다.
+        try:
+            encode_canonical(message)
+        except CodecError:
+            safe = PocError(error.code, str(error), detail={
+                "detail_encoding_error": "detail not wire-encodable(canonical)",
+                "detail_keys": sorted(str(key) for key in error.detail)})
+            message = self._msg(protocol.ERROR, safe.as_json_value())
+        return [message]
+
+    @staticmethod
+    def _ms(seconds: float) -> int:
+        """wire detail용 정수 milliseconds(R13: canonical codec float 금지, 단위는 이름에 명시)."""
+        return int(round(float(seconds) * 1000.0))
 
     # --- handshake ----------------------------------------------------------
     def start_handshake(self, now: float) -> None:
@@ -693,6 +711,8 @@ class SupervisorEngine:
         if self.state not in (EngineState.RUNNING,):
             return []
         self.state = EngineState.FINISHING
+        # R12: on_finish 예산(§11, 2초)을 제어 loop이 직접 강제한다. 일반 pump timeout으로 연장하지 않는다.
+        self._finish_deadline = now + CALLBACK_ON_FINISH_DEADLINE_S
         return [self._msg(protocol.FINISH, {"cumulative_sequence": self.last_acked_sequence})]
 
     def _on_finish_result(self, parsed, now):
@@ -701,10 +721,17 @@ class SupervisorEngine:
             return self._fail(binding_error)
         if self.state != EngineState.FINISHING:
             return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR, "예상치 못한 FINISH_RESULT"))
+        if self._finish_deadline is not None and now > self._finish_deadline:
+            # R12: 예산 뒤에 도착한 FINISH_RESULT는 성공이 아니다(late callback → POC_ABORT).
+            return self._fail(PocError(PocErrorCode.POC_CALLBACK_TIMEOUT,
+                                       "on_finish deadline 초과(late FINISH_RESULT)",
+                                       detail={"deadline_ms": self._ms(CALLBACK_ON_FINISH_DEADLINE_S)}))
+        self._finish_deadline = None
         self.state = EngineState.CLOSING
         return [self._msg(protocol.CLOSE, {"infrastructure": "COMPLETED"})]
 
     def force_close(self, now: float, *, infrastructure: str = "COMPLETED") -> list:
+        self._finish_deadline = None
         self.state = EngineState.CLOSING
         return [self._msg(protocol.CLOSE, {"infrastructure": infrastructure})]
 
@@ -713,20 +740,29 @@ class SupervisorEngine:
 
     # --- deadline -----------------------------------------------------------
     def tick(self, now: float) -> list:
+        # R13: timeout detail은 정수 ms(단위 명시)로만 낸다 — canonical wire codec은 float를 금지한다.
         if self.state == EngineState.AWAIT_HELLO and self._hello_deadline is not None:
             if now > self._hello_deadline:
                 return self._fail(PocError(PocErrorCode.POC_PROTOCOL_ERROR,
-                                           "HELLO deadline 초과", detail={"deadline_s": HELLO_DEADLINE_S}))
+                                           "HELLO deadline 초과",
+                                           detail={"deadline_ms": self._ms(HELLO_DEADLINE_S)}))
         if self.state == EngineState.AWAIT_ARMED and self._armed_deadline is not None:
             if now > self._armed_deadline:
                 return self._fail(PocError(PocErrorCode.POC_CALLBACK_TIMEOUT,
                                            "on_start(ARMED) deadline 초과",
-                                           detail={"deadline_s": ARMED_DEADLINE_S}))
+                                           detail={"deadline_ms": self._ms(ARMED_DEADLINE_S)}))
         if self.state == EngineState.RUNNING and self._oldest_unacked_sent_at is not None:
             if now - self._oldest_unacked_sent_at > SERVER_EVENT_ACK_GRACE_S:
                 return self._fail(PocError(PocErrorCode.POC_CALLBACK_TIMEOUT,
                                            "on_event ACK grace 초과(callback hang)",
-                                           detail={"grace_s": SERVER_EVENT_ACK_GRACE_S}))
+                                           detail={"grace_ms": self._ms(SERVER_EVENT_ACK_GRACE_S)}))
+        if self.state == EngineState.FINISHING and self._finish_deadline is not None:
+            # R12: on_finish가 예산(2초) 안에 FINISH_RESULT를 내지 않으면 callback timeout(POC_ABORT).
+            # child가 영원히 돌아오지 않아도 여기서 실패를 확정하고 상위가 종료 escalation을 계속한다.
+            if now > self._finish_deadline:
+                return self._fail(PocError(PocErrorCode.POC_CALLBACK_TIMEOUT,
+                                           "on_finish deadline 초과",
+                                           detail={"deadline_ms": self._ms(CALLBACK_ON_FINISH_DEADLINE_S)}))
         return []
 
     def next_deadline(self, now: float) -> float | None:
@@ -739,6 +775,8 @@ class SupervisorEngine:
             candidates.append(self._armed_deadline)
         if self.state == EngineState.RUNNING and self._oldest_unacked_sent_at is not None:
             candidates.append(self._oldest_unacked_sent_at + SERVER_EVENT_ACK_GRACE_S)
+        if self.state == EngineState.FINISHING and self._finish_deadline is not None:
+            candidates.append(self._finish_deadline)  # R12: serve loop이 on_finish 예산에 깨어난다
         if not candidates:
             return None
         return max(0.0, min(candidates) - now)

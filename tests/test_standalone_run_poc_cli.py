@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -548,6 +549,174 @@ class ExecuteLevelPocEndToEnd(unittest.TestCase):
             sess, summary = self._summary(factory)
             self.assertNotIn("poc", summary["workloads"][0])
             self.assertFalse(any("Stage 8 PoC" in ln for ln in lines))
+
+
+_REACTIVE_ANY = (
+    "class Poc:\n"
+    "    def on_start(self, context):\n        return []\n"
+    "    def on_event(self, event, context):\n"
+    "        return [context.replay(target='ROC', payload={'packet_hex': '01020304'})]\n"
+    "    def on_finish(self, context):\n        return None\n"
+).encode("utf-8")
+
+
+class _SubmitFailSession(_PocDeviceSession):
+    def submit_workload(self, scenario_id, certificate_case="normal", *, on_settle=None):
+        self.submitted.append((scenario_id, certificate_case))
+        raise RuntimeError("injected submit failure")
+
+
+class _WaitInterruptSession(_PocDeviceSession):
+    def submit_workload(self, scenario_id, certificate_case="normal", *, on_settle=None):
+        self.submitted.append((scenario_id, certificate_case))
+        return "actual-session-workload"
+
+    def wait_result(self, workload_id, *, timeout_s=None, on_trace=None, on_poll=None):
+        raise KeyboardInterrupt("injected wait interrupt")
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
+class PocCleanupN1N2Test(unittest.TestCase):
+    """N1/N2 CLI 종단 — scenario submit/wait 실패·arm 인터럽트에서 armed PoC의 cleanup-only 정리,
+    신규 action 0, 원형 예외/인터럽트 재전달, COMPLETED 금지. 실 child·socket·RF-off provider."""
+
+    def _ctx(self, poc_path, run_root, run_id):
+        option = poc_run.resolve_option(poc=poc_path, poc_dir=None, interactive=False)
+        return {"module": poc_run, "option": option, "run_root": run_root,
+                "run_id": run_id, "interactive": False,
+                "input_fn": lambda p: "", "src_path": _SRC}
+
+    def _run_capturing(self, session, ctx):
+        """`_run_workload`를 돌리되 준비된 PocWorkload를 붙잡아 종료 뒤 잔존을 검사한다."""
+        captured = []
+        original = poc_run.prepare_poc_workload
+
+        def capture(**kwargs):
+            w = original(**kwargs)
+            captured.append(w)
+            return w
+        caught = None
+        with patch.object(poc_run, "prepare_poc_workload", capture):
+            try:
+                run_cmd._run_workload(session, "SC-VDE-006", "normal", out=lambda _: None,
+                                      clock=time.monotonic, poc_ctx=ctx, poc_id=None)
+            except BaseException as exc:  # noqa: BLE001
+                caught = exc
+        return caught, captured
+
+    def test_n1_submit_exception_cleans_armed_poc_and_reraises(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _SubmitFailSession(run_root, "run-n1submit")
+            caught, captured = self._run_capturing(session, self._ctx(poc_path, run_root, "run-n1submit"))
+            self.assertIsInstance(caught, RuntimeError)      # 원래 예외 재전달(덮어쓰기 없음)
+            self.assertEqual(len(captured), 1)
+            conn = captured[0].connection
+            res = conn.residuals()
+            self.assertFalse(res["child_alive"], res)        # armed PoC child 정리됨
+            self.assertFalse(res["socket_file_exists"], res)
+            self.assertFalse(res["workload_dir_exists"], res)
+            self.assertEqual(captured[0].seams.group_tx.committed_groups, 0)  # 신규 action 0
+
+    def test_n1_wait_interrupt_cleans_armed_poc_and_reraises(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _WaitInterruptSession(run_root, "run-n1wait")
+            caught, captured = self._run_capturing(session, self._ctx(poc_path, run_root, "run-n1wait"))
+            self.assertIsInstance(caught, KeyboardInterrupt)  # 원형 인터럽트 재전달
+            self.assertEqual(len(captured), 1)
+            res = captured[0].connection.residuals()
+            self.assertFalse(res["child_alive"], res)
+            self.assertFalse(res["socket_file_exists"], res)
+            self.assertFalse(res["workload_dir_exists"], res)
+            self.assertEqual(captured[0].seams.group_tx.committed_groups, 0)
+
+    def test_n2_arm_interrupt_reraises_original_no_action_no_completed(self):
+        # ARMED 직후 KeyboardInterrupt: PocRunError로 변환하지 않고 원형 재전달, cleanup 중 신규 event/
+        # action 0(TX group 0), 결과 COMPLETED 아님. 실 child.
+        from vdeter.stage8.integration.entry import select_and_snapshot
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            write_poc_package(poc_dir, "reactive", poc_id="reactive", script=_REACTIVE_ANY)
+            poc_path = os.path.join(poc_dir, "reactive.py")
+            session = _PocDeviceSession(run_root, "run-n2")
+            snap = select_and_snapshot(scenario_id="SC-VDE-006",
+                                       dest_dir=os.path.join(run_root, "snapshot"),
+                                       poc=poc_path, interactive=False)
+            captured = []
+            original = poc_run.prepare_poc_workload
+
+            def capture(**kwargs):
+                w = original(**kwargs)
+                captured.append(w)
+                real_arm = w.arm
+
+                def interrupted():
+                    assert real_arm()               # 실제 ARMED 도달
+                    raise KeyboardInterrupt("injected immediately after ARMED")
+                w.arm = interrupted
+                return w
+            caught = None
+            with patch.object(poc_run, "prepare_poc_workload", capture):
+                try:
+                    poc_run.prepare_workload(session, snap, scenario_id="SC-VDE-006",
+                                             run_id="r-n2", workload_id="w-n2", src_path=_SRC)
+                except BaseException as exc:  # noqa: BLE001
+                    caught = exc
+            self.assertIsInstance(caught, KeyboardInterrupt)          # 원형 재전달(PocRunError 아님)
+            self.assertEqual(session.submitted, [])                   # scenario submit 0
+            self.assertEqual(captured[0].seams.group_tx.committed_groups, 0)  # cleanup TX 0
+            res = captured[0].connection.residuals()
+            self.assertFalse(res["child_alive"], res)
+            self.assertFalse(res["socket_file_exists"], res)
+            # 재진입 안전: 다시 abort해도 중복 실행·잔존 없음.
+            captured[0].abort()
+            self.assertFalse(captured[0].connection.residuals()["child_alive"])
+
+    def test_n2_arm_ordinary_failure_is_pocrunerror_aborted_no_action(self):
+        # arm이 일반 예외로 실패하면 PocRunError(.evidence ABORTED/ERROR), 신규 action 0.
+        from vdeter.stage8.integration.entry import select_and_snapshot
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            write_poc_package(poc_dir, "reactive", poc_id="reactive", script=_REACTIVE_ANY)
+            poc_path = os.path.join(poc_dir, "reactive.py")
+            session = _PocDeviceSession(run_root, "run-n2e")
+            snap = select_and_snapshot(scenario_id="SC-VDE-006",
+                                       dest_dir=os.path.join(run_root, "snapshot"),
+                                       poc=poc_path, interactive=False)
+            captured = []
+            original = poc_run.prepare_poc_workload
+
+            def capture(**kwargs):
+                w = original(**kwargs)
+                captured.append(w)
+                real_arm = w.arm
+
+                def failing():
+                    assert real_arm()
+                    raise RuntimeError("injected ordinary arm failure")
+                w.arm = failing
+                return w
+            caught = None
+            with patch.object(poc_run, "prepare_poc_workload", capture):
+                try:
+                    poc_run.prepare_workload(session, snap, scenario_id="SC-VDE-006",
+                                             run_id="r-n2e", workload_id="w-n2e", src_path=_SRC)
+                except BaseException as exc:  # noqa: BLE001
+                    caught = exc
+            self.assertEqual(type(caught).__name__, "PocRunError")
+            self.assertIn(caught.evidence["poc_infrastructure"], ("ABORTED", "ERROR"))
+            self.assertNotEqual(caught.evidence["poc_infrastructure"], "COMPLETED")
+            self.assertEqual(captured[0].seams.group_tx.committed_groups, 0)
+            self.assertFalse(captured[0].connection.residuals()["child_alive"])
 
 
 if __name__ == "__main__":
