@@ -154,7 +154,11 @@ def main() -> int:
 
     try:
         callbacks = load_entrypoint(script_path, entrypoint)
-    except Exception as error:  # noqa: BLE001 - 로드 실패는 fail-closed(연결 전 종료)
+    except KeyboardInterrupt:
+        raise  # 운영자 인터럽트는 전달(child가 non-zero로 종료)
+    except BaseException as error:  # noqa: BLE001 - import 시점 종료(SystemExit 포함)도 로드 실패
+        # 연구자 snapshot이 import 중 sys.exit()/SystemExit을 내면 clean exit(0)으로 오인되지
+        # 않도록 fail-closed non-zero로 고정한다(§6.4: 로드 실패는 연결 전 종료).
         sys.stderr.write(f"POC entrypoint 로드 실패: {error.__class__.__name__}\n")
         return 3
 

@@ -135,7 +135,10 @@ def _read_regular_file(dir_fd: int, name: str, max_bytes: int):
     symlink면 ELOOP로 예외, oversize면 예외. ((facts, data), None) 또는 (None, reason).
     """
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: FIFO/특수 파일에 대한 O_RDONLY open이 writer를 기다리며 무기한 block되는
+    # 것을 막는다(그렇지 않으면 아래 S_ISREG 거부가 도달 불가). regular file의 read는
+    # O_NONBLOCK 영향을 받지 않으므로 그대로 둔다(§6.1 fail-closed).
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(name, flags, dir_fd=dir_fd)
     except OSError as error:

@@ -20,7 +20,9 @@ production surface(`poc_api`)가 아니다.
 from __future__ import annotations
 
 import copy
+import json
 import os
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -407,7 +409,59 @@ def make_manifest_descriptor(**kwargs) -> PocManifestDescriptor:
     return build_manifest(**kwargs)
 
 
+class ResultWriteError(Exception):
+    """evidence fixture 기록 실패(fail-closed)."""
+
+
+def write_result_fixture(result, path: str) -> str:
+    """**시험 전용** evidence 파일 fixture writer(production writer 아님).
+
+    Stage 4는 production evidence writer를 두지 않는다. evidence를 쓰는 주체는 기존 runtime의
+    evidence pipeline이며 Stage 6 통합에서 연결된다. 이 helper는 read-only 경계
+    (`execution.render.render_results_file`, §12.3)를 검증할 fixture를 만들기 위한 것이다.
+
+    fixture여도 "확정 evidence는 불변"이라는 전제를 시험이 실제로 확인할 수 있도록 동일한
+    안전 속성을 갖는다: 기존 대상·symlink 거부(확정 1회), short write 검사, 임시 파일에 쓰고
+    `os.link`로 원자적 확정(중간 실패 시 대상 경로에 부분 JSON 없음), 임시 파일 정리.
+    """
+
+    payload = (json.dumps(result.as_json_value(), ensure_ascii=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    target = os.path.abspath(path)
+    directory = os.path.dirname(target) or "."
+    if os.path.lexists(target):
+        raise ResultWriteError(
+            f"이미 확정된 evidence를 덮어쓸 수 없습니다: {os.path.basename(target)}")
+    fd, tmp = tempfile.mkstemp(prefix=".result-", suffix=".tmp", dir=directory)
+    try:
+        try:
+            view = memoryview(payload)
+            total = 0
+            while total < len(view):
+                written = os.write(fd, view[total:])
+                if written <= 0:
+                    raise ResultWriteError("evidence write가 진행되지 않음(short write)")
+                total += written
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(tmp, target)  # 원자적 확정: 대상 존재 시 FileExistsError
+    except FileExistsError:
+        raise ResultWriteError(
+            f"이미 확정된 evidence를 덮어쓸 수 없습니다: {os.path.basename(target)}")
+    except OSError as exc:
+        raise ResultWriteError(f"evidence 확정 실패({exc.__class__.__name__})")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return target
+
+
 __all__ = (
+    "ResultWriteError",
+    "write_result_fixture",
     "ScenarioPriorityProvider",
     "FakeTxExecutor",
     "LoopbackConnection",

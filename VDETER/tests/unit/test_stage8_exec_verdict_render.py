@@ -10,14 +10,13 @@ import unittest
 
 from vdeter.stage8.execution.render import (
     NOT_RECORDED,
-    ResultWriteError,
     load_result,
     render_detailed,
     render_results,
     render_results_file,
     render_rf_console,
-    save_result,
 )
+from vdeter.stage8.testing.execution_fakes import ResultWriteError, write_result_fixture
 from vdeter.stage8.execution.verdict import (
     ActionExecution,
     AttackRecord,
@@ -147,7 +146,7 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import time
         result = _result(attacks=(_attack(),))
         path = os.path.join(self.dir, "result.json")
-        save_result(result, path)
+        write_result_fixture(result, path)
 
         def facts():
             st = os.stat(path)
@@ -171,15 +170,15 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import hashlib
         import os
         path = os.path.join(self.dir, "result.json")
-        save_result(_result(run_id="run-A"), path)
+        write_result_fixture(_result(run_id="run-A"), path)
         with open(path, "rb") as fh:
             before = hashlib.sha256(fh.read()).hexdigest()
         before_mtime = os.stat(path).st_mtime_ns
 
         with self.assertRaises(ResultWriteError):
-            save_result(_result(run_id="run-B"), path)   # 다른 내용
+            write_result_fixture(_result(run_id="run-B"), path)   # 다른 내용
         with self.assertRaises(ResultWriteError):
-            save_result(_result(run_id="run-A"), path)   # 동일 내용도 거부(계약 고정)
+            write_result_fixture(_result(run_id="run-A"), path)   # 동일 내용도 거부(계약 고정)
 
         with open(path, "rb") as fh:
             after = hashlib.sha256(fh.read()).hexdigest()
@@ -200,7 +199,7 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         except (OSError, NotImplementedError, AttributeError):
             self.skipTest("symlink 생성 권한 없음")
         with self.assertRaises(ResultWriteError):
-            save_result(_result(), link)
+            write_result_fixture(_result(), link)
         with open(outside, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "ORIGINAL")  # 링크 대상 무손상
 
@@ -209,10 +208,10 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import os
         from unittest import mock
         path = os.path.join(self.dir, "fail.json")
-        with mock.patch("vdeter.stage8.execution.render.os.link",
+        with mock.patch("vdeter.stage8.testing.execution_fakes.os.link",
                         side_effect=OSError("disk full")):
             with self.assertRaises(ResultWriteError):
-                save_result(_result(), path)
+                write_result_fixture(_result(), path)
         self.assertFalse(os.path.exists(path))  # 부분 파일 없음
         self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".result-")], [])
 
@@ -221,9 +220,9 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import os
         from unittest import mock
         path = os.path.join(self.dir, "short.json")
-        with mock.patch("vdeter.stage8.execution.render.os.write", return_value=0):
+        with mock.patch("vdeter.stage8.testing.execution_fakes.os.write", return_value=0):
             with self.assertRaises(ResultWriteError):
-                save_result(_result(), path)
+                write_result_fixture(_result(), path)
         self.assertFalse(os.path.exists(path))
         self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".result-")], [])
 
@@ -231,7 +230,7 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import os
         result = _result(attacks=(_attack(), _attack(request_id="r2", target="MASS-A")))
         path = os.path.join(self.dir, "r.json")
-        save_result(result, path)
+        write_result_fixture(result, path)
         restored = load_result(path)
         self.assertEqual(render_detailed(restored), render_detailed(result))
         self.assertEqual(restored.attacks_requested, 2)

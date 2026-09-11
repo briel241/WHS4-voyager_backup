@@ -161,6 +161,61 @@ class ChildEntrypointNegativeTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             self.assertEqual(child_main.main(), 2)  # env 오류 fail-closed
 
+    @staticmethod
+    def _safe_close(fd):
+        import os
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _main_with_load_fault(self, script_text, entrypoint="fault.py:Poc"):
+        """load 단계에서만 실패하는 script로 main()을 돌려 반환 코드를 관찰한다.
+
+        load 실패는 connect 전에 반환되므로 socket은 실제로 열리지 않는다.
+        """
+        import os
+        from unittest import mock
+
+        script = self._write("fault.py", script_text)
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"00" * 16)
+        os.close(write_fd)
+        self.addCleanup(self._safe_close, read_fd)
+        env = {
+            child_main.ENV_TOKEN_FD: str(read_fd),
+            child_main.ENV_SOCKET_PATH: os.path.join(self.dir, "nonexistent.sock"),
+            child_main.ENV_SNAPSHOT_SCRIPT: script,
+            child_main.ENV_ENTRYPOINT: entrypoint,
+            child_main.ENV_HELLO: "{}",
+        }
+        raised = None
+        with mock.patch.dict("os.environ", env, clear=True):
+            try:
+                return child_main.main(), None
+            except BaseException as exc:  # noqa: BLE001
+                raised = type(exc).__name__
+                return None, raised
+
+    def test_main_import_time_systemexit_is_load_failure(self):
+        """import 중 sys.exit()은 clean exit(0)이 아니라 로드 실패(3)로 고정된다(회귀 방지).
+
+        수정 전: main()의 `except Exception`이 SystemExit을 못 잡아 child가 exit 0으로 종료해
+        연결도 안 했는데 정상 완료처럼 보였다.
+        """
+        for text in ("import sys\nsys.exit(0)\nclass Poc:\n    pass\n",
+                     "import sys\nsys.exit(2)\nclass Poc:\n    pass\n"):
+            with self.subTest(text=text.splitlines()[1]):
+                rc, raised = self._main_with_load_fault(text)
+                self.assertIsNone(raised, f"SystemExit이 전파됨: {raised}")
+                self.assertEqual(rc, 3)
+
+    def test_main_import_time_exception_is_load_failure(self):
+        rc, raised = self._main_with_load_fault(
+            "raise RuntimeError('boom')\nclass Poc:\n    pass\n")
+        self.assertIsNone(raised)
+        self.assertEqual(rc, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

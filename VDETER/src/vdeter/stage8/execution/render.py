@@ -8,6 +8,10 @@
 - `render_results`: `vdeter results`가 저장 evidence(WorkloadResult 직렬화)만 읽어 run 시점과
   같은 renderer로 재생한다(§12.3). 입력 dict를 수정하지 않는다(read-only).
 
+이 module은 **읽기 전용 경계만** 제공한다. evidence를 *쓰는* 주체는 기존 runtime의 evidence
+pipeline이며 Stage 6 통합에서 연결된다 — Stage 4는 production evidence writer를 두지 않는다
+(거짓 production 경계 방지). 시험용 evidence 파일 생성은 `testing.execution_fakes.write_result_fixture`.
+
 renderer 오류는 이미 확정된 verdict를 바꾸지 않는다(§12.2). 이 module은 순수 함수다.
 """
 
@@ -15,17 +19,11 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import tempfile
 
 from .lease import MASS_B_SERIAL
 from .verdict import ActionExecution, WorkloadResult
 
 NOT_RECORDED = "not recorded"
-
-
-class ResultWriteError(Exception):
-    """evidence 확정 저장 실패(fail-closed). 확정된 evidence는 덮어쓰지 않는다(§12.3/§12.4)."""
 
 
 def render_rf_console(result: WorkloadResult) -> list:
@@ -106,60 +104,6 @@ def render_results(evidence_value: dict) -> str:
     return render_detailed(result)
 
 
-def save_result(result: WorkloadResult, path: str) -> str:
-    """workload 결과를 evidence 파일로 **확정 저장**한다(§12.4). terminal·quiescence 뒤 1회.
-
-    계약(고정):
-
-    - **확정 1회, 덮어쓰기 금지**. 대상이 이미 존재하면(regular file·symlink·디렉터리 무관)
-      내용이 같든 다르든 :class:`ResultWriteError`로 거부한다. 이미 확정된 evidence는 불변이며
-      read-only 재출력만 허용된다(§12.3: content·SHA-256·size·mtime 불변).
-    - **symlink 목적지 거부**: `lexists`로 링크 자체를 탐지하고, 최종 확정도 `os.link`라
-      링크를 따라가 다른 파일을 건드리지 않는다.
-    - **atomic**: 같은 디렉터리의 임시 파일에 전량 기록(short write 검사)·fsync한 뒤
-      `os.link`로 대상 이름을 원자적으로 만든다. 중간 실패 시 대상 경로에 **부분 JSON이
-      남지 않는다**(임시 파일만 정리되고 대상은 생성되지 않음).
-    - RF 활성 구간에서 호출하지 않는다(§12.1: per-event write 금지).
-
-    반환은 확정한 절대 경로.
-    """
-
-    payload = (json.dumps(result.as_json_value(), ensure_ascii=False,
-                          sort_keys=True, indent=2) + "\n").encode("utf-8")
-    target = os.path.abspath(path)
-    directory = os.path.dirname(target) or "."
-    if os.path.lexists(target):
-        raise ResultWriteError(
-            f"이미 확정된 evidence를 덮어쓸 수 없습니다: {os.path.basename(target)}")
-
-    fd, tmp = tempfile.mkstemp(prefix=".result-", suffix=".tmp", dir=directory)
-    try:
-        try:
-            view = memoryview(payload)
-            total = 0
-            while total < len(view):
-                written = os.write(fd, view[total:])
-                if written <= 0:
-                    raise ResultWriteError("evidence write가 진행되지 않음(short write)")
-                total += written
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        # 원자적 확정: 대상이 이미 있으면 FileExistsError(덮어쓰지 않음).
-        os.link(tmp, target)
-    except FileExistsError:
-        raise ResultWriteError(
-            f"이미 확정된 evidence를 덮어쓸 수 없습니다: {os.path.basename(target)}")
-    except OSError as exc:
-        raise ResultWriteError(f"evidence 확정 실패({exc.__class__.__name__})")
-    finally:
-        try:
-            os.unlink(tmp)  # 성공·실패 모두 임시 파일은 남기지 않는다
-        except OSError:
-            pass
-    return target
-
-
 def load_result(path: str) -> WorkloadResult:
     """저장 evidence 파일을 **읽기 전용**으로 불러온다(§12.3). 파일을 수정하지 않는다."""
 
@@ -182,8 +126,6 @@ __all__ = (
     "render_rf_console",
     "render_detailed",
     "render_results",
-    "ResultWriteError",
-    "save_result",
     "load_result",
     "render_results_file",
 )

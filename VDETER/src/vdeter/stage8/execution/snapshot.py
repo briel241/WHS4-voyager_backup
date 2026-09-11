@@ -90,7 +90,9 @@ def _consistent_read(dir_fd: int, name: str, max_bytes: int, *, uid: int):
     반환 (data, sha256, dev, ino). 부분 저장·교체·symlink·비정규 파일은 SnapshotError.
     """
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: scan 이후 원본이 FIFO/특수 파일로 교체(TOCTOU)되어도 O_RDONLY open이
+    # block되지 않게 한다. regular file read는 영향 없음(§5.3 fail-closed, 아래 regular 검사).
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(name, flags, dir_fd=dir_fd)
     except OSError as error:

@@ -295,9 +295,19 @@ class WorkloadRunner:
                 self._lease.holder = None
                 self._transitions.append("LEASE_FORCE_RELEASED")
 
-        # 3) 전체 결과(evidence 포함)로 덮어쓴다. evidence는 _safe로 보호되어 실패하지 않는다.
-        self._result = self._build_result(
-            scenario_verdict, raised=raised or close_error or pending_interrupt, evidence=True)
+        # 3) 전체 결과(evidence 포함)로 덮어쓴다. evidence 수집의 일반 예외는 _safe가 흡수하지만,
+        #    인터럽트(BaseException)는 흡수하지 않으므로 여기서 포착해 **결과에 반영**한 뒤
+        #    재전달한다(중단을 COMPLETED로 남기지 않는다).
+        try:
+            self._result = self._build_result(
+                scenario_verdict, raised=raised or close_error or pending_interrupt, evidence=True)
+        except BaseException as exc:  # noqa: BLE001 - evidence 조립 중 인터럽트/치명 오류
+            if pending_interrupt is None:
+                pending_interrupt = exc
+            # evidence 없는 경로는 외부 seam을 부르지 않아 다시 실패하지 않는다.
+            self._result = self._build_result(
+                scenario_verdict, raised=raised or close_error or pending_interrupt,
+                evidence=False)
 
         if pending_interrupt is not None:
             raise pending_interrupt  # cleanup·결과 저장 뒤 인터럽트 재전달
@@ -305,16 +315,22 @@ class WorkloadRunner:
 
     # --- 결과 조립 ----------------------------------------------------------
     def _infra_error(self):
-        """connection.infrastructure_error를 안전하게 읽는다(broken conn도 흡수)."""
+        """connection.infrastructure_error를 안전하게 읽는다(broken conn도 흡수).
+
+        **BaseException까지 흡수한다.** 이 helper는 결과 조립·cleanup 경로에서 호출되는
+        *질의*이므로, 여기서 나온 인터럽트가 cleanup(close·lease 반환)을 중단시키면 안 된다.
+        실제 인터럽트는 run()/finish()가 이미 포착해 `raised`로 전달하고 finalize 뒤 재전달한다.
+        """
         try:
             return self._conn.infrastructure_error
-        except Exception:  # noqa: BLE001
+        except BaseException:  # noqa: BLE001 - 질의 실패가 cleanup을 막지 못하게 한다
             return None
 
     def _armed_reached_safe(self) -> bool:
+        """ARMED 도달 여부 질의. 위와 같은 이유로 BaseException까지 흡수한다."""
         try:
             return self._conn.armed_reached()
-        except Exception:  # noqa: BLE001
+        except BaseException:  # noqa: BLE001
             return self._armed
 
     @staticmethod
