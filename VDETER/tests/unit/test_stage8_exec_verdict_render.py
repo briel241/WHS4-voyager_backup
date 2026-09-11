@@ -10,6 +10,7 @@ import unittest
 
 from vdeter.stage8.execution.render import (
     NOT_RECORDED,
+    ResultWriteError,
     load_result,
     render_detailed,
     render_results,
@@ -164,6 +165,67 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         self.assertEqual(text, text_again)
         # content·SHA-256·size·mtime 불변.
         self.assertEqual(before, after)
+
+    def test_overwrite_of_confirmed_evidence_rejected(self):
+        """확정된 evidence는 재호출로 조용히 덮어쓰이지 않는다(§12.3/§12.4, 계약: 확정 1회)."""
+        import hashlib
+        import os
+        path = os.path.join(self.dir, "result.json")
+        save_result(_result(run_id="run-A"), path)
+        with open(path, "rb") as fh:
+            before = hashlib.sha256(fh.read()).hexdigest()
+        before_mtime = os.stat(path).st_mtime_ns
+
+        with self.assertRaises(ResultWriteError):
+            save_result(_result(run_id="run-B"), path)   # 다른 내용
+        with self.assertRaises(ResultWriteError):
+            save_result(_result(run_id="run-A"), path)   # 동일 내용도 거부(계약 고정)
+
+        with open(path, "rb") as fh:
+            after = hashlib.sha256(fh.read()).hexdigest()
+        self.assertEqual(before, after)                   # content·SHA 불변
+        self.assertEqual(before_mtime, os.stat(path).st_mtime_ns)
+        self.assertIn("run-A", render_results_file(path))  # 원본 유지
+        self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".result-")], [])
+
+    def test_symlink_destination_rejected(self):
+        """목적지가 symlink면 거부하고 링크 대상을 건드리지 않는다."""
+        import os
+        outside = os.path.join(self.dir, "outside.json")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("ORIGINAL")
+        link = os.path.join(self.dir, "link.json")
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlink 생성 권한 없음")
+        with self.assertRaises(ResultWriteError):
+            save_result(_result(), link)
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ORIGINAL")  # 링크 대상 무손상
+
+    def test_write_failure_leaves_no_partial_evidence(self):
+        """확정 중 실패해도 대상 경로에 부분 JSON·임시 파일을 남기지 않는다(atomic)."""
+        import os
+        from unittest import mock
+        path = os.path.join(self.dir, "fail.json")
+        with mock.patch("vdeter.stage8.execution.render.os.link",
+                        side_effect=OSError("disk full")):
+            with self.assertRaises(ResultWriteError):
+                save_result(_result(), path)
+        self.assertFalse(os.path.exists(path))  # 부분 파일 없음
+        self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".result-")], [])
+
+    def test_short_write_rejected(self):
+        """os.write가 진행되지 않으면 short write로 거부하고 대상을 만들지 않는다."""
+        import os
+        from unittest import mock
+        path = os.path.join(self.dir, "short.json")
+        with mock.patch("vdeter.stage8.execution.render.os.write", return_value=0):
+            with self.assertRaises(ResultWriteError):
+                save_result(_result(), path)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".result-")], [])
 
     def test_load_result_roundtrip(self):
         import os
