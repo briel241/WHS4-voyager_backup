@@ -20,16 +20,29 @@ ACTION_SUBMIT을 보내고 조용해질 때까지 bounded 시간 동안 I/O를 �
 
 from __future__ import annotations
 
+import json
 import time
 
 from .._supervisor.engine import EngineState
 from .._supervisor.supervisor import PocSupervisor
 from ..poc_api import protocol
 from ..poc_api.codec import decode_wire_packet
-from ..poc_api.errors import PocError
+from ..poc_api.errors import PocError, PocErrorCode
+from ..poc_api.limits import (
+    MAX_ACTION_DESCRIPTOR_BYTES,
+    MAX_WORKLOAD_ACTION_REQUESTS,
+    RECONNECT_MAX_ATTEMPTS,
+    RECONNECT_TOTAL_DEADLINE_S,
+)
 
 #: 반응형 trigger slot을 유도할 slot grid(shared_medium NextSafeSlotScheduler와 동일 규약).
 _SLOT_SAMPLES = 8192
+
+#: R11: 통합 tee 보존 상한. 엔진 action cache와 같은 기존 명세 상한(MAX_WORKLOAD_ACTION_REQUESTS)을
+#: entry 상한으로, action descriptor 상한×그 개수를 byte 예산으로 쓴다(새 정책값 아님).
+#: accepted·unknown correlation은 이 상한과 무관하게 절대 eviction하지 않는다.
+_TEE_MAX_ENTRIES = MAX_WORKLOAD_ACTION_REQUESTS
+_TEE_MAX_BYTES = MAX_ACTION_DESCRIPTOR_BYTES * MAX_WORKLOAD_ACTION_REQUESTS
 
 
 class SupervisorConnection(PocSupervisor):
@@ -48,14 +61,20 @@ class SupervisorConnection(PocSupervisor):
         self._quiescence = float(quiescence)
         self._poll = float(poll)
         self._start_timeout = float(start_timeout)
-        self._submitted: dict = {}      # request_id -> action body(§9.4)
-        self._results: dict = {}        # request_id -> ACTION_RESULT body
+        self._submitted: dict = {}      # request_id -> action body(§9.4), 유계(R11)
+        self._results: dict = {}        # request_id -> ACTION_RESULT body, 유계(R11)
         self._terminals: dict = {}      # request_id -> ACTION_TERMINAL body
-        self._new_results: list = []    # since last poll
+        self._new_results: list = []    # since last poll, 유계(R11)
+        self._accepted: list = []       # accepted request_id (provider evidence 조립용)
+        self._provider_evidence = None  # cleanup 전에 snapshot한 Stage 5 provider evidence
         self._armed_reached = False
         self._conn_closed = False
         self._msg_count = 0             # outbound+inbound activity counter(quiescence 판정)
         self._slot_counter = 0          # 반응형 trigger용 단조 정수 slot
+        # R11: tee overflow 계수(임의 유실을 감추지 않고 요약으로 노출). byte 예산 누적.
+        self._tee_bytes = 0
+        self._tee_overflow = {"submitted_overflow": 0, "submitted_duplicate": 0,
+                              "results_overflow": 0, "new_results_overflow": 0}
 
     # --- outbound/inbound tee ----------------------------------------------
     def _send_all(self, messages) -> None:
@@ -64,17 +83,48 @@ class SupervisorConnection(PocSupervisor):
             self._observe_outbound(message)
         super()._send_all(messages)
 
+    @staticmethod
+    def _approx_bytes(body) -> int:
+        try:
+            return len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            return len(repr(body).encode("utf-8"))
+
     def _observe_outbound(self, message: dict) -> None:
         self._msg_count += 1
         mtype = message.get("type")
         body = message.get("body") or {}
         if mtype == protocol.ACTION_RESULT:
-            self._results[body.get("request_id")] = dict(body)
-            self._new_results.append(dict(body))
+            rid = body.get("request_id")
+            admission = body.get("admission")
+            must_keep = admission in ("accepted", "unknown")  # correlation 보존 대상(R11)
+            record = dict(body)
+            # _results: accepted/unknown은 항상 보존; rejected는 entry·byte 예산 안에서만.
+            if rid in self._results:
+                self._results[rid] = record  # 멱등 갱신(reconnect 재emit 등)
+            elif must_keep or self._tee_admit(record):
+                self._results[rid] = record
+            else:
+                self._tee_overflow["results_overflow"] += 1
+            # _new_results: accepted/unknown은 항상 전달; rejected는 큐 상한 안에서만.
+            if must_keep or len(self._new_results) < _TEE_MAX_ENTRIES:
+                self._new_results.append(record)
+            else:
+                self._tee_overflow["new_results_overflow"] += 1
+            if admission == "accepted" and isinstance(rid, str) and rid not in self._accepted:
+                self._accepted.append(rid)
         elif mtype == protocol.ACTION_TERMINAL:
             self._terminals[body.get("request_id")] = dict(body)
         elif mtype == protocol.ARMED:
             self._armed_reached = True
+
+    def _tee_admit(self, body) -> bool:
+        """rejected 기록을 entry·byte 예산 안에서만 보존한다(초과는 호출자가 counter 처리)."""
+        size = self._approx_bytes(body)
+        if len(self._results) >= _TEE_MAX_ENTRIES or self._tee_bytes + size > _TEE_MAX_BYTES:
+            return False
+        self._tee_bytes += size
+        return True
 
     def _handle_inbound(self, data: bytes) -> None:
         self._msg_count += 1
@@ -85,10 +135,47 @@ class SupervisorConnection(PocSupervisor):
                 body = obj.get("body") or {}
                 rid = body.get("request_id")
                 if isinstance(rid, str):
-                    self._submitted[rid] = dict(body.get("action") or {})
+                    self._tee_submit(rid, dict(body.get("action") or {}))
         except Exception:  # noqa: BLE001 - tee 실패가 실제 처리를 막지 않는다(super가 fail-closed)
             pass
         super()._handle_inbound(data)
+
+    def _tee_submit(self, rid: str, action: dict) -> None:
+        """inbound action metadata를 유계 보존한다(R11).
+
+        - 같은 rid의 재제출(변조 포함)은 기존 정상 metadata를 **덮어쓰지 않는다**(first-writer-wins).
+          digest 불일치·변조는 engine이 별도 판정한다(§9.4). tee는 first를 신뢰 근거로 남긴다.
+        - entry·byte 예산 초과 신규 rid는 저장하지 않고 overflow counter로 요약한다.
+        """
+        if rid in self._submitted:
+            self._tee_overflow["submitted_duplicate"] += 1
+            return
+        size = self._approx_bytes(action)
+        if len(self._submitted) >= _TEE_MAX_ENTRIES or self._tee_bytes + size > _TEE_MAX_BYTES:
+            self._tee_overflow["submitted_overflow"] += 1
+            return
+        self._tee_bytes += size
+        self._submitted[rid] = action
+
+    def _prune_resolved_tee(self) -> None:
+        """cleanup 시 resolved 기록만 폐기하고 unresolved correlation은 보존한다(R11, §13.8).
+
+        폐기 가능: terminal을 받은 rejected 결과·그 submit metadata. 보존: accepted/unknown
+        admission, terminal 미수신 accepted(= 실 ownership 불확실), _accepted 목록.
+        """
+        keep_rids = set(self._accepted)
+        for rid, body in list(self._results.items()):
+            admission = body.get("admission")
+            if admission in ("accepted", "unknown"):
+                keep_rids.add(rid)
+                continue
+            if rid in self._terminals:  # resolved rejected → 폐기 가능
+                self._results.pop(rid, None)
+                self._submitted.pop(rid, None)
+        # submit metadata는 결과가 남아있거나 보존 대상인 rid만 유지.
+        for rid in list(self._submitted):
+            if rid not in self._results and rid not in keep_rids:
+                self._submitted.pop(rid, None)
 
     # --- WorkloadConnection 구현 -------------------------------------------
     def start(self) -> None:
@@ -129,15 +216,23 @@ class SupervisorConnection(PocSupervisor):
         last_change = time.monotonic()
         last_count = self._msg_count
         while time.monotonic() < deadline:
-            state = self.pump_once(timeout=self._poll)
+            # R10: workload 실행 루프(emit_event/observation → pump)에서도 base run_until처럼
+            # 같은 PID 재접속을 수락한다(§12.2). 이 배선이 없으면 실행 중 단절은 child가 살아
+            # 재접속하려 해도 parent가 받아주지 않아 복구가 불가능했다.
+            if self.engine.state == EngineState.RECONNECTING and not self._registered:
+                self.reconnect_accept()  # 성공 시 HELLO는 다음 pump_once가 읽는다.
+                state = self.engine.state.value
+            else:
+                state = self.pump_once(timeout=self._poll)
             if state in (EngineState.ABORTED.value, EngineState.CLOSED.value):
                 break
             now = time.monotonic()
             if self._msg_count != last_count:
                 last_count = self._msg_count
                 last_change = now
-            elif now - last_change >= self._quiescence:
-                break  # child가 조용해짐(더 낼 message 없음)
+            elif (self.engine.state != EngineState.RECONNECTING
+                  and now - last_change >= self._quiescence):
+                break  # child가 조용해짐(더 낼 message 없음). 재접속 대기 중이면 계속 편다.
 
     def poll_new_results(self) -> list:
         out = list(self._new_results)
@@ -166,8 +261,23 @@ class SupervisorConnection(PocSupervisor):
         self.run_until(lambda: self.engine.state != EngineState.FINISHING, timeout=self._pump_timeout)
 
     def close(self) -> dict:
+        """workload close: protocol finish/close 실패·인터럽트와 무관하게 OS·provider 정리를 완주한다.
+
+        R8: `close_workload`(child 종료·socket teardown)가 protocol 송신 실패나 인터럽트로 끝나도
+        provider evidence snapshot(R5)과 provider cleanup을 **반드시** 수행한다. protocol close
+        실패는 memory 정리만으로 완료로 위장하지 않고 `POC_RADIO_OWNERSHIP_UNCERTAIN`(SESSION_INHIBIT)로
+        surface한다(§14.2). 인터럽트는 정리를 마친 뒤 원형 재전달한다.
+        """
         infra = "COMPLETED" if self.infrastructure_error is None else "ABORTED"
-        report = self.close_workload(infrastructure=infra)
+        interrupt: BaseException | None = None
+        report: dict = {}
+        try:
+            report = self.close_workload(infrastructure=infra)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interrupt = exc  # close_workload가 가능한 정리를 마친 뒤 올린 인터럽트 — 재전달 예정
+            report = {"protocol_error": self._error_code(exc)}
+        except Exception as exc:  # noqa: BLE001 - close_workload는 이미 유계 정리; 방어적 보존
+            report = {"protocol_error": self._error_code(exc)}
         self._conn_closed = True
         engine = self.engine
         if engine is not None:
@@ -180,6 +290,9 @@ class SupervisorConnection(PocSupervisor):
                 engine._ring_bytes = 0
             except AttributeError:
                 pass
+        # R11: cleanup 시 resolved(terminal 받은 rejected) tee 기록은 폐기하고, unresolved
+        # (accepted·unknown correlation)는 보존한다.
+        self._prune_resolved_tee()
         residual = self.residuals()
         out = {
             "child_alive": bool(residual.get("child_alive")),
@@ -189,6 +302,11 @@ class SupervisorConnection(PocSupervisor):
             "forced_kill": bool(report.get("forced_kill")),
             "steps": list(report.get("steps", [])),
         }
+        if report.get("cleanup_errors"):
+            out["cleanup_errors"] = list(report["cleanup_errors"])
+        # R5: cleanup 전에 provider가 이미 보존한 bounded evidence(readiness·composite·correlation·
+        # model_boundary)를 snapshot한다. 없는 실측값을 합성하지 않고 이미 존재하는 정보만 수집한다.
+        self._provider_evidence = self._snapshot_provider_evidence()
         # provider 예약·trigger 정리(§10, §13). 소유권 불확실은 cleanup 실패로 노출한다.
         cleanup = getattr(self._provider, "cleanup", None)
         if callable(cleanup):
@@ -196,7 +314,49 @@ class SupervisorConnection(PocSupervisor):
                 cleanup()
             except PocError as error:
                 out["error"] = error.code.value
+            except Exception as exc:  # noqa: BLE001 - provider 정리 실패도 삼키지 않고 surface
+                out["error"] = self._error_code(exc)
+        # R8: protocol finish/close 실패는 RF 소유권 불확실(SESSION_INHIBIT)로 노출한다.
+        # OS 자원이 정리됐어도(잔존 0) memory 정리만으로 RF 반환 완료를 선언하지 않는다.
+        proto_err = report.get("protocol_error")
+        if proto_err and not out.get("error"):
+            out["error"] = PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN.value
+            out["close_protocol_error"] = proto_err
+        if interrupt is not None:
+            raise interrupt  # 정리를 마친 뒤 원래 인터럽트 재전달
         return out
+
+    @staticmethod
+    def _error_code(error: BaseException) -> str:
+        return error.code.value if isinstance(error, PocError) else f"EXCEPTION:{type(error).__name__}"
+
+    def _snapshot_provider_evidence(self):
+        """accepted parent들의 Stage 5 provider evidence를 cleanup 전에 bounded snapshot한다.
+
+        parent가 없으면(방사 0) None. build_evidence/parent_for가 없으면 None. 없는 RX event·
+        terminal·실측값을 합성하지 않는다 — 이미 provider/관측자에 있는 정보만 조립한다.
+        """
+        build = getattr(self._provider, "build_evidence", None)
+        parent_for = getattr(self._provider, "parent_for", None)
+        if not callable(build) or not callable(parent_for):
+            return None
+        try:
+            seen = []
+            parents = []
+            for rid in self._accepted:
+                parent = parent_for(rid)
+                if parent is not None and parent.parent_id not in seen:
+                    seen.append(parent.parent_id)
+                    parents.append(parent)
+            if not parents:
+                return None
+            from ..shared_medium.observation import observe_scene
+            scene = observe_scene(parents)
+            evidence = build(parents, scene)
+            as_json = getattr(evidence, "as_json_value", None)
+            return as_json() if callable(as_json) else evidence
+        except Exception:  # noqa: BLE001 - evidence 수집 실패가 cleanup/판정을 막지 않는다
+            return None
 
     @property
     def infrastructure_error(self):
@@ -217,7 +377,27 @@ class SupervisorConnection(PocSupervisor):
             "engine_evidence": base.get("engine", {}),
             "residual": residual,
             "stdio": base.get("stdio", {}),
+            # R5: cleanup 전 snapshot한 Stage 5 provider evidence(readiness/composite/model_boundary).
+            "provider_evidence": self._provider_evidence,
+            # R11: 통합 tee 유계 상태·overflow 요약(임의 유실을 감추지 않는다).
+            "tee": {
+                "submitted": len(self._submitted),
+                "results": len(self._results),
+                "new_results": len(self._new_results),
+                "bytes": self._tee_bytes,
+                "max_entries": _TEE_MAX_ENTRIES,
+                "max_bytes": _TEE_MAX_BYTES,
+                "overflow": dict(self._tee_overflow),
+            },
         }
+
+    @property
+    def tee_overflow(self) -> dict:
+        return dict(self._tee_overflow)
+
+    @property
+    def provider_evidence(self):
+        return self._provider_evidence
 
 
 __all__ = ("SupervisorConnection",)

@@ -624,37 +624,52 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     return session, run_id, run_root, ready
 
 
-def _run_poc(poc_ctx, session, *, scenario_id, workload_id, poc_id, out) -> dict | None:
-    """한 workload의 Stage 8 PoC를 실제 실행 경로로 돌린다(§5, §11). baseline(none)/미선택이면 None.
+def _prepare_poc(poc_ctx, session, *, scenario_id, poc_id, out) -> dict:
+    """R1: scenario submit **전에** PoC를 선택·immutable snapshot·child spawn·on_start·ARMED한다.
 
-    scenario-호환 PoC를 선택해 immutable snapshot을 만들고, 실 child·socket·SDK·engine·Stage 5
-    provider로 실행한 뒤 세 독립 판정을 workload result에 붙일 evidence로 돌려준다. device 경계는
-    session이 제공한다(RF-off는 software, production은 실 radio — 미제공 시 poc_run이 fail-closed).
+    반환 dict: ``{"kind": "baseline"|"armed"|"failed", "workload": PocWorkload|None,
+    "evidence": dict|None}``. 준비/ARMED 실패(kind=failed)면 caller가 scenario를 제출하지 않는다.
+    baseline(none)은 자원 0(kind=baseline).
     """
     mod = poc_ctx["module"]
-    dest = Path(poc_ctx["run_root"]) / "workloads" / workload_id / "poc-snapshot"
+    counter = poc_ctx.get("_counter", 0) + 1
+    poc_ctx["_counter"] = counter
+    poc_wid = "%s-poc-%s-%03d" % (poc_ctx["run_id"], scenario_id.lower(), counter)
+    dest = Path(poc_ctx["run_root"]) / "workloads" / poc_wid / "poc-snapshot"
     try:
         snapshot = mod.select_snapshot(
             poc_ctx["option"], scenario_id=scenario_id, dest_dir=str(dest),
             poc_id=poc_id, interactive=poc_ctx.get("interactive", True))
     except mod.PocRunError as exc:
-        out("  poc refused: %s" % exc)
-        return {"status": "REFUSED", "error": str(exc)}
+        out("  poc refused: %s (scenario not submitted)" % exc)
+        return {"kind": "failed", "workload": None,
+                "evidence": {"status": "REFUSED", "error": str(exc),
+                             "poc_infrastructure": "ERROR"}}
     if snapshot is None:
-        return None  # baseline: PoC none (자원 0)
-    sock_root = str(Path(poc_ctx["run_root"]) / "poc-sockets")
+        return {"kind": "baseline", "workload": None, "evidence": None}
+    # socket root는 명세 §4.2(`$XDG_RUNTIME_DIR/vdeter-poc` 또는 `/tmp/vdeter-poc-<uid>`, workload마다
+    # nonce dir)를 쓴다(None → supervisor 선택). run root(`var/runs/<run-id>/…`) 아래에 두면 sun_path
+    # 상한을 넘어 실 child spawn이 실패한다(execute() 종단시험에서 확인). socket nonce digest는 evidence에 남는다.
     try:
-        evidence = mod.run_for_workload(
+        workload = mod.prepare_workload(
             session, snapshot, scenario_id=scenario_id, run_id=poc_ctx["run_id"],
-            workload_id=workload_id, socket_root=sock_root,
-            src_path=poc_ctx.get("src_path"))
+            workload_id=poc_wid, socket_root=None, src_path=poc_ctx.get("src_path"))
     except mod.PocRunError as exc:
-        out("  poc error: %s" % exc)
-        return {"status": "ERROR", "error": str(exc)}
-    out("  poc infrastructure=%s attacks=%s radiated_children=%s"
-        % (evidence.get("poc_infrastructure"),
-           len(evidence.get("attacks") or []),
-           (evidence.get("radiation") or {}).get("radiated_children")))
+        out("  poc prep/arm failed: %s (scenario not submitted)" % exc)
+        evidence = getattr(exc, "evidence", None) or {"status": "ERROR", "error": str(exc),
+                                                      "poc_infrastructure": "ERROR"}
+        return {"kind": "failed", "workload": None, "evidence": evidence}
+    return {"kind": "armed", "workload": workload, "evidence": None}
+
+
+def _finish_poc(poc_ctx, prep, *, scenario_verdict, out) -> dict:
+    """R1: ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집(§5.1). 반환 evidence dict."""
+    mod = poc_ctx["module"]
+    evidence = mod.finish_workload(prep["workload"], scenario_verdict=scenario_verdict)
+    out("  poc infrastructure=%s attacks=%s radiated_children=%s severity=%s"
+        % (evidence.get("poc_infrastructure"), len(evidence.get("attacks") or []),
+           (evidence.get("radiation") or {}).get("radiated_children"),
+           mod.poc_severity(evidence)))
     return evidence
 
 
@@ -671,6 +686,18 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     실행 경로에 없다(R1 선택 롤백). 상세 블록 렌더링 실패는 판정·close·
     evidence에 영향을 주지 않는다(경고 한 줄). 판정·timeout·evidence 계약은
     세션 객체가 그대로 소유한다."""
+    # R1: PoC를 scenario submit **전에** 선택·snapshot·arm한다. 준비/ARMED 실패면 scenario 제출 0.
+    prep = None
+    if poc_ctx is not None:
+        prep = _prepare_poc(poc_ctx, session, scenario_id=scenario_id, poc_id=poc_id, out=out)
+        if prep["kind"] == "failed":
+            return {
+                "status": "NOT_RUN", "scenario_id": scenario_id,
+                "certificate_case": certificate_case,
+                "quiescence": {"pass": True}, "poc": prep["evidence"],
+                "poc_severity": poc_ctx["module"].poc_severity(prep["evidence"]),
+                "poc_prep_failed": True,
+            }
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
     out("  running " + label)
@@ -692,12 +719,14 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
             index=index, total=total):
         out(line)
     out(result_line(result))
-    # Stage 8 PoC: scenario 판정과 **독립**으로 기록한다(§11.1, scenario verdict 재계산 없음).
-    if poc_ctx is not None:
-        poc_evidence = _run_poc(poc_ctx, session, scenario_id=scenario_id,
-                                workload_id=workload_id, poc_id=poc_id, out=out)
-        if poc_evidence is not None:
-            result["poc"] = poc_evidence
+    # R1/R4: 실 scenario 실행 뒤 PoC를 종료하고, 실제 scenario verdict(§11.1)를 명시 전달한다.
+    # scenario 판정과 PoC 판정은 독립이며 서로 재계산하지 않는다.
+    if prep is not None and prep["kind"] == "armed":
+        # stage8 직접 import 금지(import 경계): 권위 verdict 매핑은 poc_run adapter가 담당한다.
+        scenario_verdict = poc_ctx["module"].scenario_verdict_from_status(result.get("status"))
+        poc_evidence = _finish_poc(poc_ctx, prep, scenario_verdict=scenario_verdict, out=out)
+        result["poc"] = poc_evidence
+        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
     return result
 
 
@@ -711,19 +740,37 @@ def _clean_choice(raw: str) -> str:
 
 
 def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
-    """catalog(`--poc-dir`) mode에서 scenario-호환 PoC를 대화형 선택한다(§6.1). 반환 poc_id 또는 None.
+    """catalog(`--poc-dir`) mode에서 scenario-호환 PoC를 대화형 선택한다(§6.1, R7). 반환 (kind, poc_id).
 
-    direct(`--poc`)면 고정 package라 menu 없이 None(select_snapshot이 --poc를 쓴다).
+    kind ∈ {"poc","baseline","rescan","quit","invalid"}. direct(`--poc`)면 ("poc", None): 고정 package.
+    표시한 제어(q/r/none/숫자)를 그대로 poc_id로 넘기지 않고 menu.resolve로 해석한다.
     """
     if poc_ctx is None or not poc_ctx["option"].poc_dir:
-        return None
+        return ("poc", None)
     for line in poc_ctx["module"].catalog_menu_lines(poc_ctx["option"], scenario_id):
         out("  " + line)
     try:
-        choice = _clean_choice(input_fn("  select poc [id / none] > "))
+        choice = _clean_choice(
+            input_fn("  select poc [number / id / none / r=rescan / q=quit] > "))
     except EOFError:
-        return "none"
-    return choice or "none"
+        return ("baseline", None)
+    return poc_ctx["module"].resolve_catalog_selection(
+        poc_ctx["option"], scenario_id, choice)
+
+
+def _stop_after_workload(result, out) -> bool:
+    """workload 뒤 다음 workload 제출을 멈춰야 하는지(§14.1, R2).
+
+    quiescence 실패 또는 PoC SESSION_INHIBIT(TX 결과·소유권 불확실)면 멈추고 session을 닫는다.
+    """
+    if not (result.get("quiescence") or {}).get("pass"):
+        out("  session can no longer accept workloads (quiescence failed) — closing")
+        return True
+    if result.get("poc_severity") == "SESSION_INHIBIT":
+        out("  PoC session inhibit (TX outcome/ownership uncertain) — no further "
+            "workloads, closing session")
+        return True
+    return False
 
 
 def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
@@ -746,17 +793,21 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
             break
         if lowered in ("a", "all"):
             for number, (scenario_id, case) in enumerate(DEFAULT_BATCH_PLAN, 1):
-                poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out,
-                                      input_fn=input_fn)
+                kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out,
+                                            input_fn=input_fn)
+                if kind == "quit":
+                    return results
+                if kind in ("rescan", "invalid"):
+                    out("  poc %s — no RF action for this scenario" % kind)
+                    continue
                 result = _run_workload(session, scenario_id, case,
                                        out=out, clock=clock, index=number,
                                        total=len(DEFAULT_BATCH_PLAN),
-                                       poc_ctx=poc_ctx, poc_id=poc_id)
+                                       poc_ctx=poc_ctx,
+                                       poc_id=None if kind == "baseline" else poc_id)
                 results.append(result)
-                if result.get("status") != "PASS" or not (
-                        result.get("quiescence") or {}).get("pass"):
-                    out("  stopping batch — session can no longer accept "
-                        "workloads")
+                if result.get("status") != "PASS" or _stop_after_workload(result, out):
+                    out("  stopping batch")
                     return results
             continue
         if choice.isdigit() and 1 <= int(choice) <= len(ordered):
@@ -779,13 +830,21 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
                     % answer)
                 continue
             case = answer
-        poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out, input_fn=input_fn)
+        # R7: PoC 선택. q=session 종료, r=rescan(READY 유지), 무효=거부 — 모두 scenario submit 0.
+        kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out, input_fn=input_fn)
+        if kind == "quit":
+            break
+        if kind == "rescan":
+            out("  rescan — returning to menu (no RF action, READY preserved)")
+            continue
+        if kind == "invalid":
+            out("  invalid poc selection (no RF action taken)")
+            continue
         result = _run_workload(session, scenario_id, case, out=out,
-                               clock=clock, poc_ctx=poc_ctx, poc_id=poc_id)
+                               clock=clock, poc_ctx=poc_ctx,
+                               poc_id=None if kind == "baseline" else poc_id)
         results.append(result)
-        if not (result.get("quiescence") or {}).get("pass"):
-            out("  session can no longer accept workloads (quiescence "
-                "failed) — closing")
+        if _stop_after_workload(result, out):
             break
     return results
 
@@ -1030,8 +1089,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                                            index=number, total=len(plan),
                                            poc_ctx=poc_ctx)
                     results.append(result)
-                    if result.get("status") != "PASS" or not (
-                            result.get("quiescence") or {}).get("pass"):
+                    # R2: scenario 실패·quiescence 실패·PoC SESSION_INHIBIT면 다음 workload 제출 0.
+                    if result.get("status") != "PASS" or _stop_after_workload(result, out):
                         break
         except KeyboardInterrupt:
             interrupted = True
@@ -1069,6 +1128,14 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 overall = ("PASS" if summary["pass"] and results
                            and passed == len(plan) else "FAIL")
             if topology_after is not None and not topology_after["pass"]:
+                overall = "FAIL"
+            # R2: PoC experiment 인프라 실패(ABORTED/ERROR)를 최종 판정·exit에 정직하게 반영한다
+            # (scenario verdict는 보존하되 experiment 실패를 숨기지 않는다). REQUEST_REJECTED 단일
+            # action 거부는 poc_infrastructure=COMPLETED이므로 여기 걸리지 않는다.
+            poc_infra_ok = all(
+                (r.get("poc") or {}).get("poc_infrastructure") in (None, "COMPLETED")
+                for r in results)
+            if not poc_infra_ok:
                 overall = "FAIL"
             if overall != "PASS":
                 exit_code = exit_code or EXIT_FAIL

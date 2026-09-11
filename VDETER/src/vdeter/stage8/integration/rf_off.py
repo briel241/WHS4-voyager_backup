@@ -42,6 +42,23 @@ def rf_off_seams(*, closed_slots=(), normal_reserved=(), not_ready_endpoints=(),
     )
 
 
+def rf_off_terminal_source():
+    """RF-off 시험 경계에서 **명시적으로** 공급하는 child terminal source.
+
+    software group TX가 accepted action의 두 fan-out child를 방사 완료했다고 보아 COMPLETED를 돌려준다.
+    실장비(Stage 6)에서는 실 RF terminal 콜백이 이 자리를 대신한다. 이것은 시험용 장비 double의 명시적
+    terminal 공급이며 실 RF 성공 증명이 아니다(production 기본값으로 존재하지 않는다 — 미주입 시 executor는
+    TX_UNKNOWN으로 남긴다).
+    """
+
+    from ..shared_medium.radiation import ChildTerminal
+
+    def source(action, result, parent):
+        return {child.child_id: ChildTerminal.COMPLETED.value for child in parent.children}
+
+    return source
+
+
 def assemble_rf_off_provider(*, dual_channel_installed: bool = False, packet_resolver=None,
                              **seam_kwargs) -> tuple:
     """RF-off provider와 그 device seam을 함께 돌려준다(시험·entry 편의).
@@ -55,4 +72,4 @@ def assemble_rf_off_provider(*, dual_channel_installed: bool = False, packet_res
     return provider, seams
 
 
-__all__ = ("rf_off_seams", "assemble_rf_off_provider")
+__all__ = ("rf_off_seams", "rf_off_terminal_source", "assemble_rf_off_provider")

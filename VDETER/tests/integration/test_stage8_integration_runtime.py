@@ -31,7 +31,9 @@ if _LINUX:
     from vdeter.stage8.execution.runner import observation_step, scenario_started
     from vdeter.stage8.execution.session import Deadline, ResidentSession
     from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure
-    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_seams
+    from vdeter.stage8.integration.rf_off import (
+        assemble_rf_off_provider, rf_off_seams, rf_off_terminal_source,
+    )
     from vdeter.stage8.integration.entry import (
         run_poc_workload, select_and_snapshot,
     )
@@ -83,7 +85,8 @@ class EntryDriverTest(unittest.TestCase):
             snapshot=snap, steps=[observation_step(make_observation(source_station="ROC",
                                                                     destination_station="MASS-A"))],
             scenario_id="SC-VDE-006", run_id="r1", workload_id="w1", session_id="s1",
-            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams())
+            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams(),
+            terminal_source=rf_off_terminal_source())
         self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
         self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
         self.assertEqual(seams.group_tx.committed_groups, 1)
@@ -110,7 +113,8 @@ class EntryDriverTest(unittest.TestCase):
             snapshot=snap_a, steps=[observation_step(make_observation(source_station="ROC",
                                                                       destination_station="MASS-A"))],
             scenario_id="SC-VDE-006", run_id="r1", workload_id="wa", session_id="s1",
-            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams())
+            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams(),
+            terminal_source=rf_off_terminal_source())
         self.assertEqual(res_a.poc_infrastructure, PocInfrastructure.COMPLETED)
         # 원본 수정 → 새 snapshot B(다른 script sha).
         os.chmod(os.path.join(self.poc, "iso.py"), 0o600)
@@ -123,7 +127,8 @@ class EntryDriverTest(unittest.TestCase):
             snapshot=snap_b, steps=[observation_step(make_observation(source_station="ROC",
                                                                       destination_station="MASS-A"))],
             scenario_id="SC-VDE-006", run_id="r1", workload_id="wb", session_id="s1",
-            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams())
+            socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams(),
+            terminal_source=rf_off_terminal_source())
         self.assertEqual(res_b.poc_infrastructure, PocInfrastructure.COMPLETED)
 
 

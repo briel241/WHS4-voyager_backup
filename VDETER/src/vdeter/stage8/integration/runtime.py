@@ -70,12 +70,26 @@ class ResidentPocRuntime:
             return expired.deadline, report
 
     def close(self, connection=None) -> dict | None:
-        """정상 session close. connection이 있으면 실 child를 종료하고, session은 lease를 반환하며
-        close 상한을 확인한다(§13.9). `EXPIRED` 상태에서도 lease cleanup을 건너뛰지 않는다."""
+        """정상 session close. **teardown 전에 close 시작 시각을 기록**해(§13.9 close 예산에 실 teardown
+        시간이 포함됨) 그 뒤 실 child를 종료하고, 예외·인터럽트에도 session cleanup(lease 반환·close 상한
+        검사)을 수행한다. 원래 예외·인터럽트를 보존한다. `begin_close`는 멱등이라 재호출로 예산이
+        연장되지 않는다. `EXPIRED` 상태에서도 lease cleanup을 건너뛰지 않는다."""
 
-        report = connection.close() if connection is not None else None
-        self._session.begin_close()
-        self._session.complete_close()
+        self._session.begin_close()  # teardown 전에 close 예산 시작점을 고정한다.
+        error = None
+        report = None
+        try:
+            report = connection.close() if connection is not None else None
+        except BaseException as exc:  # noqa: BLE001 - 원래 예외/인터럽트를 보존하고 cleanup은 계속
+            error = exc
+        try:
+            # close 예산(close_s)을 실 teardown 시간까지 포함해 검사한다. 초과 시 SessionExpired(CLOSE).
+            self._session.complete_close()
+        except Exception as expired:  # noqa: BLE001
+            if error is None:
+                error = expired
+        if error is not None:
+            raise error
         return report
 
 

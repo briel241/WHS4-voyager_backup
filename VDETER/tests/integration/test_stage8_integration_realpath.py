@@ -40,7 +40,7 @@ if _LINUX:
     from vdeter.stage8.execution.verdict import (
         ActionExecution, PocInfrastructure, ScenarioVerdict, TargetEffect,
     )
-    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider
+    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
     from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
     from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
     from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
@@ -143,9 +143,12 @@ class ProductionRealPathTest(unittest.TestCase):
             socket_root=os.path.join(self.sock_root, workload_id),
         )
         lease = MassBLease()
+        # R3: RF-off 종단은 장비 double의 child terminal source를 **명시적으로** 주입한다.
         runner = WorkloadRunner(conn, lease, run_id="r1", workload_id=workload_id,
                                 scenario_id="SC-VDE-006", snapshot=snap,
-                                tx_executor=ProductionTxExecutor(provider, target_response=target_response))
+                                tx_executor=ProductionTxExecutor(
+                                    provider, terminal_source=rf_off_terminal_source(),
+                                    target_response=target_response))
         return provider, seams, conn, lease, runner
 
     def _assert_clean(self, conn, lease):

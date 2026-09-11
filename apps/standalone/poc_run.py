@@ -28,7 +28,12 @@ from dataclasses import dataclass
 from vdeter.stage8.execution.runner import scenario_started
 from vdeter.stage8.execution.selection import SelectionError, SourceMode, resolve_source_mode
 from vdeter.stage8.execution.verdict import ScenarioVerdict
-from vdeter.stage8.integration.entry import run_poc_workload, select_and_snapshot
+from vdeter.stage8.integration.entry import (
+    prepare_poc_workload,
+    run_poc_workload,
+    select_and_snapshot,
+)
+from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
 from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
 
 
@@ -105,16 +110,42 @@ def _default_steps():
     return (scenario_started(),)
 
 
-def run_for_workload(session, snapshot, *, scenario_id: str, run_id: str, workload_id: str,
-                     socket_root: str, scenario_verdict: ScenarioVerdict = ScenarioVerdict.PASS,
-                     server_config: ServerCapabilityConfig | None = None,
-                     src_path: str | None = None) -> dict:
-    """한 workload의 PoC를 실제 실행 경로로 돌리고 JSON evidence를 돌려준다(§5.1, §11, §12.4).
+#: catalog(--poc-dir) menu 제어 입력(§6.1). q=session 종료, r=rescan(READY 전용), 나머지는 poc_id.
+MENU_QUIT = frozenset({"q", "quit", "exit"})
+MENU_RESCAN = frozenset({"r", "rescan"})
+MENU_BASELINE = frozenset({"none", "0"})
 
-    device 경계는 `session.poc_device_seams()`에서 온다(없으면 fail-closed). scenario event는
-    `session.poc_workload_steps(scenario_id)`가 있으면 그것을, 없으면 선제 event만 쓴다.
+
+def resolve_catalog_selection(option: PocOption, scenario_id: str, choice: str, *,
+                              server_config: ServerCapabilityConfig | None = None) -> tuple:
+    """표시된 catalog menu 입력을 (kind, poc_id)로 해석한다(§6.1, R7).
+
+    kind ∈ {"quit","rescan","baseline","poc","invalid"}. q→quit(scenario submit 0), r→rescan(READY
+    전용, submit 0), none/0→baseline, 숫자·poc_id는 menu.resolve로 해당 package로 해석, 그 외 무효는
+    invalid(submit 0). 표시한 제어(q/r)를 poc_id로 넘기지 않는다.
     """
+    lowered = (choice or "").strip().lower()
+    if lowered in MENU_QUIT:
+        return "quit", None
+    if lowered in MENU_RESCAN:
+        return "rescan", None
+    if lowered in MENU_BASELINE:
+        return "baseline", None
+    from vdeter.stage8.execution.catalog import scan_catalog
+    from vdeter.stage8.execution.selection import build_menu
+    catalog = scan_catalog(option.poc_dir)
+    menu = build_menu(catalog, scenario_id,
+                      server_config=server_config or ServerCapabilityConfig())
+    item = menu.resolve((choice or "").strip())
+    if item is None:
+        return "invalid", None
+    if item.kind == "none":
+        return "baseline", None
+    return "poc", item.poc_id
 
+
+def _session_device_boundary(session, scenario_id: str) -> tuple:
+    """session이 제공하는 PoC device 경계 요소(seams·steps·terminal_source·target_response)."""
     seams_fn = getattr(session, "poc_device_seams", None)
     if not callable(seams_fn):
         raise PocRunError(
@@ -123,20 +154,128 @@ def run_for_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
     device_seams = seams_fn()
     if device_seams is None:
         raise PocRunError("session.poc_device_seams()가 None을 반환했습니다(device 경계 미연결)")
-
     steps_fn = getattr(session, "poc_workload_steps", None)
     steps = steps_fn(scenario_id) if callable(steps_fn) else None
     if not steps:
         steps = _default_steps()
+    ts_fn = getattr(session, "poc_terminal_source", None)
+    terminal_source = ts_fn() if callable(ts_fn) else None  # 없으면 executor가 TX_UNKNOWN
+    tr_fn = getattr(session, "poc_target_response", None)
+    target_response = tr_fn() if callable(tr_fn) else None
+    return device_seams, steps, terminal_source, target_response
 
+
+def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, workload_id: str,
+                     socket_root: str | None = None,
+                     server_config: ServerCapabilityConfig | None = None,
+                     src_path: str | None = None):
+    """PoC child를 spawn·연결·ARMED까지 준비한다(scenario submit 전, §5.1). 실패는 :class:`PocRunError`.
+
+    반환 :class:`~vdeter.stage8.integration.entry.PocWorkload`(ARMED). arm 실패 시 자원을 정리하고
+    fail-closed evidence를 담아 `PocRunError`(`.evidence`)로 올린다 — caller는 scenario를 제출하지 않는다.
+    `socket_root=None`이면 명세 §4.2 socket root(짧은 경로·nonce dir)를 supervisor가 고른다(production).
+    """
+    device_seams, steps, terminal_source, target_response = _session_device_boundary(
+        session, scenario_id)
+    if socket_root:
+        os.makedirs(socket_root, exist_ok=True)  # 명시 root(시험·격리)만 미리 만든다
+    workload = prepare_poc_workload(
+        snapshot=snapshot, steps=steps, scenario_id=scenario_id, run_id=run_id,
+        workload_id=workload_id, session_id=run_id, socket_root=socket_root,
+        device_seams=device_seams, terminal_source=terminal_source, target_response=target_response,
+        server_config=server_config or ServerCapabilityConfig(), src_path=src_path)
+    try:
+        armed = workload.arm()
+    except BaseException as exc:  # noqa: BLE001 - arm 실패: 자원 정리 후 fail-closed 보고
+        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN)
+        error = PocRunError(f"PoC arm 실패: {type(exc).__name__}: {exc}")
+        error.evidence = evidence
+        raise error from exc
+    if not armed:
+        evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN)
+        error = PocRunError("PoC가 ARMED에 도달하지 못했습니다(scenario submit 금지)")
+        error.evidence = evidence
+        raise error
+    return workload
+
+
+def scenario_verdict_from_status(status) -> ScenarioVerdict:
+    """coordinator workload 결과 status(문자열)를 권위 scenario verdict로 매핑한다(R4, §11.1).
+
+    run_cmd는 stage8을 직접 import하지 않고(import 경계 §S8-POC-API-REQ-01) 이 adapter 함수를 쓴다.
+    PASS만 PASS, 그 외(FAIL/NOT_RUN/None 등)는 FAIL(성공 추정 금지).
+    """
+    return ScenarioVerdict.PASS if status == "PASS" else ScenarioVerdict.FAIL
+
+
+def finish_workload(workload, *, scenario_verdict: ScenarioVerdict) -> dict:
+    """ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집한다(§5.1, §11, §12.4). 반환 JSON evidence."""
+    result = workload.run(scenario_verdict)
+    return _result_evidence(result, workload)
+
+
+def _finalize_evidence(workload, scenario_verdict: ScenarioVerdict) -> dict:
+    """arm 실패 등에서 cleanup·evidence만 확정한다(deliver 없이 finish)."""
+    result = workload.run(scenario_verdict)  # steps 없이도 finish→cleanup을 수행
+    return _result_evidence(result, workload)
+
+
+def _result_evidence(result, workload) -> dict:
+    evidence = result.as_json_value()
+    seams = workload.seams
+    group_tx = getattr(seams, "group_tx", None)
+    # 방사(software submit) 요약 — 실 RF atomicity 증명이 아니라 RF-off 호출 기록이다.
+    evidence["radiation"] = {
+        "committed_groups": int(getattr(group_tx, "committed_groups", 0) or 0),
+        "radiated_children": int(getattr(group_tx, "radiated_children", 0) or 0),
+    }
+    # R5: cleanup 전 snapshot한 Stage 5 provider evidence(readiness/composite/model_boundary)를 올린다.
+    conn = workload.connection
+    provider_evidence = getattr(conn, "provider_evidence", None)
+    if provider_evidence is not None:
+        evidence["provider_evidence"] = provider_evidence
+    return evidence
+
+
+def poc_severity(evidence: dict) -> str:
+    """PoC infrastructure 오류의 severity(§14.1): OK/REQUEST_REJECTED/POC_ABORT/SESSION_INHIBIT.
+
+    R2: outer loop이 다음 workload 허용 여부·session 안전 상태를 이 severity로 결정한다.
+    """
+    if evidence is None:
+        return "OK"
+    if evidence.get("status") in ("REFUSED", "ERROR"):
+        return "POC_ABORT"
+    infra = evidence.get("poc_infrastructure")
+    if infra not in ("ABORTED", "ERROR"):
+        return "OK"
+    code = evidence.get("infrastructure_error_code")
+    if not code:
+        return "POC_ABORT"
+    try:
+        return PocError(PocErrorCode(code)).severity.value
+    except (ValueError, KeyError):
+        return "POC_ABORT"  # 알 수 없는 code(예외 등)는 보수적으로 abort
+
+
+def run_for_workload(session, snapshot, *, scenario_id: str, run_id: str, workload_id: str,
+                     socket_root: str, scenario_verdict: ScenarioVerdict = ScenarioVerdict.PASS,
+                     server_config: ServerCapabilityConfig | None = None,
+                     src_path: str | None = None) -> dict:
+    """한 workload의 PoC를 arm+run 원자적으로 실행한다(순서 무관 focused 경로). 반환 JSON evidence.
+
+    scenario 실행 순서(arm→scenario→run)가 필요한 CLI는 `prepare_workload`+`finish_workload`를 쓴다.
+    """
+    device_seams, steps, terminal_source, target_response = _session_device_boundary(
+        session, scenario_id)
     os.makedirs(socket_root, exist_ok=True)
     result, seams = run_poc_workload(
         snapshot=snapshot, steps=steps, scenario_id=scenario_id, run_id=run_id,
         workload_id=workload_id, session_id=run_id, socket_root=socket_root,
-        device_seams=device_seams, scenario_verdict=scenario_verdict,
+        device_seams=device_seams, terminal_source=terminal_source, target_response=target_response,
+        scenario_verdict=scenario_verdict,
         server_config=server_config or ServerCapabilityConfig(), src_path=src_path)
     evidence = result.as_json_value()
-    # 방사(software submit) 요약 — 실 RF atomicity 증명이 아니라 RF-off 호출 기록이다.
     group_tx = getattr(seams, "group_tx", None)
     evidence["radiation"] = {
         "committed_groups": int(getattr(group_tx, "committed_groups", 0) or 0),
@@ -150,5 +289,10 @@ __all__ = (
     "PocOption",
     "resolve_option",
     "select_snapshot",
+    "resolve_catalog_selection",
+    "prepare_workload",
+    "scenario_verdict_from_status",
+    "finish_workload",
+    "poc_severity",
     "run_for_workload",
 )

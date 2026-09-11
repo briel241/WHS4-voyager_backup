@@ -129,11 +129,20 @@ def _fmt(seconds) -> str:
     return f"{seconds // 60}m{seconds % 60:02d}s"
 
 
-def _required_caps_available(entry: PackageEntry, server: ServerCapabilityConfig) -> tuple:
-    required = frozenset(entry.descriptor.required_capabilities)
+def unavailable_required_capabilities(descriptor, server: ServerCapabilityConfig) -> list:
+    """descriptor의 required capability 중 server가 광고하지 않은 것(정렬). 없으면 빈 목록.
+
+    catalog(`build_menu`)와 direct(`--poc`) 경로가 **같은** 설치 capability 사전 검증을 쓰도록
+    manifest descriptor에 직접 작용한다(R9, §6.3 fail-closed).
+    """
+    required = frozenset(descriptor.required_capabilities)
     advertised = server.advertised_capabilities()
-    unavailable = required - advertised
-    return (not unavailable), sorted(unavailable)
+    return sorted(required - advertised)
+
+
+def _required_caps_available(entry: PackageEntry, server: ServerCapabilityConfig) -> tuple:
+    unavailable = unavailable_required_capabilities(entry.descriptor, server)
+    return (not unavailable), unavailable
 
 
 def build_menu(
@@ -262,6 +271,7 @@ __all__ = (
     "ExcludedItem",
     "SelectionMenu",
     "build_menu",
+    "unavailable_required_capabilities",
     "ChangedPackage",
     "RescanSummary",
     "rescan_summary",

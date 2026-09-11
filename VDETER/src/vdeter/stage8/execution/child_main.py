@@ -31,6 +31,11 @@ if _SRC not in sys.path:
 
 from vdeter.stage8.execution.limits import SESSION_ABSOLUTE_DEADLINE_S  # noqa: E402
 from vdeter.stage8.poc_api.codec import decode_wire_packet, encode_wire_packet  # noqa: E402
+from vdeter.stage8.poc_api.limits import (  # noqa: E402
+    RECONNECT_BACKOFFS_S,
+    RECONNECT_MAX_ATTEMPTS,
+    RECONNECT_TOTAL_DEADLINE_S,
+)
 from vdeter.stage8.poc_api.messages import parse_envelope  # noqa: E402
 from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
 from vdeter.stage8.poc_api.transport import OversizedPacket, connect  # noqa: E402
@@ -99,46 +104,104 @@ def _build_hello_payload(token: bytes, run_id: str, manifest_hello: dict) -> dic
     }
 
 
+def _reconnect(engine, old_transport, reconnect_connect, hello_payload, *,
+               sleep_fn, now_fn):
+    """R10/§12.2: 같은 process·같은 SDK 상태로 총 2초·최대 3회·정해진 backoff 재접속.
+
+    같은 request_id·미확정 action·completed sequence·epoch·workload binding을 유지한 채(같은
+    `engine` 재사용) reconnect HELLO를 보낸다. process를 재시작하지 않고 safety deadline을
+    초기화하지 않는다. 정상 종료(CLOSED)나 이미 ABORTED는 재접속 대상이 아니다. 성공 시 새
+    transport, 실패 시 None(caller가 ABORT). `reconnect_connect` 미주입이면 재접속 비활성.
+    """
+
+    if reconnect_connect is None or engine.state in (ClientState.CLOSED, ClientState.ABORTED):
+        return None
+    try:
+        old_transport.close()
+    except Exception:  # noqa: BLE001 - 이미 끊긴 socket close 실패는 무시
+        pass
+    reconnect_deadline = now_fn() + RECONNECT_TOTAL_DEADLINE_S
+    for attempt in range(RECONNECT_MAX_ATTEMPTS):
+        backoff = RECONNECT_BACKOFFS_S[min(attempt, len(RECONNECT_BACKOFFS_S) - 1)]
+        if now_fn() + backoff > reconnect_deadline:
+            break
+        sleep_fn(backoff)
+        if now_fn() > reconnect_deadline:
+            break
+        try:
+            new_transport = reconnect_connect()
+        except Exception:  # noqa: BLE001 - 접속 실패는 다음 시도로
+            continue
+        try:
+            hello = engine.build_hello(hello_payload, connect_kind="reconnect")
+            new_transport.send_packet(encode_wire_packet(hello))
+        except Exception:  # noqa: BLE001 - reconnect HELLO 송신 실패는 다음 시도로
+            try:
+                new_transport.close()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        return new_transport
+    return None
+
+
 def run_client(callbacks, transport, *, token: bytes, run_id: str,
                session_id: str, workload_id: str, scenario_id: str,
                manifest_hello: dict, poll: float = 0.05,
-               now_fn=time.monotonic, safety_timeout_s: float = CHILD_SAFETY_TIMEOUT_S) -> int:
+               now_fn=time.monotonic, safety_timeout_s: float = CHILD_SAFETY_TIMEOUT_S,
+               reconnect_connect=None, sleep_fn=time.sleep) -> int:
     """SDK client loop을 돈다(§7~§13). 정상 종료(server CLOSE) 0, 그 외 non-zero.
 
     child는 자체 수명 제한을 두지 않는다. server가 CLOSE를 보내(engine CLOSED) 또는 abort
-    (ABORTED), 혹은 연결이 끊길 때까지 실행한다. `safety_timeout_s`는 supervisor가 사라진
+    (ABORTED), 혹은 복구 불가 연결 손실까지 실행한다. `safety_timeout_s`는 supervisor가 사라진
     경우의 최후 방어일 뿐 정상 workload(≤900초)나 session(≤7200초)을 조기 종료시키지 않는다.
+
+    R10: transport 손실 시 `reconnect_connect`가 주입돼 있으면 같은 process·같은 engine 상태로
+    §12.2 재접속(총 2초·3회·backoff)을 시도한다. 정상 CLOSE와 복구 가능한 단절을 구별하며,
+    복구 실패 시에만 ABORT(non-zero)한다. safety deadline은 재접속으로 초기화하지 않는다.
     """
 
     context = PocContext(session_id=session_id, workload_id=workload_id, scenario_id=scenario_id)
     engine = SdkEngine(callbacks, context)
+    hello_payload = _build_hello_payload(token, run_id, manifest_hello)
     connection_lost = False
     try:
-        for message in [engine.build_hello(_build_hello_payload(token, run_id, manifest_hello))]:
-            transport.send_packet(encode_wire_packet(message))
-        deadline = now_fn() + safety_timeout_s
+        transport.send_packet(encode_wire_packet(engine.build_hello(hello_payload)))
+        deadline = now_fn() + safety_timeout_s  # 재접속으로 초기화하지 않는다(§5.2)
         while engine.state not in (ClientState.CLOSED, ClientState.ABORTED):
             if now_fn() > deadline:
                 break  # 최후 방어(§5.2): supervisor가 CLOSE/SIGKILL을 못 보낸 극단 상황
             try:
                 data = transport.recv_packet(timeout=poll)
             except (ConnectionError, OversizedPacket, OSError):
-                connection_lost = True  # peer(server) 종료/연결 손실 → child도 종료
-                break
+                # 복구 가능한 단절인지 판정: 아직 CLOSED/ABORTED가 아니면 같은 PID로 재접속.
+                new_transport = _reconnect(engine, transport, reconnect_connect, hello_payload,
+                                           sleep_fn=sleep_fn, now_fn=now_fn)
+                if new_transport is None:
+                    connection_lost = True  # 복구 불가/재접속 비활성 → child 종료
+                    break
+                transport = new_transport
+                continue
             now = now_fn()
             outbound = []
             if data is not None:
                 parsed = parse_envelope(decode_wire_packet(data))
                 outbound.extend(engine.receive(parsed, now))
             outbound.extend(engine.tick(now))
+            send_failed = False
             for message in outbound:
                 try:
                     transport.send_packet(encode_wire_packet(message))
                 except (ConnectionError, OSError):
+                    send_failed = True
+                    break
+            if send_failed:
+                new_transport = _reconnect(engine, transport, reconnect_connect, hello_payload,
+                                           sleep_fn=sleep_fn, now_fn=now_fn)
+                if new_transport is None:
                     connection_lost = True
                     break
-            if connection_lost:
-                break
+                transport = new_transport
     finally:
         transport.close()
     return 0 if engine.state == ClientState.CLOSED else 1
@@ -184,6 +247,8 @@ def main() -> int:
             callbacks, transport, token=token, run_id=run_id,
             session_id=session_id, workload_id=workload_id, scenario_id=scenario_id,
             manifest_hello=manifest_hello,
+            # R10: 같은 socket_path로 같은 process 재접속(§12.2). process 재시작이 아니다.
+            reconnect_connect=lambda: connect(socket_path),
         )
     except Exception as error:  # noqa: BLE001
         sys.stderr.write(f"POC client 오류: {error.__class__.__name__}\n")

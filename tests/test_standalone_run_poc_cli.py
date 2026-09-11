@@ -82,6 +82,12 @@ class _PocDeviceSession:
         return [observation_step(make_observation(
             source_station="ROC", destination_station="MASS-A"))]
 
+    def poc_terminal_source(self):
+        # R3: RF-off 시험은 장비 double의 child terminal source를 **명시적으로** 제공한다.
+        # 실장비 session은 이 자리에 실 RF terminal 콜백을 연결한다(미제공 시 executor는 TX_UNKNOWN).
+        from vdeter.stage8.integration.rf_off import rf_off_terminal_source
+        return rf_off_terminal_source()
+
 
 class CliContractTest(unittest.TestCase):
     """gate 이전 CLI opt-in 계약 — crypto/실장비 불필요, 어디서나 실행."""
@@ -185,6 +191,363 @@ class RunWorkloadPocEndToEnd(unittest.TestCase):
                 session, "SC-VDE-006", "normal", out=lines.append,
                 clock=time.monotonic, poc_ctx=ctx, poc_id=None)
             self.assertEqual(result["poc"]["status"], "ERROR")
+
+
+_ARM_FAIL_POC = (
+    "class Poc:\n"
+    "    def on_start(self, context):\n        raise RuntimeError('injected on_start failure')\n"
+    "    def on_event(self, event, context):\n        return []\n"
+    "    def on_finish(self, context):\n        return None\n"
+).encode("utf-8")
+
+
+class _NoTerminalSession(_PocDeviceSession):
+    """실 RF terminal source를 연결하지 않은 session — production 기본(성공 합성 금지)."""
+    def poc_terminal_source(self):
+        return None
+
+
+class _ScenarioFailSession(_PocDeviceSession):
+    """scenario 판정이 FAIL로 오는 session(§11.1: PoC 판정과 독립)."""
+    def wait_result(self, workload_id, *, timeout_s=None, on_trace=None, on_poll=None):
+        return {"status": "FAIL", "quiescence": {"pass": True}, "scenario": {"results": {}}}
+
+
+class _RejectSession(_PocDeviceSession):
+    """action 하나가 RF 전 거부(REJECTED_BEFORE_TX)되는 session — session inhibit 아님(R2)."""
+    def poc_device_seams(self):
+        from vdeter.stage8.integration.rf_off import rf_off_seams
+        return rf_off_seams(fail_on_retune=True)
+
+
+def _feeder(answers):
+    it = iter(answers)
+
+    def _fn(prompt):
+        try:
+            return next(it)
+        except StopIteration:
+            return "q"  # 소진되면 종료 입력
+    return _fn
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
+class PocNegativeCliTest(unittest.TestCase):
+    """R1~R9 CLI 종단 negative test — 실 child·socket·provider, 실제 CLI 호출 순서/다음 workload 허용/최종 JSON.
+
+    수용 기준: 순수 모델·loopback 대체 금지. 각 항목은 실 `_run_workload`/`_menu`(또는 실 selection)로
+    검증하고, SESSION_INHIBIT 생성은 실 child의 실제 결과(POC_TX_OUTCOME_UNKNOWN)에서 나온다.
+    """
+
+    def _ctx(self, poc_path, run_root, run_id, *, interactive=False, input_fn=None):
+        option = poc_run.resolve_option(poc=poc_path, poc_dir=None, interactive=interactive)
+        return {"module": poc_run, "option": option, "run_root": run_root,
+                "run_id": run_id, "interactive": interactive,
+                "input_fn": input_fn or (lambda p: ""), "src_path": _SRC}
+
+    # --- R1: PoC는 scenario submit 전에 arm; 준비/ARMED 실패면 scenario 제출 0 ---
+    def test_r1_arm_failure_does_not_submit_scenario(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            write_poc_package(poc_dir, "armfail", poc_id="armfail", script=_ARM_FAIL_POC)
+            poc_path = os.path.join(poc_dir, "armfail.py")
+            session = _PocDeviceSession(run_root, "run-armfail")
+            ctx = self._ctx(poc_path, run_root, "run-armfail")
+            lines = []
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal", out=lines.append,
+                                           clock=time.monotonic, poc_ctx=ctx, poc_id=None)
+            # scenario는 제출되지 않는다(NOT_RUN), submit 0. PoC 실패는 evidence로 남는다.
+            self.assertEqual(result["status"], "NOT_RUN", "\n".join(lines))
+            self.assertTrue(result.get("poc_prep_failed"))
+            self.assertEqual(session.submitted, [])
+            self.assertIn(result["poc"]["poc_infrastructure"], ("ERROR", "ABORTED"))
+
+    def test_r1_poc_off_is_structural_zero(self):
+        # PoC OFF(poc_ctx 없음) → scenario는 그대로 실행되고 PoC 자원 0.
+        with tempfile.TemporaryDirectory() as run_root:
+            session = _PocDeviceSession(run_root, "run-off")
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal",
+                                           out=lambda l: None, clock=time.monotonic)
+            self.assertEqual(session.submitted, [("SC-VDE-006", "normal")])
+            self.assertNotIn("poc", result)
+
+    # --- R3: 실 terminal source 없으면 TX_UNKNOWN(성공 합성 금지); 있으면 TX_COMPLETED ---
+    def test_r3_no_terminal_source_is_tx_unknown(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _NoTerminalSession(run_root, "run-noterm")
+            ctx = self._ctx(poc_path, run_root, "run-noterm")
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal",
+                                           out=lambda l: None, clock=time.monotonic,
+                                           poc_ctx=ctx, poc_id=None)
+            poc = result["poc"]
+            self.assertEqual(poc["attacks"][0]["action_execution"], "TX_UNKNOWN")
+            self.assertEqual(poc["poc_infrastructure"], "ABORTED")
+
+    # --- R4: scenario FAIL → PoC scenario_verdict FAIL, 최종 JSON 일관 ---
+    def test_r4_scenario_fail_propagates_to_poc_verdict(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _ScenarioFailSession(run_root, "run-scfail")
+            ctx = self._ctx(poc_path, run_root, "run-scfail")
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal",
+                                           out=lambda l: None, clock=time.monotonic,
+                                           poc_ctx=ctx, poc_id=None)
+            self.assertEqual(result["status"], "FAIL")
+            self.assertEqual(result["poc"]["scenario_verdict"], "FAIL")
+            # PoC 인프라 판정은 scenario와 독립(§11.1).
+            self.assertEqual(result["poc"]["poc_infrastructure"], "COMPLETED")
+
+    # --- R5: 최종 JSON에 Stage 5 provider evidence(cleanup 전 snapshot) ---
+    def test_r5_provider_evidence_in_final_json(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _PocDeviceSession(run_root, "run-evd")
+            ctx = self._ctx(poc_path, run_root, "run-evd")
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal",
+                                           out=lambda l: None, clock=time.monotonic,
+                                           poc_ctx=ctx, poc_id=None)
+            pe = result["poc"]["provider_evidence"]
+            self.assertIsNotNone(pe)
+            self.assertEqual(pe["model_boundary"]["model"], "WIRED_SHARED_MEDIUM_EMULATION")
+            self.assertIn("readiness_by_parent", pe["broadcast_infrastructure_result"])
+            self.assertIn("parent_outcomes", pe["broadcast_infrastructure_result"])
+
+    # --- R2: SESSION_INHIBIT면 다음 workload 제출 0 (menu·run-all·non-interactive) ---
+    def _plan_run(self, session, ctx, plan):
+        """execute()의 비대화형 loop gate를 그대로 적용해 다음 workload 허용 여부를 검증."""
+        out = lambda l: None
+        results = []
+        for sid, case in plan:
+            r = run_cmd._run_workload(session, sid, case, out=out, clock=time.monotonic,
+                                      poc_ctx=ctx)
+            results.append(r)
+            if r.get("status") != "PASS" or run_cmd._stop_after_workload(r, out):
+                break
+        return results
+
+    def test_r2_session_inhibit_stops_noninteractive_plan(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _NoTerminalSession(run_root, "run-inhibit")  # 실 SESSION_INHIBIT
+            ctx = self._ctx(poc_path, run_root, "run-inhibit")
+            self._plan_run(session, ctx, [("SC-VDE-006", "normal"), ("SC-VDE-006", "normal")])
+            self.assertEqual(len(session.submitted), 1, "second workload must NOT be submitted")
+
+    def test_r2_request_reject_does_not_inhibit_session(self):
+        # RF 전 단일 거부(REJECTED_BEFORE_TX)는 session inhibit이 아니다 — 다음 workload 계속.
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _RejectSession(run_root, "run-reject")
+            ctx = self._ctx(poc_path, run_root, "run-reject")
+            self._plan_run(session, ctx, [("SC-VDE-006", "normal"), ("SC-VDE-006", "normal")])
+            self.assertEqual(len(session.submitted), 2, "REQUEST_REJECTED must not stop session")
+
+    def test_r2_session_inhibit_stops_interactive_menu(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            session = _NoTerminalSession(run_root, "run-menu")
+            fed = _feeder(["SC-VDE-006", "SC-VDE-006", "q"])
+            ctx = self._ctx(poc_path, run_root, "run-menu", interactive=True, input_fn=fed)
+            run_cmd._menu(session, out=lambda l: None, input_fn=fed,
+                          clock=time.monotonic, poc_ctx=ctx)
+            self.assertEqual(len(session.submitted), 1, "menu must stop after SESSION_INHIBIT")
+
+    def test_r2_stop_after_workload_decision(self):
+        out = lambda l: None
+        self.assertTrue(run_cmd._stop_after_workload(
+            {"status": "PASS", "quiescence": {"pass": True}, "poc_severity": "SESSION_INHIBIT"}, out))
+        self.assertFalse(run_cmd._stop_after_workload(
+            {"status": "PASS", "quiescence": {"pass": True}, "poc_severity": "REQUEST_REJECTED"}, out))
+        self.assertFalse(run_cmd._stop_after_workload(
+            {"status": "PASS", "quiescence": {"pass": True}, "poc_severity": "POC_ABORT"}, out))
+        self.assertTrue(run_cmd._stop_after_workload(
+            {"status": "PASS", "quiescence": {"pass": False}}, out))
+
+    # --- R7: catalog 메뉴 q/r/number/none/invalid 해석 ---
+    def test_r7_resolve_catalog_selection(self):
+        with tempfile.TemporaryDirectory() as poc_dir:
+            os.chmod(poc_dir, 0o700)
+            _write_poc(poc_dir, base="cat_poc")
+            option = poc_run.resolve_option(poc=None, poc_dir=poc_dir, interactive=True)
+            R = lambda c: poc_run.resolve_catalog_selection(option, "SC-VDE-006", c)
+            self.assertEqual(R("q"), ("quit", None))
+            self.assertEqual(R("quit"), ("quit", None))
+            self.assertEqual(R("r"), ("rescan", None))
+            self.assertEqual(R("none"), ("baseline", None))
+            self.assertEqual(R("0"), ("baseline", None))
+            self.assertEqual(R("zzz-not-a-poc"), ("invalid", None))
+            kind, poc_id = R("1")
+            self.assertEqual(kind, "poc")
+            self.assertEqual(poc_id, "cat-poc")
+
+    def test_r7_menu_quit_submits_zero(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            _write_poc(poc_dir, base="cat_poc")
+            session = _PocDeviceSession(run_root, "run-q")
+            # scenario 선택 후 PoC 메뉴에서 q → session 종료, scenario submit 0.
+            fed = _feeder(["SC-VDE-006", "q"])
+            option = poc_run.resolve_option(poc=None, poc_dir=poc_dir, interactive=True)
+            ctx = {"module": poc_run, "option": option, "run_root": run_root,
+                   "run_id": "run-q", "interactive": True, "input_fn": fed, "src_path": _SRC}
+            run_cmd._menu(session, out=lambda l: None, input_fn=fed,
+                          clock=time.monotonic, poc_ctx=ctx)
+            self.assertEqual(session.submitted, [])
+
+    # --- R9: direct --poc 미지원 required capability는 import·spawn 전에 거부 ---
+    def test_r9_direct_unsupported_capability_rejected_before_spawn(self):
+        with tempfile.TemporaryDirectory() as poc_dir, \
+                tempfile.TemporaryDirectory() as run_root:
+            os.chmod(poc_dir, 0o700)
+            marker = os.path.join(poc_dir, "imported.marker")
+            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            script = ("from pathlib import Path\nPath(%r).write_text('x')\n" % marker
+                      + "class Poc:\n    def on_start(self, c): return []\n"
+                        "    def on_event(self, e, c): return []\n"
+                        "    def on_finish(self, c): return None\n").encode("utf-8")
+            write_poc_package(poc_dir, "dual", poc_id="dual", script=script,
+                              required_capabilities=("observe_dual_physical_channel",),
+                              capabilities=("observe_packet", "observe_dual_physical_channel"))
+            poc_path = os.path.join(poc_dir, "dual.py")
+            session = _PocDeviceSession(run_root, "run-cap")
+            ctx = self._ctx(poc_path, run_root, "run-cap")
+            result = run_cmd._run_workload(session, "SC-VDE-006", "normal",
+                                           out=lambda l: None, clock=time.monotonic,
+                                           poc_ctx=ctx, poc_id=None)
+            # import·spawn 전에 거부: scenario 미제출, import marker 미생성.
+            self.assertEqual(result["status"], "NOT_RUN")
+            self.assertEqual(session.submitted, [])
+            self.assertFalse(os.path.exists(marker), "researcher import must not run")
+
+
+def _write_poc_compat(poc_dir, base, compat):
+    from vdeter.stage8.testing.execution_fakes import write_poc_package
+    write_poc_package(poc_dir, base, poc_id=base.replace("_", "-"),
+                      script=_REACTIVE_REPLAY, compatible_scenarios=compat)
+    return os.path.join(poc_dir, base + ".py")
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
+class ExecuteLevelPocEndToEnd(unittest.TestCase):
+    """실 사용자 CLI 본체 `run_cmd.execute(... --poc)` 종단 — gate → bring-up → PoC prep(실 child spawn·
+    ARMED, scenario submit **전**) → submit → wait → finish/evidence/cleanup → **저장된 summary.json**.
+
+    coordinator session만 가짜(기존 test_standalone_run_cli 하네스)이고 PoC child·socket·SDK·engine·
+    provider·snapshot·CLI 호출 순서·최종 JSON은 실제다. 수용 기준: 실제 CLI 호출 순서, 다음 workload
+    허용, 최종 저장 JSON.
+    """
+
+    def _factory(self, *, terminal=True):
+        import test_standalone_run_cli as harness
+        base_cls = harness.make_session_factory()
+
+        class PocFakeSession(base_cls):
+            def poc_device_seams(self):
+                from vdeter.stage8.integration.rf_off import rf_off_seams
+                return rf_off_seams()
+
+            def poc_workload_steps(self, scenario_id):
+                from vdeter.stage8.execution.runner import observation_step
+                from vdeter.stage8.testing.fakes import make_observation
+                return [observation_step(make_observation(
+                    source_station="ROC", destination_station="MASS-A"))]
+
+            def poc_terminal_source(self):
+                if not terminal:
+                    return None
+                from vdeter.stage8.integration.rf_off import rf_off_terminal_source
+                return rf_off_terminal_source()
+
+        PocFakeSession.instances = base_cls.instances
+        return PocFakeSession, harness
+
+    def _summary(self, factory):
+        import json as _json
+        sess = factory.instances[-1]
+        return sess, _json.loads((sess.run_root / "summary.json").read_text(encoding="utf-8"))
+
+    def test_execute_poc_completes_and_persists_summary(self):
+        factory, harness = self._factory()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as poc_dir:
+            paths, _ = harness.fx.prepare_environment(tmp)
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            code, lines = harness.run(paths, factory, scenario="SC-VDE-006", poc=poc_path)
+            self.assertEqual(code, run_cmd.EXIT_PASS, "\n".join(lines))
+            sess, summary = self._summary(factory)
+            self.assertEqual(summary["status"], "PASS")
+            self.assertEqual(sess.submitted, [("SC-VDE-006", "normal")])
+            w = summary["workloads"][0]
+            self.assertEqual(w["status"], "PASS")
+            self.assertEqual(w["poc"]["poc_infrastructure"], "COMPLETED")
+            self.assertEqual(w["poc"]["scenario_verdict"], "PASS")
+            self.assertEqual(w["poc"]["attacks"][0]["action_execution"], "TX_COMPLETED")
+            self.assertEqual(w["poc_severity"], "OK")
+            # R5: 저장된 최종 JSON에 Stage 5 provider evidence(cleanup 전 snapshot)가 있다.
+            self.assertEqual(w["poc"]["provider_evidence"]["model_boundary"]["model"],
+                             "WIRED_SHARED_MEDIUM_EMULATION")
+            self.assertTrue(any("Stage 8 PoC opt-in active" in ln for ln in lines))
+
+    def test_execute_poc_session_inhibit_fails_run_and_exit_code(self):
+        # 실 terminal source 미연결 → 실 child의 POC_TX_OUTCOME_UNKNOWN → SESSION_INHIBIT →
+        # scenario 판정은 PASS로 보존하되 run 전체 FAIL + EXIT_FAIL(R2: 인프라 실패를 숨기지 않음).
+        factory, harness = self._factory(terminal=False)
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as poc_dir:
+            paths, _ = harness.fx.prepare_environment(tmp)
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            code, lines = harness.run(paths, factory, scenario="SC-VDE-006", poc=poc_path)
+            self.assertEqual(code, run_cmd.EXIT_FAIL, "\n".join(lines))
+            sess, summary = self._summary(factory)
+            self.assertEqual(summary["status"], "FAIL")
+            w = summary["workloads"][0]
+            self.assertEqual(w["status"], "PASS")                        # scenario 판정 보존
+            self.assertEqual(w["poc"]["poc_infrastructure"], "ABORTED")
+            self.assertEqual(w["poc_severity"], "SESSION_INHIBIT")
+            self.assertTrue(sess.closed)                                 # session 종료·cleanup
+
+    def test_execute_batch_stops_after_session_inhibit(self):
+        # run all(005→006→001n→001f): 첫 workload SESSION_INHIBIT → 다음 workload 제출 0(R2).
+        factory, harness = self._factory(terminal=False)
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as poc_dir:
+            paths, _ = harness.fx.prepare_environment(tmp)
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc_compat(poc_dir, "batch_poc",
+                                         ("SC-VDE-005", "SC-VDE-006", "SC-VDE-001"))
+            code, lines = harness.run(paths, factory, scenario="all", poc=poc_path)
+            self.assertEqual(code, run_cmd.EXIT_FAIL, "\n".join(lines))
+            sess, summary = self._summary(factory)
+            self.assertEqual(sess.submitted, [("SC-VDE-005", "normal")])
+            self.assertEqual(summary["scenarios_run"], 1)
+            self.assertEqual(summary["scenarios_planned"], 4)
+            self.assertEqual(summary["workloads"][0]["poc_severity"], "SESSION_INHIBIT")
+
+    def test_execute_poc_off_unchanged(self):
+        # PoC OFF: 기존 실행 그대로(poc 블록 없음, 구조적 0).
+        factory, harness = self._factory()
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _ = harness.fx.prepare_environment(tmp)
+            code, lines = harness.run(paths, factory, scenario="SC-VDE-006")
+            self.assertEqual(code, run_cmd.EXIT_PASS, "\n".join(lines))
+            sess, summary = self._summary(factory)
+            self.assertNotIn("poc", summary["workloads"][0])
+            self.assertFalse(any("Stage 8 PoC" in ln for ln in lines))
 
 
 if __name__ == "__main__":

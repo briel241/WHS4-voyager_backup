@@ -296,33 +296,69 @@ class PocSupervisor:
         return predicate()
 
     # --- 종료·cleanup escalation (§15.2) ------------------------------------
+    @staticmethod
+    def _error_code(error: BaseException) -> str:
+        return error.code.value if isinstance(error, PocError) else f"EXCEPTION:{type(error).__name__}"
+
     def close_workload(self, *, infrastructure: str = "COMPLETED") -> dict:
-        """finish → 자발 close → TERM → KILL 순서. 잔존 검사 결과를 돌려준다."""
+        """finish → 자발 close → TERM → KILL 순서. 잔존 검사 결과를 돌려준다.
 
-        report = {"forced_kill": False, "steps": []}
+        R8: **protocol finish 성공 여부와 OS 자원 정리를 분리**한다. FINISH/CLOSE 송신이
+        실패(BrokenPipe·ConnectionError 등)해도 child 종료·socket teardown·engine mark_closed는
+        **항상** 시도한다. 한 정리 단계의 예외도 나머지 정리를 막지 않는다. 원래 protocol
+        오류는 `report["protocol_error"]`로, 정리 단계 예외는 `report["cleanup_errors"]`로
+        보존한다(삼켜서 완료로 위장하지 않는다). KeyboardInterrupt/SystemExit은 가능한 정리를
+        마친 뒤 원형 그대로 재전달한다(§15.2). 메모리 정리만으로 RF 반환 완료를 선언하지 않는다.
+        """
+
+        report = {"forced_kill": False, "steps": [], "protocol_error": None, "cleanup_errors": []}
         engine = self.engine
-        if engine is not None and engine.state == EngineState.RUNNING:
-            self._send_all(engine.begin_finish(self._clock.monotonic()))
-            report["steps"].append("FINISH")
-            self.run_until(lambda: engine.state != EngineState.FINISHING, timeout=FINISH_WAIT_S)
-        if engine is not None and engine.state in (EngineState.FINISHING, EngineState.RUNNING):
-            # FINISH_RESULT를 못 받았으면 on_finish 생략하고 CLOSE로 진행(§15.2).
-            self._send_all(engine.force_close(self._clock.monotonic(), infrastructure=infrastructure))
-            report["steps"].append("FORCE_CLOSE")
-        elif engine is not None and engine.state == EngineState.CLOSING:
-            report["steps"].append("CLOSE")
+        interrupt: list[BaseException] = []  # 첫 인터럽트만 보존해 정리 후 재전달
 
-        # child 자발 종료 대기 → TERM → KILL.
-        report["steps"].append(self._terminate_child())
-        if report["steps"][-1] == "SIGKILL":
+        def guard(fn, *, default=None, record_protocol=False):
+            """한 단계를 실행하되 예외/인터럽트를 보존하고 나머지 정리를 잇는다."""
+            try:
+                return fn()
+            except (KeyboardInterrupt, SystemExit) as exc:
+                if not interrupt:
+                    interrupt.append(exc)  # 정리 후 원형 재전달(첫 인터럽트 보존)
+                return default
+            except Exception as exc:  # noqa: BLE001 - 단계 오류 보존, 나머지 정리 계속
+                if record_protocol and report["protocol_error"] is None:
+                    report["protocol_error"] = self._error_code(exc)
+                else:
+                    report["cleanup_errors"].append(self._error_code(exc))
+                return default
+
+        # --- protocol finish/close (실패해도 OS 정리로 진행) ---
+        def _protocol_close():
+            if engine is not None and engine.state == EngineState.RUNNING:
+                self._send_all(engine.begin_finish(self._clock.monotonic()))
+                report["steps"].append("FINISH")
+                self.run_until(lambda: engine.state != EngineState.FINISHING, timeout=FINISH_WAIT_S)
+            if engine is not None and engine.state in (EngineState.FINISHING, EngineState.RUNNING):
+                # FINISH_RESULT를 못 받았으면 on_finish 생략하고 CLOSE로 진행(§15.2).
+                self._send_all(engine.force_close(self._clock.monotonic(), infrastructure=infrastructure))
+                report["steps"].append("FORCE_CLOSE")
+            elif engine is not None and engine.state == EngineState.CLOSING:
+                report["steps"].append("CLOSE")
+
+        guard(_protocol_close, record_protocol=True)
+
+        # --- OS 자원 정리(항상 시도, 각 단계 독립) ---
+        step = guard(self._terminate_child, default="CHILD_TERM_ERROR")
+        report["steps"].append(step)
+        if step == "SIGKILL":
             report["forced_kill"] = True
-
-        self._drain_child_output()
-        self._teardown_socket()
+        guard(self._drain_child_output)
+        guard(self._teardown_socket)
         if engine is not None:
-            engine.mark_closed()
+            guard(engine.mark_closed)
         self.closed = True
         report["residual"] = self.residuals()
+        if interrupt:
+            report["interrupt"] = self._error_code(interrupt[0])
+            raise interrupt[0]  # 가능한 정리를 마친 뒤 원래 인터럽트 재전달
         return report
 
     def _terminate_child(self) -> str:

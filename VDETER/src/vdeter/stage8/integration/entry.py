@@ -25,7 +25,13 @@ import sys
 from ..execution.catalog import scan_catalog
 from ..execution.lease import MassBLease
 from ..execution.runner import WorkloadRunner, WorkloadSpec
-from ..execution.selection import SelectionError, SourceMode, build_menu, resolve_source_mode
+from ..execution.selection import (
+    SelectionError,
+    SourceMode,
+    build_menu,
+    resolve_source_mode,
+    unavailable_required_capabilities,
+)
 from ..execution.snapshot import Snapshot, create_snapshot
 from ..execution.verdict import ScenarioVerdict, WorkloadResult
 from ..poc_api.negotiation import ServerCapabilityConfig
@@ -60,15 +66,25 @@ def select_and_snapshot(*, scenario_id: str, dest_dir: str, poc: str | None = No
     """
 
     mode = resolve_source_mode(poc=poc, poc_dir=poc_dir, interactive=interactive)
+    server = server_config or ServerCapabilityConfig()
     if mode == SourceMode.OFF:
         return None
     if mode == SourceMode.DIRECT:
         base = _base_of_path(poc)
-        return create_snapshot(os.path.dirname(os.path.abspath(poc)), base,
-                               dest_dir=dest_dir, scenario_id=scenario_id, uid=uid)
+        snapshot = create_snapshot(os.path.dirname(os.path.abspath(poc)), base,
+                                   dest_dir=dest_dir, scenario_id=scenario_id, uid=uid)
+        # R9: direct(--poc)도 catalog와 **같은** 설치 capability 사전 검증을 거친다. 미지원 required
+        # capability는 연구자 코드 import·constructor·child spawn 이전에 거부한다(§6.3, POC-D22).
+        # snapshot(파일 복사·manifest 검증)은 연구자 코드를 import하지 않으므로 이 시점이 import 전이다.
+        unavailable = unavailable_required_capabilities(snapshot.descriptor, server)
+        if unavailable:
+            raise SelectionError(
+                f"required capability unavailable: {','.join(unavailable)} "
+                f"(direct --poc는 import·spawn 전에 거부; handshake 재검증과 별개)")
+        return snapshot
     # CATALOG: scenario-first 선택.
     catalog = scan_catalog(poc_dir, uid=uid)
-    menu = build_menu(catalog, scenario_id, server_config=server_config or ServerCapabilityConfig())
+    menu = build_menu(catalog, scenario_id, server_config=server)
     if poc_id is None or poc_id == "none":
         return None  # baseline: PoC 자원 0(구조적 0).
     if poc_id not in menu.selectable_ids():
@@ -80,11 +96,17 @@ def select_and_snapshot(*, scenario_id: str, dest_dir: str, poc: str | None = No
 
 
 def build_connection(*, snapshot: Snapshot, provider, session_id: str, workload_id: str,
-                     run_id: str, scenario_id: str, socket_root: str,
+                     run_id: str, scenario_id: str, socket_root: str | None = None,
                      server_config: ServerCapabilityConfig | None = None,
                      src_path: str | None = None, python_executable: str | None = None,
                      clock=None, extra_env=None) -> SupervisorConnection:
-    """immutable snapshot을 실 child로 띄우는 `SupervisorConnection`을 만든다(실 socket·SDK)."""
+    """immutable snapshot을 실 child로 띄우는 `SupervisorConnection`을 만든다(실 socket·SDK).
+
+    `socket_root`가 None이면 supervisor가 명세 §4.2의 socket root(`$XDG_RUNTIME_DIR/vdeter-poc` 또는
+    `/tmp/vdeter-poc-<uid>`, workload마다 128-bit nonce dir)를 쓴다. 실 CLI run root(`var/runs/<run-id>/…`)
+    아래에 socket을 두면 sun_path 상한(§4.2 check_path_length)을 넘어 child spawn이 실패하므로 production
+    CLI는 None을 전달한다. 명시 root는 시험·격리용이며 그 아래에 workload_id를 덧붙인다.
+    """
 
     src_path = src_path or os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
@@ -108,22 +130,84 @@ def build_connection(*, snapshot: Snapshot, provider, session_id: str, workload_
         session_id=session_id, workload_id=workload_id, run_id=run_id, scenario_id=scenario_id,
         manifest=snapshot.descriptor, server_config=server_config or ServerCapabilityConfig(),
         clock=clock or RealMonotonicClock(),
-        socket_root=os.path.join(socket_root, workload_id),
+        # None → 명세 §4.2 root(짧은 경로, nonce dir 격리). 명시 root(시험)는 workload_id로 격리.
+        socket_root=(os.path.join(socket_root, workload_id) if socket_root else None),
     )
 
 
-def run_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id: str, workload_id: str,
-                     session_id: str, socket_root: str, device_seams,
-                     scenario_verdict: ScenarioVerdict = ScenarioVerdict.PASS,
-                     dual_channel_installed: bool = False, target_response=None,
-                     server_config: ServerCapabilityConfig | None = None,
-                     src_path: str | None = None, python_executable: str | None = None) -> tuple:
-    """한 PoC workload를 production 경로로 실행한다(§5.1 lifecycle 전체).
+class PocWorkload:
+    """arm(scenario submit 전) / run(scenario 실행 중·후)로 분리한 PoC workload 핸들(§5.1 순서).
 
-    `device_seams`는 **필수**다(fail-closed). RF-off 통합·시험에서는 `rf_off.rf_off_seams()`를 호출해
-    명시적으로 넘기고, 실장비(Stage 6)에서는 실 Stage 7 seam으로 만든 `DeviceSeams`를 넘긴다. entry가
-    시험용 seam을 조용히 기본값으로 쓰지 않는다. 반환 ``(WorkloadResult, seams)``. seams.group_tx로
-    실제 방사(software submit) 기록을 검사할 수 있다.
+    R1: PoC는 scenario submit **전에** arm(child spawn·on_start·ARMED)되어야 하고, 실제 workload event
+    처리 후 terminal·finish·evidence·cleanup으로 끝난다. arm 실패는 예외로 올려 caller가 scenario를
+    제출하지 않게 한다.
+    """
+
+    def __init__(self, runner, connection, provider, seams, steps) -> None:
+        self._runner = runner
+        self._connection = connection
+        self._provider = provider
+        self._seams = seams
+        self._steps = tuple(steps)
+
+    def arm(self) -> bool:
+        """child spawn + on_start → ARMED. 실패 시 예외(scenario submit 금지)."""
+        return self._runner.arm()
+
+    def run(self, scenario_verdict: ScenarioVerdict):
+        """ARMED 후: workload event 전달 → terminal → finish → evidence → cleanup. fail-closed 결과."""
+        try:
+            for step in self._steps:
+                if self._connection.infrastructure_error is not None:
+                    break
+                self._runner.deliver(step)
+        except Exception:  # noqa: BLE001 - runner가 기록; finish가 fail-closed 결과화
+            pass
+        except BaseException:
+            self._runner.finish(scenario_verdict)
+            raise
+        return self._runner.finish(scenario_verdict)
+
+    def run_full(self, scenario_verdict: ScenarioVerdict):
+        """arm + run(원자적). arm 실패도 fail-closed 결과로 확정(기존 run_poc_workload 호환)."""
+        try:
+            armed = self.arm()
+            if armed:
+                for step in self._steps:
+                    if self._connection.infrastructure_error is not None:
+                        break
+                    self._runner.deliver(step)
+        except Exception:  # noqa: BLE001
+            return self._runner.finish(scenario_verdict)
+        except BaseException:
+            self._runner.finish(scenario_verdict)
+            raise
+        return self._runner.finish(scenario_verdict)
+
+    @property
+    def seams(self):
+        return self._seams
+
+    @property
+    def connection(self):
+        return self._connection
+
+    @property
+    def provider(self):
+        return self._provider
+
+
+def prepare_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id: str, workload_id: str,
+                         session_id: str, socket_root: str, device_seams, terminal_source=None,
+                         dual_channel_installed: bool = False, target_response=None,
+                         server_config: ServerCapabilityConfig | None = None,
+                         src_path: str | None = None,
+                         python_executable: str | None = None) -> PocWorkload:
+    """PoC workload를 조립한다(아직 arm하지 않음). caller가 scenario submit 전에 `.arm()`을 호출한다.
+
+    `device_seams` 필수(fail-closed). `terminal_source`는 실제 child terminal 공급자다 — 미주입이면
+    executor가 TX_UNKNOWN으로 남긴다(성공 합성 금지). RF-off 시험은 `rf_off.rf_off_terminal_source()`를
+    명시 주입한다.
     """
 
     seams = device_seams
@@ -132,15 +216,40 @@ def run_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id: str
         snapshot=snapshot, provider=provider, session_id=session_id, workload_id=workload_id,
         run_id=run_id, scenario_id=scenario_id, socket_root=socket_root,
         server_config=server_config, src_path=src_path, python_executable=python_executable)
-    runner = WorkloadRunner(conn, MassBLease(), run_id=run_id, workload_id=workload_id,
-                            scenario_id=scenario_id, snapshot=snapshot,
-                            tx_executor=ProductionTxExecutor(provider, target_response=target_response))
-    result = runner.run(WorkloadSpec(steps=tuple(steps), scenario_verdict=scenario_verdict))
-    return result, seams
+    runner = WorkloadRunner(
+        conn, MassBLease(), run_id=run_id, workload_id=workload_id,
+        scenario_id=scenario_id, snapshot=snapshot,
+        tx_executor=ProductionTxExecutor(provider, terminal_source=terminal_source,
+                                         target_response=target_response))
+    return PocWorkload(runner, conn, provider, seams, steps)
+
+
+def run_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id: str, workload_id: str,
+                     session_id: str, socket_root: str, device_seams,
+                     scenario_verdict: ScenarioVerdict = ScenarioVerdict.PASS,
+                     dual_channel_installed: bool = False, terminal_source=None, target_response=None,
+                     server_config: ServerCapabilityConfig | None = None,
+                     src_path: str | None = None, python_executable: str | None = None) -> tuple:
+    """한 PoC workload를 arm+run 원자적으로 실행한다(§5.1). 반환 ``(WorkloadResult, seams)``.
+
+    scenario 실행 순서(arm→scenario→run)가 필요한 CLI는 `prepare_poc_workload` + `PocWorkload.arm/run`을
+    쓴다. 이 함수는 그 순서가 무관한 focused 시험·단독 실행용이다.
+    """
+
+    workload = prepare_poc_workload(
+        snapshot=snapshot, steps=steps, scenario_id=scenario_id, run_id=run_id,
+        workload_id=workload_id, session_id=session_id, socket_root=socket_root,
+        device_seams=device_seams, terminal_source=terminal_source, target_response=target_response,
+        dual_channel_installed=dual_channel_installed, server_config=server_config,
+        src_path=src_path, python_executable=python_executable)
+    result = workload.run_full(scenario_verdict)
+    return result, workload.seams
 
 
 __all__ = (
     "select_and_snapshot",
     "build_connection",
+    "PocWorkload",
+    "prepare_poc_workload",
     "run_poc_workload",
 )

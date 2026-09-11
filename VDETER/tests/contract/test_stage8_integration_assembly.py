@@ -13,7 +13,7 @@ import unittest
 
 from vdeter.stage8.execution.verdict import ActionExecution, TargetEffect
 from vdeter.stage8.integration.assembly import DeviceSeams, assemble_provider
-from vdeter.stage8.integration.rf_off import assemble_rf_off_provider
+from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
 from vdeter.stage8.integration.device_boundary import SoftwareGroupTx, Stage7GroupTxRadioSink
 from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
 from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
@@ -77,7 +77,9 @@ class RfOffFanOutTest(unittest.TestCase):
     def test_tx_executor_derives_completed_from_provider_outcome(self):
         provider, seams = assemble_rf_off_provider()
         submission = provider.submit(_replay(target="ROC"), request_id="r1")
-        executor = ProductionTxExecutor(provider)
+        # R3: production은 성공 terminal을 합성하지 않는다. RF-off 시험은 장비 double의 terminal
+        # source를 **명시적으로** 주입해야 TX_COMPLETED가 나온다(미주입 시 TX_UNKNOWN).
+        executor = ProductionTxExecutor(provider, terminal_source=rf_off_terminal_source())
         resolution = executor({"action_kind": "REPLAY_PACKET", "target": "ROC"},
                               _result("r1", submission))
         self.assertEqual(resolution.action_execution, ActionExecution.TX_COMPLETED)
@@ -88,11 +90,21 @@ class RfOffFanOutTest(unittest.TestCase):
         # target=MASS-A로 보내되 provider outcome은 COMPLETED이나, ROC row 조회는 없다.
         provider, seams = assemble_rf_off_provider()
         submission = provider.submit(_replay(target="MASS-A"), request_id="r1")
-        executor = ProductionTxExecutor(provider)
+        executor = ProductionTxExecutor(provider, terminal_source=rf_off_terminal_source())
         resolution = executor({"action_kind": "REPLAY_PACKET", "target": "MASS-A"},
                               _result("r1", submission))
         # MASS-A는 upper에 자연 TUNED → 전달됨.
         self.assertEqual(resolution.action_execution, ActionExecution.TX_COMPLETED)
+        self.assertEqual(resolution.target_effect, TargetEffect.INDETERMINATE)
+
+    def test_tx_executor_unknown_without_terminal_source(self):
+        # R3: terminal_source 미주입이면 accepted·submit 반환만으로 성공을 만들지 않는다.
+        provider, seams = assemble_rf_off_provider()
+        submission = provider.submit(_replay(target="ROC"), request_id="r1")
+        executor = ProductionTxExecutor(provider)  # 실 terminal source 없음(production 기본)
+        resolution = executor({"action_kind": "REPLAY_PACKET", "target": "ROC"},
+                              _result("r1", submission))
+        self.assertEqual(resolution.action_execution, ActionExecution.TX_UNKNOWN)
         self.assertEqual(resolution.target_effect, TargetEffect.INDETERMINATE)
 
 
