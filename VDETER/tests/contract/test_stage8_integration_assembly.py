@@ -7,6 +7,8 @@ terminal 유도, commit 불명확·RX 미준비·자원 충돌의 fail-closed.
 
 from __future__ import annotations
 
+import os
+import sys
 import unittest
 
 from vdeter.stage8.execution.verdict import ActionExecution, TargetEffect
@@ -54,10 +56,10 @@ class RfOffFanOutTest(unittest.TestCase):
         submission = provider.submit(_replay(target="ROC"), request_id="r1")
         self.assertEqual(submission.physical_channel.value, "lower")  # ROC target = lower
         # 단일 group commit, 두 fan-out child(C4+C6) 방사.
-        self.assertEqual(len(seams.group_tx.committed_group_ids), 1)
-        self.assertEqual(len(seams.group_tx.radiated_child_ids), 2)
-        cables = {cid.rsplit(":", 1)[-1] for cid in seams.group_tx.radiated_child_ids}
-        self.assertEqual(cables, {"C4", "C6"})
+        self.assertEqual(seams.group_tx.committed_groups, 1)
+        self.assertEqual(seams.group_tx.radiated_children, 2)
+        # C4=lane0(→ROC), C6=lane1(→MASS-A): worker burst는 lane 좌표로 방사된다.
+        self.assertEqual(set(seams.group_tx.radiated_lanes), {0, 1})
 
     def test_rx_readiness_queried_before_tx_commit(self):
         provider, seams = assemble_rf_off_provider()
@@ -66,8 +68,11 @@ class RfOffFanOutTest(unittest.TestCase):
         queried = {req.endpoint for req in seams.rx_readiness.requests}
         self.assertIn("ROC", queried)
         self.assertEqual(len(seams.group_tx.submits), 1)
-        # retune(staging)이 submit보다 먼저 기록됐다(순서 불변).
-        self.assertGreaterEqual(len(seams.group_tx.retunes), 2)
+        # 두 lane 공유 TX LO retune(staging) 1회가 submit보다 먼저 기록됐다(순서 불변).
+        self.assertEqual(len(seams.group_tx.retunes), 1)
+        retune_time = seams.group_tx.retunes[0][1]
+        submit_time = seams.group_tx.submits[0][0][2]  # (lane, data, hw_time)
+        self.assertEqual(retune_time, submit_time)  # staging·commit 같은 hardware time
 
     def test_tx_executor_derives_completed_from_provider_outcome(self):
         provider, seams = assemble_rf_off_provider()
@@ -98,7 +103,7 @@ class RfOffFailClosedTest(unittest.TestCase):
             provider.submit(_replay(target="ROC"), request_id="r1")
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
         # commit 불명확: group은 방사 기록으로 남지 않는다(software submit이 예외).
-        self.assertEqual(seams.group_tx.committed_group_ids, ())
+        self.assertEqual(seams.group_tx.committed_groups, 0)
 
     def test_rx_not_ready_rejects_before_radiation(self):
         provider, seams = assemble_rf_off_provider(not_ready_endpoints=("ROC",))
@@ -116,14 +121,81 @@ class RfOffFailClosedTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
         self.assertEqual(seams.group_tx.submits, [])
 
-    def test_software_group_tx_rejects_submit_before_both_lanes_staged(self):
+    def test_software_group_tx_matches_real_worker_contract(self):
+        # 실 Stage 7 worker signature: retune_tx_lo(target_hz, command_time_ns),
+        # submit_tx_group([(lane, data, hardware_time_ns), ...]).
         gtx = SoftwareGroupTx()
-        gtx.retune_tx_lo(lane=0, channel="lower", hardware_timestamp_ns=8192)
-        # lane 1 미staging 상태에서 두 lane submit → 순서 위반.
+        # retune(staging) 전 submit → TX 순서 위반.
         with self.assertRaises(RuntimeError):
-            gtx.submit_tx_group(group_id="g1",
-                                lanes=((0, "g1:C4", "wf"), (1, "g1:C6", "wf")),
-                                hardware_timestamp_ns=8192)
+            gtx.submit_tx_group([(0, b"d0", 8192), (1, b"d1", 8192)])
+        gtx.retune_tx_lo(2_447_237_500, 8192)
+        gtx.submit_tx_group([(0, b"d0", 8192), (1, b"d1", 8192)])
+        self.assertEqual(gtx.committed_groups, 1)
+        self.assertEqual(gtx.radiated_children, 2)
+        self.assertEqual(set(gtx.radiated_lanes), {0, 1})
+        # 같은 group 중복 submit → exactly-once 위반.
+        with self.assertRaises(RuntimeError):
+            gtx.submit_tx_group([(0, b"d0", 8192), (1, b"d1", 8192)])
+        # 서로 다른 hardware time의 burst 혼재 → 거부.
+        gtx2 = SoftwareGroupTx()
+        gtx2.retune_tx_lo(2_447_237_500, 8192)
+        with self.assertRaises(RuntimeError):
+            gtx2.submit_tx_group([(0, b"d0", 8192), (1, b"d1", 9000)])
+
+
+class RealWorkerInterfaceTest(unittest.TestCase):
+    """Stage7GroupTxRadioSink가 **실제 Stage 7 worker(double)**의 group TX 계약에 결속됨을 확인한다.
+
+    실 worker interface(retune_tx_lo(target_hz, command_time_ns)·submit_tx_group(bursts))에 그대로
+    바인딩되어 방사됨을 보인다(§4: 실제 group TX 인터페이스에 맞춘 prepare/commit 경계). 실 UHD/B210·
+    실 RF atomicity·frozen PHY 샘플 포맷·cross-process coordinator 결선은 Stage 6.
+    """
+
+    def _real_worker(self):
+        _tests = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # VDETER/tests
+        if _tests not in sys.path:
+            sys.path.insert(0, _tests)
+        from support.stage7 import Stage7FakeMedium, Stage7FakeMediumWorker
+        medium = Stage7FakeMedium(host_raw_clock=lambda: 0)
+        # 세 endpoint worker를 medium에 등록한다(수신자 ROC·MASS-A가 있어야 fan-out이 도달).
+        workers = {
+            serial: Stage7FakeMediumWorker("serial=%s" % serial, "fc32", "sc16", medium=medium)
+            for serial in ("34D03E8", "34D03DD", "3515425")  # ROC, MASS-A, MASS-B
+        }
+        return medium, workers["3515425"]  # MASS-B = 공격 송신자
+
+    def test_signature_matches_real_worker(self):
+        import inspect
+        _tests = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _tests not in sys.path:
+            sys.path.insert(0, _tests)
+        from support.stage7 import Stage7FakeMediumWorker as W
+        self.assertEqual(list(inspect.signature(W.retune_tx_lo).parameters)[1:],
+                         ["target_hz", "command_time_ns"])
+        self.assertEqual(list(inspect.signature(W.submit_tx_group).parameters)[1:],
+                         ["bursts"])
+
+    def test_adapter_radiates_through_real_worker_double(self):
+        from vdeter.stage8.integration.device_boundary import Stage7GroupTxRadioSink
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.stage8.shared_medium.radiation import (
+            AtomicBroadcast, ReferenceWaveformFactory,
+        )
+        from vdeter.stage8.shared_medium.testing import ReadyReadiness
+        medium, worker = self._real_worker()
+        sink = Stage7GroupTxRadioSink(group_tx=worker)
+        broadcast = AtomicBroadcast(radio_sink=sink, rx_readiness=ReadyReadiness(),
+                                    waveform_factory=ReferenceWaveformFactory())
+        parent = broadcast.build_parent(
+            source_station="MASS-B", channel=PhysicalChannel.LOWER, payload=b"deadbeef",
+            scheduled_sample=8192, scheduled_hw_timestamp_ns=8192, slot_key="slot-1",
+            addressed_destination="ROC")
+        admission = sink.prepare_group(group_id=parent.parent_id, children=parent.children)
+        sink.commit_group(admission)
+        # adapter가 실 worker의 retune_tx_lo(선택 채널)와 submit_tx_group(2 burst)를 호출했다.
+        self.assertEqual(worker.tx_lo_hz, 2_447_237_500)  # lower 채널 TX LO
+        transmitted = len(medium.delivery_log) + len(medium.tune_mismatch_log)
+        self.assertEqual(transmitted, 2)  # 두 fan-out child burst가 worker→medium으로 방사
 
 
 # --- 최소 seam double (fail-closed 조립 시험 전용) ---------------------------

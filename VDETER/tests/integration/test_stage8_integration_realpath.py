@@ -169,8 +169,8 @@ class ProductionRealPathTest(unittest.TestCase):
         self.assertEqual(attack.target, "ROC")
         self.assertEqual(attack.physical_channel, "lower")
         # 실제 provider가 C4+C6 atomic fan-out을 software group TX로 방사했다.
-        self.assertEqual(len(seams.group_tx.committed_group_ids), 1)
-        self.assertEqual(len(seams.group_tx.radiated_child_ids), 2)
+        self.assertEqual(seams.group_tx.committed_groups, 1)
+        self.assertEqual(seams.group_tx.radiated_children, 2)
         self._assert_clean(conn, lease)
 
     def test_preemptive_replay_full_chain(self):
@@ -182,7 +182,7 @@ class ProductionRealPathTest(unittest.TestCase):
         self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
         self.assertEqual(result.attacks[0].target, "MASS-A")
         self.assertEqual(result.attacks[0].physical_channel, "upper")
-        self.assertEqual(len(seams.group_tx.committed_group_ids), 1)
+        self.assertEqual(seams.group_tx.committed_groups, 1)
         self._assert_clean(conn, lease)
 
     def test_reactive_after_slots_binds_observation_trigger(self):
@@ -195,7 +195,7 @@ class ProductionRealPathTest(unittest.TestCase):
         self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
         self.assertEqual(len(result.attacks), 1)
         self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
-        self.assertEqual(len(seams.group_tx.committed_group_ids), 1)
+        self.assertEqual(seams.group_tx.committed_groups, 1)
         self._assert_clean(conn, lease)
 
     def test_resource_conflict_rejects_without_radiation(self):
@@ -235,7 +235,7 @@ class ProductionRealPathTest(unittest.TestCase):
         self.assertIn(result.poc_infrastructure,
                       (PocInfrastructure.ABORTED, PocInfrastructure.ERROR))
         self.assertEqual(result.infrastructure_error_code, "POC_TX_OUTCOME_UNKNOWN")
-        self.assertEqual(seams.group_tx.committed_group_ids, ())  # 방사 성공 기록 0
+        self.assertEqual(seams.group_tx.committed_groups, 0)  # 방사 성공 기록 0
         self._assert_clean(conn, lease)
 
     def test_not_tuned_observation_makes_no_event_or_action(self):

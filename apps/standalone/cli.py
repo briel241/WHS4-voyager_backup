@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="print the run summary as JSON at the end")
     run.add_argument("--no-retry", action="store_true",
                      help="disable the single automatic bring-up retry")
+    run.add_argument("--poc", default=None, metavar="PATH",
+                     help="Stage 8: external PoC package <base>.py to run against "
+                          "the selected scenario (opt-in; off by default)")
+    run.add_argument("--poc-dir", default=None, metavar="DIR",
+                     help="Stage 8: external PoC catalog directory for interactive "
+                          "scenario-first PoC selection (opt-in; interactive only)")
 
     results = sub.add_parser("results", help="list runs or show one summary")
     results.add_argument("run_id", nargs="?", default=None)
@@ -271,6 +277,7 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
             run_id=args.run_id, diagnostics=args.diagnostics,
             json_summary=args.json, retry=not args.no_retry,
             progress=not getattr(args, "no_progress", False),
+            poc=getattr(args, "poc", None), poc_dir=getattr(args, "poc_dir", None),
             out=out, input_fn=input_fn)
     if args.command == "results":
         from apps.standalone import results_cmd

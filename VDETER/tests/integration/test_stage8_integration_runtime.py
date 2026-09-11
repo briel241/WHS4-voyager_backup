@@ -86,7 +86,7 @@ class EntryDriverTest(unittest.TestCase):
             socket_root=self.sock_root, src_path=_SRC, device_seams=rf_off_seams())
         self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
         self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
-        self.assertEqual(len(seams.group_tx.committed_group_ids), 1)
+        self.assertEqual(seams.group_tx.committed_groups, 1)
 
     def test_baseline_none_creates_no_snapshot(self):
         write_poc_package(self.poc, "cat_replay", poc_id="cat-replay", script=_reactive("A"))

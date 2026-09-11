@@ -624,8 +624,42 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     return session, run_id, run_root, ready
 
 
+def _run_poc(poc_ctx, session, *, scenario_id, workload_id, poc_id, out) -> dict | None:
+    """한 workload의 Stage 8 PoC를 실제 실행 경로로 돌린다(§5, §11). baseline(none)/미선택이면 None.
+
+    scenario-호환 PoC를 선택해 immutable snapshot을 만들고, 실 child·socket·SDK·engine·Stage 5
+    provider로 실행한 뒤 세 독립 판정을 workload result에 붙일 evidence로 돌려준다. device 경계는
+    session이 제공한다(RF-off는 software, production은 실 radio — 미제공 시 poc_run이 fail-closed).
+    """
+    mod = poc_ctx["module"]
+    dest = Path(poc_ctx["run_root"]) / "workloads" / workload_id / "poc-snapshot"
+    try:
+        snapshot = mod.select_snapshot(
+            poc_ctx["option"], scenario_id=scenario_id, dest_dir=str(dest),
+            poc_id=poc_id, interactive=poc_ctx.get("interactive", True))
+    except mod.PocRunError as exc:
+        out("  poc refused: %s" % exc)
+        return {"status": "REFUSED", "error": str(exc)}
+    if snapshot is None:
+        return None  # baseline: PoC none (자원 0)
+    sock_root = str(Path(poc_ctx["run_root"]) / "poc-sockets")
+    try:
+        evidence = mod.run_for_workload(
+            session, snapshot, scenario_id=scenario_id, run_id=poc_ctx["run_id"],
+            workload_id=workload_id, socket_root=sock_root,
+            src_path=poc_ctx.get("src_path"))
+    except mod.PocRunError as exc:
+        out("  poc error: %s" % exc)
+        return {"status": "ERROR", "error": str(exc)}
+    out("  poc infrastructure=%s attacks=%s radiated_children=%s"
+        % (evidence.get("poc_infrastructure"),
+           len(evidence.get("attacks") or []),
+           (evidence.get("radiation") or {}).get("radiated_children")))
+    return evidence
+
+
 def _run_workload(session, scenario_id, certificate_case, *, out, clock,
-                  index=None, total=None):
+                  index=None, total=None, poc_ctx=None, poc_id=None):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
 
     RF 활성 구간(submit→result)에는 `running …`과 settle 안내만 표시하고
@@ -658,6 +692,12 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
             index=index, total=total):
         out(line)
     out(result_line(result))
+    # Stage 8 PoC: scenario 판정과 **독립**으로 기록한다(§11.1, scenario verdict 재계산 없음).
+    if poc_ctx is not None:
+        poc_evidence = _run_poc(poc_ctx, session, scenario_id=scenario_id,
+                                workload_id=workload_id, poc_id=poc_id, out=out)
+        if poc_evidence is not None:
+            result["poc"] = poc_evidence
     return result
 
 
@@ -670,7 +710,23 @@ def _clean_choice(raw: str) -> str:
     return _ESCAPE_SEQ_RE.sub("", str(raw)).strip()
 
 
-def _menu(session, *, out, input_fn, clock) -> list:
+def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
+    """catalog(`--poc-dir`) mode에서 scenario-호환 PoC를 대화형 선택한다(§6.1). 반환 poc_id 또는 None.
+
+    direct(`--poc`)면 고정 package라 menu 없이 None(select_snapshot이 --poc를 쓴다).
+    """
+    if poc_ctx is None or not poc_ctx["option"].poc_dir:
+        return None
+    for line in poc_ctx["module"].catalog_menu_lines(poc_ctx["option"], scenario_id):
+        out("  " + line)
+    try:
+        choice = _clean_choice(input_fn("  select poc [id / none] > "))
+    except EOFError:
+        return "none"
+    return choice or "none"
+
+
+def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
     ordered = sorted(SCENARIOS)
     results = []
     while True:
@@ -690,9 +746,12 @@ def _menu(session, *, out, input_fn, clock) -> list:
             break
         if lowered in ("a", "all"):
             for number, (scenario_id, case) in enumerate(DEFAULT_BATCH_PLAN, 1):
+                poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out,
+                                      input_fn=input_fn)
                 result = _run_workload(session, scenario_id, case,
                                        out=out, clock=clock, index=number,
-                                       total=len(DEFAULT_BATCH_PLAN))
+                                       total=len(DEFAULT_BATCH_PLAN),
+                                       poc_ctx=poc_ctx, poc_id=poc_id)
                 results.append(result)
                 if result.get("status") != "PASS" or not (
                         result.get("quiescence") or {}).get("pass"):
@@ -720,8 +779,9 @@ def _menu(session, *, out, input_fn, clock) -> list:
                     % answer)
                 continue
             case = answer
+        poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out, input_fn=input_fn)
         result = _run_workload(session, scenario_id, case, out=out,
-                               clock=clock)
+                               clock=clock, poc_ctx=poc_ctx, poc_id=poc_id)
         results.append(result)
         if not (result.get("quiescence") or {}).get("pass"):
             out("  session can no longer accept workloads (quiescence "
@@ -753,20 +813,36 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             session_factory=LocalCoordinatorSession,
             preflight_fn=None, reference_loader=None, usb_probe=None,
             environment_manifest=None, repo_root=None,
-            hardware_path=None, out=print, input_fn=input,
+            hardware_path=None, poc=None, poc_dir=None, out=print, input_fn=input,
             clock=time.monotonic, progress: bool = True,
             progress_stream=None, progress_ticker: bool = True,
             topology_probe=None) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
-    표시 계층은 판정·evidence 결과에 영향을 주지 않는다."""
+    표시 계층은 판정·evidence 결과에 영향을 주지 않는다.
+
+    `poc`/`poc_dir`(Stage 8 opt-in)가 주어지면 workload마다 scenario-호환 PoC를 선택·snapshot해
+    실제 child·socket·provider로 실행한다. 둘 다 없으면 `poc_run`(stage8) module을 로드하지 않는다
+    (기능 OFF 구조적 0). device 경계는 session이 제공한다(`poc_device_seams`)."""
     try:
         plan = plan_for(scenario, certificate_case)
     except RunRefusal as exc:
         out("Refused: " + str(exc))
         return exc.code
     interactive = scenario is None
+
+    # Stage 8 opt-in: --poc/--poc-dir가 있을 때만 sanctioned adapter를 lazy import한다.
+    poc_option = None
+    poc_run = None
+    if poc is not None or poc_dir is not None:
+        from apps.standalone import poc_run as poc_run
+        try:
+            poc_option = poc_run.resolve_option(poc=poc, poc_dir=poc_dir,
+                                                interactive=interactive)
+        except poc_run.PocRunError as exc:
+            out("Refused: " + str(exc))
+            return EXIT_CONFIG
 
     lock = SingleInstanceLock(paths.lock_path)
     try:
@@ -933,15 +1009,26 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         # workload trace·result·evidence 생성은 세션/coordinator 계약 그대로다.
         mirror.set_path(None)
         out = terminal_out
+        poc_ctx = None
+        if poc_option is not None and poc_option.active:
+            poc_ctx = {
+                "module": poc_run, "option": poc_option, "run_root": run_root,
+                "run_id": active_run_id, "interactive": interactive,
+                "input_fn": input_fn,
+                "src_path": str(Path(context["repo_root"]) / "VDETER" / "src"),
+            }
+            out("[poc]       Stage 8 PoC opt-in active (%s)"
+                % ("catalog" if poc_option.poc_dir else "direct"))
         try:
             if interactive:
                 results = _menu(session, out=out, input_fn=input_fn,
-                                clock=clock)
+                                clock=clock, poc_ctx=poc_ctx)
             else:
                 for number, (scenario_id, case) in enumerate(plan, 1):
                     result = _run_workload(session, scenario_id, case,
                                            out=out, clock=clock,
-                                           index=number, total=len(plan))
+                                           index=number, total=len(plan),
+                                           poc_ctx=poc_ctx)
                     results.append(result)
                     if result.get("status") != "PASS" or not (
                             result.get("quiescence") or {}).get("pass"):
