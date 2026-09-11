@@ -516,7 +516,8 @@ def _close_with_interrupt_guard(session, out) -> dict:
 
 
 def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
-              diagnostics, out, clock, reporter=None, mirror=None) -> tuple:
+              diagnostics, out, clock, reporter=None, mirror=None,
+              rf_off_software: bool = False) -> tuple:
     """run 디렉터리 할당 → config 생성 → 세션 spawn → READY 대기.
 
     실패는 BringupFailed(summary) — summary는 finalize 결과(정직).
@@ -566,7 +567,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         configs_dir=generated["configs_dir"], gain_artifact_path=gain_path,
         baseline_sha256=provenance_module.STAGE7_BASELINE_PIN["sha256"],
         phase="mass-roc-session", diagnostics=diagnostics,
-        identity_root=paths.identity_dir)
+        identity_root=paths.identity_dir, rf_off_software=rf_off_software)
     out(f"[config]    {run_id} generated and validated")
     out("Bringing up hardware session (~20-23 min, once per run)")
     started = clock()
@@ -673,6 +674,45 @@ def _finish_poc(poc_ctx, prep, *, scenario_verdict, out) -> dict:
     return evidence
 
 
+def _run_workload_rf_off_poc(session, scenario_id, certificate_case, *, out, clock,
+                             index=None, total=None, poc_ctx, poc_id=None):
+    """RF-off software 모드의 workload 하나 — PoC를 **실 coordinator 프로세스**에 위임한다.
+
+    CLI는 PoC source·scenario를 request에 실어 `submit_workload(poc=...)`로 발행하고, coordinator가
+    workload-local PoC(실 child·socket·SDK·provider)를 실행 중 scenario event와 함께 처리한 결과를
+    file IPC로 회신한다. CLI는 그 결과의 poc evidence·severity를 그대로 반영한다(in-process 실행 0).
+    """
+    option = poc_ctx["option"]
+    poc_req = {"poc": option.poc, "poc_dir": option.poc_dir,
+               "poc_id": poc_id, "src_path": poc_ctx.get("src_path")}
+    label = scenario_id + (" (%s)" % certificate_case if scenario_id == "SC-VDE-001" else "")
+    out("  running " + label + " (poc via coordinator)")
+    workload_id = session.submit_workload(
+        scenario_id, certificate_case, poc=poc_req,
+        on_settle=lambda remaining, prev: out(
+            "  settling %.0f s (RX pipeline drain after %s)" % (remaining, prev)))
+    started = clock()
+    trace_rows = []
+    result = session.wait_result(workload_id, on_trace=trace_rows.append)
+    result.setdefault("wall_clock_s", round(clock() - started, 1))
+    result.setdefault("workload_id", workload_id)
+    result.setdefault("scenario_id", scenario_id)
+    result.setdefault("certificate_case", certificate_case)
+    try:
+        for line in scenario_report.workload_report_lines(
+                trace_rows, result, run_root=getattr(session, "run_root", None),
+                index=index, total=total):
+            out(line)
+    except Exception:  # noqa: BLE001 - 상세 렌더링 실패가 판정·evidence를 바꾸지 않는다
+        pass
+    out(result_line(result))
+    # coordinator가 result["poc"]에 evidence를 실어 준다(§11.1 독립 판정). severity로 다음 workload 허용 판정.
+    poc_evidence = result.get("poc")
+    if poc_evidence is not None:
+        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
+    return result
+
+
 def _run_workload(session, scenario_id, certificate_case, *, out, clock,
                   index=None, total=None, poc_ctx=None, poc_id=None):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
@@ -686,6 +726,12 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     실행 경로에 없다(R1 선택 롤백). 상세 블록 렌더링 실패는 판정·close·
     evidence에 영향을 주지 않는다(경고 한 줄). 판정·timeout·evidence 계약은
     세션 객체가 그대로 소유한다."""
+    # RF-off software 모드: PoC를 CLI에서 in-process 실행하지 않고 실 coordinator 프로세스에 workload
+    # 요청으로 위임한다(실 coordinator↔PoC 연결). 결과 JSON의 poc evidence를 그대로 쓴다.
+    if poc_ctx is not None and poc_ctx.get("rf_off_software"):
+        return _run_workload_rf_off_poc(
+            session, scenario_id, certificate_case, out=out, clock=clock,
+            index=index, total=total, poc_ctx=poc_ctx, poc_id=poc_id)
     # R1: PoC를 scenario submit **전에** 선택·snapshot·arm한다. 준비/ARMED 실패면 scenario 제출 0.
     prep = None
     if poc_ctx is not None:
@@ -890,7 +936,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             hardware_path=None, poc=None, poc_dir=None, out=print, input_fn=input,
             clock=time.monotonic, progress: bool = True,
             progress_stream=None, progress_ticker: bool = True,
-            topology_probe=None) -> int:
+            topology_probe=None, rf_off_software: bool = False) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
@@ -989,7 +1035,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 session, active_run_id, run_root, _ready = _bring_up(
                     context, paths, run_id=run_id if attempt == 1 else None,
                     session_factory=session_factory, diagnostics=diagnostics,
-                    out=out, clock=clock, reporter=reporter, mirror=mirror)
+                    out=out, clock=clock, reporter=reporter, mirror=mirror,
+                    rf_off_software=rf_off_software)
                 attempts.append({"attempt": attempt, "run_id": active_run_id,
                                  "bringup": "READY"})
                 break
@@ -1090,9 +1137,13 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 "run_id": active_run_id, "interactive": interactive,
                 "input_fn": input_fn,
                 "src_path": str(Path(context["repo_root"]) / "VDETER" / "src"),
+                # RF-off software 모드: PoC를 CLI 프로세스에서 in-process 실행하지 않고 실
+                # coordinator 프로세스에 workload 요청으로 위임한다(실 coordinator↔PoC 연결).
+                "rf_off_software": rf_off_software,
             }
-            out("[poc]       Stage 8 PoC opt-in active (%s)"
-                % ("catalog" if poc_option.poc_dir else "direct"))
+            out("[poc]       Stage 8 PoC opt-in active (%s%s)"
+                % ("catalog" if poc_option.poc_dir else "direct",
+                   ", rf-off-software" if rf_off_software else ""))
         try:
             if interactive:
                 results = _menu(session, out=out, input_fn=input_fn,

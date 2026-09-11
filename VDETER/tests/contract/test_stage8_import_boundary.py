@@ -22,6 +22,17 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "standalone", "poc_run.py")),
 })
 
+# Stage 6 coordinator↔PoC 연결에서 명시 승인된 **RF-off software 세션 host** adapter.
+# production CLI adapter(poc_run)와 달리, 이것은 `--rf-off-software`에서만 진입하는 **명시적
+# 하드웨어 경계 double** harness다(실장비 실행에서는 진입하지 않는다). 따라서 rf_off·testing seam을
+# 의도적으로 import하며(그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
+# 광범위 allowlist가 아니라 정확히 이 한 파일만 추가한다(실제 결선에 필요한 최소 범위).
+_SANCTIONED_RF_OFF_SESSION = frozenset({
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py")),
+})
+
+_STAGE8_ADAPTERS = _SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
+
 
 def _run_py(code: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -67,7 +78,7 @@ class ImportBoundaryTest(unittest.TestCase):
         sanctioned adapter로 좁히고 나머지 모든 기존 소스는 여전히 stage8을 참조하지 않는다.
         """
         offenders = [p for p in self._stage8_referencing_files()
-                     if p not in _SANCTIONED_CLI_ADAPTERS]
+                     if p not in _STAGE8_ADAPTERS]
         rel = [os.path.relpath(p, _PROJECT_ROOT) for p in offenders]
         self.assertEqual(rel, [], f"승인 adapter 밖에서 stage8을 참조함: {rel}")
 
@@ -85,6 +96,20 @@ class ImportBoundaryTest(unittest.TestCase):
             path = os.path.normpath(os.path.join(standalone, name))
             self.assertNotIn(path, hits,
                              f"{name}은 stage8을 직접 참조하면 안 됨(poc_run adapter로만)")
+
+    def test_rf_off_session_adapter_is_exact_and_verification_only(self):
+        """RF-off software 세션 host는 정확히 apps/stage8_rf_off_session.py 하나이며, 실제로 stage8을
+        참조하는 명시적 RF-off harness다(하드웨어 경계 double; `--rf-off-software`에서만 진입).
+
+        production CLI 파일(cli/run_cmd/local_session)은 이 host를 통해서도 stage8을 직접 참조하지
+        않는다(여전히 stage8 문자열 0). coordinator(VDETER/apps)는 scan root 밖이라 여기서 검사하지 않는다.
+        """
+        hits = set(self._stage8_referencing_files())
+        for adapter in _SANCTIONED_RF_OFF_SESSION:
+            self.assertIn(adapter, hits, "RF-off 세션 host가 stage8을 실제로 import해야 함")
+            with open(adapter, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("rf_off", text, "RF-off 세션 host는 명시적 RF-off double(rf_off)을 쓴다")
 
     def test_sanctioned_adapter_does_not_import_testing_or_rf_off(self):
         """production adapter는 어떤 .testing이나 RF-off harness(rf_off)도 import하지 않는다(§4).

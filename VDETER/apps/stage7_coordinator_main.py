@@ -3278,7 +3278,22 @@ def main(argv=None) -> int:
         choices=("normal", "forged", "both"),
         help="mass-roc workload의 SC-VDE-001 인증서 분기",
     )
+    parser.add_argument(
+        "--rf-off-software", action="store_true",
+        help="Stage 8 RF-off software 모드: B210 launcher를 spawn하지 않고 in-process PoC workload를 "
+             "실행한다(하드웨어 경계 명시 software double 검증 전용, production 아님).",
+    )
     arguments = parser.parse_args(argv)
+
+    if arguments.rf_off_software:
+        # Stage 8 RF-off software 세션: B210/launcher 없이 실 coordinator 프로세스가 파일 IPC로
+        # PoC workload를 in-process 실행한다(연결 §3.1). 자격 대상 경로는 건드리지 않고 비자격
+        # apps/ 모듈로 위임한다. repo-root를 path에 올려 repo-root apps.* 를 import한다(기존 관례).
+        repo_root = os.path.dirname(APP_ROOT)
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from apps.stage8_rf_off_session import run_rf_off_software_session
+        return run_rf_off_software_session(arguments)
 
     if arguments.workload == "mass-roc" and arguments.phase not in (
         "rr-p2-17", "rr-p2-19"

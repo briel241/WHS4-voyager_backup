@@ -213,13 +213,21 @@ class SupervisorConnection(PocSupervisor):
 
     def emit_observation(self, record) -> None:
         # 관측 event의 observation_id를 scheduler trigger로 등록한다(반응형 인과성, H1c).
-        # slot은 VDETER(=이 connection)가 정하는 **정수**다(L4 방어: client 조작·raw ValueError 차단).
+        # 반응형 schedule 기준(slot·hardware timestamp)은 **VDETER가 소유한 실제 관측의
+        # device hardware timestamp**에서 유도한다(단순 event counter를 slot/hw-time으로 쓰지 않는다).
+        # slot은 정수이고 client가 조작할 수 없다(L4 방어). record가 hw timestamp를 주지 않는
+        # 경우에만(예: NOT_TUNED·합성 없는 최소 관측) 단조 counter로 fallback한다.
         obs_id = getattr(record, "observation_id", None)
         register = getattr(self._provider, "register_observation_trigger", None)
         if obs_id and callable(register):
-            self._slot_counter += 1
-            slot = int(self._slot_counter)
-            register(obs_id, slot=slot, hw_timestamp_ns=int(slot * _SLOT_SAMPLES))
+            hw_ts = getattr(record, "device_hw_timestamp_ns", None)
+            if isinstance(hw_ts, int) and hw_ts > 0:
+                slot = int(hw_ts // _SLOT_SAMPLES)          # 실제 hardware time → slot 좌표
+                register(obs_id, slot=slot, hw_timestamp_ns=int(hw_ts))
+            else:
+                self._slot_counter += 1                     # hw-time 없는 관측 fallback(합성 아님)
+                slot = int(self._slot_counter)
+                register(obs_id, slot=slot, hw_timestamp_ns=int(slot * _SLOT_SAMPLES))
         super().emit_observation(record)
         self.pump()
 

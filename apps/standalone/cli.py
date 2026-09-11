@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--poc-dir", default=None, metavar="DIR",
                      help="Stage 8: external PoC catalog directory for interactive "
                           "scenario-first PoC selection (opt-in; interactive only)")
+    run.add_argument("--rf-off-software", action="store_true",
+                     help="Stage 8: run the PoC through a real coordinator process in RF-off "
+                          "software mode (no B210; hardware boundary is an explicit software "
+                          "double). Verification only, not for production hardware runs.")
 
     results = sub.add_parser("results", help="list runs or show one summary")
     results.add_argument("run_id", nargs="?", default=None)
@@ -278,6 +282,7 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
             json_summary=args.json, retry=not args.no_retry,
             progress=not getattr(args, "no_progress", False),
             poc=getattr(args, "poc", None), poc_dir=getattr(args, "poc_dir", None),
+            rf_off_software=getattr(args, "rf_off_software", False),
             out=out, input_fn=input_fn)
     if args.command == "results":
         from apps.standalone import results_cmd

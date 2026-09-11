@@ -141,7 +141,8 @@ class LocalCoordinatorSession:
                  residual_probe=None,
                  use_process_group: bool | None = None,
                  group_signal=None,
-                 identity_root: Path | str | None = None) -> None:
+                 identity_root: Path | str | None = None,
+                 rf_off_software: bool = False) -> None:
         self.repo_root = Path(repo_root)
         self.run_id = run_id
         self.run_root = Path(run_root)
@@ -170,6 +171,9 @@ class LocalCoordinatorSession:
         #: configs/stage7/trust 동작 그대로.
         self.identity_root = (Path(identity_root)
                               if identity_root is not None else None)
+        #: Stage 8 RF-off software 모드 — coordinator를 B210 없이 in-process PoC 실행 세션으로
+        #: 띄운다(하드웨어 경계 명시 double 검증 전용). production 실장비 실행은 False.
+        self.rf_off_software = bool(rf_off_software)
         #: 정착 대기 상태 (host 계약 승계).
         self._last_workload_end = None
         self._last_scenario_id = None
@@ -191,7 +195,7 @@ class LocalCoordinatorSession:
     # ---- spawn ----------------------------------------------------------
 
     def build_argv(self) -> list:
-        return [
+        argv = [
             self.python_executable,
             str(self.repo_root / "VDETER" / "apps"
                 / "stage7_coordinator_main.py"),
@@ -202,6 +206,10 @@ class LocalCoordinatorSession:
             "--gain-artifact", str(self.gain_artifact_path),
             "--baseline-sha256", self.baseline_sha256,
         ]
+        if self.rf_off_software:
+            # coordinator top-level 분기가 이 flag에서 B210 없이 RF-off software 세션으로 위임한다.
+            argv.append("--rf-off-software")
+        return argv
 
     def build_env(self) -> dict:
         """`build_child_env` 위임 — run/qualify 공통 env 정책 (README §3-3)."""
@@ -310,10 +318,13 @@ class LocalCoordinatorSession:
 
     def submit_workload(self, scenario_id: str,
                         certificate_case: str = "normal", *,
-                        on_settle=None) -> str:
+                        on_settle=None, poc=None) -> str:
         """request를 원자 발행한다 (임시명은 `.json`으로 끝나지 않는다 —
         coordinator의 `endswith('.json')` 목록에 미완성본이 잡히지 않게).
-        발행 전에 host 계약대로 정착 대기를 적용한다."""
+        발행 전에 host 계약대로 정착 대기를 적용한다.
+
+        `poc`(dict)를 주면 request에 실어 coordinator가 workload-local PoC를 실행하게 한다
+        (RF-off software 세션). None이면 기존 scenario workload 그대로."""
         self.settle_before_next_workload(on_settle=on_settle)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         self._pending_scenario[workload_id] = scenario_id
@@ -324,6 +335,8 @@ class LocalCoordinatorSession:
             "requested_at_utc": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if poc is not None:
+            request["poc"] = dict(poc)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         final = self.requests_dir / (workload_id + ".json")
         tmp = self.requests_dir / (workload_id + ".json.tmp")

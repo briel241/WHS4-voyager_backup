@@ -719,5 +719,68 @@ class PocCleanupN1N2Test(unittest.TestCase):
             self.assertFalse(captured[0].connection.residuals()["child_alive"])
 
 
+@unittest.skipUnless(_LINUX, "실 coordinator 프로세스·PoC child·SOCK_SEQPACKET 전용")
+class RealCoordinatorPocEndToEnd(unittest.TestCase):
+    """실 `LocalCoordinatorSession` + 실 coordinator 프로세스(--rf-off-software) 종단 — fake session이
+    아니다. 실 CLI execute → 실 coordinator(파일 IPC) → coordinator 안에서 workload-local PoC(실 child·
+    socket·SDK·engine·provider) → summary.json. 하드웨어 경계만 명시적 RF-off double."""
+
+    def _run(self, poc_path, *, scenario="SC-VDE-006"):
+        import test_standalone_run_cli as harness
+        from apps.standalone.local_session import LocalCoordinatorSession
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _ = harness.fx.prepare_environment(tmp)
+            code, lines = harness.run(paths, LocalCoordinatorSession,
+                                      scenario=scenario, poc=poc_path,
+                                      rf_off_software=True)
+            # 실 coordinator가 쓴 summary.json을 실 run root에서 읽는다.
+            runs = sorted((Path(paths.runs_dir)).glob("*/summary.json"))
+            summary = None
+            if runs:
+                import json as _json
+                summary = _json.loads(runs[-1].read_text(encoding="utf-8"))
+            return code, lines, summary
+
+    def test_real_coordinator_runs_poc_and_persists_summary(self):
+        with tempfile.TemporaryDirectory() as poc_dir:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc(poc_dir)
+            code, lines, summary = self._run(poc_path)
+            self.assertEqual(code, cli.EXIT_PASS, "\n".join(lines))
+            self.assertIsNotNone(summary, "\n".join(lines))
+            self.assertEqual(summary["status"], "PASS")
+            w = summary["workloads"][0]
+            self.assertEqual(w["status"], "PASS")
+            poc = w.get("poc")
+            self.assertIsNotNone(poc, "\n".join(lines))
+            self.assertEqual(poc["poc_infrastructure"], "COMPLETED")
+            self.assertEqual(poc["attacks"][0]["action_execution"], "TX_COMPLETED")
+            self.assertEqual(poc["scenario_verdict"], "PASS")
+            self.assertEqual((poc.get("radiation") or {}).get("committed_groups"), 1)
+            # 반응형 action이 scenario terminal 이전에 제출됨(관측 → replay). provider evidence 결속.
+            self.assertEqual(poc["provider_evidence"]["model_boundary"]["model"],
+                             "WIRED_SHARED_MEDIUM_EMULATION")
+            self.assertTrue(any("rf-off-software" in ln for ln in lines))
+
+    def test_real_coordinator_multi_workload_isolation(self):
+        # run all: 각 workload가 새 snapshot·새 child를 쓰고 이전 event가 섞이지 않는다(proof #8).
+        with tempfile.TemporaryDirectory() as poc_dir:
+            os.chmod(poc_dir, 0o700)
+            poc_path = _write_poc_compat(poc_dir, "batch_poc",
+                                         ("SC-VDE-005", "SC-VDE-006", "SC-VDE-001"))
+            code, lines, summary = self._run(poc_path, scenario="all")
+            self.assertEqual(code, cli.EXIT_PASS, "\n".join(lines))
+            self.assertIsNotNone(summary, "\n".join(lines))
+            self.assertEqual(summary["status"], "PASS")
+            workloads = summary["workloads"]
+            self.assertEqual(len(workloads), 4)  # 005, 006, 001 normal, 001 forged
+            wids = [w.get("workload_id") for w in workloads]
+            self.assertEqual(len(set(wids)), 4, wids)  # 각 workload 고유 id(새 snapshot/child)
+            for w in workloads:
+                self.assertEqual(w["status"], "PASS")
+                self.assertEqual(w["poc"]["poc_infrastructure"], "COMPLETED")
+                self.assertEqual(w["poc"]["attacks"][0]["action_execution"], "TX_COMPLETED")
+
+
 if __name__ == "__main__":
     unittest.main()
