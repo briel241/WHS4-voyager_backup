@@ -226,7 +226,7 @@ class AtomicBroadcast:
     ) -> None:
         self._sink = radio_sink
         self._readiness = rx_readiness
-        self._factory = waveform_factory or ReferenceWaveformFactory()
+        self._factory = ReferenceWaveformFactory() if waveform_factory is None else waveform_factory
         self._arbiter = arbiter
         self._max_active_groups = int(max_active_groups)
         #: parent_id -> {"parent": ParentTransmission, "outcome": ParentOutcome}
@@ -322,9 +322,24 @@ class AtomicBroadcast:
 
         if len(parent.children) != constants.FANOUT_CHILDREN:
             raise BroadcastAtomicityError("parent당 child가 정확히 2개가 아닙니다")
+        if (parent.waveform.channel != parent.channel
+                or parent.waveform.start_sample != parent.scheduled_sample
+                or parent.waveform.sha256 != parent.waveform_sha256
+                or sha256_hex(parent.payload) != parent.payload_digest):
+            raise BroadcastAtomicityError("parent waveform/payload identity가 일치하지 않습니다")
+        expected_cables = set(topology.fanout_cables(parent.source_station))
         seen_cables = set()
         seen_receivers = set()
         for child in parent.children:
+            if child.cable not in expected_cables:
+                raise BroadcastAtomicityError("child cable이 송신자 fan-out 경로가 아닙니다")
+            if (child.tx_station, child.tx_lane, child.rx_station, child.rx_lane) != constants.CABLE_PATHS[child.cable]:
+                raise BroadcastAtomicityError("child station/lane이 고정 cable 경로와 다릅니다")
+            if child.child_id != f"{parent.parent_id}:{child.cable}":
+                raise BroadcastAtomicityError("child identity가 parent/cable과 다릅니다")
+            if (child.scheduled_hw_timestamp_ns != parent.scheduled_hw_timestamp_ns
+                    or child.samples != parent.waveform.samples):
+                raise BroadcastAtomicityError("child 실제 timestamp/samples가 parent와 다릅니다")
             if child.parent_id != parent.parent_id:
                 raise BroadcastAtomicityError("child parent_id가 parent와 다릅니다")
             if child.transfer_id != parent.transfer_id:
@@ -377,6 +392,8 @@ class AtomicBroadcast:
             )
             decision = self._readiness.window_ready(request)
             proofs[endpoint] = decision
+            if not isinstance(decision, ReadinessDecision) or not isinstance(decision.ready, bool):
+                raise BroadcastNotReady(f"required receiver {endpoint} readiness 응답 형식 오류")
             if not decision.ready:
                 raise BroadcastNotReady(
                     f"required receiver {endpoint} RX window 미준비: {decision.reason}"
@@ -387,7 +404,8 @@ class AtomicBroadcast:
     def transmit(self, parent: ParentTransmission, *, dual_channel_active: bool = False) -> BroadcastResult:
         """atomic 2단계 방사(prepare_group -> commit_group). 두 child를 함께 방사하거나 아무 것도 안 한다."""
 
-        if parent.parent_id in self._active_groups:
+        self._assert_single_burst_invariant(parent)
+        if parent.parent_id in self._active_groups or parent.parent_id in self._resolved:
             raise BroadcastAtomicityError("같은 parent를 두 번 transmit할 수 없습니다(exactly-once)")
         if len(self._active_groups) >= self._max_active_groups:
             raise BroadcastCapacityError(
@@ -437,7 +455,7 @@ class AtomicBroadcast:
         - 모든 child COMPLETED -> COMPLETED.
         - 하나라도 UNKNOWN(또는 terminal 누락) -> OUTCOME_UNKNOWN(성공 아님).
         - UNKNOWN 없이 하나라도 FAILED -> FAILED.
-        확정된 parent는 in-flight active group에서 제거한다.
+        COMPLETED/FAILED parent는 in-flight에서 제거하고 UNKNOWN은 cleanup까지 보존한다.
         """
 
         # 입력 검증 우선: 잘못된 terminal은 상태 변경 없이 구조화 오류로 거부한다
@@ -459,7 +477,7 @@ class AtomicBroadcast:
         valid_ids = {c.child_id for c in parent.children}
         unknown_ids = [cid for cid in terminals if cid not in valid_ids]
         if unknown_ids:
-            raise BroadcastError(f"parent {parent_id}에 없는 child id: {sorted(unknown_ids)}")
+            raise BroadcastError(f"parent {parent_id}에 없는 child id: {unknown_ids!r}")
 
         # (c) terminal 값 검증/coerce: 잘못된 값은 BroadcastError.
         coerced = {}
@@ -468,7 +486,7 @@ class AtomicBroadcast:
                 continue
             try:
                 coerced[cid] = ChildTerminal(value)
-            except ValueError as error:
+            except (TypeError, ValueError) as error:
                 raise BroadcastError(
                     f"알 수 없는 child terminal 값: {value!r} (child {cid})"
                 ) from error
@@ -482,9 +500,10 @@ class AtomicBroadcast:
         else:
             outcome = ParentOutcome.COMPLETED
         entry["outcome"] = outcome
-        # 확정된 parent는 in-flight에서 내리고 결과를 persist한다(evidence 반영·자원 회수는 provider).
+        # Preserve uncertain groups and their ownership until cleanup, just as for commit failure.
         self._resolved[parent_id] = outcome
-        self._active_groups.pop(parent_id, None)
+        if outcome != ParentOutcome.OUTCOME_UNKNOWN:
+            self._active_groups.pop(parent_id, None)
         return outcome
 
     def outcome_of(self, parent_id: str) -> ParentOutcome | None:

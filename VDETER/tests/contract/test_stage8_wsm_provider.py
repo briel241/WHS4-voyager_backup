@@ -321,6 +321,7 @@ class ForProductionTest(unittest.TestCase):
             radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),
             scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1),
             waveform_factory=TD.CountingWaveformFactory(),
+            arbiter=TD.FakeArbiter(),
         )
         prov.submit(_action("ROC"), request_id="p")
         self.assertEqual(prov.parent_for("p").slot_key, "slot-1")

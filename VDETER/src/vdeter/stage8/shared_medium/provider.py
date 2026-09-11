@@ -21,9 +21,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..poc_api.codec import canonical_sha256
 from ..poc_api.errors import PocError, PocErrorCode
+from ..poc_api.limits import MAX_WORKLOAD_ACTION_REQUESTS
 from ..poc_api.types import (
     ActionDescriptor,
+    ActionKind,
     FORBIDDEN_ACTION_FIELDS,
     PhysicalChannel,
     ProviderSubmission,
@@ -79,6 +82,21 @@ _SLOT_SAMPLES = 8192
 @dataclass(frozen=True, slots=True)
 class _CachedSubmission:
     submission: ProviderSubmission
+    digest: str
+
+
+def _action_digest(action: ActionDescriptor) -> str:
+    """Canonical immutable identity, including the internal bytes-only resolver extension."""
+
+    body = {"action_kind": ActionKind(action.kind).value, "target": action.target,
+            "schedule": action.schedule or {}, "payload": dict(action.payload or {})}
+    if action.source_observation_id is not None:
+        body["source_observation_id"] = action.source_observation_id
+    packet = body["payload"].get("packet_bytes")
+    if isinstance(packet, (bytes, bytearray)):
+        body["payload"]["packet_bytes"] = bytes(packet).hex()
+        body["internal_binary_packet"] = True
+    return canonical_sha256(body)
 
 
 def validate_schedule(action: ActionDescriptor) -> tuple:
@@ -231,6 +249,11 @@ class NextSafeSlotScheduler:
                         PocErrorCode.POC_DEADLINE_MISSED,
                         f"after_ms 인과성 위반(slot {slot} < target {target_ns}) — 이동하지 않음",
                     )
+            if slot <= trigger_slot or slot * self._slot_samples < trigger_ns:
+                raise PocError(
+                    PocErrorCode.POC_DEADLINE_MISSED,
+                    "반응 TX는 관측 trigger 이후 slot이어야 합니다 — 이동하지 않음",
+                )
 
         if slot < earliest:
             raise PocError(
@@ -282,15 +305,16 @@ class SharedMediumActionProvider:
             arbiter=arbiter,
         )
         self._arbiter = arbiter
-        self._scheduler = scheduler or NextSafeSlotScheduler()
+        self._scheduler = NextSafeSlotScheduler() if scheduler is None else scheduler
         self._dual_channel_installed = bool(dual_channel_installed)
-        self._packet_resolver = packet_resolver or _default_packet_resolver
+        self._packet_resolver = _default_packet_resolver if packet_resolver is None else packet_resolver
         self._cache: dict = {}          # request_id -> _CachedSubmission (exactly-once, 성공만)
         self._parents: dict = {}        # request_id -> parent (correlation)
         self._reservations: dict = {}   # request_id -> resource_key (자원 반환용)
         self._outcomes: dict = {}       # parent_id -> ParentOutcome (evidence 반영)
         #: release가 실패해 소유권이 불확실한 resource_key(복구 정보 보존·evidence). cleanup으로 지우지 않는다.
         self._unresolved_ownership: set = set()
+        self._cleanup_failures: set = set()  # component failures are not arbiter resource keys
 
     @classmethod
     def for_production(cls, *, radio_sink, rx_readiness, scheduler, waveform_factory,
@@ -301,6 +325,15 @@ class SharedMediumActionProvider:
             raise ValueError("production provider에는 실물 MAC scheduler가 필수입니다(fail-closed)")
         if waveform_factory is None:
             raise ValueError("production provider에는 frozen PHY waveform factory가 필수입니다(fail-closed)")
+        for name, dependency, methods in (
+            ("radio_sink", radio_sink, ("prepare_group", "commit_group")),
+            ("rx_readiness", rx_readiness, ("window_ready",)),
+            ("scheduler", scheduler, ("resolve", "register_trigger", "clear_triggers")),
+            ("waveform_factory", waveform_factory, ("encode",)),
+            ("arbiter", arbiter, ("reserve", "release")),
+        ):
+            if any(not callable(getattr(dependency, method, None)) for method in methods):
+                raise ValueError(f"production {name} requires callable methods: {', '.join(methods)}")
         return cls(
             radio_sink=radio_sink, rx_readiness=rx_readiness, scheduler=scheduler,
             waveform_factory=waveform_factory, arbiter=arbiter,
@@ -317,8 +350,28 @@ class SharedMediumActionProvider:
     def submit(self, action: ActionDescriptor, *, request_id: str) -> ProviderSubmission:
         """논리 target action을 단일 parent·C4+C6 fan-out으로 방사한다(exactly-once)."""
 
+        self._raise_if_ownership_uncertain()
+        if not isinstance(request_id, str) or not request_id:
+            raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+                           "request_id는 비어 있지 않은 문자열이어야 합니다")
+        if ParentOutcome.OUTCOME_UNKNOWN in self._outcomes.values():
+            raise PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN,
+                           "이전 TX 결과가 불명확합니다 — cleanup 전 재방사 금지")
+        try:
+            digest = _action_digest(action)
+        except Exception as error:
+            raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+                           "action canonical identity 형식 오류") from error
         if request_id in self._cache:
-            return self._cache[request_id].submission
+            cached = self._cache[request_id]
+            if cached.digest != digest:
+                raise PocError(PocErrorCode.POC_REQUEST_ID_CONFLICT,
+                               "같은 request_id에 다른 action body가 제출됨")
+            return cached.submission
+        # Retain exactly-once correlation for this workload, bounded by the frozen API limit.
+        if len(self._cache) >= MAX_WORKLOAD_ACTION_REQUESTS:
+            raise PocError(PocErrorCode.POC_ACTION_LIMIT_EXCEEDED,
+                           "workload action 상한 초과 — cleanup 전 추가 admission 금지")
 
         # --- 1. 자원 확보 전 검증(보유 자원 없음). 예상 밖 예외도 PocError로 구조화. ---
         try:
@@ -344,20 +397,26 @@ class SharedMediumActionProvider:
         # --- 2. 자원 예약(정상 TX 우선) ---
         resource_key = f"{channel.value}:{slot.slot_key}"
         if self._arbiter is not None:
+            if resource_key in self._reservations.values():
+                raise PocError(PocErrorCode.POC_RADIO_RESOURCE_CONFLICT,
+                               f"자원 {resource_key}에 다른 PoC action이 진행 중")
             # arbiter.reserve가 예외를 내면 자원을 이미 잡았는지 불확실하다. "미예약"으로 가정하지 않고
             # OWNERSHIP_UNCERTAIN(SESSION_INHIBIT)으로 처리하며, 잡혔을 수 있는 식별자를
             # _unresolved_ownership에 보존한다(cleanup이 회수 재시도). BaseException은 그대로 전파.
             try:
                 reserved = self._arbiter.reserve(resource_key=resource_key, owner="POC")
-            except PocError:
-                raise
-            except Exception as error:  # noqa: BLE001
+            except BaseException as error:  # ownership may change before any exception
                 self._unresolved_ownership.add(resource_key)
+                if not isinstance(error, Exception):
+                    raise
                 raise PocError(
                     PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
                     f"arbiter reserve 예외 — 자원 소유권 불확실: {error}",
                     detail={"unresolved_ownership": sorted(self._unresolved_ownership)},
                 ) from error
+            if not isinstance(reserved, bool):
+                self._unresolved_ownership.add(resource_key)
+                self._raise_if_ownership_uncertain()
             if not reserved:
                 # 명확히 미예약(정상 TX 점유) → conflict.
                 raise PocError(
@@ -405,14 +464,19 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_PROTOCOL_ERROR, f"parent 생성/방사 실패: {error}"
             ) from error
-        except BaseException:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 등
+        except BaseException as error:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 등
             # commit에 진입한 뒤의 인터럽트는 pre-fire 취소가 아니라 TX outcome unknown이다: 부분 방사를
             # 잃지 않도록 correlation·reservation을 유지하고 OUTCOME_UNKNOWN을 기록한 뒤 인터럽트를
             # 그대로 재전달한다(SESSION_INHIBIT). commit 진입 전(pre-fire)이면 예약을 반환한다.
             if parent is not None and self._broadcast.is_resolved(parent.parent_id):
                 self._outcomes[parent.parent_id] = ParentOutcome.OUTCOME_UNKNOWN
                 raise
-            self._abort_attempt(request_id)
+            try:
+                self._abort_attempt(request_id)
+            except BaseException as cleanup_error:
+                # Ownership was tracked by the release path; cleanup must not replace the
+                # operator's original interruption, even if it fails or is interrupted too.
+                raise error from cleanup_error
             raise
 
         submission = ProviderSubmission(
@@ -420,7 +484,7 @@ class SharedMediumActionProvider:
             broadcast_parent_id=parent.parent_id,
             transfer_id=parent.transfer_id,
         )
-        self._cache[request_id] = _CachedSubmission(submission=submission)
+        self._cache[request_id] = _CachedSubmission(submission=submission, digest=digest)
         return submission
 
     # --- terminal 취합 + 자원 회수 -----------------------------------------
@@ -431,6 +495,7 @@ class SharedMediumActionProvider:
         (public 경계 밖으로 PocError 외 예외를 내지 않는다).
         """
 
+        self._raise_if_ownership_uncertain()
         parent = self._parents.get(request_id)
         if parent is None:
             raise PocError(PocErrorCode.POC_NOT_RUNNING, f"알 수 없는 request_id: {request_id}")
@@ -439,12 +504,16 @@ class SharedMediumActionProvider:
             return self._outcomes.get(parent.parent_id) or self._broadcast.outcome_of(parent.parent_id)
         try:
             outcome = self._broadcast.resolve_outcome(parent.parent_id, terminals)
-        except BroadcastError as error:
+        except Exception as error:
             # invalid terminal·unknown parent: 성공 처리·reservation 해제 없이 구조화 오류로 변환.
             raise PocError(
                 PocErrorCode.POC_PROTOCOL_ERROR, f"terminal 취합 실패: {error}"
             ) from error
         self._outcomes[parent.parent_id] = outcome
+        if outcome == ParentOutcome.OUTCOME_UNKNOWN:
+            # A missing/unknown child terminal carries the same uncertainty as a failed commit.
+            # Keep ownership until explicit workload cleanup; new submissions are inhibited.
+            return outcome
         if not self._release_reservation(request_id):
             # 예약 반환 실패 → 자원 소유권 불확실(SESSION_INHIBIT). outcome은 이미 저장됨.
             raise PocError(
@@ -463,7 +532,16 @@ class SharedMediumActionProvider:
     def unresolved_ownership(self) -> tuple:
         """release 실패로 소유권이 불확실한 resource_key 목록(evidence·복구용)."""
 
-        return tuple(sorted(self._unresolved_ownership))
+        return tuple(sorted(self._unresolved_ownership | self._cleanup_failures))
+
+    def _raise_if_ownership_uncertain(self) -> None:
+        unresolved = self.unresolved_ownership()
+        if unresolved:
+            raise PocError(
+                PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
+                "미반환 자원 또는 미완료 cleanup — SESSION_INHIBIT",
+                detail={"unresolved_ownership": list(unresolved)},
+            )
 
     def register_observation_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns=None) -> None:
         """VDETER 관측 event → scheduler trigger 등록 production hook(§10).
@@ -499,19 +577,23 @@ class SharedMediumActionProvider:
     def _abort_attempt(self, request_id: str) -> None:
         """RF 방사 전/구조 실패: 예약을 반환하고 correlation 시도 기록을 지운다."""
 
-        self._release_reservation(request_id)
-        self._parents.pop(request_id, None)
+        try:
+            self._release_reservation(request_id)
+        finally:
+            self._parents.pop(request_id, None)
+        self._raise_if_ownership_uncertain()
 
     def _release_reservation(self, request_id: str) -> bool:
-        """예약을 반환한다. tracking은 항상 pop하고, arbiter.release 예외는 삼켜 False를 돌려준다
-        (release 실패로 나머지 정리가 중단되지 않게 한다)."""
+        """예약 반환 실패는 recovery key로 보존한다. 일반 예외는 False, 인터럽트는 재전달한다."""
 
-        key = self._reservations.pop(request_id, None)  # 복구 정보를 잃지 않도록 먼저 pop
+        key = self._reservations.pop(request_id, None)
         if self._arbiter is not None and key is not None:
             try:
                 self._arbiter.release(resource_key=key, owner="POC")
-            except Exception:  # noqa: BLE001 - release 실패는 상위에서 OWNERSHIP_UNCERTAIN으로 승격
+            except BaseException as error:  # preserve ownership even during interruption
                 self._unresolved_ownership.add(key)  # 실패 식별자 보존(evidence)
+                if not isinstance(error, Exception):
+                    raise
                 return False
         return True
 
@@ -544,35 +626,40 @@ class SharedMediumActionProvider:
 
         # 재시도 대상 = 현재 추적 예약 ∪ 과거 미반환 식별자.
         retry_keys = set(self._reservations.values()) | set(self._unresolved_ownership)
-        try:
-            if self._arbiter is not None:
-                for key in sorted(retry_keys):
-                    try:
-                        self._arbiter.release(resource_key=key, owner="POC")
-                        self._unresolved_ownership.discard(key)  # 회수 성공
-                    except Exception:  # noqa: BLE001 - 개별 실패는 미반환 유지, 정리는 계속
-                        self._unresolved_ownership.add(key)
-        finally:
-            self._reservations.clear()
-            try:
-                self._broadcast.cleanup()
-            except Exception:  # noqa: BLE001
-                self._unresolved_ownership.add("__broadcast_cleanup_failed__")
-            clear = getattr(self._scheduler, "clear_triggers", None)
-            if clear is not None:
+        self._unresolved_ownership.update(retry_keys)
+        interrupt = None
+        if self._arbiter is not None:
+            for key in sorted(retry_keys):
                 try:
-                    clear()
-                except Exception:  # noqa: BLE001
-                    self._unresolved_ownership.add("__trigger_cleanup_failed__")
-            self._cache.clear()
-            self._parents.clear()
-            self._outcomes.clear()
-        if self._unresolved_ownership:
-            raise PocError(
-                PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN,
-                "미반환 자원 소유권이 남아 있음 — 외부 복구 완료 전까지 SESSION_INHIBIT(정리 재시도됨)",
-                detail={"unresolved_ownership": sorted(self._unresolved_ownership)},
-            )
+                    self._arbiter.release(resource_key=key, owner="POC")
+                    self._unresolved_ownership.discard(key)
+                except BaseException as error:
+                    if not isinstance(error, Exception) and interrupt is None:
+                        interrupt = error
+        self._reservations.clear()
+        # Retry each component with its actual owner; an arbiter cannot clear a trigger failure.
+        for marker, operation in (
+            ("__broadcast_cleanup_failed__", self._broadcast.cleanup),
+            ("__trigger_cleanup_failed__", self._clear_scheduler_triggers),
+        ):
+            try:
+                operation()
+                self._cleanup_failures.discard(marker)
+            except BaseException as error:
+                self._cleanup_failures.add(marker)
+                if not isinstance(error, Exception) and interrupt is None:
+                    interrupt = error
+        self._cache.clear()
+        self._parents.clear()
+        self._outcomes.clear()
+        if interrupt is not None:
+            raise interrupt
+        self._raise_if_ownership_uncertain()
+
+    def _clear_scheduler_triggers(self) -> None:
+        clear = getattr(self._scheduler, "clear_triggers", None)
+        if clear is not None:
+            clear()
 
     # --- 내부 ---------------------------------------------------------------
     def _reject_forbidden_fields(self, action: ActionDescriptor) -> None:

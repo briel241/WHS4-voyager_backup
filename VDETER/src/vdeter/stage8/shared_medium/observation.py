@@ -202,7 +202,7 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                     observation_id = None
                     public_delivery = False
                     if decoded_here:
-                        if arrival.addressed:
+                        if arrival.addressed or arrival.official_broadcast:
                             # 주소 대상: 기존 public 처리(상위 계층). 방사 계층은 새 ACK 안 만든다.
                             public_delivery = True
                         else:

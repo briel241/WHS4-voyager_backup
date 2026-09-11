@@ -8,6 +8,7 @@ memory dataclass만 만들고 직렬화는 quiescent 후).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from .constants import MAX_DELIVERY_MATRIX_ENTRIES
@@ -21,12 +22,12 @@ class SharedMediumEvidence:
     delivery_matrix: tuple = ()
 
     def as_json_value(self) -> dict:
-        return {
+        return deepcopy({
             "scenario_result": dict(self.scenario_result),
             "broadcast_infrastructure_result": dict(self.broadcast_infrastructure_result),
             "poc_result": dict(self.poc_result),
             "delivery_matrix": list(self.delivery_matrix),
-        }
+        })
 
 
 def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
@@ -57,6 +58,9 @@ def build_evidence(parents, scene, *, broadcast_results=(), outcomes=None,
         return getattr(value, "value", str(value))
 
     parent_outcomes = {r.parent.parent_id: _effective(r) for r in broadcast_results}
+    # A failed commit has no successful BroadcastResult, but its unknown outcome is evidence.
+    parent_outcomes.update({pid: getattr(value, "value", str(value))
+                            for pid, value in outcomes.items()})
 
     infra = {
         "parents": parent_evidence,
