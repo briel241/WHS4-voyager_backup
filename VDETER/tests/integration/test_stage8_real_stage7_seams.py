@@ -640,29 +640,47 @@ class CommonLoTuningApplyTest(unittest.TestCase):
 
 
 class NormalDispatchPocRefusalTest(unittest.TestCase):
-    """P01: 일반 coordinator dispatch는 PoC 요청을 **조용히 무시하지 않는다**(거짓 성공 방지).
+    """P01: PoC를 실행하지 않는 일반 dispatch에 PoC 요청을 보내면 **fail-closed**로 거부한다.
 
-    이전에는 `run_mass_roc_session` 요청 루프가 `workload_id`/`scenario_id`/`certificate_case`만 읽어
-    `poc` 필드를 무시했다. 그래서 운영자가 PoC를 요청해도 PoC 없이 시나리오만 돌고 PASS로 보고됐다.
-    이제 fail-closed로 거부하고 시나리오도 제출하지 않는다. 소스 계약으로 확인한다(launcher·B210 불필요).
+    일반 coordinator 요청 루프는 `workload_id`/`scenario_id`/`certificate_case`만 읽어 `poc` 필드를
+    무시한다. 그래서 운영자가 PoC를 요청해도 PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓 성공이
+    가능했다. 세션 계층에서 그 조합을 거부하고 request 자체를 발행하지 않는다(시나리오 미제출).
+
+    이 검사는 **자격 결속된 coordinator 함수를 바꾸지 않는다** — `stage7_coordinator_main.main()`이나
+    `run_mass_roc_session`에 분기를 넣으면 Phase-I function binding이 바뀌어 RF 접근이 거부된다.
     """
 
-    def _source(self):
-        import os as _os
-        path = _os.path.normpath(_os.path.join(
-            _os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
-        with open(path, "r", encoding="utf-8") as handle:
-            return handle.read()
+    def _session(self, tmp, *, rf_off_software):
+        from apps.standalone.local_session import LocalCoordinatorSession
+        return LocalCoordinatorSession(
+            repo_root=_REPO, run_id="run-x", run_root=os.path.join(tmp, "run"),
+            configs_dir=os.path.join(tmp, "configs"),
+            gain_artifact_path=os.path.join(tmp, "gain.json"),
+            baseline_sha256="0" * 64, rf_off_software=rf_off_software)
 
-    def test_normal_dispatch_refuses_poc_request_before_submitting_scenario(self):
-        source = self._source()
-        self.assertIn('if request.get("poc"):', source,
-                      "일반 dispatch가 poc 요청을 검사해야 한다")
-        head = source.split('if request.get("poc"):', 1)[1][:1200]
-        self.assertIn('"status": "NOT_RUN"', head)          # 시나리오 미제출
-        self.assertIn("POC_CAPABILITY_UNAVAILABLE", head)   # 사유를 결과에 남긴다
-        self.assertIn("continue", head)                      # 아래 workload 실행으로 내려가지 않는다
-        # 거부가 workload 시작 로그보다 앞에 있다(시나리오 제출 전).
-        refuse_at = source.index('if request.get("poc"):')
-        start_at = source.index('[coordinator] workload 시작')
-        self.assertLess(refuse_at, start_at)
+    def test_poc_request_to_non_poc_dispatch_is_refused_without_submitting(self):
+        import tempfile
+        from apps.standalone.local_session import LocalSessionError
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._session(tmp, rf_off_software=False)
+            with self.assertRaises(LocalSessionError):
+                session.submit_workload("SC-VDE-006", "normal", poc={"poc": "/x.py"})
+            # request가 발행되지 않았다(시나리오도 제출되지 않는다).
+            requests = session.requests_dir
+            self.assertFalse(requests.exists() and any(requests.iterdir()), "request 미발행이어야 함")
+
+    def test_plain_workload_request_is_unaffected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._session(tmp, rf_off_software=False)
+            workload_id = session.submit_workload("SC-VDE-006", "normal")   # poc 없음 → 기존 동작
+            self.assertTrue((session.requests_dir / (workload_id + ".json")).exists())
+
+    def test_qualified_coordinator_entry_is_not_branched_for_rf_off(self):
+        """검증 전용 RF-off 경로가 자격 결속 함수(main)를 거치지 않는다."""
+        path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("rf_off_software", source)
+        self.assertNotIn("run_rf_off_software_session", source)

@@ -195,7 +195,18 @@ class LocalCoordinatorSession:
     # ---- spawn ----------------------------------------------------------
 
     def build_argv(self) -> list:
-        argv = [
+        if self.rf_off_software:
+            # Stage 8 RF-off software 세션은 **검증 전용**이므로 자격 결속된
+            # `stage7_coordinator_main.main()`을 거치지 않고 자체 entry point로 띄운다.
+            # (그 함수에 분기를 넣으면 Phase-I function binding이 바뀌어 RF 접근이 거부된다 —
+            #  자격 경로는 byte-identical로 보존한다.) B210 launcher는 spawn하지 않는다.
+            return [
+                self.python_executable,
+                str(self.repo_root / "apps" / "stage8_rf_off_session.py"),
+                "--run-id", self.run_id,
+                "--run-root", str(self.run_root),
+            ]
+        return [
             self.python_executable,
             str(self.repo_root / "VDETER" / "apps"
                 / "stage7_coordinator_main.py"),
@@ -206,10 +217,6 @@ class LocalCoordinatorSession:
             "--gain-artifact", str(self.gain_artifact_path),
             "--baseline-sha256", self.baseline_sha256,
         ]
-        if self.rf_off_software:
-            # coordinator top-level 분기가 이 flag에서 B210 없이 RF-off software 세션으로 위임한다.
-            argv.append("--rf-off-software")
-        return argv
 
     def build_env(self) -> dict:
         """`build_child_env` 위임 — run/qualify 공통 env 정책 (README §3-3)."""
@@ -324,7 +331,17 @@ class LocalCoordinatorSession:
         발행 전에 host 계약대로 정착 대기를 적용한다.
 
         `poc`(dict)를 주면 request에 실어 coordinator가 workload-local PoC를 실행하게 한다
-        (RF-off software 세션). None이면 기존 scenario workload 그대로."""
+        (RF-off software 세션). None이면 기존 scenario workload 그대로.
+
+        **fail-closed**: PoC를 실행하지 않는 coordinator(일반 dispatch)에 PoC 요청을 보내면 그 필드는
+        조용히 무시되고 시나리오만 돌아 **PoC 없이 PASS**로 보고된다(거짓 성공). 그런 조합은 여기서
+        거부하고 request를 발행하지 않는다 — 시나리오도 제출되지 않는다. 자격 결속된 coordinator
+        함수는 건드리지 않는다(Phase-I function binding 보존)."""
+        if poc is not None and not self.rf_off_software:
+            raise LocalSessionError(
+                "PoC workload 요청을 실행할 수 없는 coordinator dispatch입니다 — 일반 경로는 PoC를 "
+                "무시하므로 요청을 제출하지 않습니다(fail-closed). launcher 소유 장치 경계 결선이 "
+                "필요합니다.")
         self.settle_before_next_workload(on_settle=on_settle)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         self._pending_scenario[workload_id] = scenario_id

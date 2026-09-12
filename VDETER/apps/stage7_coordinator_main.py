@@ -2030,25 +2030,6 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             workload_id = request["workload_id"]
             scenario_id = request["scenario_id"]
             certificate_case = request.get("certificate_case", "normal")
-            if request.get("poc"):
-                # Stage 8 PoC 요청은 이 dispatch가 실행하지 않는다. 조용히 무시하고 시나리오만
-                # 돌리면 운영자가 요청한 PoC 없이 PASS로 보고돼 거짓 성공이 된다 — fail-closed로
-                # 거부하고 그 사실을 결과에 남긴다(시나리오도 제출하지 않는다).
-                print(f"[coordinator] PoC 요청 거부(이 경로 미지원) {workload_id}", flush=True)
-                write_json(os.path.join(results_dir, request_name), {
-                    "artifact_type": "STAGE7_SERVICE_WORKLOAD_RESULT_V1",
-                    "status": "NOT_RUN",
-                    "workload_id": workload_id,
-                    "scenario_id": scenario_id,
-                    "certificate_case": certificate_case,
-                    "quiescence": {"pass": True},
-                    "error": "PoC workload는 이 coordinator dispatch에서 지원하지 않습니다"
-                             " (launcher 소유 장치 경계 결선 필요) — 시나리오를 제출하지 않았습니다",
-                    "poc": {"status": "REFUSED", "poc_infrastructure": "ERROR",
-                            "infrastructure_error_code": "POC_CAPABILITY_UNAVAILABLE"},
-                })
-                idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
-                continue
             print(f"[coordinator] workload 시작 {workload_id} {scenario_id}",
                   flush=True)
             guard.progress(f"workload:{workload_id}")
@@ -3297,22 +3278,7 @@ def main(argv=None) -> int:
         choices=("normal", "forged", "both"),
         help="mass-roc workload의 SC-VDE-001 인증서 분기",
     )
-    parser.add_argument(
-        "--rf-off-software", action="store_true",
-        help="Stage 8 RF-off software 모드: B210 launcher를 spawn하지 않고 in-process PoC workload를 "
-             "실행한다(하드웨어 경계 명시 software double 검증 전용, production 아님).",
-    )
     arguments = parser.parse_args(argv)
-
-    if arguments.rf_off_software:
-        # Stage 8 RF-off software 세션: B210/launcher 없이 실 coordinator 프로세스가 파일 IPC로
-        # PoC workload를 in-process 실행한다(연결 §3.1). 자격 대상 경로는 건드리지 않고 비자격
-        # apps/ 모듈로 위임한다. repo-root를 path에 올려 repo-root apps.* 를 import한다(기존 관례).
-        repo_root = os.path.dirname(APP_ROOT)
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-        from apps.stage8_rf_off_session import run_rf_off_software_session
-        return run_rf_off_software_session(arguments)
 
     if arguments.workload == "mass-roc" and arguments.phase not in (
         "rr-p2-17", "rr-p2-19"

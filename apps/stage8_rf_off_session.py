@@ -27,6 +27,13 @@ import sys
 import time
 from pathlib import Path
 
+# 자체 entry point로 직접 실행될 때(검증 전용) repo-root·VDETER·VDETER/src를 path에 올린다.
+# `python -m`/import로 쓰일 때는 이미 올라가 있어 영향이 없다.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+for _entry in (_REPO_ROOT, _REPO_ROOT / 'VDETER', _REPO_ROOT / 'VDETER' / 'src'):
+    if str(_entry) not in sys.path:
+        sys.path.insert(0, str(_entry))
+
 # stage7 파일 IPC 상수(권위 정의 재사용 — 중복 재정의 금지).
 from apps.stage7_session import (
     SESSION_BRINGUP_TIMEOUT_S,
@@ -315,4 +322,26 @@ def run_rf_off_software_session(arguments) -> int:
     return 0 if status == "PASS" else 1
 
 
-__all__ = ("RfOffPocDeviceSession", "RfOffStage7DeviceSession", "run_rf_off_software_session")
+__all__ = ("RfOffPocDeviceSession", "RfOffStage7DeviceSession",
+           "run_rf_off_software_session", "main")
+
+
+def main(argv=None) -> int:
+    """RF-off software 세션 **자체 entry point**(검증 전용).
+
+    자격 결속된 `stage7_coordinator_main.main()`에 분기를 넣으면 Phase-I function binding이 바뀌어
+    RF 접근이 거부된다(안전 게이트). 그래서 이 검증 전용 경로는 자격 경로를 건드리지 않고 별도
+    진입점으로 실행한다. B210 launcher를 spawn하지 않으며 production 실행 경로가 아니다.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Stage 8 RF-off software session (verification only; no B210)")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-root", required=True)
+    arguments = parser.parse_args(argv)
+    return run_rf_off_software_session(arguments)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
