@@ -461,3 +461,88 @@ class PocDeviceDisabledByDefaultTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess 전용")
+class ControllerPocRequestContractTest(unittest.TestCase):
+    """P01: workload controller child의 `--poc-request` 계약(실 CLI subprocess).
+
+    launcher는 harness가 실 socket으로 서빙한다(controller는 그것 없이는 아예 시작하지 못한다).
+    그 상태에서 PoC package가 잘못돼 arm에 실패하면 **scenario를 제출하지 않고** fail-closed로
+    끝나야 한다(§5.1 "arm 실패면 scenario 자극 0"). PoC 없이 시나리오만 돌고 PASS가 되는 일이
+    없음을 실 프로세스로 확인한다.
+    """
+
+    _RUN_ID = "poc-contract"
+
+    def setUp(self):
+        from vdeter.stage7.transport import ensure_socket_root, runtime_socket_root
+
+        root = runtime_socket_root(self._RUN_ID)
+        ensure_socket_root(root)
+        env = dict(os.environ)
+        src = os.path.join(_REPO, "VDETER", "src")
+        vdeter = os.path.join(_REPO, "VDETER")
+        env["PYTHONPATH"] = os.pathsep.join(
+            [src, vdeter, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+        self.harness = subprocess.Popen(
+            [sys.executable, "-m", "tests.support.poc_device_harness", root, _PLAN_SHA],
+            cwd=vdeter, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self._stop_harness)
+        ready = self.harness.stdout.readline().strip()
+        if ready != "READY":
+            self.fail(f"harness 준비 실패: {ready!r} {self.harness.stderr.read()[:400]}")
+
+    def _stop_harness(self):
+        if self.harness.poll() is None:
+            self.harness.terminate()
+            try:
+                self.harness.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.harness.kill()
+                self.harness.wait(timeout=5)
+
+    def test_poc_arm_failure_writes_evidence_and_submits_no_scenario(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o700)
+            run_root = os.path.join(tmp, "run")
+            os.makedirs(run_root, exist_ok=True)
+            fixtures = os.path.join(tmp, "fixtures")
+            os.makedirs(fixtures, exist_ok=True)
+            poc_request = os.path.join(tmp, "poc-request.json")
+            with open(poc_request, "w", encoding="utf-8") as handle:
+                json.dump({"poc": os.path.join(tmp, "nonexistent-poc.zip"),
+                           "poc_dir": None, "poc_id": None, "src_path": None}, handle)
+
+            env = dict(os.environ)
+            src = os.path.join(_REPO, "VDETER", "src")
+            env["PYTHONPATH"] = os.pathsep.join(
+                [src, _REPO, os.path.join(_REPO, "VDETER"),
+                 env.get("PYTHONPATH", "")]).strip(os.pathsep)
+            done = subprocess.run(
+                [sys.executable, os.path.join(_REPO, "apps",
+                                              "stage7_mass_roc_controller.py"),
+                 "--run-id", self._RUN_ID, "--run-root", run_root,
+                 "--test-plan-sha", _PLAN_SHA, "--fixtures-dir", fixtures,
+                 "--scenario-id", "SC-VDE-006", "--workload-id", "w1",
+                 "--lifecycle", "session", "--poc-request", poc_request],
+                cwd=_REPO, env=env, capture_output=True, text=True, timeout=300)
+
+            # fail-closed: 종료 코드 실패 + PoC evidence 기록 + scenario 결과는 FAIL.
+            self.assertNotEqual(done.returncode, 0, done.stdout[-800:] + done.stderr[-800:])
+            poc_path = os.path.join(run_root, "mass-roc-events", "poc-result.json")
+            self.assertTrue(os.path.isfile(poc_path),
+                            f"PoC evidence가 없다: {done.stdout[-800:]}{done.stderr[-800:]}")
+            with open(poc_path, encoding="utf-8") as handle:
+                evidence = json.load(handle)
+            self.assertIn(evidence.get("status"), ("ERROR", "REFUSED"), evidence)
+            final_path = os.path.join(run_root, "mass-roc-events", "final-result.json")
+            self.assertTrue(os.path.isfile(final_path))
+            with open(final_path, encoding="utf-8") as handle:
+                final = json.load(handle)
+            self.assertEqual(final["status"], "FAIL", final)
+            # scenario를 하나도 돌리지 않았다(자극 0).
+            self.assertEqual(final.get("results"), {}, final)
