@@ -384,6 +384,7 @@ class Stage7RouteSidecar:
         "_bursts",
         "_reservations",
         "_evidence",
+        "_wired_broadcast_optin",
     )
 
     def __init__(self, *, lane_generation: int = 0) -> None:
@@ -395,6 +396,11 @@ class Stage7RouteSidecar:
         self._bursts = {}
         self._reservations = {}
         self._evidence = []
+        #: Stage 8 유선 공유 매질 opt-in(session 범위). **기본 False = legacy 동작 그대로**.
+        #: True면 이후 승격되는 정상 route context도 fan-out opt-in을 달고 나가, addressed 정상
+        #: 송신이 송신자의 두 물리 경로로 방사된다(§4.1 "항상 방사하는 운용 송신"). 논리 주소·
+        #: 정상 tuning 행렬·qualification 예외 경로는 그대로다.
+        self._wired_broadcast_optin = False
 
     @property
     def lane_generation(self) -> int:
@@ -476,6 +482,8 @@ class Stage7RouteSidecar:
                     else None
                 ),
                 request_digest=entry.request_digest,
+                # session 범위 opt-in이 켜져 있을 때만 정상 송신도 fan-out한다(기본 False).
+                broadcast_fanout_optin=self._wired_broadcast_optin,
             )
             for packet_id in packet_ids:
                 self._packets[(self._lane_generation, packet_id.value)] = context
@@ -501,6 +509,30 @@ class Stage7RouteSidecar:
                     local_id=packet_id_value,
                 )
             return Ok(context)
+
+    def set_wired_broadcast_optin(self, enabled: bool) -> bool:
+        """Stage 8 유선 공유매체 opt-in을 session 범위로 켜고 끈다(§4.1). 반환: 직전 값.
+
+        켜면 **이후 승격되는** 정상 route도 송신자의 두 물리 경로로 fan-out한다. 이미 승격된
+        context는 immutable이라 바뀌지 않는다 — 켠 시점 이후의 송신에만 적용된다(진행 중인 burst의
+        예약 계획을 도중에 바꾸지 않는다).
+
+        끄면 즉시 legacy 단일 child로 돌아간다. 기본값은 꺼짐이며, 이 method를 부르지 않는 설치의
+        동작은 Stage 8 이전과 **완전히 동일**하다.
+        """
+
+        with self._lock:
+            previous = self._wired_broadcast_optin
+            self._wired_broadcast_optin = bool(enabled)
+            if previous != self._wired_broadcast_optin:
+                self._record("wired_broadcast_optin_changed",
+                             enabled=self._wired_broadcast_optin)
+            return previous
+
+    @property
+    def wired_broadcast_optin(self) -> bool:
+        with self._lock:
+            return self._wired_broadcast_optin
 
     def bind_burst(self, packet_id_value: str, burst_id_value: str):
         with self._lock:

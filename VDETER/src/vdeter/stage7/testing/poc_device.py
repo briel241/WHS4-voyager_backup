@@ -131,6 +131,29 @@ class Stage7PocDeviceSeam:
             "bridge_locked": getattr(bridge, "clock_id", None) is not None,
         }
 
+    def wired_broadcast_optin(self, *, enabled) -> dict:
+        """정상 송신의 공유매체 fan-out opt-in을 session 범위로 켜고 끈다(P08, §4.1).
+
+        `enabled`가 None이면 조회만 한다. 켜면 이 endpoint의 **정상 service 송신**도 송신자의 두
+        물리 경로로 방사된다(논리 주소·정상 tuning 행렬 불변). 이미 승격된 route는 바뀌지 않으므로
+        진행 중인 burst의 계획을 도중에 흔들지 않는다.
+        """
+
+        radio = self._radio()
+        sidecar = getattr(radio, "_sidecar", None)
+        if sidecar is None:
+            raise PocDeviceUnavailable("radio adapter에 route sidecar가 없습니다")
+        toggle = getattr(sidecar, "set_wired_broadcast_optin", None)
+        if not callable(toggle):
+            raise PocDeviceUnavailable("설치가 공유매체 opt-in을 제공하지 않습니다")
+        if enabled is None:
+            return {"endpoint_id": self.endpoint_id,
+                    "enabled": bool(sidecar.wired_broadcast_optin), "previous": None}
+        previous = toggle(bool(enabled))
+        return {"endpoint_id": self.endpoint_id,
+                "enabled": bool(sidecar.wired_broadcast_optin),
+                "previous": bool(previous)}
+
     def mac_transmit_slots(self, *, channel_name: str, from_hw_ns: int,
                            limit: int = 8) -> dict:
         """**실 MAC slot map**에서 이 endpoint가 송신할 수 있는 다음 slot들을 돌려준다(P03).

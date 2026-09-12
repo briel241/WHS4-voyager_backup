@@ -546,3 +546,99 @@ class ControllerPocRequestContractTest(unittest.TestCase):
             self.assertEqual(final["status"], "FAIL", final)
             # scenario를 하나도 돌리지 않았다(자극 0).
             self.assertEqual(final.get("results"), {}, final)
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET·Stage7 software group 전용")
+class NormalTxSharedMediumOptinTest(LauncherPocDeviceRpcTest):
+    """P08: **정상 service 송신**이 공유매체 opt-in에서 두 물리 경로로 방사된다.
+
+    PoC action이 아니라 endpoint의 **정상 transfer**가 대상이다. opt-in을 켜기 전에는 legacy
+    단일 child, 켠 뒤에는 §5.1 고정 배선대로 fan-out이다. 논리 주소는 그대로다.
+    """
+
+    def _submit_normal_transfer(self, *, step_id):
+        """실 service API(`invoke_service_inline` SUBMIT)로 정상 전송을 낸다."""
+        payload = b"stage8-normal-fanout"
+        response = self.controller.invoke_service_inline(
+            "MASS-B", scenario_id="poc", step_id=step_id, service_operation="SUBMIT",
+            request={
+                "destination": 222_222_222,          # ROC (addressed, 논리 주소 불변)
+                "payload_format": "test.stage0.opaque",
+                "payload_base64": base64.b64encode(payload).decode("ascii"),
+                "payload_sha256": hashlib.sha256(payload).hexdigest(),
+                "ack_required": False,
+            })
+        body = response.get("body") or {}
+        self.assertEqual(body.get("call_outcome"), "OK", body)
+        return body
+
+    def test_optin_is_off_by_default(self):
+        from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
+
+        state = _C.poc_result(self._call("poc_wired_broadcast_optin", {"enabled": None}))
+        self.assertFalse(state["enabled"], "기본값은 legacy(꺼짐)여야 한다")
+
+    def test_normal_transfer_fans_out_only_when_optin_is_on(self):
+        from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
+
+        # 1) opt-in OFF — 정상 전송은 legacy 단일 child다.
+        self._submit_normal_transfer(step_id="off-1")
+        # 2) opt-in ON — 이후 승격되는 route부터 두 물리 경로로 나간다.
+        toggled = _C.poc_result(self._call("poc_wired_broadcast_optin", {"enabled": True}))
+        self.assertTrue(toggled["enabled"])
+        self.assertFalse(toggled["previous"], "직전 값은 꺼짐이어야 한다")
+        self._submit_normal_transfer(step_id="on-1")
+        # 3) 다시 끄면 legacy로 돌아온다.
+        restored = _C.poc_result(self._call("poc_wired_broadcast_optin", {"enabled": False}))
+        self.assertFalse(restored["enabled"])
+        self.assertTrue(restored["previous"])
+
+
+class SharedMediumOptinRouteTest(unittest.TestCase):
+    """P08: opt-in이 **정상 route 승격**에 적용되는지 in-process로 정밀 확인한다.
+
+    프로세스 경계 시험은 "켜고 끌 수 있다"를 보이고, 여기서는 켠 상태에서 실제로 두 child가
+    나오고 legacy는 단일 child임을 route 계획 수준에서 고정한다.
+    """
+
+    def _sidecar(self):
+        from vdeter.stage7.routing import Stage7RouteSidecar
+        return Stage7RouteSidecar()
+
+    def test_promoted_route_carries_optin_only_when_enabled(self):
+        from vdeter.stage7.routing import Stage7RouteContext, resolve_lane_plan_route
+        from vdeter.stage7.configuration import CANONICAL_ROLES
+
+        sidecar = self._sidecar()
+        self.assertFalse(sidecar.wired_broadcast_optin, "기본값은 꺼짐")
+        previous = sidecar.set_wired_broadcast_optin(True)
+        self.assertFalse(previous)
+        self.assertTrue(sidecar.wired_broadcast_optin)
+
+        # 켠 상태의 context가 fan-out으로 해석된다(ROC=C1+C3).
+        roc = CANONICAL_ROLES["ROC"][1]
+        mass_a = CANONICAL_ROLES["MASS-A"][1]
+        common = dict(method_kind="SUBMIT_TRANSFER", source_station_id=roc,
+                      destination_kind="ADDRESSED", destination_station_id=mass_a,
+                      original_source_station_id=None, original_destination_kind=None,
+                      original_destination_station_id=None, request_digest="")
+        channel = "VDETER_UPPER_100_TEST"
+        from vdeter.stage7.routing import CANONICAL_ROUTE_TABLE
+        channel = CANONICAL_ROUTE_TABLE[("ROC", "MASS-A")][0]
+        on_plan, err = resolve_lane_plan_route(
+            "ROC", Stage7RouteContext(**common, broadcast_fanout_optin=True), channel)
+        self.assertIsNone(err, err)
+        self.assertEqual(on_plan[0], ((0, "C1"), (1, "C3")))
+        self.assertEqual(on_plan[2], "OPTIN_TWO_CHILD_FANOUT")
+
+        off_plan, err = resolve_lane_plan_route(
+            "ROC", Stage7RouteContext(**common), channel)
+        self.assertIsNone(err, err)
+        self.assertEqual(off_plan[0], ((0, "C1"),))
+        self.assertEqual(off_plan[2], "SINGLE_CHILD")
+
+    def test_toggle_off_restores_legacy(self):
+        sidecar = self._sidecar()
+        sidecar.set_wired_broadcast_optin(True)
+        self.assertTrue(sidecar.set_wired_broadcast_optin(False))
+        self.assertFalse(sidecar.wired_broadcast_optin)
