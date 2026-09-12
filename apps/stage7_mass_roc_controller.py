@@ -1039,7 +1039,7 @@ class _AdapterChannel:
         self._request_lock = Lock()
 
     def request(self, message: dict) -> dict:
-        budget = min(self._timeout_s, 1.0) if message.get("command_name") == "poc_collision" else self._timeout_s
+        budget = min(self._timeout_s, 1.0) if str(message.get("command_name", "")).startswith("poc_") else self._timeout_s
         deadline = time.monotonic() + budget
         if not self._request_lock.acquire(timeout=budget):
             raise TimeoutError("TEST socket busy")
@@ -1049,7 +1049,13 @@ class _AdapterChannel:
             self._request_lock.release()
 
     def _request_locked(self, message, deadline):
-        self._client.send(message)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("TEST socket request budget exhausted")
+        if callable(getattr(type(self._client), "send_bounded", None)):
+            self._client.send_bounded(message, timeout=remaining)
+        else:
+            self._client.send(message)  # legacy in-process test transport
         while time.monotonic() < deadline:
             received = self._client.recv(timeout=min(2.0, max(0.001, deadline - time.monotonic())))
             if received is None:

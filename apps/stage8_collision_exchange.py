@@ -68,12 +68,17 @@ class CollisionExchange:
                 self.close()
             except BaseException as cleanup:
                 exc.add_note(f"RX scope cleanup: {cleanup}")
+                if isinstance(exc, Exception) and not isinstance(cleanup, Exception):
+                    cleanup.add_note(f"RX activation failed: {exc}")
+                    raise cleanup from exc
             if isinstance(exc, Exception):
-                raise _unavailable(f"RX scope activation failed: {exc}") from exc
+                raise _unavailable(f"RX scope activation failed: {exc}",
+                    ownership=bool(self.enabled or self.previous_fanout)) from exc
             raise
 
     def check(self):
         if self.error is not None:
+            self.dual_ready = False
             raise _unavailable(f"RX observation scope failed: {self.error}")
 
     def poll(self):
@@ -108,6 +113,7 @@ class CollisionExchange:
         return dict(found[0]) if len(found) == 1 else None
 
     def close(self):
+        self.dual_ready = False  # revoke capability even when restoration fails
         failures = []
         interrupted = None
         for endpoint in tuple(self.enabled):

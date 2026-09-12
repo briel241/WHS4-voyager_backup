@@ -46,6 +46,11 @@ def serve(socket_dir: str, plan_sha: str, *, endpoints=ENDPOINTS) -> int:
         start_stage7_group,
     )
 
+    # Exact production D-10 function, not a copied test policy. Other launcher
+    # adaptations (D-11 timing/D-18 ACK, etc.) remain hardware-test limitations.
+    from vdeter.mac.coordinator import MacCoordinator
+    from vdeter.stage7.short_data_compat import wrap_short_data_submission
+    MacCoordinator._submit_short_data = wrap_short_data_submission(MacCoordinator._submit_short_data)
     clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
     start_stage7_group(clock, medium, coordinator, members, resolved)
     stations = {name: station for name, (_role, station) in CANONICAL_ROLES.items()}

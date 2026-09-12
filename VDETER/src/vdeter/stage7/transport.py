@@ -123,6 +123,13 @@ class SeqPacketClient:
     def send(self, message: dict) -> None:
         self._socket.sendall(encode_message(message))
 
+    def send_bounded(self, message: dict, *, timeout: float) -> None:
+        """Bound the first write too, not only subsequent response reads."""
+        if timeout <= 0:
+            raise TimeoutError("socket send budget exhausted")
+        self._socket.settimeout(timeout)
+        self._socket.sendall(encode_message(message))
+
     def recv(self, timeout=None) -> dict | None:
         self._socket.settimeout(timeout)
         try:

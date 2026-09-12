@@ -113,6 +113,9 @@ class RfOffStage7DeviceSession:
                                           start_stage7_group, STATION_BY_ENDPOINT)
         from apps.stage8_stage7_seams import assemble_authoritative_provider
         self.run_root = Path(run_root)
+        from vdeter.mac.coordinator import MacCoordinator
+        from vdeter.stage7.short_data_compat import wrap_short_data_submission
+        MacCoordinator._submit_short_data = wrap_short_data_submission(MacCoordinator._submit_short_data)
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
         self._clock = clock

@@ -1502,51 +1502,8 @@ def main(argv=None) -> int:
         # 경로는 Link 11(37B) 고정이라 실을 수 없어 즉사 — 실물 인증서
         # 353B가 정확히 이 사각지대. 스펙(인증서=데이터 세션 90→4→74/75/76)
         # 대로, Link 11이 실제로 싣지 못하는 단문 후보는 세션으로 승격한다.
-        _orig_submit_short = _MC._submit_short_data
-
-        def _submit_short_or_session(self_c, state, requirement,
-                                     causation_event_id):
-            try:
-                link11 = next(
-                    (p for p in requirement.profiles
-                     if getattr(p.link_id, "value", None) == 11),
-                    None,
-                )
-                if link11 is None or not link11.short_data_eligible:
-                    # 파편 상한 3 명시 강제 (0.9.15/0.9.20 m9, 0.9.22 경계
-                    # 정정): frozen 산식은 세그먼트 = 헤더 4B + presentation
-                    # (link/transfer.py SEGMENT_HEADER_SIZE)이므로 3조각
-                    # 용량 645B(세그먼트) = presentation 641B. 641B 초과는
-                    # 승격하지 않고 원 단문 경로로 낙하 → frozen의 설계된
-                    # 거부(LINK_TRANSFER_SIZE_UNSUPPORTED)로 즉시 실패한다.
-                    # 검증 보증 구간(≤426B=2조각, 상한 3조각) 밖의 무음
-                    # 진입을 차단하는 게이트.
-                    if requirement.presentation_size > 3 * 215 - 4:
-                        print(
-                            "[launcher] 승격 거부 — 파편 상한 3 초과 "
-                            f"(presentation={requirement.presentation_size}"
-                            " > 641, 세그먼트 > 645)",
-                            file=sys.stderr, flush=True,
-                        )
-                        return _orig_submit_short(
-                            self_c, state, requirement, causation_event_id
-                        )
-                    print(
-                        "[launcher] short->session 승격 "
-                        f"(link11 미적합, size="
-                        f"{requirement.presentation_size})",
-                        file=sys.stderr, flush=True,
-                    )
-                    return self_c._submit_data_session(
-                        state, requirement, causation_event_id
-                    )
-            except Exception:  # noqa: BLE001 - 승격 실패 시 원 경로
-                pass
-            return _orig_submit_short(
-                self_c, state, requirement, causation_event_id
-            )
-
-        _MC._submit_short_data = _submit_short_or_session
+        from vdeter.stage7.short_data_compat import wrap_short_data_submission
+        _MC._submit_short_data = wrap_short_data_submission(_MC._submit_short_data)
         # F-spread (svc-run-a 실측: 76이 OPEN 왕복 완료 전 도착 → frozen
         # 3079가 무오류 폐기 — H1 확정. 수신측 명령 적체 하에서 OPEN에
         # 시간을 주기 위해, 세션의 '마지막 조각'만 +800ms(5슬롯) 뒤 같은
