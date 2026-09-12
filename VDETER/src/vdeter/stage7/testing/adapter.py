@@ -37,6 +37,21 @@ _INLINE_SUBMIT_KEYS = frozenset(
 )
 _INLINE_STATUS_KEYS = frozenset({"transfer_id"})
 
+#: §16.2 PoC device 경계 op(Stage 8 PoC supervisor 전용). device seam이 주입되지 않은 설치에서는
+#: 전부 REJECTED다 — 기본값은 "쓸 수 없음"이고 조용한 대체 경로는 없다.
+_POC_OPERATIONS = ("poc_radio_state", "poc_schedule_group_tx", "poc_tx_burst_state",
+                   "poc_tuning")
+
+#: 각 PoC op body의 **정확한** 허용 키(fail-closed: 그 외 키는 거부).
+_POC_SCHEDULE_KEYS = frozenset(
+    {"burst_id", "channel_name", "transmit_at_hw_ns", "samples_base64", "samples_sha256",
+     "destination_station_id", "request_digest"}
+)
+_POC_BURST_KEYS = frozenset({"burst_id"})
+_POC_TUNING_KEYS = frozenset(
+    {"mode", "rx_lo_hz", "lane_dsp_hz", "analog_bandwidth_hz", "snapshot"}
+)
+
 
 def _jsonable(value):
     if isinstance(value, dict):
@@ -60,6 +75,7 @@ class Stage7ServiceApiTestAdapter:
         "_authorized_controller",
         "_fixtures",
         "_fault_hooks",
+        "_poc_device",
         "_replay",
         "call_log",
         "artifacts",
@@ -74,9 +90,12 @@ class Stage7ServiceApiTestAdapter:
         authorized_controller: tuple,
         fixtures: dict | None = None,
         fault_hooks: dict | None = None,
+        poc_device=None,
     ) -> None:
         self.endpoint_id = endpoint_id
         self._service = service
+        #: Stage 8 PoC device 경계(launcher 소유 radio). None이면 PoC op은 전부 거부된다.
+        self._poc_device = poc_device
         self._resolved_test_plan_sha256 = resolved_test_plan_sha256
         self._authorized_controller = tuple(authorized_controller)
         #: local access-controlled fixture: relpath → exact bytes (§16.2).
@@ -119,6 +138,8 @@ class Stage7ServiceApiTestAdapter:
             response = self._inject_test_fault(message)
         elif name == "test_status":
             response = self._test_status(message)
+        elif name in _POC_OPERATIONS:
+            response = self._poc_command(name, message)
         else:
             response = self._reject(message, "CONTROL_MESSAGE_INVALID")
         self._replay[command_id] = (exact, response)
@@ -387,6 +408,87 @@ class Stage7ServiceApiTestAdapter:
                 "private_code": None,
             },
         )
+
+    # --- §16.2 PoC device 경계 op (Stage 8 supervisor ↔ launcher 소유 radio) ------
+    #
+    # PoC supervisor는 workload를 소유한 scenario controller 프로세스에 있고 장치는 launcher가
+    # 단독 소유한다. 이 op들이 그 경계를 넘는 유일한 통로다. **canonical 값만** 오간다(private
+    # radio/MAC/PHY 객체·handle은 노출하지 않는다). device seam이 주입되지 않았으면 전부 거부다.
+
+    def _poc_reject(self, message, reason: str):
+        return self._response(
+            message,
+            "REJECTED",
+            {"poc_operation": message.get("command_name"), "call_outcome": "NOT_CALLED",
+             "reason": reason, "result": None},
+        )
+
+    def _poc_command(self, name: str, message) -> dict:
+        from .poc_device import PocDeviceUnavailable
+
+        if self._poc_device is None:
+            # 기본값은 "쓸 수 없음"이다. PoC 없이 조용히 진행하지 않는다.
+            return self._poc_reject(message, "POC_DEVICE_UNAVAILABLE")
+        body = message.get("body") or {}
+        try:
+            result = self._poc_invoke(name, body)
+        except PocDeviceUnavailable as error:
+            return self._poc_reject(message, str(error)[:200])
+        except (ValueError, KeyError, TypeError) as error:
+            return self._poc_reject(message, f"{type(error).__name__}: {str(error)[:160]}")
+        except Exception as error:  # noqa: BLE001 - 장치 오류는 ERR로 회신(세션은 상위가 판정)
+            return self._response(
+                message, "COMPLETED",
+                {"poc_operation": name, "call_outcome": "ERR",
+                 "reason": type(error).__name__[:64], "result": None},
+            )
+        self.call_log.append((name, body.get("burst_id") or body.get("mode")))
+        return self._response(
+            message, "COMPLETED",
+            {"poc_operation": name, "call_outcome": "OK", "reason": None, "result": result},
+        )
+
+    def _poc_invoke(self, name: str, body: dict):
+        import base64
+
+        device = self._poc_device
+        if name == "poc_radio_state":
+            return device.radio_state()
+        if name == "poc_tx_burst_state":
+            if set(body) != _POC_BURST_KEYS:
+                raise ValueError("poc_tx_burst_state body key 집합 위반")
+            return device.tx_burst_state(str(body["burst_id"]))
+        if name == "poc_schedule_group_tx":
+            if set(body) != _POC_SCHEDULE_KEYS:
+                raise ValueError("poc_schedule_group_tx body key 집합 위반")
+            encoded = body["samples_base64"]
+            if not isinstance(encoded, str):
+                raise ValueError("samples_base64는 문자열이어야 합니다")
+            samples = base64.b64decode(encoded.encode("ascii"), validate=True)
+            digest = body["samples_sha256"]
+            # 표본이 전송 중 바뀌지 않았음을 launcher가 **스스로** 확인한다(송신 전 fail-closed).
+            if (not isinstance(digest, str)
+                    or hashlib.sha256(samples).hexdigest() != digest):
+                raise ValueError("samples_sha256이 표본과 다릅니다")
+            return device.schedule_group_tx(
+                burst_id=str(body["burst_id"]),
+                channel_name=str(body["channel_name"]),
+                transmit_at_hw_ns=int(body["transmit_at_hw_ns"]),
+                samples=samples,
+                destination_station_id=int(body["destination_station_id"]),
+                request_digest=str(body["request_digest"] or ""),
+            )
+        if name == "poc_tuning":
+            if set(body) != _POC_TUNING_KEYS:
+                raise ValueError("poc_tuning body key 집합 위반")
+            return device.tuning(
+                mode=str(body["mode"]),
+                rx_lo_hz=body["rx_lo_hz"],
+                lane_dsp_hz=body["lane_dsp_hz"],
+                analog_bandwidth_hz=body["analog_bandwidth_hz"],
+                snapshot=body["snapshot"],
+            )
+        raise ValueError(f"알 수 없는 PoC op: {name!r}")
 
     def _test_status(self, message) -> dict:
         query = (message.get("body") or {}).get("query_command_id")

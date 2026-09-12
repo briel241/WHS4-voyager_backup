@@ -656,10 +656,16 @@ class Stage7AuthoritativeRadioSink:
         if utc_ns is None:
             raise RuntimeError("host time bridge가 잠겨 있지 않아 TX 시각을 UTC로 변환할 수 없습니다")
         data = to_cf32le(children[0].samples)
+        # UTC label 축의 clock id는 **bridge가 소유한다**. adapter에는 `clock_id` 속성이 없어
+        # 이전 구현은 항상 리터럴 "stage8"로 떨어졌고, `schedule_tx`가 이 필드를 검증하지 않으므로
+        # 요청이 갖지 않은 clock 정체를 주장한 채 조용히 통과했다.
+        clock_id = getattr(bridge, "clock_id", None)
+        if not clock_id:
+            raise RuntimeError("bridge clock_id가 없습니다 — TX 시각을 결속할 수 없습니다")
         transmit_at = TimePoint(seconds=int(utc_ns) // 1_000_000_000,
                                 nanoseconds=int(utc_ns) % 1_000_000_000,
                                 clock_domain=ClockDomain.UTC,
-                                clock_id=str(getattr(self._adapter, "clock_id", "") or "stage8"))
+                                clock_id=str(clock_id))
         samples = SampleBlock(
             sample_format="cf32le",
             sample_rate_hz=resampling.DEVICE_SAMPLE_RATE_HZ,

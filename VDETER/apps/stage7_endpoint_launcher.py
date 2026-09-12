@@ -2766,12 +2766,26 @@ def main(argv=None) -> int:
             for path in sorted(_glob.glob(os.path.join(arguments.fixtures_dir, "*.json"))):
                 with open(path, "rb") as handle:
                     fixtures[os.path.basename(path)] = handle.read()
+        # Stage 8 PoC device 경계(§16.2 최소 확장): launcher가 단독 소유한 radio를 TEST adapter
+        # op으로만 노출한다. 이 seam이 없으면 PoC op은 전부 거부된다(기본값 = 쓸 수 없음).
+        # 송신은 권위 `schedule_tx` 하나로만 나가며 별도 예약 원장·우회 경로를 만들지 않는다.
+        from vdeter.stage7.configuration import CANONICAL_ROLES
+        from vdeter.stage7.testing.poc_device import Stage7PocDeviceSeam
+
+        poc_device = Stage7PocDeviceSeam(
+            endpoint_id=arguments.endpoint_id,
+            endpoint=endpoint,
+            # §7 canonical mapping이 station id의 권위 출처다(별도 표를 만들지 않는다).
+            station_id_by_endpoint={name: station
+                                    for name, (_role, station) in CANONICAL_ROLES.items()},
+        )
         adapter = Stage7ServiceApiTestAdapter(
             endpoint_id=arguments.endpoint_id,
             service=endpoint,
             resolved_test_plan_sha256=arguments.test_plan_sha,
             authorized_controller=(os.getuid(),),  # type: ignore[attr-defined]
             fixtures=fixtures,
+            poc_device=poc_device,
         )
         test_socket_path = os.path.join(root, f"{arguments.endpoint_id}.test.sock")
         test_server = SeqPacketServer(test_socket_path)

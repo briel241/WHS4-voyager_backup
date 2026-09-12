@@ -14,6 +14,10 @@ from ..canonical_json import encode_canonical_json
 from ..ipc import TEST_PROTOCOL, body_sha256_of
 
 
+class PocDeviceCallError(RuntimeError):
+    """launcher PoC device op이 거부·실패했다. 성공으로 위장하지 않는다."""
+
+
 class Stage7ScenarioController:
     """§16.2 test command 발행자. transport는 주입형이다.
 
@@ -194,6 +198,40 @@ class Stage7ScenarioController:
         )
         return self._channels[endpoint_id].request(message)
 
+    # --- §16.2 PoC device 경계 (Stage 8 supervisor → launcher 소유 radio) ---------
+
+    def poc_command(self, endpoint_id: str, command_name: str, body: dict) -> dict:
+        """PoC device op 하나를 보내고 응답을 그대로 돌려준다.
+
+        판정하지 않는다 — 호출자가 `status`/`call_outcome`/`reason`을 보고 결정한다. 거부를
+        성공으로 바꾸거나 결과를 합성하지 않는다(장치 경계의 사실만 전달).
+        """
+
+        message = self._command(endpoint_id, command_name, dict(body))
+        response = self._channels[endpoint_id].request(message)
+        payload = response.get("body") or {}
+        self.command_log.append(
+            {
+                "endpoint_id": endpoint_id,
+                "command": command_name,
+                "status": response.get("status"),
+                "call_outcome": payload.get("call_outcome"),
+                "reason": payload.get("reason"),
+            }
+        )
+        return response
+
+    @staticmethod
+    def poc_result(response: dict):
+        """PoC op 응답에서 result를 꺼낸다. 거부·오류면 `PocDeviceCallError`."""
+
+        body = response.get("body") or {}
+        if response.get("status") != "COMPLETED" or body.get("call_outcome") != "OK":
+            raise PocDeviceCallError(
+                f"{body.get('poc_operation')}: status={response.get('status')} "
+                f"outcome={body.get('call_outcome')} reason={body.get('reason')}")
+        return body.get("result")
+
     @staticmethod
     def fixture_bytes(value: dict) -> tuple:
         """(exact bytes, sha256) — source endpoint의 local fixture preload용."""
@@ -202,4 +240,4 @@ class Stage7ScenarioController:
         return data, hashlib.sha256(data).hexdigest()
 
 
-__all__ = ("Stage7ScenarioController",)
+__all__ = ("Stage7ScenarioController", "PocDeviceCallError")
