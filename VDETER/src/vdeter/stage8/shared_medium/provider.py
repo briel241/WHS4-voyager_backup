@@ -222,6 +222,17 @@ class NextSafeSlotScheduler:
 
         self._triggers.clear()
 
+    def slot_for_hw_ns(self, hw_timestamp_ns: int) -> int:
+        """hardware timestamp → 이 scheduler의 slot 좌표. **slot 단위의 단일 소유자**다.
+
+        상위(연결 layer)가 관측 hardware timestamp로 trigger를 등록할 때 slot 환산을 직접 하지 않고
+        이 함수를 쓴다. 기본 stub은 hardware timestamp를 sample 좌표와 같은 단위로 모델링하므로
+        `_slot_samples`(=8192)로 나눈다. 실 MAC scheduler 결속(subclass)은 실제 device slot 길이를
+        `_slot_samples`로 두므로 같은 식이 실 시간축에서 성립한다.
+        """
+
+        return max(0, int(hw_timestamp_ns) // self._slot_samples)
+
     @property
     def trigger_count(self) -> int:
         return len(self._triggers)
@@ -555,6 +566,15 @@ class SharedMediumActionProvider:
                 "미반환 자원 또는 미완료 cleanup — SESSION_INHIBIT",
                 detail={"unresolved_ownership": list(unresolved)},
             )
+
+    def slot_for_hw_ns(self, hw_timestamp_ns: int) -> int:
+        """scheduler의 slot 좌표 환산을 그대로 노출한다(연결 layer가 slot 단위를 직접 정하지 않게).
+
+        scheduler가 이 hook을 제공하지 않으면 `None`을 돌려주고, 호출자는 자체 fallback을 쓴다.
+        """
+
+        convert = getattr(self._scheduler, "slot_for_hw_ns", None)
+        return None if convert is None else int(convert(hw_timestamp_ns))
 
     def register_observation_trigger(self, observation_id: str, *, slot: int, hw_timestamp_ns=None) -> None:
         """VDETER 관측 event → scheduler trigger 등록 production hook(§10).

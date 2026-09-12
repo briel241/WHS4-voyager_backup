@@ -741,45 +741,59 @@ class RealCoordinatorPocEndToEnd(unittest.TestCase):
                 summary = _json.loads(runs[-1].read_text(encoding="utf-8"))
             return code, lines, summary
 
-    def test_real_coordinator_runs_poc_and_persists_summary(self):
+    def test_real_coordinator_runs_poc_through_real_seams_and_inhibits_on_unknown_tx(self):
+        """실 CLI→실 coordinator→**실 Stage 7 seam**→실 PoC child 종단(P01/P03~P06/P10 결선 상태).
+
+        실 방사(실 worker group TX→실 conducted 매질)는 일어나지만, PoC TX는 권위 radio adapter의
+        TX 원장을 거치지 않아 terminal이 미확정이다(P10 미완). 따라서 TX_UNKNOWN·ABORTED로 남고
+        §14.1에 따라 SESSION_INHIBIT가 되어 다음 workload를 막고 최종 FAIL이 된다. scenario 판정은
+        이와 **독립**으로 PASS를 유지한다(§11.1). 이전의 COMPLETED 단언은 fake 매질 delivery 로그
+        휴리스틱 산물이었으며, 그 휴리스틱을 제거한 정직한 결과가 이것이다.
+        """
         with tempfile.TemporaryDirectory() as poc_dir:
             os.chmod(poc_dir, 0o700)
             poc_path = _write_poc(poc_dir)
             code, lines, summary = self._run(poc_path)
-            self.assertEqual(code, cli.EXIT_PASS, "\n".join(lines))
-            self.assertIsNotNone(summary, "\n".join(lines))
-            self.assertEqual(summary["status"], "PASS")
+            joined = chr(10).join(lines)
+            self.assertIsNotNone(summary, joined)
             w = summary["workloads"][0]
-            self.assertEqual(w["status"], "PASS")
             poc = w.get("poc")
-            self.assertIsNotNone(poc, "\n".join(lines))
-            self.assertEqual(poc["poc_infrastructure"], "COMPLETED")
-            self.assertEqual(poc["attacks"][0]["action_execution"], "TX_COMPLETED")
+            self.assertIsNotNone(poc, joined)
+            # scenario 판정과 PoC 판정의 독립성(§11.1).
+            self.assertEqual(w["status"], "PASS")
             self.assertEqual(poc["scenario_verdict"], "PASS")
+            self.assertEqual(poc["poc_infrastructure"], "ABORTED")
+            self.assertEqual(poc["attacks"][0]["action_execution"], "TX_UNKNOWN")
+            # 실 방사는 실제로 일어났다(실 worker→실 매질 group TX 1건).
             self.assertEqual((poc.get("radiation") or {}).get("committed_groups"), 1)
-            # 반응형 action이 scenario terminal 이전에 제출됨(관측 → replay). provider evidence 결속.
             self.assertEqual(poc["provider_evidence"]["model_boundary"]["model"],
                              "WIRED_SHARED_MEDIUM_EMULATION")
-            self.assertTrue(any("rf-off-software" in ln for ln in lines))
+            # 미확정 TX → SESSION_INHIBIT → 세션 차단·최종 FAIL(성공으로 위장하지 않는다).
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertEqual(code, cli.EXIT_FAIL, joined)
+            self.assertTrue(any("session inhibit" in ln.lower() for ln in lines), joined)
 
-    def test_real_coordinator_multi_workload_isolation(self):
-        # run all: 각 workload가 새 snapshot·새 child를 쓰고 이전 event가 섞이지 않는다(proof #8).
+    def test_real_coordinator_session_inhibit_blocks_next_workload(self):
+        """run all에서 첫 workload의 미확정 TX가 SESSION_INHIBIT를 일으켜 다음 workload 제출을 막는다.
+
+        각 workload는 새 snapshot·새 child를 쓰며, 미확정 소유권을 삭제해 잔존 0으로 만들지 않고
+        세션을 차단한다(§14.1, R2).
+        """
         with tempfile.TemporaryDirectory() as poc_dir:
             os.chmod(poc_dir, 0o700)
             poc_path = _write_poc_compat(poc_dir, "batch_poc",
                                          ("SC-VDE-005", "SC-VDE-006", "SC-VDE-001"))
             code, lines, summary = self._run(poc_path, scenario="all")
-            self.assertEqual(code, cli.EXIT_PASS, "\n".join(lines))
-            self.assertIsNotNone(summary, "\n".join(lines))
-            self.assertEqual(summary["status"], "PASS")
+            joined = chr(10).join(lines)
+            self.assertIsNotNone(summary, joined)
             workloads = summary["workloads"]
-            self.assertEqual(len(workloads), 4)  # 005, 006, 001 normal, 001 forged
-            wids = [w.get("workload_id") for w in workloads]
-            self.assertEqual(len(set(wids)), 4, wids)  # 각 workload 고유 id(새 snapshot/child)
-            for w in workloads:
-                self.assertEqual(w["status"], "PASS")
-                self.assertEqual(w["poc"]["poc_infrastructure"], "COMPLETED")
-                self.assertEqual(w["poc"]["attacks"][0]["action_execution"], "TX_COMPLETED")
+            # 4개 계획이지만 첫 workload의 SESSION_INHIBIT로 이후 제출 0.
+            self.assertEqual(len(workloads), 1, [w.get("workload_id") for w in workloads])
+            first = workloads[0]
+            self.assertEqual(first["poc"]["poc_infrastructure"], "ABORTED")
+            self.assertEqual(first["poc"]["attacks"][0]["action_execution"], "TX_UNKNOWN")
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertEqual(code, cli.EXIT_FAIL, joined)
 
 
 if __name__ == "__main__":

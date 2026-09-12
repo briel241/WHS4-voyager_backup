@@ -215,9 +215,13 @@ def scenario_verdict_from_status(status) -> ScenarioVerdict:
     return ScenarioVerdict.PASS if status == "PASS" else ScenarioVerdict.FAIL
 
 
-def finish_workload(workload, *, scenario_verdict: ScenarioVerdict) -> dict:
-    """ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집한다(§5.1, §11, §12.4). 반환 JSON evidence."""
-    result = workload.run(scenario_verdict)
+def finish_workload(workload, *, scenario_verdict: ScenarioVerdict, guard=None) -> dict:
+    """ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집한다(§5.1, §11, §12.4). 반환 JSON evidence.
+
+    `guard`(선택)는 각 scenario step 전달 **전에** 호출되는 검사 훅이다(P11: 실행 중 권위 deadline
+    만료·운영자 중단 감지). 만료 시 남은 step 없이 cleanup-only로 종료하고 원인을 올린다.
+    """
+    result = workload.run(scenario_verdict, guard=guard)
     return _result_evidence(result, workload)
 
 

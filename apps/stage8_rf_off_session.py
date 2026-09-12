@@ -102,21 +102,19 @@ class RfOffStage7DeviceSession:
     """
 
     def __init__(self, run_root: str) -> None:
-        from tests.support.stage7 import (build_stage7_software_group, start_stage7_group,
-                                          ENDPOINT_TO_SERIAL)
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium import constants
+        from tests.support.stage7 import build_stage7_software_group, start_stage7_group
         self.run_root = Path(run_root)
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
         self._clock = clock
         self._medium = medium
         self._members = members
-        self._mass_b_serial = ENDPOINT_TO_SERIAL["MASS-B"]
-        # WSM-G1 common-LO(RF-off 주입): PoC 대상 채널(lower)로 수신기 RX LO 정합.
-        center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
-        for ep in ("ROC", "MASS-A"):
-            members[ep].endpoint.dependencies.radio.lease.worker.rx_lo_hz = center
+        # 정상 role tuning 행렬(§5.5)을 **바꾸지 않는다**. ROC는 자연적으로 lower 수신이므로 lower
+        # 채널 PoC 송신의 required receiver는 그대로 TUNED다. 이전 구현은 ROC·MASS-A의 RX LO를 모두
+        # lower로 강제했는데, 그것은 시험 통과를 위해 정상 endpoint tuning을 바꾸는 일이었다(P06).
+
+    def _mass_b_worker(self):
+        return self._members["MASS-B"].endpoint.dependencies.radio.lease.worker
 
     def poc_device_seams(self):
         from apps.stage8_stage7_seams import stage7_device_seams
@@ -124,12 +122,11 @@ class RfOffStage7DeviceSession:
 
     def poc_terminal_source(self):
         from apps.stage8_stage7_seams import stage7_terminal_source
-        return stage7_terminal_source(self._medium, tx_serial=self._mass_b_serial)  # 실 매질 delivery
+        return stage7_terminal_source(self._mass_b_worker())   # 실 async TX 통지(P10)
 
     def poc_target_response(self):
         from apps.stage8_stage7_seams import stage7_target_response
-        return stage7_target_response(self._medium, tx_serial=self._mass_b_serial,
-                                      station_to_endpoint={"ROC": "ROC", "MASS-A": "MASS-A"})
+        return stage7_target_response(self._members)           # 실 application 관측(P09)
 
     def poc_workload_steps(self, scenario_id):
         from vdeter.stage8.execution.runner import observation_step, scenario_started
@@ -145,6 +142,7 @@ class RfOffStage7DeviceSession:
 def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
                         run_id: str) -> dict:
     """PoC workload 하나를 실 coordinator 프로세스 안에서 실행하고 evidence dict를 돌려준다."""
+    from vdeter.stage8.execution.session import SessionExpired
     from vdeter.stage8.execution.verdict import ScenarioVerdict
 
     from apps.standalone import poc_run
@@ -186,8 +184,30 @@ def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
         runtime.end_workload()
         raise
     # scenario 진행 중 event 전달 → 반응형 action → terminal → finish → evidence → cleanup.
+    # P11: workload가 **진행 중일 때** 권위 deadline(workload/absolute)을 step마다 확인한다. 만료 시
+    # 남은 step 없이 정리하고, 살아 있는 child를 runtime.enforce_deadlines로 종료한다(중복 timer 없음).
     scenario_verdict = ScenarioVerdict.PASS
-    evidence = poc_run.finish_workload(prepared, scenario_verdict=scenario_verdict)
+    connection = getattr(prepared, "connection", None)
+
+    def _deadline_guard():
+        runtime.session.check_deadlines()   # 권위 모델 조회만(새 상한 만들지 않음)
+
+    try:
+        evidence = poc_run.finish_workload(prepared, scenario_verdict=scenario_verdict,
+                                           guard=_deadline_guard)
+    except SessionExpired as expired:
+        # 만료를 성공으로 덮지 않는다. 살아 있는 child·provider를 정리하고 만료를 evidence로 남긴다.
+        report = None
+        if connection is not None:
+            try:
+                _deadline, report = runtime.enforce_deadlines(connection)
+            except Exception:  # noqa: BLE001 - 정리 실패도 만료 보고를 막지 않는다
+                report = None
+        # session 모델은 이미 EXPIRED다. end_workload를 부르지 않는다(만료 상태를 되돌리지 않음).
+        return {"status": "ERROR", "poc_infrastructure": "ABORTED",
+                "infrastructure_error_code": "POC_DEADLINE_MISSED",
+                "deadline": getattr(getattr(expired, "deadline", None), "value", None),
+                "cleanup": report, "workload_id": workload_id, "scenario_id": scenario_id}
     evidence.setdefault("workload_id", workload_id)
     evidence.setdefault("scenario_id", scenario_id)
     runtime.end_workload()

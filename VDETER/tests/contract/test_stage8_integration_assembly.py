@@ -72,7 +72,10 @@ class RfOffFanOutTest(unittest.TestCase):
         self.assertEqual(len(seams.group_tx.retunes), 1)
         retune_time = seams.group_tx.retunes[0][1]
         submit_time = seams.group_tx.submits[0][0][2]  # (lane, data, hw_time)
-        self.assertEqual(retune_time, submit_time)  # staging·commit 같은 hardware time
+        # P03: timed retune은 TX 시각과 **같은 시각이 아니라 앞선 시각**에 발행한다(기존 radio_adapter
+        # 규약: hardware_start - _RETUNE_LEAD_NS). 같은 시각이면 LO 정착 전에 방사하게 된다.
+        # RF-off stub 좌표는 실시간이 아니라 TX 시각이 수천 ns라 lead가 0으로 clamp된다(실 경로는 200 ms).
+        self.assertLessEqual(retune_time, submit_time)  # staging이 commit보다 앞선다(순서 불변)
 
     def test_tx_executor_derives_completed_from_provider_outcome(self):
         provider, seams = assemble_rf_off_provider()

@@ -222,8 +222,13 @@ class SupervisorConnection(PocSupervisor):
         if obs_id and callable(register):
             hw_ts = getattr(record, "device_hw_timestamp_ns", None)
             if isinstance(hw_ts, int) and hw_ts > 0:
-                slot = int(hw_ts // _SLOT_SAMPLES)          # 실제 hardware time → slot 좌표
-                register(obs_id, slot=slot, hw_timestamp_ns=int(hw_ts))
+                # slot 좌표 환산은 scheduler가 소유한다(P03: 연결 layer가 slot 단위를 가정하지 않는다).
+                # 실 MAC 결속 scheduler는 실 device slot 길이(26.666… ms)를, RF-off stub은 8192을 쓴다.
+                convert = getattr(self._provider, "slot_for_hw_ns", None)
+                slot = convert(hw_ts) if callable(convert) else None
+                if slot is None:
+                    slot = int(hw_ts // _SLOT_SAMPLES)      # scheduler 미제공 시 stub 좌표 fallback
+                register(obs_id, slot=int(slot), hw_timestamp_ns=int(hw_ts))
             else:
                 self._slot_counter += 1                     # hw-time 없는 관측 fallback(합성 아님)
                 slot = int(self._slot_counter)

@@ -163,15 +163,26 @@ class PocWorkload:
         관장한다. `PocWorkload.run`과 달리 저장된 scenario step을 전달하지 않는다."""
         return self._runner.abort(scenario_verdict, cause=cause)
 
-    def run(self, scenario_verdict: ScenarioVerdict):
-        """ARMED 후: workload event 전달 → terminal → finish → evidence → cleanup. fail-closed 결과."""
+    def run(self, scenario_verdict: ScenarioVerdict, *, guard=None):
+        """ARMED 후: workload event 전달 → terminal → finish → evidence → cleanup. fail-closed 결과.
+
+        `guard`(선택)는 **각 step 전달 전에** 호출되는 검사 훅이다(P11). 실행 중 권위 deadline 만료·
+        운영자 중단을 여기서 감지한다. guard가 예외를 올리면 남은 step을 전달하지 않고(신규 action
+        없음) cleanup-only로 종료한 뒤 그 예외를 그대로 올린다 — 만료를 성공으로 덮지 않는다.
+        guard는 상한을 새로 만들지 않고 기존 권위 deadline 모델을 조회만 한다.
+        """
         try:
             for step in self._steps:
                 if self._connection.infrastructure_error is not None:
                     break
+                if guard is not None:
+                    guard()          # 만료·중단이면 예외 → 아래에서 cleanup-only 종료
                 self._runner.deliver(step)
-        except Exception:  # noqa: BLE001 - runner가 기록; finish가 fail-closed 결과화
-            pass
+        except Exception as exc:  # noqa: BLE001 - runner가 기록; finish가 fail-closed 결과화
+            if guard is not None and getattr(exc, "deadline", None) is not None:
+                # 권위 deadline 만료: 남은 step 없이 정리만 하고 원인을 보존해 올린다.
+                self._runner.abort(scenario_verdict, cause=exc)
+                raise
         except BaseException:
             self._runner.finish(scenario_verdict)
             raise

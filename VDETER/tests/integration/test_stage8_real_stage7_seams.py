@@ -26,7 +26,8 @@ for _p in (_REPO, os.path.join(_REPO, "VDETER"), _SRC, os.path.join(_REPO, "VDET
 @unittest.skipUnless(_LINUX, "실 Stage 7 software group(POSIX) 전용")
 class RealStage7SeamsTest(unittest.TestCase):
     def _group(self):
-        from tests.support.stage7 import build_stage7_software_group, start_stage7_group
+        from tests.support.stage7 import (build_stage7_software_group, drive_stage7_group,
+                                          start_stage7_group)
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
         return clock, medium, members
@@ -43,6 +44,7 @@ class RealStage7SeamsTest(unittest.TestCase):
 
     def test_poc_action_flows_through_real_mac_phy_group_tx_and_receive(self):
         from apps.stage8_stage7_seams import stage7_target_response, stage7_terminal_source
+        from tests.support.stage7 import drive_stage7_group
         from vdeter.phy.transmitter import Phy11Transmitter
         from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
         from vdeter.stage8.shared_medium.radiation import ParentOutcome
@@ -61,9 +63,16 @@ class RealStage7SeamsTest(unittest.TestCase):
         parent = provider.parent_for("poc-1")
         self.assertIsNotNone(parent)
 
-        # 1) 실 frozen PHY 변조: parent waveform sample이 실 Phy11Transmitter 출력과 동일.
-        expected = tuple(Phy11Transmitter().encode(bytes(range(54))).samples)
-        self.assertEqual(tuple(parent.waveform.samples), expected)
+        # 1) 실 frozen PHY 변조 + 권위 native→device 변환(P05): parent waveform은 실 Phy11Transmitter
+        #    native 출력(2,048 @76.8 kS/s)을 기존 정상 경로와 같은 `interpolate_slot`으로 4배 보간한
+        #    device 표본(8,192 @307.2 kS/s = 26.666… ms)이어야 한다. native를 그대로 실으면 device
+        #    rate에서 6.666… ms짜리 잘린 burst가 된다.
+        from vdeter.phy import resampling
+        native = tuple(Phy11Transmitter().encode(bytes(range(54))).samples)
+        self.assertEqual(len(native), resampling.NATIVE_SLOT_SAMPLES)
+        expected = resampling.interpolate_slot(native)
+        self.assertEqual(tuple(parent.waveform.samples), tuple(expected))
+        self.assertEqual(len(parent.waveform.samples), resampling.DEVICE_SLOT_SAMPLES)
 
         # 2) 실 worker group-TX + 실 매질 fan-out: C4(→ROC)+C6(→MASS-A) 도달.
         new = medium.delivery_log[delivery_before:]
@@ -71,16 +80,19 @@ class RealStage7SeamsTest(unittest.TestCase):
         self.assertEqual(paths, ["C4", "C6"], paths)
         self.assertTrue(all(d["tx_serial"] == "3515425" for d in new))  # MASS-B 실 serial
 
-        # 3) 실 매질 delivery로 child terminal 확정 → resolve_outcome COMPLETED.
-        terminals = stage7_terminal_source(medium, tx_serial="3515425")(action, {}, parent)
+        # 3) TX terminal은 **권위 원장**에서 와야 한다. PoC group TX는 radio adapter의 schedule_tx를
+        #    거치지 않으므로 adapter가 BURST_ACK을 드레인해도 대응 원장이 없다 → terminal 미확정.
+        #    매질 delivery 기록으로 COMPLETED를 만들지 않는다(P10: 과거/우회 로그로 성공 추정 금지).
+        terminals = stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+                                   pump=lambda: drive_stage7_group(clock, members, 4))(action, {}, parent)
+        self.assertTrue(all(v == "UNKNOWN" for v in terminals.values()), terminals)
         outcome = provider.resolve_outcome("poc-1", terminals)
-        self.assertEqual(outcome, ParentOutcome.COMPLETED)
+        self.assertEqual(outcome, ParentOutcome.OUTCOME_UNKNOWN)   # 성공 추정 금지(SESSION_INHIBIT 경로)
 
-        # 4) 실 수신 evidence로 target effect: 논리 target ROC 도달 → EFFECT_OBSERVED.
-        effect, reason = stage7_target_response(
-            medium, tx_serial="3515425",
-            station_to_endpoint={"ROC": "ROC", "MASS-A": "MASS-A"})(action, {}, parent)
-        self.assertEqual(effect, TargetEffect.EFFECT_OBSERVED, reason)
+        # 4) target effect는 **application 수신 증거**로만 판정한다. 물리 도달은 효과가 아니다.
+        #    합성 packet은 정상 복호·주소 수락을 통과하지 못하므로 INDETERMINATE가 정직한 결과다.
+        effect, reason = stage7_target_response(members)(action, {}, parent)
+        self.assertEqual(effect, TargetEffect.INDETERMINATE, reason)
 
     def test_real_readiness_fail_closed_without_common_lo(self):
         # 수신기 RX LO가 송신 채널에 정합하지 않으면 실 rx_readiness가 RF 전 fail-closed(방사 0).
@@ -155,7 +167,8 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
 
     def test_real_child_action_radiates_through_real_stage7_seams(self):
         import json
-        from tests.support.stage7 import build_stage7_software_group, start_stage7_group
+        from tests.support.stage7 import (build_stage7_software_group, drive_stage7_group,
+                                          start_stage7_group)
         from vdeter.stage8._supervisor.child import SubprocessChildSpawner
         from vdeter.stage8._supervisor.clock import RealMonotonicClock
         from vdeter.stage8.execution.child_main import ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT
@@ -199,9 +212,9 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
             server_config=ServerCapabilityConfig(), clock=RealMonotonicClock(),
             socket_root=os.path.join(self.sock_root, "w1"))
         # tx terminal·target을 **실 conducted 매질 delivery**에서 공급(합성 아님).
-        terminal_source = stage7_terminal_source(medium, tx_serial="3515425")
-        target_response = stage7_target_response(
-            medium, tx_serial="3515425", station_to_endpoint={"ROC": "ROC", "MASS-A": "MASS-A"})
+        terminal_source = stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+                                   pump=lambda: drive_stage7_group(clock, members, 4))
+        target_response = stage7_target_response(members)
         runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w1",
                                 scenario_id="SC-VDE-006", snapshot=snap,
                                 tx_executor=ProductionTxExecutor(
@@ -219,10 +232,11 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
         # 실 child의 반응형 REPLAY가 실 seams를 거쳐 실 매질로 방사됨.
         new = medium.delivery_log[delivery_before:]
         paths = sorted(d["path_id"] for d in new if d["tx_serial"] == "3515425")
+        # 실 방사는 일어나지만 TX terminal 권위 경로 미결속 → TX_UNKNOWN·ABORTED(P10 미완, 정직 표기).
         self.assertEqual(paths, ["C4", "C6"], (paths, result.poc_infrastructure))
-        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
         self.assertEqual(len(result.attacks), 1)
-        self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
+        self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_UNKNOWN)
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
 
 
 @unittest.skipUnless(_LINUX, "real subprocess/socket + Stage7 software group only")
@@ -323,10 +337,9 @@ class RealScenarioObservationTest(unittest.TestCase):
                                 scenario_id="SC-VDE-006", snapshot=snap,
                                 tx_executor=ProductionTxExecutor(
                                     provider,
-                                    terminal_source=stage7_terminal_source(medium, tx_serial="3515425"),
-                                    target_response=stage7_target_response(
-                                        medium, tx_serial="3515425",
-                                        station_to_endpoint={"ROC": "ROC", "MASS-A": "MASS-A"})))
+                                    terminal_source=stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+                                   pump=lambda: drive_stage7_group(clock, members, 4)),
+                                    target_response=stage7_target_response(members)))
         observation = ObservationRecord(
             physical_channel=PhysicalChannel.UPPER, tuning_state=TuningState.TUNED_OBSERVER,
             observation_id="obs-real-c3", source_station="ROC", destination_station="MASS-A",
@@ -342,6 +355,118 @@ class RealScenarioObservationTest(unittest.TestCase):
             conn._teardown_socket()
         radiated = sorted(d["path_id"] for d in medium.delivery_log[radiate_before:]
                           if d["tx_serial"] == "3515425")
+        # 실 방사는 일어난다(실 worker→실 매질 C4+C6). 그러나 TX terminal은 권위 원장에서 오지 않아
+        # 미확정이므로 성공으로 추정하지 않는다 → TX_UNKNOWN·ABORTED(SESSION_INHIBIT). P10 미완의
+        # 정직한 표현이다(이전의 COMPLETED는 매질 delivery 로그 휴리스틱 산물이었다).
         self.assertEqual(radiated, ["C4", "C6"], (radiated, result.poc_infrastructure))
-        self.assertEqual(result.poc_infrastructure, PocInfrastructure.COMPLETED)
-        self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_COMPLETED)
+        self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_UNKNOWN)
+        self.assertEqual(result.poc_infrastructure, PocInfrastructure.ABORTED)
+
+
+class RealUnitsAndConversionTest(unittest.TestCase):
+    """P03(시간 좌표·lead·retune)·P05(native→device 변환) 회귀 고정. 장치·socket 불필요."""
+
+    def _scheduler(self, now_ns, *, tx_lo_hz=None):
+        from types import SimpleNamespace
+        from apps.stage8_stage7_seams import Stage7HwTimeScheduler
+        worker = SimpleNamespace(hardware_time_ns=lambda: now_ns, tx_lo_hz=tx_lo_hz)
+        return Stage7HwTimeScheduler(worker)
+
+    def _action(self):
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        return ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                payload={"packet_hex": bytes(range(54)).hex()})
+
+    def test_p03_slot_uses_real_device_slot_duration_not_sample_count(self):
+        # 수정 전: hardware ns를 8192(sample 수)로 나눠 lead가 5,632 ns였다.
+        # 수정 후: slot 경계는 8192/307,200 s = 26,666,666 ns.
+        from apps.stage8_stage7_seams import DEVICE_SLOT_NS, hw_ns_to_slot, slot_to_hw_ns
+        from vdeter.phy import resampling
+        self.assertEqual(DEVICE_SLOT_NS,
+                         resampling.DEVICE_SLOT_SAMPLES * 10**9 // resampling.DEVICE_SAMPLE_RATE_HZ)
+        self.assertEqual(DEVICE_SLOT_NS, 26_666_666)
+        # 정수 정밀 환산: slot→ns→slot 왕복이 어긋나지 않는다(누적 내림 오차 없음).
+        for slot in (0, 1, 45, 1000, 123456):
+            self.assertEqual(hw_ns_to_slot(slot_to_hw_ns(slot)), slot)
+
+    def test_p03_sample_index_and_hardware_ns_are_distinct_units(self):
+        slot = self._scheduler(1_000_000_000).resolve(self._action(), request_id="u1")
+        from vdeter.phy import resampling
+        from apps.stage8_stage7_seams import slot_to_hw_ns
+        index = slot.scheduled_sample // resampling.DEVICE_SLOT_SAMPLES
+        self.assertNotEqual(slot.scheduled_sample, slot.scheduled_hw_timestamp_ns)
+        self.assertEqual(slot.scheduled_sample, index * resampling.DEVICE_SLOT_SAMPLES)
+        self.assertEqual(slot.scheduled_hw_timestamp_ns, slot_to_hw_ns(index))
+
+    def test_p03_lead_meets_authoritative_minimum(self):
+        from apps.stage8_stage7_seams import _RETUNE_LEAD_NS, _TX_LEAD_NS
+        from vdeter.stage8.shared_medium import constants
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        now = 1_000_000_000
+        # TX LO 미확정 → 보수적으로 retune lead(200 ms) 요구.
+        slot = self._scheduler(now).resolve(self._action(), request_id="u2")
+        self.assertGreaterEqual(slot.scheduled_hw_timestamp_ns - now, _RETUNE_LEAD_NS)
+        # 이미 대상 채널에 tune돼 있으면 retune 불필요 → 기본 TX lead(100 ms) 이상.
+        center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
+        from types import SimpleNamespace
+        from apps.stage8_stage7_seams import Stage7HwTimeScheduler
+        worker = SimpleNamespace(hardware_time_ns=lambda: now, tx_lo_hz=center)
+        sched = Stage7HwTimeScheduler(worker, current_channel=PhysicalChannel.LOWER)
+        slot2 = sched.resolve(self._action(), request_id="u3")
+        self.assertGreaterEqual(slot2.scheduled_hw_timestamp_ns - now, _TX_LEAD_NS)
+        # lead가 5,632 ns 같은 값으로 되돌아가지 않는다(회귀 고정).
+        self.assertGreater(slot2.scheduled_hw_timestamp_ns - now, 1_000_000)
+
+    def test_p03_retune_is_issued_before_tx_not_at_tx_time(self):
+        from vdeter.stage8.integration.device_boundary import (RETUNE_LEAD_NS,
+                                                               Stage7GroupTxRadioSink)
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.stage8.shared_medium.radiation import ChildPath
+
+        class _Spy:
+            def __init__(self):
+                self.retunes = []
+                self.submits = []
+
+            def retune_tx_lo(self, target_hz, command_time_ns):
+                self.retunes.append((target_hz, command_time_ns))
+
+            def submit_tx_group(self, bursts):
+                self.submits.append(tuple(bursts))
+
+        spy = _Spy()
+        tx_ns = 5_000_000_000  # 실시간 좌표(실 scheduler 산출 범위)
+        samples = (0j,) * 8
+        children = tuple(
+            ChildPath(child_id=f"p:{cable}", parent_id="p", transfer_id="t", cable=cable,
+                      tx_station="MASS-B", tx_lane=lane, rx_station=rx, rx_lane=1,
+                      channel=PhysicalChannel.LOWER, payload_digest="d", waveform_sha256="w",
+                      scheduled_sample=0, scheduled_hw_timestamp_ns=tx_ns, samples=samples)
+            for cable, lane, rx in (("C4", 0, "ROC"), ("C6", 1, "MASS-A")))
+        sink = Stage7GroupTxRadioSink(group_tx=spy)
+        sink.commit_group(sink.prepare_group(group_id="p", children=children))
+        self.assertEqual(spy.retunes[0][1], tx_ns - RETUNE_LEAD_NS)   # TX보다 200 ms 앞섬
+        self.assertLess(spy.retunes[0][1], spy.submits[0][0][2])       # staging < 방사
+
+    def test_p05_waveform_is_device_rate_with_authoritative_conversion(self):
+        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from vdeter.phy import resampling
+        from vdeter.phy.transmitter import Phy11Transmitter
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        payload = bytes(range(54))
+        burst = Link11WaveformFactory().encode(source_station="MASS-B",
+                                               channel=PhysicalChannel.LOWER, payload=payload)
+        native = tuple(Phy11Transmitter().encode(payload).samples)
+        self.assertEqual(len(native), resampling.NATIVE_SLOT_SAMPLES)          # 2,048 native
+        self.assertEqual(len(burst.samples), resampling.DEVICE_SLOT_SAMPLES)   # 8,192 device
+        self.assertEqual(tuple(burst.samples), tuple(resampling.interpolate_slot(native)))
+        # device rate에서 정확히 한 slot 길이(26.666… ms). 보간 없이 실으면 6.666… ms였다.
+        duration_ms = len(burst.samples) / resampling.DEVICE_SAMPLE_RATE_HZ * 1000
+        self.assertAlmostEqual(duration_ms, 26.6667, places=3)
+
+    def test_p05_oversized_payload_is_rejected_not_truncated(self):
+        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        with self.assertRaises(ValueError):
+            Link11WaveformFactory().encode(source_station="MASS-B",
+                                           channel=PhysicalChannel.LOWER, payload=bytes(200))

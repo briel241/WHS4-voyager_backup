@@ -175,3 +175,56 @@ class R13TimeoutErrorWireTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
+class P11WorkloadDeadlineDuringExecutionTest(_Base):
+    """P11: workload **진행 중** 권위 deadline 만료가 감지되어 살아 있는 child를 종료한다.
+
+    이전에는 `ResidentPocRuntime.enforce_deadlines` 호출자가 시험뿐이었고, 세션 loop은 workload
+    handler를 동기 호출해 실행 중에는 만료를 볼 수 없었다. 이제 각 scenario step 전에 권위 deadline을
+    확인하는 guard가 돌고, 만료 시 남은 step 없이(신규 action 0) 정리하고 child를 종료한다.
+    중복 timer를 만들지 않고 기존 `ResidentSession` 모델만 조회한다. fake clock으로 경계를 시험한다.
+    """
+
+    def test_workload_deadline_expiry_during_steps_terminates_child(self):
+        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.session import ResidentSession, SessionExpired
+        from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
+        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.stage8.integration.entry import PocWorkload
+        from vdeter.stage8.integration.runtime import ResidentPocRuntime
+        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
+        from vdeter.stage8.testing.fakes import FakeClock
+
+        conn, provider, snap = self._connection("w11", _FAST_FINISH, "p11poc")
+        runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w11",
+                                scenario_id="SC-VDE-006", snapshot=snap,
+                                tx_executor=ProductionTxExecutor(provider))
+        # workload 상한 1초인 권위 정책을 주입하고 fake clock으로 만료를 만든다(상한 완화 아님).
+        clock = FakeClock(0.0)
+        session = ResidentSession(clock=clock,
+                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+        runtime = ResidentPocRuntime(session)
+        runtime.bring_up()
+        self.assertTrue(runner.arm() and conn.running)
+        runtime.begin_workload()
+        # step이 여러 개인 workload. 첫 step 뒤 시계를 상한 너머로 밀어 실행 중 만료를 만든다.
+        workload = PocWorkload(runner, conn, provider, None,
+                               [scenario_started(), scenario_started(), scenario_started()])
+        calls = {"n": 0}
+
+        def guard():
+            calls["n"] += 1
+            if calls["n"] == 2:
+                clock.set(2.0)          # workload 상한(1초) 초과 시점으로 전진
+            session.check_deadlines()   # 권위 모델 조회(중복 timer 없음)
+
+        with self.assertRaises(SessionExpired):
+            workload.run(ScenarioVerdict.PASS, guard=guard)
+        # 만료를 성공으로 덮지 않는다: 결과는 ABORTED이고 남은 step은 전달되지 않았다.
+        self.assertEqual(runner.finish(ScenarioVerdict.PASS).poc_infrastructure,
+                         PocInfrastructure.ABORTED)
+        self.assertLess(calls["n"], 3, "만료 뒤 남은 step을 전달하면 안 된다")
+        # 살아 있던 child·socket·workload dir이 정리됐다(잔존 0).
+        self._assert_no_residue(conn)

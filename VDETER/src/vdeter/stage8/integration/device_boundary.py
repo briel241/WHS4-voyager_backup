@@ -24,6 +24,10 @@ from ..shared_medium import constants
 from ..shared_medium.iq import to_cf32le
 from ..shared_medium.radiation import GroupAdmission
 
+#: 기존 Stage 7 radio_adapter가 강제하는 timed retune 최소 lead(`_RETUNE_LEAD_NS`, 200 ms).
+#: 값을 여기서 새로 정하지 않고 권위 구현과 같은 값을 인용한다(완화 금지).
+RETUNE_LEAD_NS = 200_000_000
+
 
 class Stage7GroupTxRadioSink:
     """production `RadioBurstSink`. **실 Stage 7 worker의 group TX 계약**에 결속한다(§6.1, WSM-REQ-01/03).
@@ -64,9 +68,17 @@ class Stage7GroupTxRadioSink:
     def prepare_group(self, *, group_id: str, children) -> GroupAdmission:
         children = self._validate(children)
         channel = children[0].channel
-        command_time_ns = children[0].scheduled_hw_timestamp_ns
+        tx_time_ns = children[0].scheduled_hw_timestamp_ns
         target_hz = constants.CHANNEL_EFFECTIVE_CENTER_HZ[channel]
-        # 두 lane은 TX LO를 공유한다(B210 TX A/B). command time에 한 번 retune한다(staging).
+        # 두 lane은 TX LO를 공유한다(B210 TX A/B). timed retune은 TX 시각과 같은 시각이 아니라
+        # **최소 retune lead만큼 앞선 시각**에 발행한다(기존 radio_adapter와 같은 규약:
+        # `worker.retune_tx_lo(desired, hardware_start - _RETUNE_LEAD_NS)`). TX 시각에 retune을
+        # 걸면 LO 정착 전에 방사하게 된다(P03). lead 값은 완화하지 않고 권위 상수를 인용한다.
+        # 실 시간축(실 MAC scheduler 결속)에서는 TX 시각이 now+200 ms 이후이므로 lead가 그대로 적용된다.
+        # RF-off stub scheduler는 hardware timestamp를 sample 좌표와 같은 단위로 모델링해 TX 시각이
+        # 수천 ns 규모다(실시간 아님). 그 좌표에서만 0으로 clamp하며, 이때도 retune은 TX보다 **앞선다**.
+        # 실 경로의 lead를 줄이지 않는다(clamp는 tx_time < lead인 비실시간 좌표에서만 일어난다).
+        command_time_ns = max(0, tx_time_ns - RETUNE_LEAD_NS)
         self._group_tx.retune_tx_lo(target_hz, command_time_ns)
         return GroupAdmission(group_id=group_id, children=children)
 
@@ -114,9 +126,11 @@ class SoftwareGroupTx:
         if len(times) != 1:
             raise RuntimeError("group burst는 같은 hardware timestamp를 공유해야 합니다")
         hw = next(iter(times))
-        if hw not in self._staged_times:
+        # staging(retune)은 방사 시각보다 **앞서야** 한다. 기존 검사는 retune 시각이 TX 시각과 정확히
+        # 같기를 요구했으나, 권위 규약은 retune을 최소 lead만큼 앞선 시각에 발행하는 것이다(P03).
+        if not any(staged <= hw for staged in self._staged_times):
             raise RuntimeError(
-                "submit_tx_group before retune_tx_lo at that time (TX 순서 위반: staging 전 방사)")
+                "submit_tx_group before retune_tx_lo (TX 순서 위반: staging 전 방사)")
         key = (frozenset(int(lane) for (lane, _d, _h) in bursts), hw)
         if key in self._submitted:
             raise RuntimeError("group already submitted (exactly-once 위반)")
