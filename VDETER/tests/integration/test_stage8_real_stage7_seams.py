@@ -539,3 +539,130 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
         children, _skipped, scope = resolved
         self.assertEqual(children, ((0, "C1"), (1, "C3")))
         self.assertEqual(scope, "TWO_CHILD_BROADCAST")      # 기존 scope 유지
+
+
+class CommonLoTuningApplyTest(unittest.TestCase):
+    """P07: common LO/DSP/BW 계획의 적용·readback 검증·실패 복구·capability 광고 근거."""
+
+    class _Device:
+        """장치 경계 double — 실제 장치 설정은 이번 범위에서 하지 않는다(절차만 검증)."""
+
+        def __init__(self, *, fail=False, wrong_dsp=False):
+            self.applied = []
+            self.restored = []
+            self.current = {"rx_lo_hz": 1, "lane_dsp_hz": {0: 0, 1: 0}, "analog_bandwidth_hz": 1}
+            self._fail = fail
+            self._wrong_dsp = wrong_dsp
+
+        def read_tuning(self):
+            return dict(self.current)
+
+        def apply_manual_tuning(self, *, rx_lo_hz, lane_dsp_hz, analog_bandwidth_hz):
+            if self._fail:
+                raise RuntimeError("injected device tuning failure")
+            self.applied.append((rx_lo_hz, dict(lane_dsp_hz), analog_bandwidth_hz))
+            dsp = dict(lane_dsp_hz)
+            if self._wrong_dsp:                      # 장치가 다른 값을 보고하는 경우
+                dsp[1] = int(dsp[1]) + 1_000
+            self.current = {"rx_lo_hz": rx_lo_hz, "lane_dsp_hz": dsp,
+                            "analog_bandwidth_hz": analog_bandwidth_hz}
+            return dict(self.current)
+
+        def restore_tuning(self, snapshot):
+            self.restored.append(dict(snapshot))
+            self.current = dict(snapshot)
+
+    class _DeviceNoRestore(_Device):
+        """복구 수단(restore_tuning)이 없는 장치 — 복구 불가를 숨기지 않는지 확인용."""
+        restore_tuning = None
+
+    def _plan(self):
+        from vdeter.stage8.shared_medium.tuning import derive_dual_channel_plan
+        return derive_dual_channel_plan()
+
+    def test_plan_is_applied_to_device_and_readback_verified(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier
+        from vdeter.stage8.shared_medium import constants
+        device = self._Device()
+        applier = CommonLoTuningApplier(device)
+        readback = applier.apply(self._plan())
+        # 공통 RF LO와 lane별 DSP, analog BW가 실제로 적용됐다(G1 승인 계획값).
+        self.assertEqual(len(device.applied), 1)
+        lo, dsp, bw = device.applied[0]
+        self.assertEqual(lo, constants.COMMON_RF_LO_HZ)
+        self.assertEqual(dsp, {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ})
+        self.assertEqual(bw, constants.ANALOG_RX_BANDWIDTH_HZ)
+        self.assertEqual(readback["rx_lo_hz"], constants.COMMON_RF_LO_HZ)
+        # 검증된 readback이 있을 때만 capability를 광고한다.
+        self.assertIn("observe_dual_physical_channel", applier.advertise_capabilities())
+
+    def test_missing_device_support_is_fail_closed_and_advertises_nothing(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+
+        class _Unsupported:
+            pass
+
+        applier = CommonLoTuningApplier(_Unsupported())
+        with self.assertRaises(CommonLoTuningError):
+            applier.apply(self._plan())
+        # 계획을 만들었다는 이유로 광고하지 않는다(silent single-channel fallback 금지).
+        self.assertEqual(applier.advertise_capabilities(), frozenset())
+
+    def test_readback_mismatch_rejects_and_recovers(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        device = self._Device(wrong_dsp=True)
+        applier = CommonLoTuningApplier(device)
+        with self.assertRaises(CommonLoTuningError) as ctx:
+            applier.apply(self._plan())
+        self.assertIn("lane_dsp_hz[1]", str(ctx.exception))   # 장치 보고값으로 판정
+        self.assertTrue(device.restored, "불일치 시 이전 tuning으로 복구해야 한다")
+        self.assertEqual(applier.advertise_capabilities(), frozenset())
+        self.assertIsNone(applier.verified_readback)
+
+    def test_apply_failure_recovers_previous_tuning(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        device = self._Device(fail=True)
+        before = device.read_tuning()
+        applier = CommonLoTuningApplier(device)
+        with self.assertRaises(CommonLoTuningError):
+            applier.apply(self._plan())
+        self.assertEqual(device.restored[-1], before)          # 직전 상태로 복구
+        self.assertEqual(applier.advertise_capabilities(), frozenset())
+
+    def test_recovery_failure_is_recorded_not_hidden(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        device = self._DeviceNoRestore(fail=True)
+        applier = CommonLoTuningApplier(device)
+        with self.assertRaises(CommonLoTuningError):
+            applier.apply(self._plan())
+        self.assertTrue(getattr(applier, "recovery_error", None))   # 복구 불가를 보존
+        self.assertEqual(applier.advertise_capabilities(), frozenset())
+
+
+class NormalDispatchPocRefusalTest(unittest.TestCase):
+    """P01: 일반 coordinator dispatch는 PoC 요청을 **조용히 무시하지 않는다**(거짓 성공 방지).
+
+    이전에는 `run_mass_roc_session` 요청 루프가 `workload_id`/`scenario_id`/`certificate_case`만 읽어
+    `poc` 필드를 무시했다. 그래서 운영자가 PoC를 요청해도 PoC 없이 시나리오만 돌고 PASS로 보고됐다.
+    이제 fail-closed로 거부하고 시나리오도 제출하지 않는다. 소스 계약으로 확인한다(launcher·B210 불필요).
+    """
+
+    def _source(self):
+        import os as _os
+        path = _os.path.normpath(_os.path.join(
+            _os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_normal_dispatch_refuses_poc_request_before_submitting_scenario(self):
+        source = self._source()
+        self.assertIn('if request.get("poc"):', source,
+                      "일반 dispatch가 poc 요청을 검사해야 한다")
+        head = source.split('if request.get("poc"):', 1)[1][:1200]
+        self.assertIn('"status": "NOT_RUN"', head)          # 시나리오 미제출
+        self.assertIn("POC_CAPABILITY_UNAVAILABLE", head)   # 사유를 결과에 남긴다
+        self.assertIn("continue", head)                      # 아래 workload 실행으로 내려가지 않는다
+        # 거부가 workload 시작 로그보다 앞에 있다(시나리오 제출 전).
+        refuse_at = source.index('if request.get("poc"):')
+        start_at = source.index('[coordinator] workload 시작')
+        self.assertLess(refuse_at, start_at)

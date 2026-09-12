@@ -2030,6 +2030,25 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             workload_id = request["workload_id"]
             scenario_id = request["scenario_id"]
             certificate_case = request.get("certificate_case", "normal")
+            if request.get("poc"):
+                # Stage 8 PoC 요청은 이 dispatch가 실행하지 않는다. 조용히 무시하고 시나리오만
+                # 돌리면 운영자가 요청한 PoC 없이 PASS로 보고돼 거짓 성공이 된다 — fail-closed로
+                # 거부하고 그 사실을 결과에 남긴다(시나리오도 제출하지 않는다).
+                print(f"[coordinator] PoC 요청 거부(이 경로 미지원) {workload_id}", flush=True)
+                write_json(os.path.join(results_dir, request_name), {
+                    "artifact_type": "STAGE7_SERVICE_WORKLOAD_RESULT_V1",
+                    "status": "NOT_RUN",
+                    "workload_id": workload_id,
+                    "scenario_id": scenario_id,
+                    "certificate_case": certificate_case,
+                    "quiescence": {"pass": True},
+                    "error": "PoC workload는 이 coordinator dispatch에서 지원하지 않습니다"
+                             " (launcher 소유 장치 경계 결선 필요) — 시나리오를 제출하지 않았습니다",
+                    "poc": {"status": "REFUSED", "poc_infrastructure": "ERROR",
+                            "infrastructure_error_code": "POC_CAPABILITY_UNAVAILABLE"},
+                })
+                idle_deadline = time.monotonic() + SESSION_IDLE_TIMEOUT_S
+                continue
             print(f"[coordinator] workload 시작 {workload_id} {scenario_id}",
                   flush=True)
             guard.progress(f"workload:{workload_id}")

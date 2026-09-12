@@ -713,3 +713,123 @@ __all__ = (
     "Stage7AuthoritativeRadioSink", "Stage7LedgerTerminalSource",
     "assemble_authoritative_provider",
 )
+
+
+# =============================================================================
+# P07: MASS-B common LO + per-lane DSP + analog bandwidth 적용 경로
+# =============================================================================
+
+class CommonLoTuningError(RuntimeError):
+    """common LO 계획 적용·readback 검증 실패(fail-closed)."""
+
+
+class CommonLoTuningApplier:
+    """승인된 common LO/DSP/BW 계획을 **장치 configure/readback/복구 경로**에 적용한다(P07).
+
+    이전에는 `tuning.derive_dual_channel_plan()`이 계획 객체만 돌려주고 장치에 적용하는 경로가 없었다
+    (계획 반환만으로 dual-channel 지원을 주장할 수 없다). 이 applier는 실제 적용 절차를 담는다:
+
+    1. **적용**: 두 lane에 공통 RF LO를 걸고, lane별 DSP offset(lower/upper)과 analog RX bandwidth를
+       설정한다. 장치 경계 method는 `apply_manual_tuning(rx_lo_hz, lane_dsp_hz, analog_bandwidth_hz)`
+       이며 **readback dict를 돌려줘야 한다**. 제공하지 않는 설치는 미지원이므로 fail-closed다
+       (silent single-channel fallback 금지).
+    2. **readback 검증**: 돌려받은 실제 값이 계획과 일치하는지 대조한다. LO·lane별 DSP·BW 중 하나라도
+       다르면 실패다. 계획값을 그대로 되풀이하지 않고 **장치가 보고한 값**만 본다.
+    3. **복구**: 적용 또는 검증이 실패하면 이전 tuning으로 되돌린다(`restore_tuning`이 있으면 호출).
+       복구까지 실패하면 그 사실을 보존해 올린다(성공으로 위장하지 않는다).
+
+    capability 광고는 **검증된 readback**에서만 나온다(`advertise_capabilities`). 실제 장치 적용은
+    이번 범위에서 수행하지 않으며, 여기서는 장치 경계 double로 절차를 검증한다.
+    """
+
+    def __init__(self, worker) -> None:
+        self._worker = worker
+        self._verified = None          # 마지막으로 검증된 readback
+        self._previous = None          # 복구용 직전 tuning snapshot
+
+    @staticmethod
+    def _expected(plan) -> dict:
+        """계획 → 장치에 기대하는 값(lane 0=lower, lane 1=upper)."""
+        return {
+            "rx_lo_hz": int(plan.common_rf_lo_hz),
+            "lane_dsp_hz": {0: int(plan.lower_dsp_hz), 1: int(plan.upper_dsp_hz)},
+            "analog_bandwidth_hz": int(plan.analog_rx_bandwidth_hz),
+        }
+
+    def _snapshot(self):
+        read = getattr(self._worker, "read_tuning", None)
+        if callable(read):
+            try:
+                return dict(read() or {})
+            except Exception:  # noqa: BLE001 - snapshot 실패가 적용을 막지는 않는다
+                return None
+        return None
+
+    def apply(self, plan) -> dict:
+        """계획을 적용하고 **검증된 readback**을 돌려준다. 실패 시 복구 후 예외."""
+        apply_fn = getattr(self._worker, "apply_manual_tuning", None)
+        if not callable(apply_fn):
+            raise CommonLoTuningError(
+                "설치가 manual common-LO tuning(apply_manual_tuning)을 제공하지 않습니다 — "
+                "dual-channel 미지원(fail-closed, single-channel silent fallback 금지)")
+        expected = self._expected(plan)
+        self._previous = self._snapshot()
+        try:
+            readback = apply_fn(rx_lo_hz=expected["rx_lo_hz"],
+                                lane_dsp_hz=dict(expected["lane_dsp_hz"]),
+                                analog_bandwidth_hz=expected["analog_bandwidth_hz"])
+        except Exception as error:  # noqa: BLE001 - 적용 실패 → 복구 후 fail-closed
+            self._recover(reason=f"apply 실패: {type(error).__name__}")
+            raise CommonLoTuningError(f"common LO 적용 실패: {type(error).__name__}: {error}") from error
+        mismatch = self._mismatch(expected, readback)
+        if mismatch:
+            self._recover(reason="readback 불일치")
+            raise CommonLoTuningError(f"common LO readback 불일치: {mismatch}")
+        self._verified = dict(readback or {})
+        return dict(self._verified)
+
+    @staticmethod
+    def _mismatch(expected: dict, readback) -> dict:
+        """기대값과 장치 보고값의 차이(없으면 빈 dict). 보고가 없으면 전체 불일치로 본다."""
+        if not isinstance(readback, dict):
+            return {"readback": "missing"}
+        out = {}
+        if int(readback.get("rx_lo_hz", -1)) != expected["rx_lo_hz"]:
+            out["rx_lo_hz"] = (expected["rx_lo_hz"], readback.get("rx_lo_hz"))
+        if int(readback.get("analog_bandwidth_hz", -1)) != expected["analog_bandwidth_hz"]:
+            out["analog_bandwidth_hz"] = (expected["analog_bandwidth_hz"],
+                                          readback.get("analog_bandwidth_hz"))
+        reported = readback.get("lane_dsp_hz") or {}
+        for lane, want in expected["lane_dsp_hz"].items():
+            got = reported.get(lane, reported.get(str(lane)))
+            if got is None or int(got) != int(want):
+                out[f"lane_dsp_hz[{lane}]"] = (want, got)
+        return out
+
+    def _recover(self, *, reason: str) -> None:
+        """직전 tuning으로 되돌린다. 복구 수단이 없거나 실패하면 그 사실을 보존한다."""
+        self._verified = None
+        restore = getattr(self._worker, "restore_tuning", None)
+        if not callable(restore) or self._previous is None:
+            self.recovery_error = f"복구 수단 없음({reason})"
+            return
+        try:
+            restore(dict(self._previous))
+            self.recovery_error = None
+        except Exception as error:  # noqa: BLE001
+            self.recovery_error = f"복구 실패({reason}): {type(error).__name__}"
+
+    @property
+    def verified_readback(self):
+        return None if self._verified is None else dict(self._verified)
+
+    def advertise_capabilities(self) -> frozenset:
+        """**검증된 readback**이 있을 때만 dual-channel capability를 광고한다(P07).
+
+        계획을 만들었다는 사실이나 boolean 설정만으로 광고하지 않는다.
+        """
+        from vdeter.stage8.shared_medium.tuning import DUAL_CHANNEL_CAPABILITY
+
+        if self._verified is None:
+            return frozenset()
+        return frozenset({DUAL_CHANNEL_CAPABILITY})
