@@ -218,8 +218,9 @@ class PocWorkload:
 
 
 def prepare_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id: str, workload_id: str,
-                         session_id: str, socket_root: str, device_seams, terminal_source=None,
+                         session_id: str, socket_root: str, device_seams=None, terminal_source=None,
                          dual_channel_installed: bool = False, target_response=None,
+                         provider=None,
                          server_config: ServerCapabilityConfig | None = None,
                          src_path: str | None = None,
                          python_executable: str | None = None) -> PocWorkload:
@@ -231,7 +232,13 @@ def prepare_poc_workload(*, snapshot: Snapshot, steps, scenario_id: str, run_id:
     """
 
     seams = device_seams
-    provider = assemble_provider(seams, dual_channel_installed=dual_channel_installed)
+    if provider is None:
+        # seam으로 조립(기존 경로). `provider`가 주어지면 **이미 권위 경로에 결속된** provider를 쓴다
+        # (예: radio_adapter.schedule_tx로 방사하는 sink). 둘 다 없으면 fail-closed.
+        if seams is None:
+            raise ValueError(
+                "device_seams 또는 provider 중 하나는 필요합니다(조용한 RF-off 대체 금지, fail-closed)")
+        provider = assemble_provider(seams, dual_channel_installed=dual_channel_installed)
     conn = build_connection(
         snapshot=snapshot, provider=provider, session_id=session_id, workload_id=workload_id,
         run_id=run_id, scenario_id=scenario_id, socket_root=socket_root,

@@ -73,6 +73,16 @@ PAIRWISE_EDGE_CHILD = {
     "MASS-B": (1, "C3"),
 }
 
+#: Stage 8 공유매체 fan-out(§5.1 고정 배선): 송신자 → 그 송신자의 두 물리 경로.
+#: 유선 공유매체에서 한 논리 burst는 송신자의 두 lane으로 **동시** 방사되어 비송신 두 endpoint에
+#: 물리적으로 도달한다. 논리 주소는 바뀌지 않으며, 수신 endpoint가 실제로 복호하는지는 그 endpoint의
+#: tuning(§5.5 자연 관측 행렬)이 정한다. ROC의 두 경로는 기존 BROADCAST entry와 동일하다.
+BROADCAST_FANOUT_CHILDREN = {
+    "ROC": ((0, "C1"), (1, "C3")),
+    "MASS-A": ((0, "C2"), (1, "C5")),
+    "MASS-B": ((0, "C4"), (1, "C6")),
+}
+
 _ROUTE_BEARING_GENERAL_TYPES = frozenset({0, 4, 13, 90})
 
 
@@ -100,6 +110,10 @@ class Stage7RouteContext:
     original_destination_kind: str | None
     original_destination_station_id: int | None
     request_digest: str
+    #: Stage 8 유선 공유매체 opt-in 표시(기본 False = legacy 동작 그대로). True면 addressed 전송도
+    #: 송신자의 두 물리 경로로 fan-out한다(논리 주소·정상 tuning은 보존). 이 값을 켜는 경로는
+    #: `Stage7RouteSidecar.bind_broadcast_fanout_burst` 하나뿐이며 정상 MAC route 승격은 켜지 않는다.
+    broadcast_fanout_optin: bool = False
 
     def destination_key(self):
         return (self.destination_kind, self.destination_station_id)
@@ -308,6 +322,19 @@ def resolve_lane_plan_route(
         )
     skipped = ()
     fanout_scope = "SINGLE_CHILD" if len(children) == 1 else "TWO_CHILD_BROADCAST"
+    if getattr(context, "broadcast_fanout_optin", False) and destination_endpoint != "BROADCAST":
+        # Stage 8 유선 공유매체 opt-in: 논리 주소(addressed)는 그대로 두고 **물리 fan-out만** 송신자의
+        # 두 경로로 확장한다. 두 child는 같은 선택 채널을 공유한다(B210 TX A/B 공유 LO).
+        # legacy/feature OFF 경로는 이 분기에 들어오지 않는다(context 기본값 False).
+        fanned = BROADCAST_FANOUT_CHILDREN.get(endpoint_id)
+        if fanned is None:
+            return None, _private_error(
+                Stage7PrivateErrorCode.LANE_ROUTE_INVALID,
+                "공유매체 fan-out 표에 없는 송신자입니다",
+                endpoint_id=endpoint_id,
+            )
+        children = fanned
+        fanout_scope = "OPTIN_TWO_CHILD_FANOUT"
     if destination_endpoint == "BROADCAST" and pairwise_edge is not None:
         kept = PAIRWISE_EDGE_CHILD.get(pairwise_edge)
         if kept is None:
@@ -495,6 +522,45 @@ class Stage7RouteSidecar:
             self._record(
                 "burst_bound", bound_packet=packet_id_value, bound_burst=burst_id_value
             )
+            return Ok(context)
+
+    def bind_broadcast_fanout_burst(self, burst_id_value: str, *, source_station_id: int,
+                                 destination_station_id: int, request_digest: str,
+                                 method_kind: str = "STAGE8_SHARED_MEDIUM"):
+        """Stage 8 유선 공유매체 opt-in burst의 route context를 결속한다(§15.1 예약 경로 재사용).
+
+        정상 MAC packet을 거치지 않는 Stage 8 PoC action을 기존 `reserve_burst`·`schedule_tx`·충돌
+        검사·TX 원장에 태우기 위한 최소 진입점이다. context에 `broadcast_fanout_optin=True`를 달아
+        `resolve_lane_plan_route`가 송신자의 두 물리 경로로 fan-out하게 한다. 논리 주소는 그대로다.
+
+        기존 정상 route 승격 경로(`note_route_call`→`_packets`)는 이 flag를 켜지 않으므로 legacy 및
+        feature OFF 동작은 변하지 않는다. 같은 burst_id가 다른 route에 이미 결속돼 있으면 거부한다.
+        """
+
+        with self._lock:
+            key = (self._lane_generation, burst_id_value)
+            existing = self._bursts.get(key)
+            if existing is not None:
+                if not getattr(existing, "broadcast_fanout_optin", False):
+                    return _private_error(
+                        Stage7PrivateErrorCode.LANE_ROUTE_INVALID,
+                        "Burst ID가 이미 다른 route에 결속되어 있습니다",
+                        local_id=burst_id_value,
+                    )
+                return Ok(existing)
+            context = Stage7RouteContext(
+                method_kind=method_kind,
+                source_station_id=source_station_id,
+                destination_kind="ADDRESSED",
+                destination_station_id=destination_station_id,
+                original_source_station_id=None,
+                original_destination_kind=None,
+                original_destination_station_id=None,
+                request_digest=request_digest,
+                broadcast_fanout_optin=True,
+            )
+            self._bursts[key] = context
+            self._record("broadcast_fanout_burst_bound", bound_burst=burst_id_value)
             return Ok(context)
 
     def release_packet(self, packet_id_value: str) -> None:

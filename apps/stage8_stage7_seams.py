@@ -19,6 +19,8 @@ group-TX/RX·TX terminal 공급자에 연결. production silent RF-off fallback�
 
 from __future__ import annotations
 
+import uuid
+
 from vdeter.phy import resampling
 from vdeter.phy.burst.rrc import validate_cf32le_full_scale
 from vdeter.phy.transmitter import Phy11Transmitter
@@ -412,6 +414,56 @@ def stage7_terminal_source(worker, *, pump=None):
     return Stage7TxTerminalSource(worker, pump=pump)
 
 
+class Stage7LedgerTerminalSource:
+    """terminal_source → **권위 TX 원장**(`radio_adapter.tx_burst_state`)에서 terminal 확정(P10).
+
+    권위 adapter가 worker 비동기 통지(BURST_ACK/UNDERFLOW/…)를 소비해 per-lane state를
+    `SUBMITTED → COMPLETED|FAILED`로 전이시키고 parent terminal을 확정한다. 이 source는 그 원장을
+    **조회만** 한다(상태를 만들지 않는다):
+
+    - lane state `COMPLETED` → `ChildTerminal.COMPLETED`
+    - lane state `FAILED` → `ChildTerminal.FAILED`
+    - `SUBMITTED`(진행 중) 또는 원장에 없음 → `ChildTerminal.UNKNOWN`(성공 추정 금지)
+
+    burst_id로 조회하므로 **과거 burst의 ACK이 현재 burst를 완료 처리할 수 없다**. 통지는 adapter의
+    `poll_once()`가 드레인하므로, 시간 전진 훅(`pump`)으로 그 loop을 돌려 확정을 유계로 기다린다.
+    """
+
+    def __init__(self, adapter, sink, *, pump=None, max_polls: int = 64) -> None:
+        self._adapter = adapter
+        self._sink = sink
+        self._pump = pump
+        self._max_polls = int(max_polls)
+
+    def __call__(self, action, result, parent) -> dict:
+        burst_id = self._sink.burst_by_group.get(parent.parent_id)
+        lanes = {child.child_id: getattr(child, "tx_lane", None) for child in parent.children}
+        if burst_id is None:
+            return {cid: ChildTerminal.UNKNOWN.value for cid in lanes}
+        snapshot = None
+        for _ in range(self._max_polls):
+            snapshot = self._adapter.tx_burst_state(burst_id)
+            if snapshot is not None and snapshot.get("terminal"):
+                break
+            if self._pump is None:
+                break
+            try:
+                self._pump()        # 권위 poll loop을 돌려 통지 소비를 유도(통지 합성 아님)
+            except Exception:  # noqa: BLE001
+                break
+        states = (snapshot or {}).get("children") or {}
+        out = {}
+        for child_id, lane in lanes.items():
+            state = states.get(lane)
+            if state == "COMPLETED":
+                out[child_id] = ChildTerminal.COMPLETED.value
+            elif state == "FAILED":
+                out[child_id] = ChildTerminal.FAILED.value
+            else:
+                out[child_id] = ChildTerminal.UNKNOWN.value   # 진행 중·미기록은 미확정 보존
+        return out
+
+
 def stage7_target_response(members, *, station_to_endpoint=None):
     """target_response → **대상 endpoint의 실제 application 관측**으로 target effect 판정(P09).
 
@@ -459,6 +511,125 @@ def stage7_target_response(members, *, station_to_endpoint=None):
     return response
 
 
+class Stage7AuthoritativeRadioSink:
+    """radio_sink seam → **권위 `radio_adapter.schedule_tx` 경로**로 방사한다(P02/P03/P04/P08/P10).
+
+    이전 sink(`Stage7GroupTxRadioSink`)는 worker에 직접 `submit_tx_group`을 걸어 권위 adapter를
+    우회했다. 그 결과 (a) 권위 lead/retune/lane 겹침 검사를 받지 않고 (b) adapter TX 원장에 없어
+    BURST_ACK이 버려져 terminal이 영원히 미확정이었다.
+
+    이 sink는 기존 경로를 **재사용**한다:
+
+    - `prepare_group`: sidecar에 공유매체 burst route를 결속한다(`bind_broadcast_fanout_burst`).
+      `resolve_lane_plan_route`가 송신자의 두 물리 경로(C4+C6 등)로 fan-out한다(§5.1, P08).
+      장치 동작은 하지 않는다(예약·검증 단계).
+    - `commit_group`: 권위 `schedule_tx(RadioTxRequest)` 한 번. adapter가 최소 lead(100/200 ms)와
+      timed retune(TX−200 ms), lane 겹침·pending TX 충돌, 정상 TX 우선을 검사한 뒤 두 lane을 **같은
+      hardware time에 한 번의 `submit_tx_group`**으로 방사하고 `_TxParent`를 TX 원장에 등록한다.
+
+    시간 좌표: Stage 8 scheduler는 실 worker hardware ns로 slot을 고르고, 여기서 권위 time bridge
+    (`hardware_ns_to_utc_label`)로 UTC label을 만들어 요청한다. adapter가 다시 hardware로 변환하며
+    clock/generation 정합을 확인한다(모델 시각을 장치에 바로 밀어넣지 않는다).
+
+    실패는 그대로 올려 `AtomicBroadcast`가 RF 전 fail-closed(BroadcastNotAdmitted) 또는 commit 불명확
+    (OUTCOME_UNKNOWN)으로 처리하게 한다. 여기서 성공을 합성하지 않는다.
+    """
+
+    def __init__(self, adapter, *, sidecar, source_station_id: int,
+                 station_id_by_endpoint: dict) -> None:
+        self._adapter = adapter
+        self._sidecar = sidecar
+        self._source_station_id = int(source_station_id)
+        self._station_id = dict(station_id_by_endpoint)
+        #: group_id → 이번 commit에 쓴 burst_id(권위 원장 조회 키). 유계 유지.
+        self.burst_by_group: dict = {}
+
+    @staticmethod
+    def _validate(children) -> tuple:
+        children = tuple(children)
+        if len(children) != 2:
+            raise RuntimeError("group에는 정확히 두 fan-out child가 있어야 합니다")
+        if len({c.scheduled_hw_timestamp_ns for c in children}) != 1:
+            raise RuntimeError("fan-out child는 같은 hardware timestamp를 공유해야 합니다")
+        if len({c.channel for c in children}) != 1:
+            raise RuntimeError("fan-out child는 같은 선택 채널을 공유해야 합니다(공유 TX LO)")
+        return children
+
+    def prepare_group(self, *, group_id: str, children):
+        from vdeter.stage8.shared_medium.radiation import GroupAdmission
+
+        children = self._validate(children)
+        target = None
+        for child in children:
+            station = self._station_id.get(getattr(child, "rx_station", None))
+            if station is not None and getattr(child, "rx_station", None) == children[0].rx_station:
+                target = station
+                break
+        if target is None:
+            target = self._station_id.get(children[0].rx_station)
+        if target is None:
+            raise RuntimeError(f"수신 station id를 알 수 없습니다: {children[0].rx_station}")
+        burst_id = str(uuid.uuid4())
+        bound = self._sidecar.bind_broadcast_fanout_burst(
+            burst_id, source_station_id=self._source_station_id,
+            destination_station_id=int(target),
+            request_digest=children[0].payload_digest or "")
+        if getattr(bound, "is_err", False):
+            raise RuntimeError(f"공유매체 burst route 결속 실패: {getattr(bound, 'error', bound)}")
+        self.burst_by_group[group_id] = burst_id
+        return GroupAdmission(group_id=group_id, children=children)
+
+    @staticmethod
+    def _stage7_channel(stage8_channel):
+        """Stage 8 `PhysicalChannel` enum → Stage 7 named `PhysicalChannel`(권위 채널 이름).
+
+        두 계층은 이름이 같지만 서로 다른 형식이다(Stage 8은 lower/upper enum, Stage 7은 canonical
+        채널 **이름** 값 객체). 권위 요청에는 Stage 7 형식이 필요하므로 여기서 한 번 변환한다.
+        """
+        from vdeter.common.identifiers import PhysicalChannel as Stage7Channel
+        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
+        from vdeter.stage8.poc_api.types import PhysicalChannel as Stage8Channel
+
+        mapping = {Stage8Channel.LOWER: LOWER_CHANNEL_NAME, Stage8Channel.UPPER: UPPER_CHANNEL_NAME}
+        name = mapping.get(stage8_channel)
+        if name is None:
+            raise RuntimeError(f"알 수 없는 Physical Channel: {stage8_channel!r}")
+        return Stage7Channel(name)
+
+    def commit_group(self, admission) -> None:
+        from vdeter.common.contracts.radio import RadioTxRequest, SampleBlock
+        from vdeter.common.identifiers import BurstId
+        from vdeter.common.time import ClockDomain, TimePoint
+
+        children = admission.children
+        burst_id = self.burst_by_group.get(admission.group_id)
+        if burst_id is None:
+            raise RuntimeError("commit 전에 prepare_group이 필요합니다(예약 없음)")
+        hw_ns = int(children[0].scheduled_hw_timestamp_ns)
+        bridge = getattr(self._adapter, "bridge", None)
+        utc_ns = bridge.hardware_ns_to_utc_label(hw_ns) if bridge is not None else None
+        if utc_ns is None:
+            raise RuntimeError("host time bridge가 잠겨 있지 않아 TX 시각을 UTC로 변환할 수 없습니다")
+        data = to_cf32le(children[0].samples)
+        transmit_at = TimePoint(seconds=int(utc_ns) // 1_000_000_000,
+                                nanoseconds=int(utc_ns) % 1_000_000_000,
+                                clock_domain=ClockDomain.UTC,
+                                clock_id=str(getattr(self._adapter, "clock_id", "") or "stage8"))
+        samples = SampleBlock(
+            sample_format="cf32le",
+            sample_rate_hz=resampling.DEVICE_SAMPLE_RATE_HZ,
+            sample_count=len(children[0].samples),
+            data=data,
+            first_sample_at=transmit_at,
+        )
+        request = RadioTxRequest(burst_id=BurstId(burst_id),
+                                 channel=self._stage7_channel(children[0].channel),
+                                 transmit_at=transmit_at, samples=samples)
+        result = self._adapter.schedule_tx(request)     # 권위 경로(lead·retune·충돌·원장)
+        if getattr(result, "is_err", False):
+            raise RuntimeError(f"권위 schedule_tx 거부: {getattr(result, 'error', result)}")
+
+
 def stage7_device_seams(members, *, channel_center_hz=None):
     """실행 중 software group의 실 MASS-B endpoint 객체로 `DeviceSeams`를 만든다(no stub).
 
@@ -478,6 +649,41 @@ def stage7_device_seams(members, *, channel_center_hz=None):
         rx_readiness=Stage7ReceiverReadiness(workers, center),  # 실 수신기 RX 준비
         waveform_factory=Link11WaveformFactory(),             # 실 frozen PHY
     )
+
+
+def assemble_authoritative_provider(members, *, station_id_by_endpoint,
+                                    channel_center_hz=None, dual_channel_installed: bool = False):
+    """**권위 `schedule_tx` 경로**로 방사하는 production provider를 조립한다(P02/P03/P04/P08/P10).
+
+    `stage7_device_seams`(worker 직접 제출)와 달리 radio_sink가 `Stage7AuthoritativeRadioSink`다:
+    sidecar 공유매체 예약 → `schedule_tx`(lead·retune·lane 겹침·정상 TX 우선) → 한 번의 group TX →
+    TX 원장 등록. terminal은 그 원장에서 읽는다(`Stage7LedgerTerminalSource`).
+
+    반환 ``(provider, bindings)``. bindings에 sink·adapter가 있어 terminal source를 만들 수 있다.
+    """
+    from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+
+    center = channel_center_hz or constants.CHANNEL_EFFECTIVE_CENTER_HZ
+    member = members["MASS-B"]
+    adapter = member.endpoint.dependencies.radio
+    worker = adapter.lease.worker
+    workers = {ep: members[ep].endpoint.dependencies.radio.lease.worker for ep in members}
+    sidecar = getattr(adapter, "_sidecar", None)
+    if sidecar is None:
+        raise RuntimeError("radio adapter에 route sidecar가 없습니다(권위 예약 경로 불가)")
+    sink = Stage7AuthoritativeRadioSink(
+        adapter, sidecar=sidecar,
+        source_station_id=station_id_by_endpoint["MASS-B"],
+        station_id_by_endpoint=station_id_by_endpoint)
+    provider = SharedMediumActionProvider.for_production(
+        radio_sink=sink,
+        rx_readiness=Stage7ReceiverReadiness(workers, center),
+        scheduler=Stage7HwTimeScheduler(worker),
+        waveform_factory=Link11WaveformFactory(),
+        arbiter=Stage7WorkerArbiter(worker),
+        dual_channel_installed=dual_channel_installed,
+    )
+    return provider, {"sink": sink, "adapter": adapter, "worker": worker, "members": members}
 
 
 def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_installed: bool = False):
@@ -504,4 +710,6 @@ __all__ = (
     "Link11WaveformFactory", "Stage7HwTimeScheduler", "Stage7WorkerArbiter",
     "Stage7ReceiverReadiness", "stage7_terminal_source", "stage7_target_response",
     "stage7_device_seams", "assemble_stage7_provider",
+    "Stage7AuthoritativeRadioSink", "Stage7LedgerTerminalSource",
+    "assemble_authoritative_provider",
 )

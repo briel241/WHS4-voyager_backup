@@ -33,14 +33,14 @@ class RealStage7SeamsTest(unittest.TestCase):
         return clock, medium, members
 
     def _assemble(self, members, medium, *, channel):
-        from apps.stage8_stage7_seams import assemble_stage7_provider
-        from vdeter.stage8.shared_medium import constants
-        # WSM-G1 common-LO 정합 주입(RF-off): service-tuned 수신 동시 도달은 실장비.
-        center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[channel]
-        for ep in ("ROC", "MASS-A"):
-            members[ep].endpoint.dependencies.radio.lease.worker.rx_lo_hz = center
-        provider, bindings = assemble_stage7_provider(members)
-        return provider, bindings
+        """권위 경로 provider(sidecar 예약→schedule_tx→group TX→TX 원장)를 조립한다.
+
+        정상 role tuning(§5.5)은 바꾸지 않는다 — lower 송신의 required receiver(ROC)는 자연 TUNED다.
+        """
+        from apps.stage8_stage7_seams import assemble_authoritative_provider
+        from tests.support.stage7 import STATION_BY_ENDPOINT
+        return assemble_authoritative_provider(
+            members, station_id_by_endpoint=STATION_BY_ENDPOINT)
 
     def test_poc_action_flows_through_real_mac_phy_group_tx_and_receive(self):
         from apps.stage8_stage7_seams import stage7_target_response, stage7_terminal_source
@@ -74,20 +74,34 @@ class RealStage7SeamsTest(unittest.TestCase):
         self.assertEqual(tuple(parent.waveform.samples), tuple(expected))
         self.assertEqual(len(parent.waveform.samples), resampling.DEVICE_SLOT_SAMPLES)
 
-        # 2) 실 worker group-TX + 실 매질 fan-out: C4(→ROC)+C6(→MASS-A) 도달.
+        # 2) 물리 fan-out은 **두 lane**으로 나간다(P08): 권위 원장이 lane 0·1을 모두 등록한다.
+        #    반면 **디지털 도달**은 §5.5 자연 관측 행렬을 따른다 — MASS-B의 lower 송신에서 자연
+        #    TUNED인 비송신 endpoint는 ROC뿐이므로 C4만 매질을 통과하고, upper에 tuned인 MASS-A로
+        #    가는 C6는 tune 불일치로 수신되지 않는다(NOT_TUNED는 실패가 아니라 정상 상태).
+        #    정상 endpoint tuning을 시험 통과를 위해 바꾸지 않는다.
+        burst_id = bindings["sink"].burst_by_group[parent.parent_id]
+        ledger = bindings["adapter"].tx_burst_state(burst_id)
+        self.assertEqual(sorted(ledger["children"].keys()), [0, 1], ledger)  # 두 lane fan-out
         new = medium.delivery_log[delivery_before:]
         paths = sorted(d["path_id"] for d in new)
-        self.assertEqual(paths, ["C4", "C6"], paths)
+        self.assertEqual(paths, ["C4"], paths)          # 자연 TUNED 수신기(ROC)만 도달
         self.assertTrue(all(d["tx_serial"] == "3515425" for d in new))  # MASS-B 실 serial
 
         # 3) TX terminal은 **권위 원장**에서 와야 한다. PoC group TX는 radio adapter의 schedule_tx를
         #    거치지 않으므로 adapter가 BURST_ACK을 드레인해도 대응 원장이 없다 → terminal 미확정.
         #    매질 delivery 기록으로 COMPLETED를 만들지 않는다(P10: 과거/우회 로그로 성공 추정 금지).
-        terminals = stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
-                                   pump=lambda: drive_stage7_group(clock, members, 4))(action, {}, parent)
-        self.assertTrue(all(v == "UNKNOWN" for v in terminals.values()), terminals)
+        from apps.stage8_stage7_seams import Stage7LedgerTerminalSource
+        # 접수 직후에는 원장이 SUBMITTED(진행 중)여야 한다 — 즉시 완료로 확정하지 않는다.
+        burst = bindings["sink"].burst_by_group[parent.parent_id]
+        immediate = bindings["adapter"].tx_burst_state(burst)
+        self.assertFalse(immediate["terminal"], immediate)
+        self.assertTrue(all(v == "SUBMITTED" for v in immediate["children"].values()), immediate)
+        terminals = Stage7LedgerTerminalSource(
+            bindings["adapter"], bindings["sink"],
+            pump=lambda: drive_stage7_group(clock, members, 4))(action, {}, parent)
+        self.assertTrue(all(v == "COMPLETED" for v in terminals.values()), terminals)
         outcome = provider.resolve_outcome("poc-1", terminals)
-        self.assertEqual(outcome, ParentOutcome.OUTCOME_UNKNOWN)   # 성공 추정 금지(SESSION_INHIBIT 경로)
+        self.assertEqual(outcome, ParentOutcome.COMPLETED)   # 권위 원장이 확정
 
         # 4) target effect는 **application 수신 증거**로만 판정한다. 물리 도달은 효과가 아니다.
         #    합성 packet은 정상 복호·주소 수락을 통과하지 못하므로 INDETERMINATE가 정직한 결과다.
@@ -470,3 +484,58 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Link11WaveformFactory().encode(source_station="MASS-B",
                                            channel=PhysicalChannel.LOWER, payload=bytes(200))
+
+
+class SharedMediumRouteFanOutTest(unittest.TestCase):
+    """P08: 공유매체 opt-in에서만 송신자별 두 물리 경로로 fan-out한다(legacy 보존)."""
+
+    def _context(self, *, shared):
+        from vdeter.stage7.routing import Stage7RouteContext
+        return Stage7RouteContext(
+            method_kind="TEST", source_station_id=333333333,       # MASS-B
+            destination_kind="ADDRESSED", destination_station_id=222222222,  # ROC
+            original_source_station_id=None, original_destination_kind=None,
+            original_destination_station_id=None, request_digest="d",
+            broadcast_fanout_optin=shared)
+
+    def test_legacy_addressed_route_is_single_child(self):
+        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
+        from vdeter.stage7.routing import resolve_lane_plan_route
+        resolved, error = resolve_lane_plan_route(
+            "MASS-B", self._context(shared=False), LOWER_CHANNEL_NAME)
+        self.assertIsNone(error, error)
+        children, _skipped, scope = resolved
+        self.assertEqual(children, ((0, "C4"),))          # 기존 단일 child 그대로
+        self.assertEqual(scope, "SINGLE_CHILD")
+
+    def test_shared_medium_optin_fans_out_to_two_paths(self):
+        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
+        from vdeter.stage7.routing import resolve_lane_plan_route
+        resolved, error = resolve_lane_plan_route(
+            "MASS-B", self._context(shared=True), LOWER_CHANNEL_NAME)
+        self.assertIsNone(error, error)
+        children, _skipped, scope = resolved
+        self.assertEqual(children, ((0, "C4"), (1, "C6")))   # §5.1 MASS-B = C4+C6
+        self.assertEqual(scope, "OPTIN_TWO_CHILD_FANOUT")
+
+    def test_every_sender_fanout_matches_fixed_cabling(self):
+        from vdeter.stage7.routing import BROADCAST_FANOUT_CHILDREN
+        # §5.1 고정 배선: ROC=C1+C3, MASS-A=C2+C5, MASS-B=C4+C6.
+        self.assertEqual(BROADCAST_FANOUT_CHILDREN["ROC"], ((0, "C1"), (1, "C3")))
+        self.assertEqual(BROADCAST_FANOUT_CHILDREN["MASS-A"], ((0, "C2"), (1, "C5")))
+        self.assertEqual(BROADCAST_FANOUT_CHILDREN["MASS-B"], ((0, "C4"), (1, "C6")))
+
+    def test_broadcast_route_is_unchanged_by_optin(self):
+        # BROADCAST는 기존 표(C1+C3)를 그대로 쓰고 opt-in 분기를 타지 않는다.
+        from vdeter.stage7.configuration import UPPER_CHANNEL_NAME
+        from vdeter.stage7.routing import Stage7RouteContext, resolve_lane_plan_route
+        ctx = Stage7RouteContext(
+            method_kind="TEST", source_station_id=222222222, destination_kind="BROADCAST",
+            destination_station_id=None, original_source_station_id=None,
+            original_destination_kind=None, original_destination_station_id=None,
+            request_digest="d", broadcast_fanout_optin=True)
+        resolved, error = resolve_lane_plan_route("ROC", ctx, UPPER_CHANNEL_NAME)
+        self.assertIsNone(error, error)
+        children, _skipped, scope = resolved
+        self.assertEqual(children, ((0, "C1"), (1, "C3")))
+        self.assertEqual(scope, "TWO_CHILD_BROADCAST")      # 기존 scope 유지

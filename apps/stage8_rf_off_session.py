@@ -102,13 +102,21 @@ class RfOffStage7DeviceSession:
     """
 
     def __init__(self, run_root: str) -> None:
-        from tests.support.stage7 import build_stage7_software_group, start_stage7_group
+        from tests.support.stage7 import (build_stage7_software_group, drive_stage7_group,
+                                          start_stage7_group, STATION_BY_ENDPOINT)
+        from apps.stage8_stage7_seams import assemble_authoritative_provider
         self.run_root = Path(run_root)
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
         self._clock = clock
         self._medium = medium
         self._members = members
+        # 권위 경로 provider: sidecar 공유매체 예약 → schedule_tx(lead·retune·충돌·정상 TX 우선)
+        # → 한 번의 group TX(두 lane) → TX 원장. terminal은 그 원장에서 읽는다(P02/P03/P04/P08/P10).
+        self._provider, self._bindings = assemble_authoritative_provider(
+            members, station_id_by_endpoint=STATION_BY_ENDPOINT)
+        #: 권위 poll loop 구동 훅(통지 소비 유도). 통지를 만들지 않는다.
+        self._pump = lambda: drive_stage7_group(clock, members, 4)
         # 정상 role tuning 행렬(§5.5)을 **바꾸지 않는다**. ROC는 자연적으로 lower 수신이므로 lower
         # 채널 PoC 송신의 required receiver는 그대로 TUNED다. 이전 구현은 ROC·MASS-A의 RX LO를 모두
         # lower로 강제했는데, 그것은 시험 통과를 위해 정상 endpoint tuning을 바꾸는 일이었다(P06).
@@ -116,13 +124,19 @@ class RfOffStage7DeviceSession:
     def _mass_b_worker(self):
         return self._members["MASS-B"].endpoint.dependencies.radio.lease.worker
 
+    def poc_provider(self):
+        """권위 경로 provider를 직접 제공한다(seam 조립 대신). PoC action이 `schedule_tx`로 나간다."""
+        return self._provider
+
     def poc_device_seams(self):
         from apps.stage8_stage7_seams import stage7_device_seams
-        return stage7_device_seams(self._members)          # 실 Stage 7 seam(DeviceSeams)
+        return stage7_device_seams(self._members)          # provider 미사용 경로의 fallback seam
 
     def poc_terminal_source(self):
-        from apps.stage8_stage7_seams import stage7_terminal_source
-        return stage7_terminal_source(self._mass_b_worker())   # 실 async TX 통지(P10)
+        from apps.stage8_stage7_seams import Stage7LedgerTerminalSource
+        # P10: 권위 TX 원장에서 terminal을 읽는다(매질 로그·직접 통지 휴리스틱 아님).
+        return Stage7LedgerTerminalSource(self._bindings["adapter"], self._bindings["sink"],
+                                          pump=self._pump)
 
     def poc_target_response(self):
         from apps.stage8_stage7_seams import stage7_target_response

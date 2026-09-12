@@ -145,14 +145,21 @@ def resolve_catalog_selection(option: PocOption, scenario_id: str, choice: str, 
 
 
 def _session_device_boundary(session, scenario_id: str) -> tuple:
-    """session이 제공하는 PoC device 경계 요소(seams·steps·terminal_source·target_response)."""
+    """session이 제공하는 PoC device 경계 요소(provider|seams·steps·terminal_source·target_response).
+
+    session이 `poc_provider()`를 제공하면 **이미 조립된 권위 provider**를 그대로 쓴다(권위
+    `schedule_tx` 경로 결속). 없으면 기존처럼 `poc_device_seams()`로 provider를 조립한다.
+    둘 다 없으면 fail-closed다(조용한 RF-off 대체 금지).
+    """
+    provider_fn = getattr(session, "poc_provider", None)
+    provider = provider_fn() if callable(provider_fn) else None
     seams_fn = getattr(session, "poc_device_seams", None)
-    if not callable(seams_fn):
+    if provider is None and not callable(seams_fn):
         raise PocRunError(
             "session이 PoC device 경계(poc_device_seams)를 제공하지 않습니다 — production radio "
             "연결이 필요합니다(RF-off 기본값으로 조용히 대체하지 않음, fail-closed)")
-    device_seams = seams_fn()
-    if device_seams is None:
+    device_seams = seams_fn() if callable(seams_fn) else None
+    if provider is None and device_seams is None:
         raise PocRunError("session.poc_device_seams()가 None을 반환했습니다(device 경계 미연결)")
     steps_fn = getattr(session, "poc_workload_steps", None)
     steps = steps_fn(scenario_id) if callable(steps_fn) else None
@@ -162,7 +169,7 @@ def _session_device_boundary(session, scenario_id: str) -> tuple:
     terminal_source = ts_fn() if callable(ts_fn) else None  # 없으면 executor가 TX_UNKNOWN
     tr_fn = getattr(session, "poc_target_response", None)
     target_response = tr_fn() if callable(tr_fn) else None
-    return device_seams, steps, terminal_source, target_response
+    return device_seams, steps, terminal_source, target_response, provider
 
 
 def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, workload_id: str,
@@ -175,7 +182,7 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
     fail-closed evidence를 담아 `PocRunError`(`.evidence`)로 올린다 — caller는 scenario를 제출하지 않는다.
     `socket_root=None`이면 명세 §4.2 socket root(짧은 경로·nonce dir)를 supervisor가 고른다(production).
     """
-    device_seams, steps, terminal_source, target_response = _session_device_boundary(
+    device_seams, steps, terminal_source, target_response, provider = _session_device_boundary(
         session, scenario_id)
     if socket_root:
         os.makedirs(socket_root, exist_ok=True)  # 명시 root(시험·격리)만 미리 만든다
@@ -183,6 +190,7 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
         snapshot=snapshot, steps=steps, scenario_id=scenario_id, run_id=run_id,
         workload_id=workload_id, session_id=run_id, socket_root=socket_root,
         device_seams=device_seams, terminal_source=terminal_source, target_response=target_response,
+        provider=provider,
         server_config=server_config or ServerCapabilityConfig(), src_path=src_path)
     try:
         armed = workload.arm()
@@ -320,7 +328,7 @@ def run_for_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
 
     scenario 실행 순서(arm→scenario→run)가 필요한 CLI는 `prepare_workload`+`finish_workload`를 쓴다.
     """
-    device_seams, steps, terminal_source, target_response = _session_device_boundary(
+    device_seams, steps, terminal_source, target_response, provider = _session_device_boundary(
         session, scenario_id)
     os.makedirs(socket_root, exist_ok=True)
     result, seams = run_poc_workload(

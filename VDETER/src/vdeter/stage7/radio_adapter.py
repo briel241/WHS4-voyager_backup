@@ -66,6 +66,8 @@ _LEAD_NS = 100_000_000
 # → 단문 시나리오 간헐 실패의 원인).
 _RX_LEAD_NS = 20_000_000
 _RETUNE_LEAD_NS = 200_000_000
+#: 확정된 TX burst의 per-lane 결과를 보존하는 유계 이력 크기(원장에서 제거된 뒤 조회용).
+_TX_TERMINAL_HISTORY = 64
 _SWITCH_GAP_NS = 100_000_000
 _UTC_FLAGS = (
     RadioUtcFlag.HOST_ESTIMATE,
@@ -242,7 +244,7 @@ class Stage7B210RadioAdapter:
         "_time_source", "_id_source", "_event_sink", "_resolved", "_sidecar",
         "_lane_dispatcher", "_worker_factory", "_lease", "_state", "_generation",
         "_lane_generation", "_configuration", "_applied", "_applied_lane_settings",
-        "_bridge", "_tx_parents", "_rx_children", "_terminal_keys",
+        "_bridge", "_tx_parents", "_rx_children", "_terminal_keys", "_tx_terminal_outcomes",
         "_last_stopped", "_lock", "_condition", "_stopping", "_monitor_thread",
         "_monitor_stop", "_underflow_count", "_overflow_count", "_late_command_count",
         "_tx_rejected", "_rx_rejected", "_last_tx_tune_hz", "_pairwise_edge",
@@ -282,6 +284,8 @@ class Stage7B210RadioAdapter:
         self._tx_parents = {}
         self._rx_children = {}
         self._terminal_keys = set()
+        #: burst_id -> {lane: 최종 state}. 유계(_TX_TERMINAL_HISTORY).
+        self._tx_terminal_outcomes = {}
         self._last_stopped = None
         self._lock = RLock()
         self._condition = Condition(self._lock)
@@ -627,6 +631,7 @@ class Stage7B210RadioAdapter:
             self._tx_parents.clear()
             self._rx_children.clear()
             self._terminal_keys.clear()
+            self._tx_terminal_outcomes.clear()   # generation 재설정 시 과거 결과가 새지 않게
             self._rx_pending = []
             self._rx_issued = []
             self._last_stopped = None
@@ -1197,6 +1202,26 @@ class Stage7B210RadioAdapter:
             pass
         self._last_tx_tune_hz = parent.retune_return
 
+    def tx_burst_state(self, burst_id_value: str):
+        """burst의 **권위 TX 원장** 상태 조회(읽기 전용). Stage 8 terminal 판정이 쓴다.
+
+        반환: ``{"terminal": bool, "children": {lane: state}}`` — state는 SUBMITTED|COMPLETED|FAILED.
+        아직 제출되지 않았거나 원장에 없으면 ``None``. 진행 중(SUBMITTED)과 확정(COMPLETED/FAILED)을
+        구분할 수 있고, 과거 burst의 결과가 현재 burst로 새지 않는다(burst_id 키). 상태를 만들지 않고
+        원장이 기록한 것만 돌려준다.
+        """
+
+        with self._condition:
+            parent = self._tx_parents.get(burst_id_value)
+            if parent is not None:
+                return {"terminal": bool(parent.terminal),
+                        "children": {child.lane_index: child.state
+                                     for child in parent.children.values()}}
+            recorded = self._tx_terminal_outcomes.get(burst_id_value)
+            if recorded is None:
+                return None
+            return {"terminal": True, "children": dict(recorded)}
+
     def _maybe_complete_parent_locked(self, parent: _TxParent):
         if parent.terminal:
             return
@@ -1205,6 +1230,12 @@ class Stage7B210RadioAdapter:
             return
         parent.terminal = True
         self._terminal_keys.add(parent.key)
+        # 확정된 per-lane 결과를 유계로 보존한다(parent는 아래에서 원장에서 제거되므로, 이후 조회가
+        # "기록 없음"과 "실패"를 혼동하지 않게 한다). 상한 초과 시 가장 오래된 것부터 버린다.
+        self._tx_terminal_outcomes[parent.request.burst_id.value] = {
+            child.lane_index: child.state for child in parent.children.values()}
+        while len(self._tx_terminal_outcomes) > _TX_TERMINAL_HISTORY:
+            self._tx_terminal_outcomes.pop(next(iter(self._tx_terminal_outcomes)), None)
         self._tx_parents.pop(parent.request.burst_id.value, None)
         self._finish_retune_locked(parent)
         if all(state == "COMPLETED" for state in states):
