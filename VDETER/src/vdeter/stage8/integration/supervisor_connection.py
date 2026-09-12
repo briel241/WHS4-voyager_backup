@@ -61,6 +61,9 @@ class SupervisorConnection(PocSupervisor):
         self._quiescence = float(quiescence)
         self._poll = float(poll)
         self._start_timeout = float(start_timeout)
+        #: P11: 블로킹 대기 중에도 권위 deadline·운영자 중단을 확인하는 훅. 상한을 새로 만들지
+        #: 않고 기존 모델을 조회만 한다. None이면 기존 동작(고정 pump timeout)과 같다.
+        self._guard = None
         self._submitted: dict = {}      # request_id -> action body(§9.4), 유계(R11)
         self._results: dict = {}        # request_id -> ACTION_RESULT body, 유계(R11)
         self._terminals: dict = {}      # request_id -> ACTION_TERMINAL body
@@ -236,6 +239,16 @@ class SupervisorConnection(PocSupervisor):
         super().emit_observation(record)
         self.pump()
 
+    def set_deadline_guard(self, guard) -> None:
+        """블로킹 대기 루프에서 호출할 권위 deadline/중단 검사 훅을 건다(P11).
+
+        `pump`는 child가 조용해질 때까지 최대 `pump_timeout`을 기다린다. child가 느리거나 응답하지
+        않으면 그 고정 상한까지 붙잡혀 있고, 그 동안 권위 workload/absolute deadline이 만료돼도
+        아무도 눈치채지 못했다 — guard 호출이 step 경계에만 있었기 때문이다. 이제 대기 루프
+        **안에서도** 확인한다.
+        """
+        self._guard = guard
+
     def pump(self) -> None:
         if self._conn_closed or self.engine is None:
             return
@@ -243,6 +256,9 @@ class SupervisorConnection(PocSupervisor):
         last_change = time.monotonic()
         last_count = self._msg_count
         while time.monotonic() < deadline:
+            if self._guard is not None:
+                # 만료면 여기서 예외가 올라가고, workload는 남은 step 없이 cleanup-only로 끝난다.
+                self._guard()
             # R10: workload 실행 루프(emit_event/observation → pump)에서도 base run_until처럼
             # 같은 PID 재접속을 수락한다(§12.2). 이 배선이 없으면 실행 중 단절은 child가 살아
             # 재접속하려 해도 parent가 받아주지 않아 복구가 불가능했다.

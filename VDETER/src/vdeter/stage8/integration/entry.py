@@ -184,6 +184,21 @@ class PocWorkload:
         없음) cleanup-only로 종료한 뒤 그 예외를 그대로 올린다 — 만료를 성공으로 덮지 않는다.
         guard는 상한을 새로 만들지 않고 기존 권위 deadline 모델을 조회만 한다.
         """
+        # P11: guard를 connection의 **블로킹 대기 루프에도** 건다. step 경계 검사만으로는 느린
+        # child·포화 큐·응답 없는 경계에서 pump/drain 안에 갇혀 만료를 놓친다.
+        install = getattr(self._connection, "set_deadline_guard", None)
+        if guard is not None and callable(install):
+            install(guard)
+
+        def _release_guard():
+            """정리 직전에 guard를 뗀다.
+
+            cleanup 자체도 pump를 돈다. 만료된 guard를 그대로 두면 **정리가 만료로 다시 실패해**
+            child·socket·예약이 잔존한다. 만료는 남은 step을 막는 것이지 정리를 막는 것이 아니다.
+            """
+            if callable(install):
+                install(None)
+
         try:
             for step in self._steps:
                 if self._connection.infrastructure_error is not None:
@@ -194,11 +209,16 @@ class PocWorkload:
         except Exception as exc:  # noqa: BLE001 - runner가 기록; finish가 fail-closed 결과화
             if guard is not None and getattr(exc, "deadline", None) is not None:
                 # 권위 deadline 만료: 남은 step 없이 정리만 하고 원인을 보존해 올린다.
+                _release_guard()
                 self._runner.abort(scenario_verdict, cause=exc)
                 raise
+            _release_guard()
         except BaseException:
+            _release_guard()
             self._runner.finish(scenario_verdict)
             raise
+        else:
+            _release_guard()
         return self._runner.finish(scenario_verdict)
 
     def run_full(self, scenario_verdict: ScenarioVerdict):

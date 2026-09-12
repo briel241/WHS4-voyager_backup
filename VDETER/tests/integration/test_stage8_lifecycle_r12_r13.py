@@ -228,3 +228,50 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
         self.assertLess(calls["n"], 3, "만료 뒤 남은 step을 전달하면 안 된다")
         # 살아 있던 child·socket·workload dir이 정리됐다(잔존 0).
         self._assert_no_residue(conn)
+
+    def test_deadline_expiry_inside_a_blocking_step_is_detected(self):
+        """P11: **step 하나가 진행되는 동안** 만료돼도 감지된다.
+
+        step 경계 guard만 있으면 느린 child·포화 큐·응답 없는 경계에서 pump/drain 안에 갇혀 만료를
+        놓친다(고정 pump timeout까지 붙잡힘). guard를 connection의 대기 루프에도 걸어 **블로킹 구간
+        안에서** 만료를 잡는지 확인한다. step은 하나뿐이므로 step 경계 검사로는 절대 잡히지 않는다.
+        """
+        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.session import ResidentSession, SessionExpired
+        from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
+        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.stage8.integration.entry import PocWorkload
+        from vdeter.stage8.integration.runtime import ResidentPocRuntime
+        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
+        from vdeter.stage8.testing.fakes import FakeClock
+
+        conn, provider, snap = self._connection("w11b", _FAST_FINISH, "p11bpoc")
+        runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w11b",
+                                scenario_id="SC-VDE-006", snapshot=snap,
+                                tx_executor=ProductionTxExecutor(provider))
+        clock = FakeClock(0.0)
+        session = ResidentSession(clock=clock,
+                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+        runtime = ResidentPocRuntime(session)
+        runtime.bring_up()
+        self.assertTrue(runner.arm() and conn.running)
+        runtime.begin_workload()
+
+        # **step 하나짜리** workload. 만료는 그 step을 처리하는 대기 루프 안에서만 일어난다.
+        workload = PocWorkload(runner, conn, provider, None, [scenario_started()])
+        calls = {"n": 0}
+
+        def guard():
+            calls["n"] += 1
+            if calls["n"] >= 2:         # 첫 호출은 step 경계, 그 뒤는 전부 대기 루프 안이다
+                clock.set(2.0)
+            session.check_deadlines()
+
+        with self.assertRaises(SessionExpired):
+            workload.run(ScenarioVerdict.PASS, guard=guard)
+        self.assertGreater(calls["n"], 1,
+                           "대기 루프 안에서 guard가 호출되지 않았다(블로킹 중 만료 미감지)")
+        self.assertEqual(runner.finish(ScenarioVerdict.PASS).poc_infrastructure,
+                         PocInfrastructure.ABORTED)
+        # 만료가 **정리까지** 막으면 안 된다 — guard를 떼고 정리하므로 잔존이 0이어야 한다.
+        self._assert_no_residue(conn)

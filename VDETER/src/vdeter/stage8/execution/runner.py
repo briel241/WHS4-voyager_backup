@@ -177,6 +177,12 @@ class WorkloadRunner:
 
     def _drain_actions(self, trigger: str) -> None:
         for _ in range(_DRAIN_ITER_CAP):
+            # P11: action 처리 루프는 최대 _DRAIN_ITER_CAP 회 돌며 매 회 pump한다. 느린 child·
+            # 포화 큐에서는 이 안에 오래 머무를 수 있으므로, step 경계뿐 아니라 **여기서도**
+            # 권위 deadline·중단을 확인한다(상한을 새로 만들지 않고 조회만 한다).
+            guard = getattr(self._conn, "_guard", None)
+            if guard is not None:
+                guard()
             if self._infra_error() is not None:
                 return
             results = self._conn.poll_new_results()
