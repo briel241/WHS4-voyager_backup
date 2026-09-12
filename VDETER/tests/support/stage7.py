@@ -137,7 +137,10 @@ class Stage7FakeMedium:
             return
         receiver_hw_ns = raw_ns - WORKER_T0_NS[rx_serial]
         receiver.pending_bursts.setdefault(rx_lane, []).append(
-            {"hardware_time_ns": receiver_hw_ns, "data": data, "path_id": path_id}
+            {"hardware_time_ns": receiver_hw_ns, "data": data, "path_id": path_id,
+             # 합성 경계(§7.1)가 채널을 구분하고 같은 도달을 두 번 합산하지 않게 하는 값.
+             "tx_lo_hz": sender.tx_lo_hz,
+             "arrival_id": f"{path_id}-{raw_ns}-{len(self.delivery_log)}"}
         )
         self.delivery_log.append(
             {
@@ -163,6 +166,8 @@ class Stage7FakeMediumWorker:
         self.rx_windows = {0: [], 1: []}
         self.rx_continuous = False
         self.rx_continuous_since = None
+        #: lane별 마지막 창 합성 결과(§7.1 모델 증거). 시험이 겹침·clip을 확인한다.
+        self.last_rx_composite = {0: None, 1: None}
         self.async_events = []
         self.closed = False
         self.tx_muted = [False, False]
@@ -267,6 +272,8 @@ class Stage7FakeMediumWorker:
     def stop_rx_continuous(self):
         self.rx_continuous = False
         self.rx_continuous_since = None
+        #: lane별 마지막 창 합성 결과(§7.1 모델 증거). 시험이 겹침·clip을 확인한다.
+        self.last_rx_composite = {0: None, 1: None}
         return True
 
     def hardware_time_ns(self):
@@ -402,21 +409,52 @@ class Stage7FakeMediumWorker:
             if now < end_ns + 20_000_000:
                 return None
             window["consumed"] = True
-            data = None
-            tolerance = 1_000_000_000 // DEVICE_RATE  # 한 sample 이내 정렬
-            for burst in self.pending_bursts[lane]:
-                if abs(burst["hardware_time_ns"] - window["start_ns"]) <= tolerance:
-                    if len(burst["data"]) == window["count"] * 8:
-                        data = burst["data"]
-                        break
-            if data is None:
-                data = b"\x00" * (window["count"] * 8)
+            # P12: 이 창에 도달한 **모든** 입력을 수신기 좌표로 정렬해 한 번 합성한다(§7.1).
+            # 이전에는 정렬이 맞는 **첫** burst 하나만 쓰고 나머지를 조용히 버려, 겹침이 있어도
+            # 충돌이 재현되지 않았고 정상 TX와 PoC TX가 합성 입력에서 빠졌다.
+            composite = self._compose_window(lane, window)
+            self.last_rx_composite[lane] = composite
             return {
-                "segments": ((data, window["start_ns"], False),),
+                "segments": ((composite.data, window["start_ns"], False),),
                 "overflow_samples": 0,
                 "trailing_gap": False,
             }
         return None
+
+    def _tuned_center_hz(self, lane):
+        """이 lane이 실제로 듣고 있는 실효 중심. manual common-LO면 lane마다 다르다."""
+        if getattr(self, "rx_rf_lo_hz", None) is not None:
+            return (self.lane_rx_center_hz or {}).get(lane)
+        return self.rx_lo_hz
+
+    def _compose_window(self, lane, window):
+        """창 하나의 합성 입력을 만든다 — 권위 합성기(§7.1)를 그대로 쓴다."""
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.stage8.shared_medium.rx_boundary import RxArrival, compose_rx_window
+
+        # 합성기에 넘기는 channel은 **묶음 표식**이다(측정값이 아니다). 실제 채널 구분은 아래
+        # `tuned_center_hz` 일치 검사가 한다. 이 토폴로지에서 lane 0/1은 lower/upper에 고정이다.
+        channel = PhysicalChannel.LOWER if lane == 0 else PhysicalChannel.UPPER
+
+        span_ns = (window["count"] * 1_000_000_000 + DEVICE_RATE - 1) // DEVICE_RATE
+        start, end = window["start_ns"], window["start_ns"] + span_ns
+        arrivals, remaining = [], []
+        for burst in self.pending_bursts[lane]:
+            burst_span = (len(burst["data"]) // 8 * 1_000_000_000 + DEVICE_RATE - 1) // DEVICE_RATE
+            if burst["hardware_time_ns"] + burst_span <= start or burst["hardware_time_ns"] >= end:
+                remaining.append(burst)       # 이 창과 무관 — 다음 창을 위해 남긴다
+                continue
+            arrivals.append(RxArrival(
+                arrival_id=burst.get("arrival_id") or f"{burst['path_id']}-{burst['hardware_time_ns']}",
+                receiver_hw_ns=int(burst["hardware_time_ns"]),
+                effective_center_hz=int(burst.get("tx_lo_hz") or 0),
+                data=burst["data"], source=burst.get("path_id")))
+        # 소비한 도달은 제거한다 — 같은 입력이 다음 창에서 다시 합산되지 않게(중복 합산 금지).
+        self.pending_bursts[lane] = remaining
+        return compose_rx_window(
+            arrivals=arrivals, window_start_ns=start, sample_count=window["count"],
+            sample_rate_hz=DEVICE_RATE, tuned_center_hz=self._tuned_center_hz(lane),
+            channel=channel)
 
     def poll_async(self):
         now = self.hardware_time_ns()
