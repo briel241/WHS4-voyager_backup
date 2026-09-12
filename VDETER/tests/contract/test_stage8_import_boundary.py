@@ -41,6 +41,10 @@ _SANCTIONED_RF_OFF_SESSION = frozenset({
 # 않으므로 여기 목록에 없다(그 성질은 아래 규칙이 정적으로 강제한다).
 _SANCTIONED_LAUNCHER_SEAMS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_launcher_seams.py")),
+    # workload를 소유한 scenario controller child가 PoC supervisor를 호스팅한다(연결 §3.1).
+    # stage8 참조는 전부 **method 안 lazy import**이며 `--poc-request` 없이는 실행되지 않는다 —
+    # 그 성질은 아래 `test_controller_without_poc_request_loads_no_stage8`이 실제 실행으로 증명한다.
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage7_mass_roc_controller.py")),
 })
 
 _STAGE8_ADAPTERS = (_SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
@@ -94,6 +98,22 @@ class ImportBoundaryTest(unittest.TestCase):
                      if p not in _STAGE8_ADAPTERS]
         rel = [os.path.relpath(p, _PROJECT_ROOT) for p in offenders]
         self.assertEqual(rel, [], f"승인 adapter 밖에서 stage8을 참조함: {rel}")
+
+    def test_controller_without_poc_request_loads_no_stage8(self):
+        """PoC를 요청하지 않으면 scenario controller는 stage8을 **적재하지 않는다**(구조적 0).
+
+        controller가 allowlist에 있는 이유는 PoC supervisor를 호스팅하기 때문이지만, 그 참조는 전부
+        method 안 lazy import다. import만으로 stage8이 딸려오면 "PoC OFF 경로 구조적 0"이 깨지므로
+        실제로 실행해 확인한다(정적 문자열 검사로 대신하지 않는다).
+        """
+        done = _run_py(
+            "import importlib, sys;"
+            "importlib.import_module('apps.stage7_mass_roc_controller');"
+            "print(sorted(m for m in sys.modules if m.startswith('vdeter.stage8')))"
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("[]", done.stdout.strip(),
+                      f"controller import만으로 stage8이 적재됐다: {done.stdout.strip()}")
 
     def test_sanctioned_adapter_is_exact_not_a_blanket_dir(self):
         """allowlist는 whole-directory가 아니라 정확히 poc_run.py 하나다(광범위 우회 금지).

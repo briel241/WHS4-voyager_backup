@@ -1,9 +1,21 @@
 {
- "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V1",
+ "added_functions": [
+  "_expected_usb_speed",
+  "_p3_fault_status",
+  "_shared_hub_topology_check"
+ ],
  "approved_utc": "2026-09-10",
- "policy": "Phase I (standalone) approved change (2026-09-04): run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). Pi powered-USB3-hub host profile (2026-09-10, user-approved option (b)): run_rr_p0 derives the approved USB link speed of each endpoint from the resolved host_execution.usb_transport through the single profile definition vdeter.stage7.host_profiles (legacy Pi values unchanged: 5000/480/5000; STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1: 5000/5000/5000) and, for the powered-hub profile only, additionally verifies the live sysfs shared self-powered hub topology; helper functions _expected_usb_speed/_shared_hub_topology_check were added. No RF threshold, deadline, gain, PHY/MAC, waveform, retry or scenario judgement changed. This fixture pins every approved implementation by AST and source SHA-256 (verified identical on CPython 3.12.3 and 3.12.13) so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
- "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
+ "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V1",
+ "expected_changed_vs_qualified_commit": [
+  "run_mass_roc_session",
+  "run_rr_p0",
+  "run_rr_p3_fault"
+ ],
  "functions": {
+  "run_mass_roc_session": {
+   "ast_sha256": "d830088991262e43918d06cf0d9abcd5b0123150a06bbd60b8397aca6bcc1bdd",
+   "source_sha256": "b88e4985403f61597617af9dd0e5aed5ba99c89f55d4171a78e67e19059a9fef"
+  },
   "run_rr_p0": {
    "ast_sha256": "f11e7b9c690606452fc8455469fd379f06b004f56b02aa59c70e6eb50098c1c6",
    "source_sha256": "b2f13db6e7f37171a88fd02bb9c3d63cd95657858a206e26846deb38d1b2b5be"
@@ -13,16 +25,6 @@
    "source_sha256": "39d83fb2d3dbcb88d2688a8dd61a29c0395774e5c959120b9aa8138a97b7ab78"
   }
  },
- "added_functions": [
-  "_expected_usb_speed",
-  "_p3_fault_status",
-  "_shared_hub_topology_check"
- ],
- "expected_changed_vs_qualified_commit": [
-  "run_mass_roc_session",
-  "run_rr_p0",
-  "run_rr_p3_fault"
- ],
  "pi_powered_usb3_hub_2026_09_10": {
   "functions_repinned": [
    "run_rr_p0"
@@ -32,5 +34,19 @@
    "_shared_hub_topology_check"
   ],
   "reason": "Raspberry Pi 5 with the three B210s on one self-powered USB3 hub (all 5000M, hub bus power, no per-B210 DC asset); legacy Pi profile and its RR-P0 expectations preserved verbatim"
+ },
+ "policy": "Phase I (standalone) approved change (2026-09-04): run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). Pi powered-USB3-hub host profile (2026-09-10, user-approved option (b)): run_rr_p0 derives the approved USB link speed of each endpoint from the resolved host_execution.usb_transport through the single profile definition vdeter.stage7.host_profiles (legacy Pi values unchanged: 5000/480/5000; STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1: 5000/5000/5000) and, for the powered-hub profile only, additionally verifies the live sysfs shared self-powered hub topology; helper functions _expected_usb_speed/_shared_hub_topology_check were added. No RF threshold, deadline, gain, PHY/MAC, waveform, retry or scenario judgement changed. This fixture pins every approved implementation by AST and source SHA-256 (verified identical on CPython 3.12.3 and 3.12.13) so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
+ "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
+ "stage8_poc_lifecycle_2026_09_12": {
+  "derived_from": {
+   "method": "ast.dump / ast.unparse of the actual function in the working tree",
+   "parent_commit": "f340646665b3fb2c9c86847fd0eadac0fc98fc27",
+   "relpath": "VDETER/apps/stage7_coordinator_main.py"
+  },
+  "functions_repinned": [
+   "run_mass_roc_session"
+  ],
+  "note": "source_sha256 is CPython-patch-version dependent (ast.unparse PEP 701 f-string quote reuse); derived on CPython 3.12.13, the interpreter whose output matches this fixture. This does not modify the frozen Phase-G qualification reference.",
+  "reason": "Stage 8 PoC workload lifecycle on the normal dispatch (user-approved 2026-09-12): run_mass_roc_session reads the request's optional poc field, hands it to the workload controller child as a file path, reads back the child's poc-result.json, and fails the workload when PoC evidence is requested but absent. The scenario path with no poc field is unchanged."
  }
 }

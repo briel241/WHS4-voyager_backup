@@ -198,9 +198,11 @@ def test_real_phase_g_binding_rejects_current_coordinator():
 
 def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
     """계약 A(함수 단위): 전체 file SHA만 현재값으로 맞추고 함수 해시는 실제
-    Phase G 값 그대로면 changed=['run_rr_p0', 'run_rr_p3_fault']로 거부된다 —
-    즉 변경된 함수가 정확히 승인 대상 둘(Phase I run_rr_p3_fault, 2026-09-10
-    Pi powered-USB3-hub run_rr_p0)뿐임을 실제 결속으로 확인."""
+    Phase G 값 그대로면 승인 대상 함수들만 changed로 거부된다 — 즉 변경된 함수가
+    정확히 승인 목록과 일치함을 실제 결속으로 확인한다(Phase I run_rr_p3_fault,
+    2026-09-10 Pi powered-USB3-hub run_rr_p0, 2026-09-12 Stage 8 PoC 수명주기
+    run_mass_roc_session). 승인 목록은 fixture의
+    `expected_changed_vs_qualified_commit`가 소유하며 여기서 따로 적지 않는다."""
     profile = _rebind_for_phase_i(_phase_g_profile_copy(),
                                   _current_coordinator_source(),
                                   pin_run_rr_p3_fault=False)
@@ -212,7 +214,12 @@ def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
     except stage7_service_layer.ServiceSessionError as exc:
         text = str(exc)
         assert "run_rr_p3_fault" in text, text
-        assert "changed=['run_rr_p0', 'run_rr_p3_fault']" in text, text
+        # 승인 목록과 **정확히** 일치해야 한다(승인 밖 함수가 하나라도 끼면 실패).
+        with open(os.path.join(_REPO, "tests", "fixtures",
+                               "stage7_phase_i_function_bindings.json"),
+                  encoding="utf-8") as handle:
+            approved = json.load(handle)["expected_changed_vs_qualified_commit"]
+        assert f"changed={sorted(approved)!r}" in text, (text, sorted(approved))
 
 
 def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():

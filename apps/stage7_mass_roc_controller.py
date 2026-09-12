@@ -896,6 +896,88 @@ class EventLog:
         return None
 
 
+class PocWorkloadHost:
+    """workload를 소유한 이 프로세스가 PoC supervisor를 호스팅한다(연결 §3.1, P01).
+
+    장치는 launcher가 단독 소유하므로 provider seam은 §16.2 TEST adapter op으로만 장치에 닿는다
+    (`apps/stage8_launcher_seams`). 이 class는 `poc_run`이 읽는 device 경계 공급자 계약을 만족시킨다.
+
+    관측(P09)은 **실제 실행 중 복호 이벤트**에서 온다 — `service_events` JSONL의 `DATA_RECEIVED`
+    기록(실 source/destination/payload digest/수신 시각)을 그대로 쓴다. 다만 그 공개 이벤트에는
+    physical channel과 장치 시각이 없으므로, 반응형 인과성 기준 시각은 **관측 시점에 읽은 실
+    actor hardware clock**을 쓴다(합성 counter 아님). 이것은 수신기의 복호 시각이 아니며, 그
+    차이는 남은 제한으로 보고한다.
+    """
+
+    #: 관측 1건을 만들 때 쓰는 실 이벤트 유형(공개 service event 경계).
+    OBSERVED_EVENT_TYPE = "DATA_RECEIVED"
+
+    def __init__(self, *, controller, events, actor_endpoint: str = "MASS-B") -> None:
+        from apps.stage8_launcher_seams import assemble_launcher_provider
+
+        self._events = events
+        self._actor = actor_endpoint
+        self._provider, self._bindings = assemble_launcher_provider(
+            controller, actor_endpoint=actor_endpoint, endpoint_ids=ENDPOINT_IDS,
+            station_id_by_endpoint=dict(STATION_BY_ENDPOINT))
+        self._seen = {endpoint: 0 for endpoint in ENDPOINT_IDS}
+
+    # --- poc_run device 경계 계약 --------------------------------------------
+
+    def poc_provider(self):
+        return self._provider
+
+    def poc_terminal_source(self):
+        return self._bindings["terminal_source"]
+
+    def poc_target_response(self):
+        # 실 application 수신 증거는 launcher 쪽 service event에 있다. 이 경로에서는 아직 그것을
+        # action에 결속해 읽지 않으므로 공급하지 않는다 — 없는 효과를 만들지 않는다(INDETERMINATE).
+        return None
+
+    def poc_workload_steps(self, scenario_id):
+        from vdeter.stage8.execution.runner import scenario_started
+        return [scenario_started()]
+
+    # --- 실행 중 실 관측 -------------------------------------------------------
+
+    def new_observations(self):
+        """지난 호출 이후 도착한 **실 복호 이벤트**를 PoC 관측 record로 만든다."""
+        from vdeter.stage8.poc_api.types import (
+            ObservationRecord, PhysicalChannel, TuningState,
+        )
+
+        self._events.poll()
+        out = []
+        for endpoint_id in ENDPOINT_IDS:
+            records = self._events.records.get(endpoint_id) or []
+            for record in records[self._seen.get(endpoint_id, 0):]:
+                if record.get("event_type") != self.OBSERVED_EVENT_TYPE:
+                    continue
+                source = record.get("original_source") or record.get("source")
+                destination = record.get("original_destination")
+                if source is None or destination is None:
+                    continue
+                try:
+                    hw_ns = int(self._bindings["actor"].radio_state(fresh=True)
+                                .get("hardware_time_ns"))
+                except Exception:  # noqa: BLE001 - 시각을 못 읽으면 관측을 만들지 않는다
+                    continue
+                out.append(ObservationRecord(
+                    physical_channel=PhysicalChannel.UPPER,
+                    tuning_state=TuningState.TUNED_OBSERVER,
+                    observation_id=f"obs-{endpoint_id}-{record.get('payload_sha256', '')[:16]}",
+                    source_station=str(source),
+                    destination_station=str(destination),
+                    device_hw_timestamp_ns=hw_ns,
+                    host_mono_timestamp_ns=int(record.get("received_at_ns") or hw_ns),
+                    body={"payload_sha256": record.get("payload_sha256"),
+                          "observed_at_endpoint": endpoint_id},
+                ))
+            self._seen[endpoint_id] = len(records)
+        return out
+
+
 # --------------------------------------------------------------------------
 # CLI — coordinator가 spawn하는 별도 process
 # --------------------------------------------------------------------------
@@ -986,6 +1068,10 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--diagnostics", action="store_true",
         help="evidence 상세도를 높인다 (터미널 출력량은 늘리지 않는다)")
+    parser.add_argument(
+        "--poc-request", default=None,
+        help="Stage 8 PoC 요청 JSON 경로. 주면 이 프로세스가 workload-local PoC supervisor를 "
+             "호스팅한다(연결 §3.1). 주지 않으면 기존 scenario 실행과 완전히 같다")
     arguments = parser.parse_args(argv)
     workload_id = arguments.workload_id or "single"
 
@@ -1059,12 +1145,87 @@ def main(argv=None) -> int:
         _own_endpoint_lifecycle_start(
             inline_controller, invoke_fixture, gate_dir)
 
+    # --- Stage 8 PoC: scenario **전에** arm한다(§5.1). 실패면 scenario 자극 0 ---------
+    poc_host = None
+    poc_prepared = None
+    poc_evidence = None
+    if arguments.poc_request:
+        from apps.standalone import poc_run as _poc_run
+        with open(arguments.poc_request, "rb") as handle:
+            poc_request = json.loads(handle.read().decode("utf-8"))
+        poc_host = PocWorkloadHost(controller=inline_controller, events=events)
+        try:
+            option = _poc_run.resolve_option(poc=poc_request.get("poc"),
+                                             poc_dir=poc_request.get("poc_dir"),
+                                             interactive=False)
+            snapshot = _poc_run.select_snapshot(
+                option, scenario_id=arguments.scenario_id,
+                dest_dir=os.path.join(arguments.run_root, "poc-snapshot"),
+                poc_id=poc_request.get("poc_id"), interactive=False)
+            if snapshot is not None:
+                poc_prepared = _poc_run.prepare_workload(
+                    poc_host, snapshot, scenario_id=arguments.scenario_id,
+                    run_id=arguments.run_id, workload_id=workload_id,
+                    socket_root=None, src_path=poc_request.get("src_path"))
+            else:
+                poc_evidence = {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
+                                "workload_id": workload_id}
+        except Exception as exc:  # noqa: BLE001 - arm 실패는 fail-closed: scenario를 돌리지 않는다
+            poc_evidence = getattr(exc, "evidence", None) or {
+                "status": "ERROR", "poc_infrastructure": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}"}
+            poc_evidence.setdefault("workload_id", workload_id)
+            trace.emit("poc_arm_failed", error=f"{type(exc).__name__}: {exc}")
+            _write_result(arguments.run_root, "poc-result", poc_evidence)
+            final = {
+                "artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
+                "run_id": arguments.run_id, "workload_id": workload_id,
+                "lifecycle": arguments.lifecycle, "scenario_id": arguments.scenario_id,
+                "certificate_case": arguments.certificate_case,
+                "status": "FAIL",
+                "error": "PoC arm 실패 — scenario를 제출하지 않았습니다(fail-closed)",
+                "cleanup_errors": [], "results": {},
+                "command_log": inline_controller.command_log,
+            }
+            _write_result(arguments.run_root, "final-result", final)
+            trace.close()
+            print("[mass-roc-controller] 종결 FAIL (poc arm)", flush=True)
+            return 1
+
     results: dict = {}
     run_error: str | None = None
     cleanup_errors: list[str] = []
     try:
-        results = run_scenarios(controller, arguments.scenario_id,
-                                arguments.certificate_case, trace=trace)
+        if poc_prepared is not None:
+            # scenario를 **백그라운드로** 돌리고 그 동안 실 복호 관측을 PoC에 전달한다.
+            # 그래야 반응형 action이 scenario terminal **이전에** 제출된다(§8.3 인과성).
+            import threading as _threading
+
+            box: dict = {}
+
+            def _run_scenarios():
+                try:
+                    box["results"] = run_scenarios(
+                        controller, arguments.scenario_id,
+                        arguments.certificate_case, trace=trace)
+                except Exception as exc:  # noqa: BLE001
+                    box["error"] = f"{type(exc).__name__}: {exc}"
+
+            thread = _threading.Thread(target=_run_scenarios, daemon=True)
+            thread.start()
+            delivered = 0
+            while thread.is_alive():
+                for observation in poc_host.new_observations():
+                    poc_prepared.deliver_observation(observation)
+                    delivered += 1
+                time.sleep(0.1)
+            thread.join(timeout=5.0)
+            results = box.get("results") or {}
+            run_error = box.get("error")
+            trace.emit("poc_observations_delivered", count=delivered)
+        else:
+            results = run_scenarios(controller, arguments.scenario_id,
+                                    arguments.certificate_case, trace=trace)
     except Exception as exc:  # noqa: BLE001 - 원래 예외를 evidence에 보존
         run_error = f"{type(exc).__name__}: {exc}"
         import traceback as _tb
@@ -1080,6 +1241,30 @@ def main(argv=None) -> int:
                     cleanup_errors.append(f"{endpoint_id} STOP 실패: {exc}")
 
     overall = run_error is None and bool(results)         and all(_result_ok(item) for item in results.values())
+
+    # --- Stage 8 PoC 종료: **실제 scenario verdict**를 명시 전달한다(§11.1 독립 판정) --------
+    if poc_prepared is not None:
+        from apps.standalone import poc_run as _poc_run
+        # 판정을 재계산하지 않는다 — 방금 확정한 이 workload의 scenario 결과를 그대로 매핑한다.
+        scenario_verdict = _poc_run.scenario_verdict_from_status(
+            "PASS" if overall else "FAIL")
+        try:
+            poc_evidence = _poc_run.finish_workload(
+                poc_prepared, scenario_verdict=scenario_verdict)
+        except BaseException as exc:  # noqa: BLE001 - finish 실패도 cleanup-only로 정리
+            prep = {"workload": poc_prepared}
+            poc_evidence = _poc_run.abort_prepared(
+                prep, cause=exc, out=lambda line: trace.emit("poc_abort", detail=line))
+            if not isinstance(exc, Exception):
+                raise
+        poc_evidence = poc_evidence or {"status": "ERROR", "poc_infrastructure": "ERROR"}
+        poc_evidence.setdefault("workload_id", workload_id)
+        poc_evidence.setdefault("scenario_id", arguments.scenario_id)
+    if poc_evidence is not None:
+        _write_result(arguments.run_root, "poc-result", poc_evidence)
+        trace.emit("poc_result", infrastructure=poc_evidence.get("poc_infrastructure"),
+                   status=poc_evidence.get("status"))
+
     for scenario_id, payload in results.items():
         _write_result(arguments.run_root, scenario_id, payload)
     final = {

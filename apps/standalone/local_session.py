@@ -330,18 +330,13 @@ class LocalCoordinatorSession:
         coordinator의 `endswith('.json')` 목록에 미완성본이 잡히지 않게).
         발행 전에 host 계약대로 정착 대기를 적용한다.
 
-        `poc`(dict)를 주면 request에 실어 coordinator가 workload-local PoC를 실행하게 한다
-        (RF-off software 세션). None이면 기존 scenario workload 그대로.
+        `poc`(dict)를 주면 request에 실어 coordinator가 workload-local PoC를 실행하게 한다.
+        None이면 기존 scenario workload 그대로다.
 
-        **fail-closed**: PoC를 실행하지 않는 coordinator(일반 dispatch)에 PoC 요청을 보내면 그 필드는
-        조용히 무시되고 시나리오만 돌아 **PoC 없이 PASS**로 보고된다(거짓 성공). 그런 조합은 여기서
-        거부하고 request를 발행하지 않는다 — 시나리오도 제출되지 않는다. 자격 결속된 coordinator
-        함수는 건드리지 않는다(Phase-I function binding 보존)."""
-        if poc is not None and not self.rf_off_software:
-            raise LocalSessionError(
-                "PoC workload 요청을 실행할 수 없는 coordinator dispatch입니다 — 일반 경로는 PoC를 "
-                "무시하므로 요청을 제출하지 않습니다(fail-closed). launcher 소유 장치 경계 결선이 "
-                "필요합니다.")
+        일반 dispatch도 이제 PoC를 처리한다: coordinator가 요청을 workload child에 넘기고, child가
+        PoC supervisor를 호스팅한 뒤 evidence를 결과에 싣는다. PoC를 요청했는데 evidence가 없으면
+        coordinator가 workload를 FAIL로 확정하므로, PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓
+        성공은 성립하지 않는다."""
         self.settle_before_next_workload(on_settle=on_settle)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         self._pending_scenario[workload_id] = scenario_id

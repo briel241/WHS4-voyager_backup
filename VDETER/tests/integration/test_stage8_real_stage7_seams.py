@@ -763,16 +763,32 @@ class NormalDispatchPocRefusalTest(unittest.TestCase):
             gain_artifact_path=os.path.join(tmp, "gain.json"),
             baseline_sha256="0" * 64, rf_off_software=rf_off_software)
 
-    def test_poc_request_to_non_poc_dispatch_is_refused_without_submitting(self):
+    def test_poc_request_rides_on_the_normal_dispatch_request(self):
+        """일반 dispatch도 PoC 요청을 싣는다 — coordinator가 workload child에 넘겨 실행한다."""
+        import json
         import tempfile
-        from apps.standalone.local_session import LocalSessionError
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp, rf_off_software=False)
-            with self.assertRaises(LocalSessionError):
-                session.submit_workload("SC-VDE-006", "normal", poc={"poc": "/x.py"})
-            # request가 발행되지 않았다(시나리오도 제출되지 않는다).
-            requests = session.requests_dir
-            self.assertFalse(requests.exists() and any(requests.iterdir()), "request 미발행이어야 함")
+            workload_id = session.submit_workload(
+                "SC-VDE-006", "normal", poc={"poc": "/x.py", "poc_id": None,
+                                             "poc_dir": None, "src_path": None})
+            path = session.requests_dir / (workload_id + ".json")
+            self.assertTrue(path.exists())
+            with open(path, "r", encoding="utf-8") as handle:
+                request = json.load(handle)
+            self.assertEqual(request["poc"]["poc"], "/x.py")
+
+    def test_missing_poc_evidence_fails_the_workload(self):
+        """PoC를 요청했는데 child가 evidence를 남기지 않으면 workload는 **FAIL**이다.
+
+        PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓 성공을 자격 경로에서 차단한다(정적 증거).
+        """
+        path = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("POC_EVIDENCE_MISSING", source)
+        self.assertIn("poc_request is None or poc_evidence is not None", source)
 
     def test_plain_workload_request_is_unaffected(self):
         import tempfile
