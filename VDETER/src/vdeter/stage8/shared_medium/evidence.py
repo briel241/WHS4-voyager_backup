@@ -25,7 +25,11 @@ class SharedMediumEvidence:
         return deepcopy({
             "model_boundary": {
                 "model": "WIRED_SHARED_MEDIUM_EMULATION",
-                "virtual_clipping": "deterministic_approximation",
+                "collision_policy": "LOCAL_DECODED_WINDOW_OVERLAP_DROP_V1",
+                "collision_scope": "CO_DECODED_LANES_IN_ONE_COMPLETED_RX_WINDOW",
+                "undecoded_interference_detection": False,
+                "rf_off_scene_model": "TX_INTERVAL_DROP_V1",
+                "virtual_clipping": "NOT_IMPLEMENTED_REMOVED_V1_4",
                 "single_antenna_adc_equivalence_proven": False,
                 "analog_adc_saturation_proven": False,
             },

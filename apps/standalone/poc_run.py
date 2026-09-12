@@ -41,6 +41,12 @@ class PocRunError(Exception):
     """PoC 선택·실행 계약 위반(fail-closed). CLI가 종료 코드로 변환한다."""
 
 
+def collision_state_error(message, *, ownership=False):
+    """Map internal TEST/RX safety failure to public PoC severity at the sanctioned boundary."""
+    return PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN if ownership
+                    else PocErrorCode.POC_COLLISION_STATE_UNAVAILABLE, message)
+
+
 @dataclass(frozen=True)
 class PocOption:
     """CLI `--poc`/`--poc-dir` 선택 상태."""
@@ -182,6 +188,13 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
     fail-closed evidence를 담아 `PocRunError`(`.evidence`)로 올린다 — caller는 scenario를 제출하지 않는다.
     `socket_root=None`이면 명세 §4.2 socket root(짧은 경로·nonce dir)를 supervisor가 고른다(production).
     """
+    prepare_scope = getattr(session, "prepare_poc_scope", None)
+    if callable(prepare_scope):
+        prepare_scope(snapshot.descriptor)
+        runtime_config = getattr(session, "poc_server_config", None)
+        if not callable(runtime_config):
+            raise PocRunError("prepared RX scope has no verified server capabilities")
+        server_config = runtime_config()
     device_seams, steps, terminal_source, target_response, provider = _session_device_boundary(
         session, scenario_id)
     if socket_root:
@@ -245,7 +258,8 @@ def _finalize_evidence(workload, scenario_verdict: ScenarioVerdict, *,
     return _result_evidence(result, workload)
 
 
-def abort_prepared(prep: dict, *, cause: BaseException, out) -> dict | None:
+def abort_prepared(prep: dict, *, cause: BaseException, out,
+                   scenario_verdict=ScenarioVerdict.NOT_RUN) -> dict | None:
     """N1: 이미 ARMED된 PoC를 scenario submit/wait/render 실패·인터럽트에서 cleanup-only로 정리한다.
 
     신규 event/action 없이 child·socket·workload dir·provider 예약을 정리하고, `cause`를 실패로
@@ -257,7 +271,7 @@ def abort_prepared(prep: dict, *, cause: BaseException, out) -> dict | None:
         return None
     evidence = None
     try:
-        result = workload.abort(cause=cause)
+        result = workload.abort(scenario_verdict=scenario_verdict, cause=cause)
         evidence = _result_evidence(result, workload)
     except BaseException as cleanup_exc:  # noqa: BLE001 - 원래 예외 보존; cleanup 오류는 evidence로만
         evidence = {"status": "ERROR", "poc_infrastructure": "ABORTED",

@@ -250,6 +250,7 @@ class Stage7B210RadioAdapter:
         "_tx_rejected", "_rx_rejected", "_last_tx_tune_hz", "_pairwise_edge",
         "_delivery_status", "_endpoint_id", "_private_faults", "_hardware_clock_id",
         "_calibration_only", "_monitor_enabled",
+        "_rx_lane_channels",
     )
 
     def __init__(
@@ -286,6 +287,7 @@ class Stage7B210RadioAdapter:
         self._terminal_keys = set()
         #: burst_id -> {lane: 최종 state}. 유계(_TX_TERMINAL_HISTORY).
         self._tx_terminal_outcomes = {}
+        self._rx_lane_channels = None
         self._last_stopped = None
         self._lock = RLock()
         self._condition = Condition(self._lock)
@@ -1009,12 +1011,14 @@ class Stage7B210RadioAdapter:
                     "active bridge 없이 timed RX를 수락할 수 없습니다",
                 )
                 return self._error(ErrorCode.CLOCK_MAPPING_UNAVAILABLE, ErrorCategory.DEVICE, "host affine bridge가 잠겨 있지 않습니다")
+            if not self.rx_lanes_for(request.channel.name):
+                return self._error(ErrorCode.RADIO_UNSUPPORTED_SETTING, ErrorCategory.VALIDATION, "channel is not tuned")
             hardware_end = hardware_start + request.duration_nanoseconds
             base_key = (
                 self._generation, request.channel.name,
                 request.start_at.total_nanoseconds(), request.duration_nanoseconds,
             )
-            for lane_index in (0, 1):
+            for lane_index in self.rx_lanes_for(request.channel.name):
                 child_key = ("rx", base_key, lane_index)
                 if child_key in self._terminal_keys or child_key in self._rx_children:
                     self._rx_reject_probe(
@@ -1028,7 +1032,7 @@ class Stage7B210RadioAdapter:
             # 이미 연속으로 열려 있으므로, 여기서는 collector 창 등록만 한다
             # (장치 명령 0회 — 창 경계는 합성 rx_time 태그가 공급).
             worker = self._lease.worker
-            for lane_index in (0, 1):
+            for lane_index in self.rx_lanes_for(request.channel.name):
                 try:
                     worker.register_rx_window_lane(lane_index, hardware_start, expected)
                 except Exception as error:  # noqa: BLE001
@@ -1221,6 +1225,20 @@ class Stage7B210RadioAdapter:
             if recorded is None:
                 return None
             return {"terminal": True, "children": dict(recorded)}
+
+    def rx_lanes_for(self, channel_name):
+        mapping = self._rx_lane_channels
+        return (0, 1) if mapping is None else tuple(
+            lane for lane in (0, 1) if mapping.get(lane) == channel_name)
+
+    def set_rx_lane_channels(self, mapping):
+        """Scope owner calls only after all admitted RX children have drained."""
+        with self._condition:
+            if any(not child.terminal for child in self._rx_children.values()):
+                raise RuntimeError("RX windows must drain before changing lane bindings")
+            if mapping is not None and (set(mapping) != {0, 1} or len(set(mapping.values())) != 2):
+                raise ValueError("two distinct canonical RX channels required")
+            self._rx_lane_channels = None if mapping is None else dict(mapping)
 
     def _maybe_complete_parent_locked(self, parent: _TxParent):
         if parent.terminal:

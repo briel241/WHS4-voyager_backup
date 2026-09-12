@@ -43,12 +43,13 @@ class PocDeviceUnavailable(RuntimeError):
 class Stage7PocDeviceSeam:
     """launcher 프로세스 안에서 radio adapter/worker/route sidecar를 감싸는 TEST-only seam."""
 
-    __slots__ = ("_endpoint", "endpoint_id", "_station_id_by_endpoint")
+    __slots__ = ("_endpoint", "endpoint_id", "_station_id_by_endpoint", "_rx_scope")
 
     def __init__(self, *, endpoint_id: str, endpoint, station_id_by_endpoint: dict) -> None:
         self.endpoint_id = endpoint_id
         self._endpoint = endpoint
         self._station_id_by_endpoint = dict(station_id_by_endpoint)
+        self._rx_scope = None
 
     # --- 내부 접근자 ----------------------------------------------------------
 
@@ -68,12 +69,67 @@ class Stage7PocDeviceSeam:
 
     # --- 조회 ----------------------------------------------------------------
 
+    def collision_command(self, body):
+        from ..rx_scope import WorkloadRxScope
+        from ..collision_runtime import CollisionRuntimeError
+        mode, owner = body.get("mode"), body.get("session_id")
+        allowed = {"ENABLE": {"mode", "session_id", "dual"}}
+        for name in ("ACTIVATE", "POLL", "CLOSE", "DISABLE", "SUPPORT"):
+            allowed[name] = {"mode", "session_id"}
+        if mode not in allowed or set(body) != allowed[mode]:
+            raise ValueError("RX scope command keys invalid")
+        if not isinstance(owner, str) or not 0 < len(owner) <= 128:
+            raise ValueError("RX scope owner invalid")
+        if mode == "SUPPORT":
+            worker = self._worker()
+            return {"dual_supported": self.endpoint_id == "MASS-B" and all(
+                callable(getattr(worker, n, None)) for n in ("read_tuning", "apply_manual_tuning", "restore_tuning"))}
+        with self._endpoint.stage4.lock:
+            if mode == "ENABLE":
+                if self._rx_scope is not None:
+                    if self._rx_scope.owner != owner or self._rx_scope.dual != body["dual"]:
+                        raise CollisionRuntimeError("RX scope already owned")
+                else:
+                    self._rx_scope = WorkloadRxScope(self, owner, body["dual"])
+                if self._rx_scope.dual and not self._rx_scope.active and not self._rx_scope.closed:
+                    self._endpoint.stage4.mac.coordinator._rx_planner_paused = True
+                return {"enabled": True}
+            if self._rx_scope is None:
+                if mode in ("CLOSE", "DISABLE"):
+                    return {"disabled": True, "active": False}
+                raise CollisionRuntimeError("RX scope absent")
+            if self._rx_scope.owner != owner:
+                raise CollisionRuntimeError("RX scope owner mismatch")
+            result = getattr(self._rx_scope, mode.lower())()
+            if mode == "DISABLE" and result.get("disabled"):
+                self._rx_scope = None
+            return _jsonable_tuning(result)
+
+    def clock_map(self, *, direction, timestamp_ns):
+        if type(timestamp_ns) is not int or timestamp_ns < 0 or direction not in ("HW_TO_UTC", "UTC_TO_HW"):
+            raise ValueError("invalid clock mapping request")
+        bridge = self._radio().bridge
+        method = bridge.hardware_ns_to_utc_label if direction == "HW_TO_UTC" else bridge.utc_label_to_hardware_ns
+        value = method(timestamp_ns)
+        if value is None:
+            raise PocDeviceUnavailable("active bridge unavailable")
+        return {"timestamp_ns": int(value), "clock_id": bridge.clock_id, "generation": bridge.generation}
+
     def radio_state(self) -> dict:
         """scheduler·arbiter·readiness가 쓰는 **실 장치 상태**. 없는 값은 None으로 둔다."""
 
         radio = self._radio()
         worker = self._worker()
         bridge = getattr(radio, "bridge", None)
+        runtime_state = getattr(worker, "poc_runtime_state", None)
+        owned = runtime_state() if callable(runtime_state) else None
+        if owned is not None and (
+                not isinstance(owned, dict)
+                or type(owned.get("hardware_time_ns")) is not int
+                or not isinstance(owned.get("tx_muted"), list)
+                or len(owned["tx_muted"]) != 2
+                or any(type(v) is not bool for v in owned["tx_muted"])):
+            raise PocDeviceUnavailable("invalid device-owner state")
 
         def _call(name):
             method = getattr(worker, name, None)
@@ -85,21 +141,16 @@ class Stage7PocDeviceSeam:
                 return None
 
         windows = {}
-        raw_windows = getattr(worker, "rx_windows", None)
-        if raw_windows:
-            items = (raw_windows.items() if hasattr(raw_windows, "items")
-                     else enumerate(raw_windows))
-            for lane, entries in items:
-                kept = []
-                for entry in (entries or ())[-_MAX_RX_WINDOWS:]:
-                    kept.append({
-                        "start_ns": int(entry.get("start_ns", 0)),
-                        "count": int(entry.get("count", 0)),
-                        "consumed": bool(entry.get("consumed")),
-                    })
-                windows[str(int(lane))] = kept
+        with radio._condition:
+            for child in radio._rx_children.values():
+                if child.terminal:
+                    continue
+                rows = windows.setdefault(str(child.lane_index), [])
+                rows.append({"start_ns": child.hardware_start_ns, "count": child.expected_sample_count,
+                             "channel": child.request.channel.name, "consumed": False})
+            windows = {lane: rows[-_MAX_RX_WINDOWS:] for lane, rows in windows.items()}
 
-        muted = getattr(worker, "_tx_muted", None)
+        muted = owned["tx_muted"] if owned is not None else getattr(worker, "_tx_muted", None)
         if muted is None:
             muted = getattr(worker, "tx_muted", None)
         muted_list = None
@@ -110,16 +161,21 @@ class Stage7PocDeviceSeam:
             except TypeError:
                 muted_list = None
 
-        lane_centers = getattr(worker, "lane_rx_center_hz", None) or {}
+        # Lifecycle already verifies tuning. No extra UHD readback per state poll.
+        tuning = (self._rx_scope.readback if self._rx_scope is not None and self._rx_scope.touched else None) or {}
+        lane_centers = tuning.get("lane_center_hz") or getattr(worker, "lane_rx_center_hz", None) or {}
         return {
             "endpoint_id": self.endpoint_id,
-            "hardware_time_ns": _call("hardware_time_ns"),
-            "tx_lo_hz": getattr(worker, "tx_lo_hz", None),
-            "rx_lo_hz": getattr(worker, "rx_lo_hz", None),
+            "hardware_time_ns": owned["hardware_time_ns"] if owned is not None else _call("hardware_time_ns"),
+            "tx_lo_hz": owned.get("tx_lo_hz") if owned is not None else getattr(worker, "tx_lo_hz", None),
+            "rx_lo_hz": owned.get("rx_lo_hz") if owned is not None else (getattr(worker, "rx_lo_hz", None) or getattr(worker, "_rx_lo_frequency_hz", None) or lane_centers.get(0)),
+            "rx_rf_lo_hz": tuning.get("rx_lo_hz"),
             "lane_rx_center_hz": {str(int(k)): int(v) for k, v in lane_centers.items()},
             "tx_muted": muted_list,
-            "rx_continuous": bool(getattr(worker, "rx_continuous", False)),
-            "rx_continuous_since_ns": _call("rx_continuous_since_ns"),
+            "rx_continuous": bool(owned.get("rx_continuous")) if owned is not None else bool(getattr(worker, "rx_continuous", False)),
+            "rx_continuous_since_ns": owned.get("rx_continuous_since_ns") if owned is not None else _call("rx_continuous_since_ns"),
+            "device_state_basis": owned.get("state_basis") if owned is not None else "IN_PROCESS_WORKER",
+            "tx_lo_basis": owned.get("tx_lo_basis") if owned is not None else "IN_PROCESS_WORKER",
             "rx_windows": windows,
             # 두 clock id는 **다른 것**이다: hardware(장치 시간축)와 bridge(UTC label 축).
             # 둘을 섞으면 좌표 결속 증거가 무의미해지므로 각각 싣는다.
@@ -173,6 +229,7 @@ class Stage7PocDeviceSeam:
         from ...mac.access import enumerate_function_slots
         from ...mac.tbb import SlotFunction
         from ...mac.tdma import FRAME_NANOSECONDS
+        from ...mac.resources import externally_reserved
 
         mac = getattr(getattr(self._endpoint, "stage4", None), "mac", None)
         # `Stage4Mac`은 port 계약이고 slot map 소유자는 그 뒤의 `MacCoordinator`다.
@@ -204,6 +261,9 @@ class Stage7PocDeviceSeam:
             except Exception:  # noqa: BLE001 - 한 function 실패가 전체를 막지 않는다
                 continue
             for item in found:
+                if externally_reserved(state.lc_allocations, item.logical_channel,
+                                       item.frame_ordinal):
+                    continue
                 hardware_ns = to_hw(int(item.start_nanoseconds))
                 if hardware_ns is None:
                     continue        # 장치 좌표로 환산 불가 → 후보로 주지 않는다
@@ -245,7 +305,7 @@ class Stage7PocDeviceSeam:
 
     def schedule_group_tx(self, *, burst_id: str, channel_name: str, transmit_at_hw_ns: int,
                           samples: bytes, destination_station_id: int,
-                          request_digest: str) -> dict:
+                          request_digest: str, wire_packet_digest=None, collision_session_id=None) -> dict:
         """공유매체 fan-out route를 결속하고 **권위 `schedule_tx`** 한 번으로 제출한다.
 
         여기서 파형을 만들지 않는다 — supervisor가 frozen PHY로 만든 device-rate 표본을 그대로
@@ -262,6 +322,14 @@ class Stage7PocDeviceSeam:
                 f"!= {DEVICE_SLOT_SAMPLES * _CF32LE_BYTES_PER_SAMPLE}B")
 
         radio = self._radio()
+        if collision_session_id is not None or self._rx_scope is not None:
+            gate = self._endpoint.stage4.collision_gate
+            if (gate is None or gate.session_id != collision_session_id or gate.fault
+                    or not gate.accepting):
+                raise PocDeviceUnavailable("collision session is not admitting PoC TX")
+            if (not isinstance(wire_packet_digest, str) or len(wire_packet_digest) != 64
+                    or any(c not in "0123456789abcdef" for c in wire_packet_digest)):
+                raise ValueError("wire packet SHA-256 required before TX")
         sidecar = getattr(radio, "_sidecar", None)
         if sidecar is None:
             raise PocDeviceUnavailable("radio adapter에 route sidecar가 없습니다")
@@ -281,7 +349,7 @@ class Stage7PocDeviceSeam:
             raise PocDeviceUnavailable(f"station id를 알 수 없습니다: {self.endpoint_id}")
         bound = bind(str(burst_id), source_station_id=int(source_station),
                      destination_station_id=int(destination_station_id),
-                     request_digest=str(request_digest or ""))
+                     request_digest=str(request_digest or ""), wire_packet_digest=wire_packet_digest)
         if getattr(bound, "is_err", False):
             return {"accepted": False, "burst_id": str(burst_id),
                     "reason": "ROUTE_BIND_REJECTED",
@@ -326,6 +394,8 @@ class Stage7PocDeviceSeam:
                analog_bandwidth_hz=None, snapshot=None) -> dict:
         """manual common-LO tuning 적용/조회/복구를 launcher 소유 worker에 건다."""
 
+        if mode in ("APPLY", "RESTORE", "apply", "restore") and self._endpoint.stage4.collision_gate is not None:
+            raise PocDeviceUnavailable("close collision RX scope before changing its tuning binding")
         worker = self._worker()
         if mode == "READ":
             read = getattr(worker, "read_tuning", None)

@@ -722,6 +722,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
                 continue
             self.assertEqual(request.rf_freq_policy, _TuneRequest.POLICY_MANUAL)
             self.assertEqual(request.dsp_freq_policy, _TuneRequest.POLICY_MANUAL)
+            self.assertEqual(request.target_freq, request.rf_freq - request.dsp_freq)
             self.assertEqual(int(request.rf_freq), constants.COMMON_RF_LO_HZ)
         self.assertEqual(readback["lane_dsp_hz"],
                          {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ})

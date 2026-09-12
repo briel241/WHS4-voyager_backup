@@ -728,7 +728,8 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     세션 객체가 그대로 소유한다."""
     # RF-off software 모드: PoC를 CLI에서 in-process 실행하지 않고 실 coordinator 프로세스에 workload
     # 요청으로 위임한다(실 coordinator↔PoC 연결). 결과 JSON의 poc evidence를 그대로 쓴다.
-    if poc_ctx is not None and poc_ctx.get("rf_off_software"):
+    if poc_ctx is not None and (poc_ctx.get("rf_off_software")
+            or getattr(session, "poc_workloads_in_coordinator", False) is True):
         return _run_workload_rf_off_poc(
             session, scenario_id, certificate_case, out=out, clock=clock,
             index=index, total=total, poc_ctx=poc_ctx, poc_id=poc_id)
@@ -808,7 +809,9 @@ def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
     """
     if poc_ctx is None or not poc_ctx["option"].poc_dir:
         return ("poc", None)
-    for line in poc_ctx["module"].catalog_menu_lines(poc_ctx["option"], scenario_id):
+    selection_kwargs = ({"server_config": poc_ctx["selection_config"]}
+                        if poc_ctx.get("selection_config") is not None else {})
+    for line in poc_ctx["module"].catalog_menu_lines(poc_ctx["option"], scenario_id, **selection_kwargs):
         out("  " + line)
     try:
         choice = _clean_choice(
@@ -816,7 +819,7 @@ def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
     except EOFError:
         return ("baseline", None)
     return poc_ctx["module"].resolve_catalog_selection(
-        poc_ctx["option"], scenario_id, choice)
+        poc_ctx["option"], scenario_id, choice, **selection_kwargs)
 
 
 def _stop_after_workload(result, out) -> bool:
@@ -1140,6 +1143,11 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 # RF-off software 모드: PoC를 CLI 프로세스에서 in-process 실행하지 않고 실
                 # coordinator 프로세스에 workload 요청으로 위임한다(실 coordinator↔PoC 연결).
                 "rf_off_software": rf_off_software,
+                # Catalogue availability only. The owning launcher validates
+                # actual tuning/windows BEFORE runtime WELCOME advertises dual.
+                "selection_config": poc_run.ServerCapabilityConfig(
+                    wsm_g1_production_installed=(
+                        getattr(session, "poc_workloads_in_coordinator", False) is True)),
             }
             out("[poc]       Stage 8 PoC opt-in active (%s%s)"
                 % ("catalog" if poc_option.poc_dir else "direct",

@@ -12,7 +12,7 @@ frozen Runtime의 `link_command_id`는 wrapper method 인자가 아니므로 rou
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 
 from ..common.addressing import Address, AddressKind
@@ -114,6 +114,7 @@ class Stage7RouteContext:
     #: 송신자의 두 물리 경로로 fan-out한다(논리 주소·정상 tuning은 보존). 이 값을 켜는 경로는
     #: `Stage7RouteSidecar.bind_broadcast_fanout_burst` 하나뿐이며 정상 MAC route 승격은 켜지 않는다.
     broadcast_fanout_optin: bool = False
+    wire_packet_digest: str | None = None
 
     def destination_key(self):
         return (self.destination_kind, self.destination_station_id)
@@ -534,7 +535,7 @@ class Stage7RouteSidecar:
         with self._lock:
             return self._wired_broadcast_optin
 
-    def bind_burst(self, packet_id_value: str, burst_id_value: str):
+    def bind_burst(self, packet_id_value: str, burst_id_value: str, *, wire_packet_digest=None):
         with self._lock:
             context = self._packets.get((self._lane_generation, packet_id_value))
             if context is None:
@@ -550,15 +551,21 @@ class Stage7RouteSidecar:
                     "Burst ID가 이미 다른 route에 결속되어 있습니다",
                     local_id=burst_id_value,
                 )
+            if wire_packet_digest is not None:
+                context = replace(context, wire_packet_digest=wire_packet_digest)
             self._bursts[(self._lane_generation, burst_id_value)] = context
             self._record(
                 "burst_bound", bound_packet=packet_id_value, bound_burst=burst_id_value
             )
             return Ok(context)
 
+    def burst_context(self, burst_id_value):
+        with self._lock:
+            return self._bursts.get((self._lane_generation, burst_id_value))
+
     def bind_broadcast_fanout_burst(self, burst_id_value: str, *, source_station_id: int,
                                  destination_station_id: int, request_digest: str,
-                                 method_kind: str = "STAGE8_SHARED_MEDIUM"):
+                                 method_kind: str = "STAGE8_SHARED_MEDIUM", wire_packet_digest=None):
         """Stage 8 유선 공유매체 opt-in burst의 route context를 결속한다(§15.1 예약 경로 재사용).
 
         정상 MAC packet을 거치지 않는 Stage 8 PoC action을 기존 `reserve_burst`·`schedule_tx`·충돌
@@ -590,6 +597,7 @@ class Stage7RouteSidecar:
                 original_destination_station_id=None,
                 request_digest=request_digest,
                 broadcast_fanout_optin=True,
+                wire_packet_digest=wire_packet_digest,
             )
             self._bursts[key] = context
             self._record("broadcast_fanout_burst_bound", bound_burst=burst_id_value)

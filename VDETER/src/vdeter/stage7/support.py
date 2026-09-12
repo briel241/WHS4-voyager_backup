@@ -10,6 +10,7 @@ encode/accept/completion과 Service dispatch는 inherited path를 사용한다.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from threading import RLock
 
 from ..common.contracts.phy import PhyRecoveryStatus, RecoveredPacketSet
@@ -85,6 +86,7 @@ class _LogicalWindow:
         "errors",
         "first_sample_utc_ns",
         "terminal_lanes",
+        "expected_lanes",
         "delivered",
     )
 
@@ -96,6 +98,7 @@ class _LogicalWindow:
         self.errors = {}
         self.first_sample_utc_ns = {}
         self.terminal_lanes = set()
+        self.expected_lanes = {0, 1}
         self.delivered = False
 
 
@@ -265,6 +268,7 @@ class Stage7LaneRxDispatcher:
                     "이미 등록된 logical RX window key입니다",
                 )
             window = _LogicalWindow(key, command, canonical_allowed)
+            window.expected_lanes = set(self._support._endpoint._radio.rx_lanes_for(request.channel.name))
             self._windows[key] = window
         rx_window_key = (
             request.channel.name,
@@ -273,6 +277,8 @@ class Stage7LaneRxDispatcher:
             request.duration_nanoseconds,
         )
         for stack in self._stacks:
+            if stack.lane_index not in window.expected_lanes:
+                continue
             admitted = stack.bridge.admit_window(
                 request.channel, request.start_at, request.duration_nanoseconds,
                 canonical_allowed,
@@ -461,7 +467,7 @@ class Stage7LaneRxDispatcher:
                 window.first_sample_utc_ns[lane_index] = received_at_ns
             if error is not None:
                 window.errors[lane_index] = error
-            if len(window.terminal_lanes) == len(self._stacks):
+            if window.terminal_lanes == window.expected_lanes:
                 window.delivered = True
                 deliver = True
                 self._windows.pop(window.key, None)
@@ -480,7 +486,39 @@ class Stage7LaneRxDispatcher:
             self._support.finish_logical_window(window.command, window.key, error=representative)
             return
         merged = self._merge_results(window)
-        self._support.finish_logical_window(window.command, window.key, merged=merged)
+        gate = getattr(self._support, "collision_gate", None)
+        if gate is None or not gate.accepting:
+            self._support.finish_logical_window(window.command, window.key, merged=merged)
+            return
+        request = window.command.payload.request
+        rx_key = (request.channel.name, request.start_at.clock_id,
+                  request.start_at.total_nanoseconds(), request.duration_nanoseconds)
+        metadata, packets = {}, []
+        for lane, result in sorted(window.results.items()):
+            records = self._stacks[lane].facade.diagnostic_sink.recent_records_for_window(rx_key)
+            for packet in result.packets:
+                digest = hashlib.sha256(packet.packet).hexdigest()
+                matches = [r for r in records if r.packet_digest == digest and r.estimator_status == "RECOVERED"]
+                # Ambiguous/missing actual PHY time is not replaced by requested window time.
+                meta = None
+                if len(matches) == 1:
+                    record = matches[0]
+                    meta = {
+                        "physical_channel": request.channel.name, "link_id": record.link_id,
+                        "device_hw_timestamp_ns": record.rx_sample0_hardware_ns,
+                        "rx_utc_ns": self._support._endpoint._radio.bridge.hardware_ns_to_utc_label(record.rx_sample0_hardware_ns),
+                        "duration_ns": (8192 * 1_000_000_000 + 307199) // 307200,
+                        "host_mono_timestamp_ns": self._support._endpoint._time().now_monotonic().total_nanoseconds(),
+                        "lane": lane, "lane_generation": record.lane_generation,
+                        "stream_epoch_id": record.stream_epoch_id,
+                        "device_time_source": "PHY_RECOVERED_SAMPLE0_HARDWARE_NS",
+                        "physical_channel_source": "ACTUAL_RX_WINDOW",
+                    }
+                packets.append(packet)
+                metadata[packet.packet_id.value] = meta
+        # Keep independently decoded equal packets until AFTER overlap classification.
+        self._support.finish_logical_window(window.command, window.key,
+            merged=replace(merged, packets=tuple(packets)), metadata=metadata)
 
     def _merge_results(self, window) -> RecoveredPacketSet:
         winners = {}
@@ -544,22 +582,54 @@ class Stage7LaneRxDispatcher:
 class Stage7Stage5Support(Stage5Support):
     """frozen `Stage5Support`의 four-method RX override (§15)."""
 
-    __slots__ = ("_lane_dispatcher",)
+    __slots__ = ("_lane_dispatcher", "collision_gate", "_collision_pump_lock")
 
     def __init__(self, endpoint, mac, outbox, ingress, health, lock) -> None:
         super().__init__(endpoint, mac, outbox, ingress, health, lock)
         self._lane_dispatcher = None
+        self.collision_gate = None
+        self._collision_pump_lock = RLock()
+
+    def pump(self):
+        # The RF/decoder producer only enqueues. Deliver on the existing pump,
+        # never on the TEST socket thread, never under the RX dispatcher lock.
+        if self.collision_gate is None:
+            super().pump()
+            return
+        if self._collision_pump_lock.acquire(blocking=False):
+            try:
+                gate = self.collision_gate
+                if gate is not None:
+                    for item, packets, failure in gate.drain():
+                        command, key, merged, _, _ = item
+                        if failure:
+                            self._finish_collision_window(command, key, error=_private_error(
+                                Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID, failure).error)
+                        else:
+                            self._finish_collision_window(command, key,
+                                merged=replace(merged, packets=packets,
+                                    status=PhyRecoveryStatus.RECOVERED if packets else PhyRecoveryStatus.NO_BURST_DETECTED))
+            finally:
+                self._collision_pump_lock.release()
+        super().pump()
 
     def bind_lane_runtime(self, dispatcher: Stage7LaneRxDispatcher) -> None:
         """restart factory가 완전한 새 lane set을 한 번 atomic rebind한다."""
 
         self._lane_dispatcher = dispatcher
 
+    def note_application_delivery(self, packet_id):
+        gate = self.collision_gate
+        if gate is not None:
+            gate.application_delivered(packet_id.value)
+
     @property
     def lane_dispatcher(self):
         return self._lane_dispatcher
 
     def reset_for_restart(self) -> None:
+        if self.collision_gate is not None:
+            self.collision_gate.fail("ENDPOINT_RESTART")
         super().reset_for_restart()
         self._lane_dispatcher = None
 
@@ -672,11 +742,31 @@ class Stage7Stage5Support(Stage5Support):
 
     # --- merge terminal --------------------------------------------------------
 
-    def finish_logical_window(self, command, key, *, merged=None, error=None) -> None:
+    def finish_logical_window(self, command, key, *, merged=None, error=None, metadata=None) -> None:
+        gate = self.collision_gate
+        if (gate is not None and merged is not None and merged.packets
+                and command.payload.request.start_at.total_nanoseconds() >= gate.active_from_ns):
+            request = command.payload.request
+            start = request.start_at.total_nanoseconds()
+            item = (command, key, merged, start, start + request.duration_nanoseconds)
+            packets = tuple((p, (metadata or {}).get(p.packet_id.value))
+                            for p in merged.packets)
+            held = gate.hold(key, item, packets)
+            if held is None:
+                self._finish_collision_window(command, key, merged=merged)
+                return
+            if held:
+                return
+            error = _private_error(Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                                   "MODEL_COLLISION_RX_CAPACITY").error
+            merged = None
+        self._finish_collision_window(command, key, merged=merged, error=error)
+
+    def _finish_collision_window(self, command, key, *, merged=None, error=None):
         from ..common.events import InternalEventType
         from ..common.contracts.mac_execution import PhyRxWindowClosedEvent
 
-        if merged is not None:
+        if merged is not None and (merged.packets or self.collision_gate is None):
             self._endpoint._record(
                 InternalEventType.PACKETS_RECOVERED, Layer.PHY, payload=merged
             )

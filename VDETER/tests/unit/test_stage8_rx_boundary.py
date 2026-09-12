@@ -9,7 +9,6 @@ from __future__ import annotations
 import unittest
 
 from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium import frontend
 from vdeter.stage8.shared_medium.iq import to_cf32le
 from vdeter.stage8.shared_medium.rx_boundary import (
     MAX_WINDOW_ARRIVALS,
@@ -46,8 +45,7 @@ class SingleInputTest(unittest.TestCase):
         result = _compose([_arrival("a", at_ns=0, data=data)])
         self.assertEqual(result.data, data)
         self.assertEqual(result.input_count, 1)
-        self.assertEqual(result.overlap_sample_count, 0)
-        self.assertEqual(result.clip_count, 0)
+        self.assertEqual(result.dropped_input_count, 0)
 
     def test_no_arrival_yields_silence_not_a_fabricated_receive(self):
         result = _compose([])
@@ -56,32 +54,23 @@ class SingleInputTest(unittest.TestCase):
 
 
 class OverlapTest(unittest.TestCase):
-    def test_full_overlap_sums_linearly(self):
-        """완전히 겹치면 복소 선형 합산이다(§7.1)."""
-        result = _compose([_arrival("a", at_ns=0, data=_tone(0.1 + 0.0j)),
-                           _arrival("b", at_ns=0, data=_tone(0.2 + 0.0j))])
-        self.assertEqual(result.input_count, 2)
-        self.assertEqual(result.overlap_sample_count, _COUNT)
-        # 0.1 + 0.2 = 0.3 (full-scale 1.0 미만이라 clip 없음)
-        self.assertEqual(result.clip_count, 0)
-        self.assertAlmostEqual(result.post_clip_peak, 0.3, places=5)
+    def test_full_overlap_drops_both(self):
+        result = _compose([_arrival("a", at_ns=0, data=_tone(0.1+0j)),
+                           _arrival("b", at_ns=0, data=_tone(0.2+0j))])
+        self.assertEqual(result.dropped_input_count, 2)
+        self.assertEqual(result.data, bytes(_COUNT * 8))
 
-    def test_partial_overlap_sums_only_the_overlapping_samples(self):
-        """부분 겹침은 겹친 구간만 합산하고 나머지는 단일 입력 그대로다."""
-        half = _COUNT // 2
-        shift_ns = int(half * _NS_PER_SAMPLE)
-        result = _compose([_arrival("a", at_ns=0, data=_tone(0.1 + 0.0j)),
-                           _arrival("b", at_ns=shift_ns, data=_tone(0.2 + 0.0j))])
-        self.assertEqual(result.input_count, 2)
-        self.assertEqual(result.overlap_sample_count, half)
+    def test_partial_overlap_drops_whole_bursts(self):
+        result = _compose([_arrival("a", at_ns=0, data=_tone(0.1+0j)),
+                           _arrival("b", at_ns=int(32 * _NS_PER_SAMPLE), data=_tone(0.2+0j))])
+        self.assertEqual(result.dropped_input_count, 2)
+        self.assertEqual(result.data, bytes(_COUNT * 8))
 
-    def test_sum_beyond_full_scale_is_clipped_not_normalised(self):
-        """full-scale을 넘으면 고정 virtual frontend로 포화시킨다 — 자동 정규화 금지(§7.2)."""
-        result = _compose([_arrival("a", at_ns=0, data=_tone(0.8 + 0.0j)),
-                           _arrival("b", at_ns=0, data=_tone(0.8 + 0.0j))])
-        self.assertGreater(result.clip_count, 0)
-        self.assertAlmostEqual(result.pre_clip_peak, 1.6, places=5)
-        self.assertAlmostEqual(result.post_clip_peak, frontend.FULL_SCALE, places=6)
+    def test_strong_burst_is_not_captured(self):
+        result = _compose([_arrival("a", at_ns=0, data=_tone(100+0j)),
+                           _arrival("b", at_ns=0, data=_tone(0.0001+0j))])
+        self.assertEqual(result.dropped_input_count, 2)
+        self.assertEqual(result.data, bytes(_COUNT * 8))
 
     def test_non_overlapping_arrival_outside_the_window_is_rejected(self):
         far = int(_COUNT * 4 * _NS_PER_SAMPLE)
@@ -100,7 +89,7 @@ class ChannelSeparationTest(unittest.TestCase):
         self.assertEqual(result.input_count, 1)
         self.assertEqual(result.not_tuned_count, 1)
         self.assertIn(("other", "NOT_TUNED"), result.rejected)
-        self.assertEqual(result.clip_count, 0)
+        self.assertEqual(result.dropped_input_count, 0)
 
     def test_untuned_lane_receives_nothing(self):
         result = compose_rx_window(
@@ -134,13 +123,12 @@ class EvidenceTest(unittest.TestCase):
         result = _compose([_arrival("a", at_ns=0, data=_tone(0.9 + 0.0j)),
                            _arrival("b", at_ns=0, data=_tone(0.9 + 0.0j))])
         evidence = result.as_evidence()
-        self.assertEqual(evidence["model"], "WIRED_SHARED_MEDIUM_EMULATION")
-        self.assertEqual(evidence["virtual_clipping"], "deterministic_approximation")
-        self.assertFalse(evidence["analog_adc_saturation_proven"])
-        self.assertEqual(evidence["frontend_version"], frontend.VIRTUAL_FRONTEND_VERSION)
-        # 소수는 문자열로 싣는다(canonical JSON은 float를 거부한다).
-        self.assertIsInstance(evidence["pre_clip_peak"], str)
-        self.assertGreater(evidence["clip_count"], 0)
+        self.assertEqual(evidence["model"], "TX_INTERVAL_DROP_V1")
+        self.assertTrue(evidence["simulation_only"])
+        self.assertFalse(evidence["rf_collision_measured"])
+        self.assertEqual(evidence["dropped_input_count"], 2)
+        self.assertNotIn("clip_count", evidence)
+
 
 
 if __name__ == "__main__":

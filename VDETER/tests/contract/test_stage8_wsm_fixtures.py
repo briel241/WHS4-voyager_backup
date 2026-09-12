@@ -2,7 +2,8 @@
 
 RF-off 요구 매핑: byte-pinned IQ fixture + SHA-256 manifest, positive/negative control,
 5-hard-gate(단일 burst 합성 전후 동일성), 15(frozen decoder 결과), 14(payload 임의 합성 0).
-fixture는 문서화된 참조 modem에서 결정적으로 재생성되며 코드가 같은 vector를 내는지 대조한다.
+단일 waveform은 그대로 재생성한다. 옛 composite 3종은 역사 decoder fixture로만 보존한다.
+v1.4 production 모델은 composite를 생성하지 않으며 충돌은 전체 burst drop이다.
 """
 
 from __future__ import annotations
@@ -65,20 +66,23 @@ class DeterministicRegenerationTest(unittest.TestCase):
     def test_capture_composite_matches_pinned_bytes(self):
         a = D.build_burst(PhysicalChannel.LOWER, 0, P1)
         b = D.build_burst(PhysicalChannel.LOWER, 0, P1)
-        comp = IQ.synthesize_same_channel([a, b])
-        self.assertEqual(comp.cf32le, _load("composite_capture_lower.iq"))
+        comp = IQ.render_noncolliding([a, b])
+        self.assertEqual(comp.dropped_input_count, 2)
+        self.assertEqual(comp.cf32le, bytes(len(comp.cf32le)))
 
     def test_collision_composite_matches_pinned_bytes(self):
         a = D.build_burst(PhysicalChannel.LOWER, 0, P1)
         b = D.build_burst(PhysicalChannel.LOWER, 0, P3)
-        comp = IQ.synthesize_same_channel([a, b])
-        self.assertEqual(comp.cf32le, _load("composite_collision_lower.iq"))
+        comp = IQ.render_noncolliding([a, b])
+        self.assertEqual(comp.dropped_input_count, 2)
+        self.assertEqual(comp.cf32le, bytes(len(comp.cf32le)))
 
     def test_partial_composite_matches_pinned_bytes(self):
         a = D.build_burst(PhysicalChannel.LOWER, 0, P1)
         b = D.build_burst(PhysicalChannel.LOWER, 40, P3)
-        comp = IQ.synthesize_same_channel([a, b])
-        self.assertEqual(comp.cf32le, _load("composite_partial_lower.iq"))
+        comp = IQ.render_noncolliding([a, b])
+        self.assertEqual(comp.dropped_input_count, 2)
+        self.assertEqual(comp.cf32le, bytes(len(comp.cf32le)))
 
 
 class PositiveControlTest(unittest.TestCase):
@@ -116,7 +120,7 @@ class HardGateOnFixtureTest(unittest.TestCase):
     def test_single_fixture_burst_byte_identical_and_decode_same(self):
         samples = IQ.from_cf32le(_load("src_clean_lower_p1.iq"))
         burst = IQ.IqBurst(PhysicalChannel.LOWER, 0, samples)
-        comp = IQ.synthesize_same_channel([burst])
+        comp = IQ.render_noncolliding([burst])
         self.assertEqual(comp.cf32le, burst.cf32le)
         self.assertEqual(D.decode(comp.samples).payload, P1)
 

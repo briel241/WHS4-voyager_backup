@@ -129,6 +129,9 @@ class _FileTail:
 class LocalCoordinatorSession:
     """coordinator 프로세스 하나를 로컬 자식으로 소유·감시·회수한다."""
 
+    # Both production and RF-off requests are owned by the coordinator child.
+    poc_workloads_in_coordinator = True
+
     def __init__(self, *, repo_root: Path | str, run_id: str,
                  run_root: Path | str, configs_dir: Path | str,
                  gain_artifact_path: Path | str,

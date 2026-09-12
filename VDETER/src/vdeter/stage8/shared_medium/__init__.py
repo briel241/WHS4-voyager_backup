@@ -15,7 +15,6 @@ from . import (
     constants,
     decoder,
     evidence,
-    frontend,
     iq,
     observation,
     provider,
@@ -25,7 +24,7 @@ from . import (
     tuning,
 )
 from .decoder import DecodeResult, DecodeStatus, build_burst, decode, encode_payload
-from .iq import CompositeResult, IqBurst, group_collisions, synthesize_same_channel
+from .iq import WindowRender, IqBurst, group_collisions, render_noncolliding
 from .observation import DeliveryRow, SceneResult, observe_scene
 from .provider import NextSafeSlotScheduler, SharedMediumActionProvider
 from .radiation import (
@@ -46,7 +45,6 @@ from .tuning import CommonLoTuningPlan, derive_dual_channel_plan, resolve_dual_c
 
 __all__ = (
     "constants",
-    "frontend",
     "iq",
     "decoder",
     "tuning",
@@ -57,9 +55,9 @@ __all__ = (
     "provider",
     "evidence",
     "IqBurst",
-    "CompositeResult",
+    "WindowRender",
     "group_collisions",
-    "synthesize_same_channel",
+    "render_noncolliding",
     "DecodeStatus",
     "DecodeResult",
     "decode",

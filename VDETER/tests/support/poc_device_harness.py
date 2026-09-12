@@ -19,7 +19,7 @@ import threading
 import time
 
 #: 모의 시간 진행 배속(실시간 대비). lead 의미를 보존하면서 시험을 과도하게 늘리지 않는 값.
-_TIME_ACCELERATION = 4.0
+_TIME_ACCELERATION = float(os.environ.get("STAGE8_TEST_TIME_ACCELERATION", "4.0"))
 
 
 #: 서빙할 endpoint(실 배치와 같은 세 endpoint). 각자 **자기 socket**과 자기 adapter를 가진다.

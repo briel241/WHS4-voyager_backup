@@ -7,7 +7,6 @@ from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
 from vdeter.stage8.poc_api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
 from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
 from vdeter.stage8.shared_medium import evidence as E
-from vdeter.stage8.shared_medium import frontend as F
 from vdeter.stage8.shared_medium import observation as O
 from vdeter.stage8.shared_medium import radiation as R
 from vdeter.stage8.shared_medium import testing as T
@@ -28,7 +27,10 @@ def test_empty_and_populated_exports_identify_emulation_and_clipping_boundary():
     for value in (E.SharedMediumEvidence(), E.build_evidence([p], O.observe_scene([p]))):
         boundary = value.as_json_value()["model_boundary"]
         assert boundary["model"] == "WIRED_SHARED_MEDIUM_EMULATION"
-        assert boundary["virtual_clipping"] == "deterministic_approximation"
+        assert boundary["collision_policy"] == "LOCAL_DECODED_WINDOW_OVERLAP_DROP_V1"
+        assert boundary["undecoded_interference_detection"] is False
+        assert boundary["rf_off_scene_model"] == "TX_INTERVAL_DROP_V1"
+        assert boundary["virtual_clipping"] == "NOT_IMPLEMENTED_REMOVED_V1_4"
         assert boundary["single_antenna_adc_equivalence_proven"] is False
         assert boundary["analog_adc_saturation_proven"] is False
 
@@ -83,25 +85,22 @@ def test_composite_metrics_correlate_collision_sources_and_distinct_sample_windo
     values = E.build_evidence(parents, scene).as_json_value()
     for row in values["delivery_matrix"]:
         if row["tuning_state"] == "NOT_TUNED":
-            assert row["composite"] is None
+            assert row["interval_evidence"] is None
             assert row["readiness"] is None
             continue
-        metrics = row["composite"]
+        metrics = row["interval_evidence"]
         p = next(p for p in parents if p.parent_id == row["parent_id"])
-        composite = next(c for endpoint, c in scene.composites
-                         if endpoint == row["endpoint"] and c.channel.value == row["channel"]
-                         and c.base_start_sample <= p.scheduled_sample < c.base_start_sample + len(c.samples))
-        assert metrics["start_sample"] == composite.base_start_sample
-        assert metrics["end_sample"] == composite.base_start_sample + len(composite.samples)
-        assert metrics["pre_clip_peak"] == composite.pre_clip_peak
-        assert metrics["post_clip_peak"] == composite.post_clip_peak
-        assert metrics["frontend_version"] == composite.frontend_version == F.VIRTUAL_FRONTEND_VERSION
-        assert [source["peak"] for source in metrics["per_source_peak"]] == list(composite.per_source_peak)
-        assert {source["parent_id"] for source in metrics["per_source_peak"]} == {
-            other.parent_id for other in parents if other.scheduled_sample < metrics["end_sample"]
-            and other.waveform.end_sample > metrics["start_sample"]
-        }
-        assert metrics["pre_clip_peak"] > metrics["post_clip_peak"] if p.scheduled_sample < 4096 else True
+        assert metrics["model"] == "TX_INTERVAL_DROP_V1"
+        assert metrics["simulation_only"] is True
+        assert metrics["start_sample"] <= p.scheduled_sample < metrics["end_sample"]
+        assert p.parent_id in metrics["parent_ids"]
+        if p.scheduled_sample < 4096:
+            assert row["decode_status"] == "MODEL_COLLISION_DROP"
+            assert row["public_delivery"] is False
+            assert row["decoded_payload_digest"] is None
+        else:
+            assert row["public_delivery"] is True
+        assert "pre_clip_peak" not in metrics
     json.dumps(values, allow_nan=False)
     assert '"samples"' not in json.dumps(values)
     assert '"payload"' not in json.dumps(values)
@@ -150,7 +149,7 @@ def test_proof_and_composite_export_obey_existing_delivery_cap(monkeypatch):
     exported = E.build_evidence([p], scene, broadcast_results=[result]).as_json_value()
     assert len(exported["delivery_matrix"]) == 1
     assert exported["delivery_matrix"][0]["readiness"]["proof"]
-    assert exported["delivery_matrix"][0]["composite"]["per_source_peak"]
+    assert exported["delivery_matrix"][0]["interval_evidence"]["parent_ids"]
     assert exported["broadcast_infrastructure_result"]["delivery_matrix_dropped_rows"] == 1
     assert exported["broadcast_infrastructure_result"]["delivery_matrix_cap"] == 1
 
@@ -185,7 +184,7 @@ def test_provider_default_evidence_preserves_successful_proof_until_cleanup():
     assert exported["broadcast_infrastructure_result"]["parent_outcomes"][p.parent_id] == "COMPLETED"
     roc = next(row for row in exported["delivery_matrix"] if row["endpoint"] == "ROC")
     assert roc["readiness"]["proof"]["slot_key"] == p.slot_key
-    assert roc["composite"]["frontend_version"] == F.VIRTUAL_FRONTEND_VERSION
+    assert roc["interval_evidence"]["model"] == "TX_INTERVAL_DROP_V1"
     omitted = provider.build_evidence([p], scene, broadcast_results=()).as_json_value()
     assert all(row["readiness"] is None for row in omitted["delivery_matrix"])
     provider.cleanup()

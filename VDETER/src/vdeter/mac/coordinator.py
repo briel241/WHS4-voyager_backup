@@ -296,6 +296,8 @@ class MacCoordinator:
         "_phy_profiles",
         "_repository",
         "_bootstrap",
+        "_observer_channel_names",
+        "_rx_planner_paused",
     )
 
     def __init__(
@@ -318,6 +320,8 @@ class MacCoordinator:
         self._link_profiles = link_profile_registry
         self._phy_profiles = phy_profile_registry
         self._repository = repository
+        self._observer_channel_names = ()
+        self._rx_planner_paused = False
         self._bootstrap = (
             STAGE4_BBSC_BOOTSTRAP_V1
             if profile.upper_channel.name == UPPER_CHANNEL.name
@@ -571,6 +575,7 @@ class MacCoordinator:
 
         slot_map = self.active_slot_map(state)
         receive_channel = self._receive_channel()
+        receive_names = {receive_channel.name, *self._observer_channel_names}
         wanted: list = []
         seen = set()
 
@@ -589,25 +594,25 @@ class MacCoordinator:
         else:
             functions = (SlotFunction.BBSC, SlotFunction.ASC, SlotFunction.RAC, SlotFunction.DSCH)
         for slot in slot_map.slots:
-            if slot.physical_channel.name != receive_channel.name:
+            if slot.physical_channel.name not in receive_names:
                 continue
             if slot.function in functions:
                 add(slot)
         for allocation in state.lc_allocations:
-            if allocation.state is LcState.EXTERNAL_RESERVED:
+            if allocation.state is LcState.EXTERNAL_RESERVED and not self._observer_channel_names:
                 continue
             if allocation.last_valid_frame_ordinal < frame_ordinal:
                 continue
             if frame_ordinal < allocation.activation_frame_ordinal:
                 continue
-            if allocation.peer_station_id_value != self.local_station_id.value:
+            if not self._observer_channel_names and allocation.peer_station_id_value != self.local_station_id.value:
                 # 이 endpoint가 수신자인 할당만 assigned DC를 연다.
                 if allocation.owner_station_id_value != self.local_station_id.value:
                     continue
             for slot in slot_map.slots:
                 if (
                     slot.function is SlotFunction.DC
-                    and slot.physical_channel.name == receive_channel.name
+                    and slot.physical_channel.name in receive_names
                     and slot.tdma_channel == allocation.tdma_channel
                 ):
                     add(slot)
@@ -623,6 +628,8 @@ class MacCoordinator:
     ) -> MacState:
         """현재/다음 frame의 새 required set과 저장 set의 차집합만 새 batch로 만든다."""
 
+        if self._rx_planner_paused:
+            return state
         if errors is None:
             errors = []
         link_id = self._link_id_for(11)
@@ -2509,7 +2516,27 @@ class MacCoordinator:
             destination.kind is not AddressKind.ADDRESSED
             or destination.station_id.value != self.local_station_id.value
         ):
-            return state
+            # A valid grant to another station updates occupancy only. In
+            # particular it must not consume our outstanding Type 90 request,
+            # open a transfer, send an ACK, or grant us a TX allocation.
+            if destination.kind is not AddressKind.ADDRESSED or resource_module.is_rejection(body):
+                return state
+            slot_map = self.active_slot_map(state)
+            tx_slot = slot_map.slot_for_logical_channel(body.logical_channel_tx)
+            rx_slot = slot_map.slot_for_logical_channel(body.logical_channel_rx)
+            if tx_slot is None or rx_slot is None:
+                return state
+            external = resource_module.allocation_from_type4(
+                body=body,
+                owner_station_id_value=body.source_id.value,
+                peer_station_id_value=destination.station_id.value,
+                transmit_frame_ordinal=transmit_frame,
+                tdma_channel=tx_slot.tdma_channel,
+                issued_by_local=False,
+                external=True,
+            )
+            return state.evolve(lc_allocations=resource_module.upsert_allocation(
+                state.lc_allocations, external))
         outstanding = state.outstanding_request
         if outstanding is None:
             if resource_module.is_rejection(body):

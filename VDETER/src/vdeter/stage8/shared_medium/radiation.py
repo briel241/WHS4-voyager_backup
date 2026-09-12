@@ -128,6 +128,7 @@ class ChildPath:
     scheduled_sample: int
     scheduled_hw_timestamp_ns: int
     samples: tuple
+    wire_packet_digest: str | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -341,6 +342,7 @@ class AtomicBroadcast:
                     scheduled_sample=scheduled_sample,
                     scheduled_hw_timestamp_ns=scheduled_hw_timestamp_ns,
                     samples=samples,
+                    wire_packet_digest=waveform.wire_packet_digest,
                 )
             )
         parent = ParentTransmission(

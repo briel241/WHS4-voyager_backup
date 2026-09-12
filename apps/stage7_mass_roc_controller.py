@@ -181,12 +181,24 @@ class MassRocScenarioController:
         self._now = now_fn if now_fn is not None else time.time
         self._status_timeout_s = status_timeout_s
         self._receive_timeout_s = receive_timeout_s
+        self._cancel_requested = False
+        self._workload_guard = None
+
+    def cancel_workload(self):
+        self._cancel_requested = True
+
+    def _check_activity(self):
+        if self._cancel_requested:
+            raise ScenarioError("workload cancelled; no further service submissions")
+        if self._workload_guard is not None:
+            self._workload_guard()
 
     # ---- inline Service 호출 (public transfer ID / state) -------------------
 
     def _submit(self, endpoint_id: str, *, step_id: str, destination_station: int,
                 payload_format: str, payload: bytes, ack_required: bool) -> tuple[str, dict]:
         """endpoint에서 canonical inline SUBMIT을 시키고 public transfer ID를 얻는다."""
+        self._check_activity()
         request = {
             "destination": destination_station,
             "payload_format": payload_format,
@@ -208,6 +220,7 @@ class MassRocScenarioController:
         return body["transfer_id"], body
 
     def _status(self, endpoint_id: str, transfer_id: str) -> str | None:
+        self._check_activity()
         response = self._controller.invoke_service_inline(
             endpoint_id, scenario_id=f"mass-roc:{self._workload_id}",
             step_id=f"{self._workload_id}/status/{transfer_id[:8]}",
@@ -242,6 +255,7 @@ class MassRocScenarioController:
                        before: int = 0) -> dict | None:
         """DATA_RECEIVED가 도착할 때까지 대기하고 그 record를 돌려준다."""
         def predicate(records):
+            self._check_activity()
             hits = _received(records, endpoint_id, payload_sha)
             return hits[before:] if len(hits) > before else None
 
@@ -902,38 +916,86 @@ class PocWorkloadHost:
     장치는 launcher가 단독 소유하므로 provider seam은 §16.2 TEST adapter op으로만 장치에 닿는다
     (`apps/stage8_launcher_seams`). 이 class는 `poc_run`이 읽는 device 경계 공급자 계약을 만족시킨다.
 
-    관측(P09)은 **실제 실행 중 복호 이벤트**에서 온다 — `service_events` JSONL의 `DATA_RECEIVED`
-    기록(실 source/destination/payload digest/수신 시각)을 그대로 쓴다. 다만 그 공개 이벤트에는
-    physical channel과 장치 시각이 없으므로, 반응형 인과성 기준 시각은 **관측 시점에 읽은 실
-    actor hardware clock**을 쓴다(합성 counter 아님). 이것은 수신기의 복호 시각이 아니며, 그
-    차이는 남은 제한으로 보고한다.
+    관측(P09)은 actor의 실제 PHY 복호 + 수신기 내부 복호 구간 gate에서만 온다.
+    TEST 소켓은 실제 RX 채널·첫 표본 장치 시각을 운반한다. 다른 endpoint의 Service
+    이벤트나 polling 시각으로 관측을 합성하지 않는다. 대상 application 효과는 별도 receipt다.
     """
-
-    #: 관측 1건을 만들 때 쓰는 실 이벤트 유형(공개 service event 경계).
-    OBSERVED_EVENT_TYPE = "DATA_RECEIVED"
 
     def __init__(self, *, controller, events, actor_endpoint: str = "MASS-B") -> None:
         from apps.stage8_launcher_seams import assemble_launcher_provider
 
         self._events = events
+        self._controller = controller
         self._actor = actor_endpoint
         self._provider, self._bindings = assemble_launcher_provider(
             controller, actor_endpoint=actor_endpoint, endpoint_ids=ENDPOINT_IDS,
             station_id_by_endpoint=dict(STATION_BY_ENDPOINT))
-        self._seen = {endpoint: 0 for endpoint in ENDPOINT_IDS}
+        self._exchange = None
 
     # --- poc_run device 경계 계약 --------------------------------------------
 
+    def selection_capabilities(self):
+        from apps.standalone.poc_run import ServerCapabilityConfig
+        reply = self._bindings["actor"].call("poc_collision",
+            {"mode": "SUPPORT", "session_id": "capability-discovery"})
+        return ServerCapabilityConfig(wsm_g1_production_installed=bool(reply.get("dual_supported")))
+
+    def prepare_poc_scope(self, descriptor):
+        from apps.stage8_collision_exchange import CollisionExchange
+        from apps.stage8_launcher_seams import assemble_launcher_provider
+        if self._exchange is not None:
+            raise RuntimeError("workload RX scope already prepared")
+        dual = "observe_dual_physical_channel" in descriptor.requested_capabilities
+        self._exchange = CollisionExchange(self._bindings["clients"], self._actor, dual=dual)
+        self._exchange.start()
+        self._provider, self._bindings = assemble_launcher_provider(
+            self._controller, actor_endpoint=self._actor, endpoint_ids=ENDPOINT_IDS,
+            station_id_by_endpoint=dict(STATION_BY_ENDPOINT),
+            dual_channel_installed=self._exchange.dual_ready)
+        self._bindings["actor"].collision_session_id = self._exchange.session_id
+
+    def poc_server_config(self):
+        from apps.standalone.poc_run import ServerCapabilityConfig
+        return ServerCapabilityConfig(wsm_g1_production_installed=bool(
+            self._exchange is not None and self._exchange.dual_ready))
+
     def poc_provider(self):
+        if self._exchange is None:
+            from apps.stage8_collision_exchange import CollisionExchange
+            self._exchange = CollisionExchange(self._bindings["clients"], self._actor)
+            self._exchange.start()
+            self._bindings["actor"].collision_session_id = self._exchange.session_id
         return self._provider
+
+    def close_collision_exchange(self):
+        if self._exchange is not None:
+            self._exchange.close()
+            return self._exchange.evidence
+        return None
 
     def poc_terminal_source(self):
         return self._bindings["terminal_source"]
 
     def poc_target_response(self):
-        # 실 application 수신 증거는 launcher 쪽 service event에 있다. 이 경로에서는 아직 그것을
-        # action에 결속해 읽지 않으므로 공급하지 않는다 — 없는 효과를 만들지 않는다(INDETERMINATE).
-        return None
+        from vdeter.stage8.execution.verdict import TargetEffect
+
+        def response(action, result, parent):
+            from vdeter.mac.tdma import FRAME_NANOSECONDS
+            binding = self._bindings["sink"].receipt_by_group.get(parent.parent_id)
+            receipt = None
+            if binding is not None and self._exchange is not None:
+                start = binding["transmit_at_utc_ns"]
+                receipt = self._exchange.target_receipt(parent.addressed_destination,
+                    digest=binding["wire_packet_digest"], source=self._actor,
+                    start_ns=start - FRAME_NANOSECONDS // 90,
+                    end_ns=start + FRAME_NANOSECONDS // 90)
+            if receipt is None:
+                return TargetEffect.INDETERMINATE, "no unique target application receipt in selected slot neighbourhood"
+            return TargetEffect.EFFECT_OBSERVED, (
+                f"target application accepted packet={receipt['packet_digest']}; "
+                "basis=MAC_PRESENTATION_SERVICE_ACCEPTED; not proof of exploit success")
+
+        return response
 
     def poc_workload_steps(self, scenario_id):
         from vdeter.stage8.execution.runner import scenario_started
@@ -942,50 +1004,24 @@ class PocWorkloadHost:
     # --- 실행 중 실 관측 -------------------------------------------------------
 
     def new_observations(self):
-        """지난 호출 이후 도착한 **실 복호 이벤트**를 PoC 관측 record로 만든다."""
-        from vdeter.stage8.poc_api.types import ObservationRecord, TuningState
-        from vdeter.stage8.shared_medium.topology import role_rx_channel
-
-        station_to_endpoint = {station: endpoint
-                               for endpoint, station in STATION_BY_ENDPOINT.items()}
-        self._events.poll()
+        """Only the actor's actual, pre-MAC-policy-cleared PHY observations."""
+        from vdeter.stage8.poc_api.types import ObservationRecord, TuningState, PhysicalChannel
+        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
         out = []
-        for endpoint_id in ENDPOINT_IDS:
-            records = self._events.records.get(endpoint_id) or []
-            for record in records[self._seen.get(endpoint_id, 0):]:
-                if record.get("event_type") != self.OBSERVED_EVENT_TYPE:
-                    continue
-                source = record.get("original_source") or record.get("source")
-                destination = record.get("original_destination")
-                if source is None or destination is None:
-                    continue
-                try:
-                    hw_ns = int(self._bindings["actor"].radio_state(fresh=True)
-                                .get("hardware_time_ns"))
-                except Exception:  # noqa: BLE001 - 시각을 못 읽으면 관측을 만들지 않는다
-                    continue
-                # 송신 채널은 **수신자 role**이 정한다(addressed 전송은 대상의 RX 채널로 나간다).
-                # 공개 service event에는 physical channel이 없으므로 권위 role 표에서 유도하고,
-                # 그것이 측정값이 아니라 유도값임을 증거에 남긴다(측정으로 위장하지 않는다).
-                dest_endpoint = station_to_endpoint.get(int(destination))
-                if dest_endpoint is None:
-                    continue
-                out.append(ObservationRecord(
-                    physical_channel=role_rx_channel(dest_endpoint),
-                    tuning_state=TuningState.TUNED_OBSERVER,
-                    observation_id=f"obs-{endpoint_id}-{record.get('payload_sha256', '')[:16]}",
-                    source_station=str(source),
-                    destination_station=str(destination),
-                    device_hw_timestamp_ns=hw_ns,
-                    host_mono_timestamp_ns=int(record.get("received_at_ns") or hw_ns),
-                    body={"payload_sha256": record.get("payload_sha256"),
-                          "observed_at_endpoint": endpoint_id,
-                          # 무엇이 실측이고 무엇이 유도인지 분리해 기록한다.
-                          "physical_channel_source": "DERIVED_FROM_ROLE_RX_CHANNEL",
-                          "device_time_source": "ACTOR_HARDWARE_CLOCK_AT_OBSERVATION",
-                          "decode_evidence": "REAL_SERVICE_DATA_RECEIVED"},
-                ))
-            self._seen[endpoint_id] = len(records)
+        for record in self._exchange.observations() if self._exchange is not None else ():
+            out.append(ObservationRecord(
+                physical_channel=PhysicalChannel.LOWER if record["physical_channel"] == LOWER_CHANNEL_NAME else PhysicalChannel.UPPER,
+                tuning_state=TuningState.TUNED_OBSERVER,
+                observation_id=f"{self._exchange.session_id}:{self._actor}:{record['observation_key']}:{record['device_hw_timestamp_ns']}",
+                source_station=str(record["source_station"]),
+                destination_station=str(record["destination_station"] or "BROADCAST"),
+                device_hw_timestamp_ns=record["device_hw_timestamp_ns"],
+                host_mono_timestamp_ns=record["host_mono_timestamp_ns"],
+                body={k: v for k, v in record.items() if k not in (
+                    "source_station", "destination_station", "physical_channel",
+                    "device_hw_timestamp_ns", "host_mono_timestamp_ns")}
+                | {"observed_at_endpoint": self._actor, "source_station_basis": "FIXED_PHYSICAL_INPUT_PATH",
+                   "address_basis": "NOT_INFERRED_FROM_TRANSMITTER"}))
         return out
 
 
@@ -997,14 +1033,25 @@ class _AdapterChannel:
     """SeqPacketClient 위의 §16.2 request/response 채널."""
 
     def __init__(self, client, timeout_s: float = 300.0) -> None:
+        from threading import Lock
         self._client = client
         self._timeout_s = timeout_s
+        self._request_lock = Lock()
 
     def request(self, message: dict) -> dict:
+        budget = min(self._timeout_s, 1.0) if message.get("command_name") == "poc_collision" else self._timeout_s
+        deadline = time.monotonic() + budget
+        if not self._request_lock.acquire(timeout=budget):
+            raise TimeoutError("TEST socket busy")
+        try:
+            return self._request_locked(message, deadline)
+        finally:
+            self._request_lock.release()
+
+    def _request_locked(self, message, deadline):
         self._client.send(message)
-        deadline = time.monotonic() + self._timeout_s
         while time.monotonic() < deadline:
-            received = self._client.recv(timeout=2.0)
+            received = self._client.recv(timeout=min(2.0, max(0.001, deadline - time.monotonic())))
             if received is None:
                 continue
             if received.get("command_id") == message["command_id"]:
@@ -1172,7 +1219,8 @@ def main(argv=None) -> int:
             snapshot = _poc_run.select_snapshot(
                 option, scenario_id=arguments.scenario_id,
                 dest_dir=os.path.join(arguments.run_root, "poc-snapshot"),
-                poc_id=poc_request.get("poc_id"), interactive=False)
+                poc_id=poc_request.get("poc_id"), interactive=False,
+                server_config=poc_host.selection_capabilities())
             if snapshot is not None:
                 poc_prepared = _poc_run.prepare_workload(
                     poc_host, snapshot, scenario_id=arguments.scenario_id,
@@ -1182,6 +1230,11 @@ def main(argv=None) -> int:
                 poc_evidence = {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
                                 "workload_id": workload_id}
         except Exception as exc:  # noqa: BLE001 - arm 실패는 fail-closed: scenario를 돌리지 않는다
+            collision_cleanup_error = None
+            try:
+                poc_host.close_collision_exchange()
+            except Exception as cleanup_exc:
+                collision_cleanup_error = str(cleanup_exc)
             poc_evidence = getattr(exc, "evidence", None) or {
                 "status": "ERROR", "poc_infrastructure": "ERROR",
                 "error": f"{type(exc).__name__}: {exc}"}
@@ -1195,7 +1248,7 @@ def main(argv=None) -> int:
                 "certificate_case": arguments.certificate_case,
                 "status": "FAIL",
                 "error": "PoC arm 실패 — scenario를 제출하지 않았습니다(fail-closed)",
-                "cleanup_errors": [], "results": {},
+                "cleanup_errors": [collision_cleanup_error] if collision_cleanup_error else [], "results": {},
                 "command_log": inline_controller.command_log,
             }
             _write_result(arguments.run_root, "final-result", final)
@@ -1206,6 +1259,9 @@ def main(argv=None) -> int:
     results: dict = {}
     run_error: str | None = None
     cleanup_errors: list[str] = []
+    thread = None
+    poc_failure = None
+    scenario_success = False
     try:
         if poc_prepared is not None:
             # scenario를 **백그라운드로** 돌리고 그 동안 실 복호 관측을 PoC에 전달한다.
@@ -1213,6 +1269,8 @@ def main(argv=None) -> int:
             import threading as _threading
 
             box: dict = {}
+            controller._workload_guard = poc_host._exchange.check
+            poc_prepared.deliver_scenario_start()
 
             def _run_scenarios():
                 try:
@@ -1238,11 +1296,43 @@ def main(argv=None) -> int:
             results = run_scenarios(controller, arguments.scenario_id,
                                     arguments.certificate_case, trace=trace)
     except Exception as exc:  # noqa: BLE001 - 원래 예외를 evidence에 보존
+        poc_failure = exc if poc_prepared is not None else None
         run_error = f"{type(exc).__name__}: {exc}"
         import traceback as _tb
         trace.emit("workload_exception", error=run_error,
                    traceback=_tb.format_exc()[-2000:])
     finally:
+        scenario_success = run_error is None and bool(results) and all(_result_ok(item) for item in results.values())
+        # Stop the scenario producer before restoring model state. A failing
+        # observer must not leave a daemon submitting the next workload's TX.
+        controller.cancel_workload()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                cleanup_errors.append("scenario producer still alive; session must inhibit")
+                run_error = run_error or cleanup_errors[-1]
+                from apps.standalone.poc_run import collision_state_error
+                poc_failure = poc_failure or collision_state_error(cleanup_errors[-1])
+        import sys as _sys
+        interrupted = _sys.exc_info()[1]
+        if interrupted is not None and not isinstance(interrupted, Exception) and poc_prepared is not None:
+            from apps.standalone import poc_run as _poc_run
+            try:
+                _poc_run.abort_prepared({"workload": poc_prepared}, cause=interrupted,
+                                       out=lambda line: trace.emit("poc_abort", detail=line))
+            except BaseException as cleanup_exc:
+                interrupted.add_note(f"PoC interrupt cleanup: {cleanup_exc}")
+        # Finish the model while endpoint pumps/clocks still exist. Pending RX
+        # is drained (or explicitly failed), never replayed after this workload.
+        if poc_host is not None:
+            try:
+                collision_evidence = poc_host.close_collision_exchange()
+                if collision_evidence is not None:
+                    trace.emit("collision_model_closed", evidence=collision_evidence)
+            except Exception as exc:
+                cleanup_errors.append(f"collision cleanup: {exc}")
+                run_error = run_error or f"collision cleanup: {exc}"
+                poc_failure = poc_failure or exc
         if not session_owned:
             for endpoint_id in ENDPOINT_IDS:
                 try:
@@ -1258,10 +1348,16 @@ def main(argv=None) -> int:
         from apps.standalone import poc_run as _poc_run
         # 판정을 재계산하지 않는다 — 방금 확정한 이 workload의 scenario 결과를 그대로 매핑한다.
         scenario_verdict = _poc_run.scenario_verdict_from_status(
-            "PASS" if overall else "FAIL")
+            "PASS" if scenario_success else "FAIL")
         try:
-            poc_evidence = _poc_run.finish_workload(
-                poc_prepared, scenario_verdict=scenario_verdict)
+            if poc_failure is not None:
+                poc_evidence = _poc_run.abort_prepared(
+                    {"workload": poc_prepared}, cause=poc_failure,
+                    scenario_verdict=scenario_verdict,
+                    out=lambda line: trace.emit("poc_abort", detail=line))
+            else:
+                poc_evidence = _poc_run.finish_workload(
+                    poc_prepared, scenario_verdict=scenario_verdict)
         except BaseException as exc:  # noqa: BLE001 - finish 실패도 cleanup-only로 정리
             prep = {"workload": poc_prepared}
             poc_evidence = _poc_run.abort_prepared(
@@ -1271,6 +1367,8 @@ def main(argv=None) -> int:
         poc_evidence = poc_evidence or {"status": "ERROR", "poc_infrastructure": "ERROR"}
         poc_evidence.setdefault("workload_id", workload_id)
         poc_evidence.setdefault("scenario_id", arguments.scenario_id)
+        if poc_host is not None and poc_host._exchange is not None:
+            poc_evidence["collision_model"] = poc_host._exchange.evidence
     if poc_evidence is not None:
         _write_result(arguments.run_root, "poc-result", poc_evidence)
         trace.emit("poc_result", infrastructure=poc_evidence.get("poc_infrastructure"),

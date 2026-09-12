@@ -79,6 +79,93 @@ class Stage4ResourceTest(unittest.TestCase):
     def setUpClass(cls):
         cls.slot_map = build_canonical_tbb_profile(deployment_profile()).slot_map
 
+    def test_heard_allocation_cannot_replace_or_authorize_own_grant(self):
+        from vdeter.mac.resources import (
+            conflicting_allocation, externally_reserved, find_allocation_for_tx,
+            prune_expired_allocations, upsert_allocation,
+        )
+        own = LcAllocation(2, 16, ROC_STATION_ID.value, MASS_A_STATION_ID.value,
+                           LcState.RESERVED, 10, 13, 1, False)
+        heard = replace(own, state=LcState.EXTERNAL_RESERVED,
+                        peer_station_id_value=MASS_B_STATION_ID.value)
+        entries = upsert_allocation((own,), heard)
+        self.assertEqual(2, len(entries))
+        self.assertEqual(entries, upsert_allocation(entries, heard))
+        self.assertIsNone(find_allocation_for_tx((heard,), 2, 11))
+        self.assertIs(own, find_allocation_for_tx(entries, 2, 11))
+        self.assertIs(heard, conflicting_allocation((heard,), (2, 16),
+                                                    ROC_STATION_ID.value, 11))
+        self.assertTrue(externally_reserved(entries, 2, 9))
+        self.assertTrue(externally_reserved(entries, 16, 13))
+        self.assertFalse(externally_reserved(entries, 2, 14))
+        self.assertEqual((), prune_expired_allocations(entries, 14))
+
+    def test_other_mass_type4_records_occupancy_without_transfer_side_effects(self):
+        clock, endpoints = build_stage4_software_group(with_type0=False)
+        start_stage4_group(clock, endpoints)
+        coordinator = next(e.stage4.mac.coordinator for e in endpoints
+                           if e.dependencies.configuration.endpoint.station_id == MASS_A_STATION_ID)
+        pair = duplex_pair(coordinator.active_slot_map(coordinator.state),
+                           Direction.ROC_TO_SHIP, 1, lower=LOWER_CHANNEL, upper=UPPER_CHANNEL)
+        body = build_allocation_body(source_id=ROC_STATION_ID,
+                                    destination=Addressed(MASS_B_STATION_ID),
+                                    logical_channel_tx=pair.logical_channel_tx,
+                                    logical_channel_rx=pair.logical_channel_rx, link_id=LinkId(11))
+        commands, errors = [], []
+        state = coordinator.state
+        arguments = dict(decoded=SimpleNamespace(received_at=clock.now_utc()),
+                         causation_event_id="overheard", commands=commands, errors=errors)
+        observed = coordinator._receive_type4(state, body, **arguments)
+        self.assertEqual(1, len(observed.lc_allocations))
+        self.assertIs(LcState.EXTERNAL_RESERVED, observed.lc_allocations[0].state)
+        self.assertEqual(MASS_B_STATION_ID.value, observed.lc_allocations[0].peer_station_id_value)
+        self.assertEqual(state.transfers, observed.transfers)
+        self.assertEqual(state.outstanding_request, observed.outstanding_request)
+        self.assertEqual([], commands)
+        self.assertEqual([], errors)
+        repeated = coordinator._receive_type4(observed, body, **arguments)
+        self.assertEqual(observed.lc_allocations, repeated.lc_allocations)
+        rejected = build_rejection_body(source_id=ROC_STATION_ID,
+                                        destination=Addressed(MASS_B_STATION_ID))
+        self.assertIs(observed, coordinator._receive_type4(observed, rejected, **arguments))
+        self.assertEqual(coordinator.required_rx_slots(state, 1),
+                         coordinator.required_rx_slots(observed, 1))
+
+    def test_overheard_type4_real_link_to_mac_path(self):
+        from vdeter.common.contracts.link import LinkPacketEncodeRequest, LinkDecodeRequest
+        from vdeter.common.contracts.mac import MacMessageInput
+        from vdeter.common.contracts.message import MessageEncodeRequest
+        clock, endpoints = build_stage4_software_group(with_type0=False)
+        start_stage4_group(clock, endpoints)
+        receiver = next(e for e in endpoints
+                        if e.dependencies.configuration.endpoint.station_id == MASS_A_STATION_ID)
+        sender = next(e for e in endpoints
+                      if e.dependencies.configuration.endpoint.station_id == ROC_STATION_ID)
+        coordinator = receiver.stage4.mac.coordinator
+        pair = duplex_pair(coordinator.active_slot_map(coordinator.state),
+                           Direction.ROC_TO_SHIP, 1, lower=LOWER_CHANNEL, upper=UPPER_CHANNEL)
+        body = build_allocation_body(source_id=ROC_STATION_ID,
+                                    destination=Addressed(MASS_B_STATION_ID),
+                                    logical_channel_tx=pair.logical_channel_tx,
+                                    logical_channel_rx=pair.logical_channel_rx, link_id=LinkId(11))
+        built = sender._link.encode_packet(LinkPacketEncodeRequest(
+            link_id=LinkId(11), messages=(MessageEncodeRequest(body, Correlation()),),
+            correlation=Correlation()))
+        self.assertTrue(built.is_ok, built)
+        decoded = receiver._link.decode_packet(LinkDecodeRequest(
+            packet_id=built.value.packet_id, link_id=LinkId(11),
+            received_at=clock.now_utc(), packet=built.value.packet))
+        self.assertTrue(decoded.is_ok, decoded)
+        before = coordinator.state
+        result = receiver.stage4.mac.handle_message(MacMessageInput(
+            decoded=decoded.value, channel=UPPER_CHANNEL))
+        self.assertTrue(result.is_ok, result)
+        self.assertFalse(result.value.actions, "overhear must not deliver application data or ACK")
+        self.assertEqual(before.transfers, coordinator.state.transfers)
+        self.assertEqual(before.outstanding_request, coordinator.state.outstanding_request)
+        self.assertEqual(1, len(coordinator.state.lc_allocations))
+        self.assertIs(LcState.EXTERNAL_RESERVED, coordinator.state.lc_allocations[0].state)
+
     def test_TC_MAC_008_canonical_pair_allocation_and_single_resync(self):
         self.assertTrue(validate_terminal_capabilities(2).is_ok)
         unsupported_capability = validate_terminal_capabilities(0x12)

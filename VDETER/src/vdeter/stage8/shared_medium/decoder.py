@@ -1,18 +1,18 @@
 """RF-off 참조 frozen decoder (`WIRED_SHARED_MEDIUM_EMULATION`, 명세 §7.3, §11.1).
 
 Stage 5는 실장비 PHY/GNU Radio(numpy 의존)를 실행하지 않는 순수 software track(WSM-G3)이다.
-이 module은 그 track에서 composite IQ의 decode 성공·실패를 결정하는 **결정적 참조 decoder**다.
+이 module은 RF-off 단일 파형/역사 fixture의 **결정적 참조 decoder**다.
 실신호용 frozen PHY는 `vdeter.phy.transmitter.Link11Phy`이며, 그 실신호 dual-channel decode
 검증(WSM-G4)과 qualification(WSM-G5)은 Stage 6 이후로 이관된다(로드맵 §6.1).
 
 decoder 판정 규칙은 표준 QPSK hard-decision + CRC이며 fixture에 맞춰 조정하지 않는다.
-collision 결과는 이 decoder가 composite IQ(선형 합산 + virtual clipping)에 대해 자연스럽게
-결정한다. 명세에 없는 정규화·보정 상수를 추가하지 않는다.
+v1.4 충돌 결과는 TX 구간 정책이 결정한다. 이 decoder로 충돌 패킷을 복구하거나
+production 수신 성공을 합성하지 않는다. decoder 자체의 판정 상수는 변경하지 않는다.
 
 waveform provenance (byte-pinned fixture 생성 근거):
 - modulation: QPSK, symbol당 1 complex sample(SAMPLES_PER_SYMBOL=1).
 - symbol amplitude A = 0.6(축당). 단일 burst 축 peak 0.6 < full-scale 1.0(clip 없음);
-  동일 두 burst 정렬 합산 시 축 1.2 > 1.0 → virtual frontend clipping이 자연 발생.
+  역사 composite fixture는 과거 모델 입력이며 현재 정책의 출력을 뜻하지 않는다.
 - bit→symbol: byte는 MSB-first 2bit씩; 첫 bit=I 선택, 둘째 bit=Q 선택.
   I = +A(bit 0) / -A(bit 1), Q = +A(bit 0) / -A(bit 1).
 - hard-decision: I real>=0 → bit 0, else 1; Q imag>=0 → bit 0, else 1. 판정 경계 0(표준).

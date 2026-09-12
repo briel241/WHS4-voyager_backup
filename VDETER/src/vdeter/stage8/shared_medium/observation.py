@@ -5,7 +5,7 @@
 - receiver가 해당 Physical Channel을 듣고 있으면 TUNED_OBSERVER, 아니면 NOT_TUNED.
 - NOT_TUNED는 실패가 아니며 packet bytes·payload·성공 event를 합성하지 않고 counter/state로만
   기록한다.
-- 같은 channel·시간이 겹치는 arrival만 collision group으로 합성해 composite를 한 번 decode한다.
+- 같은 channel·시간이 겹치는 arrival은 MODEL_COLLISION_DROP; 합성·클리핑하지 않는다.
 - fan-out sibling(같은 parent)끼리는 같은 collision group에 들어갈 수 없다.
 - 주소 대상만 public delivery를 일으키고, 비주소 tuned MASS-B POC_ACTOR는 PoC-private
   관측 event만 만든다.
@@ -21,7 +21,7 @@ from ..poc_api.types import ObservationRecord, PhysicalChannel, TuningState
 from . import constants, topology
 from .constants import MAX_DELIVERY_MATRIX_ENTRIES
 from .decoder import DecodeStatus, decode
-from .iq import IqBurst, group_collisions, synthesize_same_channel
+from .iq import IqBurst, group_collisions
 from .radiation import ParentTransmission, SiblingCollisionError
 
 
@@ -56,8 +56,7 @@ class DeliveryRow:
     observation_id: str | None
     collision_input_count: int
     overlap_sample_count: int
-    clip_count: int
-    composite: dict | None = None
+    interval_evidence: dict | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -74,8 +73,7 @@ class DeliveryRow:
             "observation_id": self.observation_id,
             "collision_input_count": self.collision_input_count,
             "overlap_sample_count": self.overlap_sample_count,
-            "clip_count": self.clip_count,
-            "composite": deepcopy(self.composite),
+            "interval_evidence": deepcopy(self.interval_evidence),
         }
 
 
@@ -84,7 +82,6 @@ class SceneResult:
     rows: tuple
     poc_private_observations: tuple
     not_tuned_counter: int
-    composites: tuple = field(default_factory=tuple)
     delivery_matrix_truncated: bool = False
     dropped_rows: int = 0
 
@@ -136,7 +133,6 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
     rows = []
     poc_private = []
     not_tuned_counter = 0
-    composites = []
     dropped_rows = 0
 
     def add_row(row):
@@ -175,98 +171,60 @@ def observe_scene(parents, *, dual_channel_active: bool = False) -> SceneResult:
                             observation_id=None,
                             collision_input_count=0,
                             overlap_sample_count=0,
-                            clip_count=0,
                         )
                     )
                 continue
 
-            # TUNED: 같은 channel·겹침 arrival을 collision group으로 합성 후 한 번 decode.
+            # RF-off scene model. Same receiver/channel + interval overlap
+            # drops BOTH, even identical or very unequal-amplitude waveforms.
+            # Production must NOT use these planned parents as RX evidence.
             groups = group_collisions([a.burst for a in channel_arrivals])
-            # burst -> arrival 역참조(동일 index 순서).
             index = {id(a.burst): a for a in channel_arrivals}
             for group in groups:
-                # sibling 자기충돌 금지: 같은 parent가 한 group에 둘 이상이면 오류.
                 parent_ids = [index[id(b)].parent_id for b in group]
                 if len(set(parent_ids)) != len(parent_ids):
-                    raise SiblingCollisionError(
-                        f"receiver {endpoint}의 collision group에 동일 parent가 중복됨: {parent_ids}"
-                    )
-                composite = synthesize_same_channel(group)
-                composites.append((endpoint, composite))
-                # Capture metrics while the real group-to-parent mapping is available.
-                # No raw IQ is retained on bounded delivery rows; sample coordinates
-                # describe this software composite, not an invented hardware window.
-                composite_evidence = {
-                    "start_sample": composite.base_start_sample,
-                    "end_sample": composite.base_start_sample + len(composite.samples),
-                    "pre_clip_peak": composite.pre_clip_peak,
-                    "post_clip_peak": composite.post_clip_peak,
-                    "frontend_version": composite.frontend_version,
-                    "per_source_peak": [
-                        {"parent_id": index[id(burst)].parent_id,
-                         "source_station": index[id(burst)].source_station,
-                         "peak": peak}
-                        for burst, peak in zip(group, composite.per_source_peak)
-                    ],
+                    raise SiblingCollisionError("duplicate parent at receiver")
+                collided = len(group) > 1
+                interval_evidence = {
+                    "model": "TX_INTERVAL_DROP_V1", "simulation_only": True,
+                    "rf_collision_measured": False,
+                    "decision": "MODEL_COLLISION_DROP" if collided else "NO_MODEL_COLLISION",
+                    "start_sample": min(b.start_sample for b in group),
+                    "end_sample": max(b.end_sample for b in group),
+                    "parent_ids": parent_ids,
                 }
-                result = decode(composite.samples)
-                recovered_digest = (
-                    sha256_hex(result.payload) if result.recovered and result.payload is not None else None
-                )
+                result = None if collided else decode(group[0].samples)
+                digest = sha256_hex(result.payload) if result and result.recovered and result.payload is not None else None
                 for burst in group:
                     arrival = index[id(burst)]
-                    decoded_here = (
-                        result.recovered and recovered_digest == arrival.payload_digest
-                    )
+                    decoded_here = digest is not None and digest == arrival.payload_digest
                     observation_id = None
-                    public_delivery = False
-                    if decoded_here:
-                        if arrival.addressed or arrival.official_broadcast:
-                            # 주소 대상: 기존 public 처리(상위 계층). 방사 계층은 새 ACK 안 만든다.
-                            public_delivery = True
-                        else:
-                            # 비주소 tuned: MASS-B POC_ACTOR만 PoC-private 관측 event.
-                            if endpoint == constants.STATION_MASS_B:
-                                observation_id = f"obs-{arrival.parent_id}"
-                                poc_private.append(
-                                    ObservationRecord(
-                                        physical_channel=channel,
-                                        tuning_state=TuningState.TUNED_OBSERVER,
-                                        observation_id=observation_id,
-                                        source_station=arrival.source_station,
-                                        destination_station=(
-                                            _addressed_dest(parents, arrival.parent_id) or ""
-                                        ),
-                                        device_hw_timestamp_ns=_scheduled_ns(parents, arrival.parent_id),
-                                        host_mono_timestamp_ns=_scheduled_ns(parents, arrival.parent_id),
-                                        body={"payload_digest": arrival.payload_digest},
-                                    )
-                                )
-                    add_row(
-                        DeliveryRow(
-                            parent_id=arrival.parent_id,
-                            source_station=arrival.source_station,
-                            endpoint=endpoint,
-                            channel=channel,
-                            physical_reach=True,
-                            tuning_state=TuningState.TUNED_OBSERVER.value,
-                            decode_status=result.status.value,
-                            decoded_payload_digest=recovered_digest if decoded_here else None,
-                            addressed=arrival.addressed,
-                            public_delivery=public_delivery,
-                            observation_id=observation_id,
-                            collision_input_count=composite.input_count,
-                            overlap_sample_count=composite.overlap_sample_count,
-                            clip_count=composite.clip_count,
-                            composite=composite_evidence,
-                        )
-                    )
+                    public_delivery = decoded_here and (arrival.addressed or arrival.official_broadcast)
+                    if decoded_here and not public_delivery and endpoint == constants.STATION_MASS_B:
+                        observation_id = f"obs-{arrival.parent_id}"
+                        poc_private.append(ObservationRecord(
+                            physical_channel=channel, tuning_state=TuningState.TUNED_OBSERVER,
+                            observation_id=observation_id, source_station=arrival.source_station,
+                            destination_station=_addressed_dest(parents, arrival.parent_id) or "",
+                            device_hw_timestamp_ns=_scheduled_ns(parents, arrival.parent_id),
+                            host_mono_timestamp_ns=_scheduled_ns(parents, arrival.parent_id),
+                            body={"payload_digest": arrival.payload_digest, "simulation_only": True,
+                                  "device_time_source": "RF_OFF_PLANNED_SAMPLE_NOT_MEASURED_RX"}))
+                    add_row(DeliveryRow(
+                        parent_id=arrival.parent_id, source_station=arrival.source_station,
+                        endpoint=endpoint, channel=channel, physical_reach=True,
+                        tuning_state=TuningState.TUNED_OBSERVER.value,
+                        decode_status="MODEL_COLLISION_DROP" if collided else result.status.value,
+                        decoded_payload_digest=digest if decoded_here else None,
+                        addressed=arrival.addressed, public_delivery=public_delivery,
+                        observation_id=observation_id, collision_input_count=len(group),
+                        overlap_sample_count=max(0, min(b.end_sample for b in group) - max(b.start_sample for b in group)) if collided else 0,
+                        interval_evidence=interval_evidence))
 
     return SceneResult(
         rows=tuple(rows),
         poc_private_observations=tuple(poc_private),
         not_tuned_counter=not_tuned_counter,
-        composites=tuple(composites),
         delivery_matrix_truncated=dropped_rows > 0,
         dropped_rows=dropped_rows,
     )

@@ -42,8 +42,11 @@ class LauncherDeviceClient:
         self.endpoint_id = endpoint_id
         self._state = None
         self._state_at = 0.0
+        self.collision_session_id = None
 
     def call(self, command_name: str, body: dict):
+        if command_name == "poc_schedule_group_tx" and self.collision_session_id is not None:
+            body = dict(body, collision_session_id=self.collision_session_id)
         response = self._controller.poc_command(self.endpoint_id, command_name, body)
         return Stage7ScenarioController.poc_result(response)
 
@@ -71,6 +74,11 @@ class _RemoteWorker:
 
     def _state(self):
         return self._client.radio_state()
+
+    def map_from_sender(self, sender, hardware_ns):
+        utc = sender._client.call("poc_clock_map", {"direction": "HW_TO_UTC", "timestamp_ns": hardware_ns})
+        mapped = self._client.call("poc_clock_map", {"direction": "UTC_TO_HW", "timestamp_ns": utc["timestamp_ns"]})
+        return mapped["timestamp_ns"], {"sender_bridge": utc, "receiver_bridge": mapped}
 
     # scheduler(P03)
     def hardware_time_ns(self):
@@ -132,6 +140,7 @@ class LauncherRadioSink:
         self._station_id = dict(station_id_by_endpoint)
         #: group_id → burst_id(권위 원장 조회 키).
         self.burst_by_group: dict = {}
+        self.receipt_by_group: dict = {}
 
     @staticmethod
     def _validate(children) -> tuple:
@@ -170,7 +179,12 @@ class LauncherRadioSink:
             "samples_sha256": hashlib.sha256(samples).hexdigest(),
             "destination_station_id": int(target),
             "request_digest": str(getattr(children[0], "payload_digest", "") or ""),
+            "wire_packet_digest": children[0].wire_packet_digest,
         })
+        if result.get("accepted"):
+            self.receipt_by_group[admission.group_id] = {
+                "transmit_at_utc_ns": result["transmit_at_utc_ns"],
+                "wire_packet_digest": children[0].wire_packet_digest}
         self._client.invalidate()     # 송신 후 장치 상태는 달라졌다 — 캐시를 믿지 않는다
         if not result.get("accepted"):
             raise RuntimeError(
@@ -239,11 +253,13 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
     없으면 `POC_DEADLINE_MISSED`로 거부한다(임의로 뒤로 미루거나 격자 시각으로 되돌아가지 않는다).
     """
 
-    def __init__(self, worker, client: LauncherDeviceClient, *, channel_name: str,
-                 current_channel=None) -> None:
+    def __init__(self, worker, client: LauncherDeviceClient, *, channel_name: str | None = None,
+                 current_channel=None, rx_readiness=None) -> None:
         super().__init__(worker, current_channel=current_channel)
         self._client = client
         self._channel_name = channel_name
+        self._fixed_channel_name = channel_name
+        self._rx_readiness = rx_readiness
 
     def _query(self) -> dict:
         """launcher에서 실 MAC 송신 가능 slot 후보를 읽는다(시험이 대체할 수 있는 유일한 지점)."""
@@ -255,8 +271,16 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
 
     def resolve(self, action, *, request_id: str):
         from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.poc_api.types import TARGET_TO_PHYSICAL_CHANNEL
         from vdeter.stage8.shared_medium.radiation import ScheduledSlot
 
+        target_channel = stage7_channel_name(TARGET_TO_PHYSICAL_CHANNEL[action.target])
+        if self._fixed_channel_name is not None and self._fixed_channel_name != target_channel:
+            raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID,
+                           "MAC slot query channel differs from logical target")
+        # The canonical target determines the query on every action; there is
+        # no device-grid fallback when the caller omits a channel override.
+        self._channel_name = target_channel
         base = super().resolve(action, request_id=request_id)   # 실 clock·권위 lead·인과성
         self._base_hw_ns = int(base.scheduled_hw_timestamp_ns)
         answer = self._query()
@@ -266,18 +290,42 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
         # lead를 줄여 통과시키지 않는다 — 만족하는 후보가 없으면 거부한다.
         now_ns = self._hw_now_ns()
         earliest = now_ns + self._required_lead_ns()
-        usable = [slot for slot in slots if int(slot["start_hw_ns"]) >= earliest]
-        if not usable:
+        usable = [slot for slot in slots
+                  if int(slot["start_hw_ns"]) >= max(earliest, self._base_hw_ns)]
+        if action.schedule.get("kind") == "after_slots":
+            # An exact relative slot is not NEXT_SAFE_SLOT. If that slot is
+            # unavailable (including heard occupancy), do not silently move
+            # the reactive action to a later MAC slot.
+            usable = [slot for slot in usable
+                      if int(slot["start_hw_ns"]) == self._base_hw_ns]
+        chosen = None
+        for slot in usable:
+            if self._rx_readiness is not None:
+                from vdeter.stage8.shared_medium.radiation import ReadinessRequest
+                state = self._client.radio_state()
+                decision = self._rx_readiness.window_ready(ReadinessRequest(
+                    endpoint=action.target, channel=TARGET_TO_PHYSICAL_CHANNEL[action.target],
+                    slot_key="mac-{frame_ordinal}-{tdma_channel}-{slot_in_frame}".format(**slot),
+                    scheduled_sample=int(slot["start_hw_ns"]) * 307200 // 1000000000,
+                    scheduled_hw_timestamp_ns=int(slot["start_hw_ns"]),
+                    clock_id=state.get("clock_id"), bridge_generation=state.get("bridge_generation"),
+                    correction_revision=state.get("correction_revision")))
+                if not decision.ready:
+                    continue
+            # Readiness RPCs consume lead too. Never weaken the authority's lead.
+            if int(slot["start_hw_ns"]) >= self._hw_now_ns() + self._required_lead_ns():
+                chosen = slot
+                break
+        if chosen is None:
             raise PocError(
                 PocErrorCode.POC_DEADLINE_MISSED,
-                "실 MAC slot map에 권위 lead를 만족하는 송신 가능 slot이 없습니다 — 이동하지 않음",
+                "실 MAC 후보에 lead와 수신 창 준비를 만족하는 slot이 없습니다 — 거부",
                 detail={"channel": self._channel_name,
                         "earliest_hw_ns": earliest,
                         "candidates": len(slots),
                         "slot_map_id": (answer or {}).get("slot_map_id")})
-        chosen = usable[0]
         return ScheduledSlot(
-            scheduled_sample=base.scheduled_sample,
+            scheduled_sample=(int(chosen["start_hw_ns"]) * 307_200) // 1_000_000_000,
             scheduled_hw_timestamp_ns=int(chosen["start_hw_ns"]),
             # slot_key를 MAC 좌표로 만든다 — 자원 예약 키가 실제 TDMA slot과 1:1이 된다.
             slot_key=("mac-{frame_ordinal}-{tdma_channel}-{slot_in_frame}"
@@ -318,16 +366,14 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
     workers = {endpoint: _RemoteWorker(client) for endpoint, client in clients.items()}
     sink = LauncherRadioSink(actor, channel_name_of=stage7_channel_name,
                              station_id_by_endpoint=station_id_by_endpoint)
-    # `mac_channel_name`을 주면 **실 MAC slot map**이 허용한 slot만 고른다(P03). 주지 않으면
-    # device-grid scheduler 그대로다(MAC 결속 없음을 조용히 숨기지 않고 호출자가 고르게 한다).
-    if mac_channel_name:
-        scheduler = MacSlotScheduler(workers[actor_endpoint], actor,
-                                     channel_name=mac_channel_name)
-    else:
-        scheduler = Stage7HwTimeScheduler(workers[actor_endpoint])
+    # Always use the real MAC query (including heard reservations). The default
+    # production path must not silently fall back to the device sample grid.
+    readiness = Stage7ReceiverReadiness(workers, center, source_worker=workers[actor_endpoint])
+    scheduler = MacSlotScheduler(workers[actor_endpoint], actor,
+                                 channel_name=mac_channel_name, rx_readiness=readiness)
     provider = SharedMediumActionProvider.for_production(
         radio_sink=sink,
-        rx_readiness=Stage7ReceiverReadiness(workers, center),
+        rx_readiness=readiness,
         scheduler=scheduler,
         waveform_factory=Link11WaveformFactory(),
         arbiter=Stage7WorkerArbiter(workers[actor_endpoint]),

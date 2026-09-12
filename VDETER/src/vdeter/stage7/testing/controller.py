@@ -210,6 +210,9 @@ class Stage7ScenarioController:
         message = self._command(endpoint_id, command_name, dict(body))
         response = self._channels[endpoint_id].request(message)
         payload = response.get("body") or {}
+        if (command_name == "poc_collision" and body.get("mode") == "POLL"
+                and response.get("status") == "COMPLETED" and payload.get("call_outcome") == "OK"):
+            return response  # periodic metadata exchange: bounded aggregate evidence, not per-poll logging
         self.command_log.append(
             {
                 "endpoint_id": endpoint_id,

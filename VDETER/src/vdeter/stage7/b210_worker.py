@@ -523,6 +523,25 @@ class Stage7DualLaneFlowgraphBackend:
             "rx_lo_lane1_hz": int(round(self._source.get_center_freq(1))),
         }
 
+    def poc_runtime_state(self) -> dict:
+        """Owner-process state in one RPC; no repeated tuning/sensor USB reads.
+
+        RX center is the verified configure/restore state (manual scope supplies
+        its own verified per-lane readback). TX LO is the last accepted command,
+        not proof that a future timed retune has already occurred.
+        """
+        with self._control_lock:
+            return {
+                "hardware_time_ns": self.hardware_time_ns(),
+                "tx_lo_hz": self._tx_lo_frequency_hz,
+                "rx_lo_hz": self._rx_lo_frequency_hz,
+                "tx_muted": list(self._tx_muted),
+                "rx_continuous": self._rx_continuous_since_ns is not None,
+                "rx_continuous_since_ns": self._rx_continuous_since_ns,
+                "state_basis": "DEVICE_OWNER_CONTROL_STATE",
+                "tx_lo_basis": "LAST_ACCEPTED_COMMAND_NOT_TIMED_COMPLETION",
+            }
+
     # --- manual RX tuning (WSM-G1 공통 LO + lane DSP + analog BW) ---------------
 
     def _tune_policy(self, name: str):
@@ -590,7 +609,7 @@ class Stage7DualLaneFlowgraphBackend:
                 # analog filter를 먼저 넓힌다 — 좁은 상태로 DSP offset을 걸면 그 순간 lane 하나가
                 # 통과대역 밖에 놓인다.
                 self._source.set_bandwidth(int(analog_bandwidth_hz), lane)
-                request = uhd.tune_request(float(int(rx_lo_hz) + offsets[lane]))
+                request = uhd.tune_request(float(int(rx_lo_hz) - offsets[lane]))
                 request.rf_freq_policy = manual_rf
                 request.rf_freq = float(int(rx_lo_hz))
                 request.dsp_freq_policy = manual_rf
@@ -991,6 +1010,9 @@ class Stage7IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
 
     def sensor_readback(self) -> dict:
         return self._rpc("sensor_readback")
+
+    def poc_runtime_state(self) -> dict:
+        return self._rpc("poc_runtime_state")
 
     def set_tx_mute(self, lane: int, muted: bool) -> None:
         self._rpc("set_tx_mute", lane, muted)

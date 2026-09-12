@@ -1,25 +1,15 @@
-"""IQ sample-domain 표현·직렬화·합성 (명세 §5.1, §7.1, §7.2).
+"""TX IQ wire representation + bounded RF-off noncollision fixture rendering.
 
-- byte-pinned IQ는 기존 `cf32le` format(interleaved float32 little-endian I,Q)을 쓴다
-  (`common/contracts/radio.py`의 `SAMPLE_FORMAT_CF32LE`와 동일 wire 표현). numpy를
-  쓰지 않고 stdlib `struct`만 사용한다(clean checkout 재현성·의존성 0).
-- 합성 arithmetic은 명세 §7.1 결정만 사용한다: **같은 Physical Channel이며 시간이 겹치는
-  구간만** complex IQ 선형 합산, 겹치지 않는 구간은 해당 input을 그대로 사용(copy).
-  이 선형 복소 합산은 기존 `radio/software/medium.py`의 render 합산 규약과 동일하다.
-- composite full-scale 초과는 versioned virtual frontend(:mod:`frontend`)로만 clipping한다.
-  명세에 없는 정규화·scaling·보정 상수는 추가하지 않는다.
-
-이 module을 import해도 thread·socket·disk write가 생기지 않는다.
+No synthetic IQ sum/clipping/capture model. Real RX uses the TX-record gate.
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..poc_api.types import PhysicalChannel
-from . import frontend
 from .constants import MAX_BURST_SAMPLES, MAX_COLLISION_GROUP_BURSTS
 
 #: byte-pinned wire format 이름(기존 등록 format 재사용).
@@ -29,7 +19,7 @@ BYTES_PER_SAMPLE = 8
 
 
 class IqError(ValueError):
-    """IQ 표현·합성 규칙 위반."""
+    """IQ wire representation or bounded RF-off rendering violation."""
 
 
 def to_cf32le(samples) -> bytes:
@@ -76,6 +66,7 @@ class IqBurst:
     channel: PhysicalChannel
     start_sample: int
     samples: tuple
+    wire_packet_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel, PhysicalChannel):
@@ -112,31 +103,23 @@ def time_overlaps(a: IqBurst, b: IqBurst) -> bool:
     return a.start_sample < b.end_sample and b.start_sample < a.end_sample
 
 
+
 @dataclass(frozen=True, slots=True)
-class CompositeResult:
-    """한 receiver·channel의 겹침 구간 합성 결과(§7.1, §7.2).
-
-    비겹침 구간은 단일 input을 그대로 copy했고, 겹침 구간만 선형 합산 후 virtual frontend
-    clipping을 적용했다. per-source·pre/post-clip peak과 clip count를 evidence로 남긴다.
-    """
-
+class WindowRender:
+    """RF-off fixture rendering; no addition, clipping, or capture effect."""
     channel: PhysicalChannel
     base_start_sample: int
     samples: tuple
     input_count: int
     overlap_sample_count: int
-    clip_count: int
-    pre_clip_peak: float
-    post_clip_peak: float
-    per_source_peak: tuple
-    frontend_version: str = frontend.VIRTUAL_FRONTEND_VERSION
+    dropped_input_count: int
 
     @property
-    def cf32le(self) -> bytes:
+    def cf32le(self):
         return to_cf32le(self.samples)
 
     @property
-    def sha256(self) -> str:
+    def sha256(self):
         return sha256_cf32le(self.samples)
 
 
@@ -181,90 +164,39 @@ def group_collisions(bursts) -> list:
     return [groups[root] for root in order]
 
 
-def synthesize_same_channel(bursts) -> CompositeResult:
-    """같은 Physical Channel의 겹치는 peer IQ를 hardware-time으로 정렬·합성한다(§7.1).
 
-    - 겹치는 sample: complex 선형 합산 후 virtual frontend clipping.
-    - 겹치지 않는 sample: 단일 input을 그대로 copy(합산·clip 없음 → byte-identity 보존).
-    - 모든 burst는 같은 channel이어야 한다(다른 channel은 caller가 분리한다).
-    - fan-out sibling(같은 parent) 검출은 상위 collision grouping이 보장한다.
+def render_noncolliding(bursts) -> WindowRender:
+    """Copy isolated inputs unchanged; any overlapped input is dropped entirely.
+
+    RF-off sample coordinates only. Production decisions use the complete TX
+    journal in stage7.collision_runtime, not this synthetic fixture renderer.
     """
-
     seq = list(bursts)
-    if not seq:
-        raise IqError("합성할 burst가 없습니다")
-    if len(seq) > MAX_COLLISION_GROUP_BURSTS:
-        raise IqError(
-            f"collision group burst 수 {len(seq)}가 상한 {MAX_COLLISION_GROUP_BURSTS}를 넘습니다"
-        )
-    channel = seq[0].channel
-    for burst in seq:
-        if burst.channel != channel:
-            raise IqError("synthesize_same_channel: 서로 다른 Physical Channel은 합성하지 않습니다")
-
-    base = min(b.start_sample for b in seq)
-    end = max(b.end_sample for b in seq)
-    length = end - base
-    if length > MAX_BURST_SAMPLES:
-        raise IqError(f"composite 길이 {length}가 상한 {MAX_BURST_SAMPLES}를 넘습니다")
-
-    # position별 contributor 수를 먼저 세어 단일/다중을 구분한다.
-    contributors = [0] * length
-    for burst in seq:
-        off = burst.start_sample - base
-        for i in range(len(burst.samples)):
-            contributors[off + i] += 1
-
-    out = [0j] * length
-    # 단일 contributor 위치는 그대로 copy(§7.1: 겹치지 않는 구간은 해당 input만).
-    for burst in seq:
-        off = burst.start_sample - base
-        for i, sample in enumerate(burst.samples):
-            pos = off + i
-            if contributors[pos] == 1:
-                out[pos] = sample
-            else:
-                out[pos] = out[pos] + sample  # 겹침: 선형 복소 합산
-
-    pre_clip_peak = frontend.axis_peak(out)
-
-    clip_count = 0
-    overlap_sample_count = 0
-    for pos in range(length):
-        if contributors[pos] >= 2:
-            overlap_sample_count += 1
-            raw = out[pos]
-            if frontend.is_clipped(raw):
-                clip_count += 1
-                out[pos] = frontend.clip_sample(raw)
-        # 단일 contributor는 copy 그대로(clip 미적용) → byte-identity 보존.
-
-    post_clip_peak = frontend.axis_peak(out)
-    per_source_peak = tuple(frontend.axis_peak(b.samples) for b in seq)
-
-    return CompositeResult(
-        channel=channel,
-        base_start_sample=base,
-        samples=tuple(out),
-        input_count=len(seq),
-        overlap_sample_count=overlap_sample_count,
-        clip_count=clip_count,
-        pre_clip_peak=pre_clip_peak,
-        post_clip_peak=post_clip_peak,
-        per_source_peak=per_source_peak,
-    )
+    if not seq or len(seq) > MAX_COLLISION_GROUP_BURSTS:
+        raise IqError("bounded nonempty input group required")
+    if any(b.channel != seq[0].channel for b in seq):
+        raise IqError("mixed physical channels")
+    base, end = min(b.start_sample for b in seq), max(b.end_sample for b in seq)
+    if end - base > MAX_BURST_SAMPLES:
+        raise IqError("render window exceeds bound")
+    dropped, intersections = set(), []
+    for i, a in enumerate(seq):
+        for j, b in enumerate(seq[i + 1:], i + 1):
+            if time_overlaps(a, b):
+                dropped.update((i, j))
+                intersections.append((max(a.start_sample, b.start_sample), min(a.end_sample, b.end_sample)))
+    overlap, previous_end = 0, base
+    for start, stop in sorted(intersections):
+        overlap += max(0, stop - max(start, previous_end))
+        previous_end = max(previous_end, stop)
+    out = [0j] * (end - base)
+    for i, burst in enumerate(seq):
+        if i not in dropped:
+            offset = burst.start_sample - base
+            out[offset:offset + len(burst.samples)] = burst.samples
+    return WindowRender(seq[0].channel, base, tuple(out), len(seq), overlap, len(dropped))
 
 
-__all__ = (
-    "SAMPLE_FORMAT",
-    "BYTES_PER_SAMPLE",
-    "IqError",
-    "to_cf32le",
-    "from_cf32le",
-    "sha256_cf32le",
-    "IqBurst",
-    "time_overlaps",
-    "CompositeResult",
-    "group_collisions",
-    "synthesize_same_channel",
-)
+__all__ = ("SAMPLE_FORMAT", "BYTES_PER_SAMPLE", "IqError", "to_cf32le",
+           "from_cf32le", "sha256_cf32le", "IqBurst", "time_overlaps",
+           "WindowRender", "group_collisions", "render_noncolliding")

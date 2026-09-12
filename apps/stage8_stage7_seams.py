@@ -103,7 +103,9 @@ class Link11WaveformFactory:
             raise ValueError(
                 f"device burst count mismatch: {len(device)} != {resampling.DEVICE_SLOT_SAMPLES}")
         validate_cf32le_full_scale(to_cf32le(device))  # 권위 full-scale 검증
-        return IqBurst(channel=channel, start_sample=0, samples=device)
+        import hashlib
+        return IqBurst(channel=channel, start_sample=0, samples=device,
+                       wire_packet_digest=hashlib.sha256(packet).hexdigest())
 
 
 class Stage7HwTimeScheduler(NextSafeSlotScheduler):
@@ -260,9 +262,10 @@ class Stage7ReceiverReadiness:
     실 RX 창 충전·복호 품질은 실장비에서 확정한다.
     """
 
-    def __init__(self, workers_by_station: dict, channel_center_hz) -> None:
+    def __init__(self, workers_by_station: dict, channel_center_hz, *, source_worker=None) -> None:
         self._workers = dict(workers_by_station)
         self._center = channel_center_hz
+        self._source_worker = source_worker
 
     @staticmethod
     def _tuned_lanes(worker, expected_center_hz) -> tuple:
@@ -275,8 +278,10 @@ class Stage7ReceiverReadiness:
         if getattr(worker, "rx_rf_lo_hz", None) is not None:
             lane_centers = getattr(worker, "lane_rx_center_hz", None) or {}
             return tuple(sorted(lane for lane, center in lane_centers.items()
-                                if center == expected_center_hz))
-        if getattr(worker, "rx_lo_hz", None) == expected_center_hz:
+                                if abs(center - expected_center_hz) <= 1))
+        center = getattr(worker, "rx_lo_hz", None)
+        # Same ±1 Hz readback contract as Stage7B210RadioAdapter configure.
+        if center is not None and expected_center_hz is not None and abs(center - expected_center_hz) <= 1:
             return (0, 1)
         return ()
 
@@ -330,12 +335,20 @@ class Stage7ReceiverReadiness:
             # §5.5 자연 관측 행렬상 정상일 수 있는 상태다(수신 실패로 만들지 않는다).
             return ReadinessDecision(ready=False, reason="NOT_TUNED")
         tx_ns = int(request.scheduled_hw_timestamp_ns)
+        mapping = None
+        if self._source_worker is not None:
+            try:
+                tx_ns, mapping = worker.map_from_sender(self._source_worker, tx_ns)
+            except Exception:
+                return ReadinessDecision(ready=False, reason="RX_CLOCK_MAPPING_UNAVAILABLE")
         covering = self._covering_window(worker, tx_ns, lanes)
         # 서비스 모드 수신은 **연속 RX**다(`start_rx_continuous`: 창별 유한 스트림 대신 단일 연속
         # 스트림, 창 경계는 collector가 태그). 연속 RX는 "켜져 있다"만으로 부족하고 **예약 시각이
         # 스트림 시작 이후**여야 한다 — 시작 전 시각은 수신되지 않는다.
         since = self._continuous_since(worker)
         continuous_covers = since is not None and tx_ns >= since
+        if self._source_worker is not None and covering is None:
+            return ReadinessDecision(ready=False, reason="RX_WINDOW_NOT_PLANNED")
         if covering is None and not continuous_covers:
             reason = ("RX_CONTINUOUS_NOT_YET_STARTED"
                       if since is not None else "RX_WINDOW_NOT_PLANNED")
@@ -347,6 +360,7 @@ class Stage7ReceiverReadiness:
             "rx_window": covering,                       # 실 등록 창(있으면 계획·수락 증거)
             "rx_continuous_since_ns": since,             # 실 연속 RX 시작 시각(coverage 근거)
             "scheduled_hw_timestamp_ns": tx_ns,
+            "cross_device_mapping": mapping,
             "clock_id": request.clock_id,
             "bridge_generation": request.bridge_generation,
             "correction_revision": request.correction_revision,

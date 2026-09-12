@@ -176,6 +176,15 @@ class PocWorkload:
             return
         self._runner.deliver(observation_step(observation))
 
+    def deliver_scenario_start(self):
+        """Live controller start boundary, once; never replay START at teardown."""
+        starts = tuple(s for s in self._steps if s.event_type == "SCENARIO_STARTED")
+        self._steps = tuple(s for s in self._steps if s.event_type != "SCENARIO_STARTED")
+        if len(starts) > 1:
+            raise ValueError("duplicate scenario start steps")
+        for step in starts:
+            self._runner.deliver(step)
+
     def run(self, scenario_verdict: ScenarioVerdict, *, guard=None):
         """ARMED 후: workload event 전달 → terminal → finish → evidence → cleanup. fail-closed 결과.
 

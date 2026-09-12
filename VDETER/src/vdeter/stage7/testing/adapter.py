@@ -40,7 +40,7 @@ _INLINE_STATUS_KEYS = frozenset({"transfer_id"})
 #: §16.2 PoC device 경계 op(Stage 8 PoC supervisor 전용). device seam이 주입되지 않은 설치에서는
 #: 전부 REJECTED다 — 기본값은 "쓸 수 없음"이고 조용한 대체 경로는 없다.
 _POC_OPERATIONS = ("poc_radio_state", "poc_schedule_group_tx", "poc_tx_burst_state",
-                   "poc_tuning", "poc_mac_slots", "poc_wired_broadcast_optin")
+                   "poc_tuning", "poc_mac_slots", "poc_wired_broadcast_optin", "poc_collision", "poc_clock_map")
 
 #: 각 PoC op body의 **정확한** 허용 키(fail-closed: 그 외 키는 거부).
 _POC_SCHEDULE_KEYS = frozenset(
@@ -444,7 +444,8 @@ class Stage7ServiceApiTestAdapter:
                 {"poc_operation": name, "call_outcome": "ERR",
                  "reason": type(error).__name__[:64], "result": None},
             )
-        self.call_log.append((name, body.get("burst_id") or body.get("mode")))
+        if not (name == "poc_collision" and body.get("mode") == "POLL"):
+            self.call_log.append((name, body.get("burst_id") or body.get("mode")))
         return self._response(
             message, "COMPLETED",
             {"poc_operation": name, "call_outcome": "OK", "reason": None, "result": result},
@@ -454,6 +455,12 @@ class Stage7ServiceApiTestAdapter:
         import base64
 
         device = self._poc_device
+        if name == "poc_clock_map":
+            if set(body) != {"direction", "timestamp_ns"}:
+                raise ValueError("clock mapping key mismatch")
+            return device.clock_map(**body)
+        if name == "poc_collision":
+            return device.collision_command(body)
         if name == "poc_radio_state":
             return device.radio_state()
         if name == "poc_tx_burst_state":
@@ -461,7 +468,8 @@ class Stage7ServiceApiTestAdapter:
                 raise ValueError("poc_tx_burst_state body key 집합 위반")
             return device.tx_burst_state(str(body["burst_id"]))
         if name == "poc_schedule_group_tx":
-            if set(body) != _POC_SCHEDULE_KEYS:
+            if (not _POC_SCHEDULE_KEYS <= set(body)
+                    or set(body) - _POC_SCHEDULE_KEYS - {"wire_packet_digest", "collision_session_id"}):
                 raise ValueError("poc_schedule_group_tx body key 집합 위반")
             encoded = body["samples_base64"]
             if not isinstance(encoded, str):
@@ -479,6 +487,8 @@ class Stage7ServiceApiTestAdapter:
                 samples=samples,
                 destination_station_id=int(body["destination_station_id"]),
                 request_digest=str(body["request_digest"] or ""),
+                wire_packet_digest=body.get("wire_packet_digest"),
+                collision_session_id=body.get("collision_session_id"),
             )
         if name == "poc_wired_broadcast_optin":
             if set(body) != _POC_OPTIN_KEYS:
