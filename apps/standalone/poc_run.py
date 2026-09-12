@@ -264,16 +264,26 @@ def _result_evidence(result, workload) -> dict:
     evidence = result.as_json_value()
     seams = workload.seams
     group_tx = getattr(seams, "group_tx", None)
-    # 방사(software submit) 요약 — 실 RF atomicity 증명이 아니라 RF-off 호출 기록이다.
-    evidence["radiation"] = {
-        "committed_groups": int(getattr(group_tx, "committed_groups", 0) or 0),
-        "radiated_children": int(getattr(group_tx, "radiated_children", 0) or 0),
-    }
     # R5: cleanup 전 snapshot한 Stage 5 provider evidence(readiness/composite/model_boundary)를 올린다.
     conn = workload.connection
     provider_evidence = getattr(conn, "provider_evidence", None)
     if provider_evidence is not None:
         evidence["provider_evidence"] = provider_evidence
+    # 방사 요약 — 실 RF atomicity 증명이 아니라 RF-off 호출 기록이다. `SoftwareGroupTx` double은 자체
+    # 카운터(committed_groups)를 노출하고, 실 Stage 7 worker seam은 그렇지 않으므로 공유 provider
+    # evidence(broadcast_infrastructure_result)에서 committed parent·child 수를 유도한다(동일 수치).
+    committed = getattr(group_tx, "committed_groups", None)
+    radiated = getattr(group_tx, "radiated_children", None)
+    if committed is None or radiated is None:
+        bir = (provider_evidence or {}).get("broadcast_infrastructure_result") or {}
+        committed_ids = set(bir.get("committed_parent_ids") or [])
+        committed = len(committed_ids)
+        radiated = sum(len(p.get("children") or []) for p in (bir.get("parents") or [])
+                       if p.get("parent_id") in committed_ids)
+    evidence["radiation"] = {
+        "committed_groups": int(committed or 0),
+        "radiated_children": int(radiated or 0),
+    }
     return evidence
 
 

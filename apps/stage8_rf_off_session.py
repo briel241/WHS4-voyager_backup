@@ -88,6 +88,60 @@ class RfOffPocDeviceSession:
         return [scenario_started(), observation_step(observation)]
 
 
+class RfOffStage7DeviceSession:
+    """poc_run이 읽는 device-boundary 공급자 — **실 Stage 7 software group 객체에 결속**(no stub).
+
+    `--rf-off-software` coordinator 프로세스 안에서 실행 중 Stage 7 software group(`build_stage7_software_group`
+    + `start_stage7_group`)을 한 번 띄우고, PoC provider seam을 그 **실 endpoint 객체**(worker·frozen PHY·
+    hardware clock·route 매질·수신기)에 결속한다. 하드웨어 경계(B210 device I/O)만 fake medium worker.
+    이전 `RfOffPocDeviceSession`은 rf_off **stub** seam을 썼고, 이 class가 그것을 실 seam으로 교체한다.
+
+    device delivery는 `tx_lo_hz==rx_lo_hz`를 요구하므로(WSM-G1 common-LO), PoC 대상 채널(lower=ROC)로
+    수신기 RX LO 정합을 RF-off 한정 주입한다(실 동시 service-tuned 도달은 실장비). 실 service scenario를
+    동시에 돌리지 않는 PoC 전용 세션이므로 이 주입이 정상 수신을 침범하지 않는다.
+    """
+
+    def __init__(self, run_root: str) -> None:
+        from tests.support.stage7 import (build_stage7_software_group, start_stage7_group,
+                                          ENDPOINT_TO_SERIAL)
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.stage8.shared_medium import constants
+        self.run_root = Path(run_root)
+        clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
+        start_stage7_group(clock, medium, coordinator, members, resolved)
+        self._clock = clock
+        self._medium = medium
+        self._members = members
+        self._mass_b_serial = ENDPOINT_TO_SERIAL["MASS-B"]
+        # WSM-G1 common-LO(RF-off 주입): PoC 대상 채널(lower)로 수신기 RX LO 정합.
+        center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
+        for ep in ("ROC", "MASS-A"):
+            members[ep].endpoint.dependencies.radio.lease.worker.rx_lo_hz = center
+
+    def poc_device_seams(self):
+        from apps.stage8_stage7_seams import stage7_device_seams
+        return stage7_device_seams(self._members)          # 실 Stage 7 seam(DeviceSeams)
+
+    def poc_terminal_source(self):
+        from apps.stage8_stage7_seams import stage7_terminal_source
+        return stage7_terminal_source(self._medium, tx_serial=self._mass_b_serial)  # 실 매질 delivery
+
+    def poc_target_response(self):
+        from apps.stage8_stage7_seams import stage7_target_response
+        return stage7_target_response(self._medium, tx_serial=self._mass_b_serial,
+                                      station_to_endpoint={"ROC": "ROC", "MASS-A": "MASS-A"})
+
+    def poc_workload_steps(self, scenario_id):
+        from vdeter.stage8.execution.runner import observation_step, scenario_started
+        from vdeter.stage8.testing.fakes import make_observation
+        # 반응형 관측의 device_hw_timestamp_ns를 **실 worker hardware clock**에서 읽는다(counter 아님).
+        mass_b = self._members["MASS-B"].endpoint.dependencies.radio.lease.worker
+        hw_ns = int(mass_b.hardware_time_ns())
+        observation = make_observation(source_station="ROC", destination_station="MASS-A",
+                                       device_hw_timestamp_ns=hw_ns)
+        return [scenario_started(), observation_step(observation)]
+
+
 def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
                         run_id: str) -> dict:
     """PoC workload 하나를 실 coordinator 프로세스 안에서 실행하고 evidence dict를 돌려준다."""
@@ -167,9 +221,10 @@ def run_rf_off_software_session(arguments) -> int:
     runtime = ResidentPocRuntime(session_model)
     runtime.bring_up()  # READY(bring-up 상한·absolute 확인). RF-off는 실 B210 bring-up 없음.
 
-    device_session = RfOffPocDeviceSession(str(run_root))
+    # 실 Stage 7 seam에 결속(no stub). software group build 실패는 fail-closed(조용한 stub fallback 금지).
+    device_session = RfOffStage7DeviceSession(str(run_root))
 
-    print("[coordinator] RF-off software session READY (no B210 launchers)", flush=True)
+    print("[coordinator] RF-off software session READY (real Stage 7 seams, no B210 launchers)", flush=True)
     _write_json(session_dir / _READY, {"run_id": run_id, "mode": "rf-off-software",
                                        "ready": True})
     status = "PASS"
@@ -226,4 +281,4 @@ def run_rf_off_software_session(arguments) -> int:
     return 0 if status == "PASS" else 1
 
 
-__all__ = ("RfOffPocDeviceSession", "run_rf_off_software_session")
+__all__ = ("RfOffPocDeviceSession", "RfOffStage7DeviceSession", "run_rf_off_software_session")

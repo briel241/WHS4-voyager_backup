@@ -21,6 +21,9 @@ _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 # 구조적 0"은 PoC 미사용 경로에 대한 것이고, 이 adapter는 RF-off 통합 검증에서만 import된다.
 _SANCTIONED_SHARED_MEDIUM_ADAPTERS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py")),
+    # RF-off software 세션 host: 실 Stage 7 seam 결속 시 common-LO center(shared_medium.constants)를
+    # 참조한다. `--rf-off-software`에서만 진입하는 검증 전용 경로다.
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py")),
 })
 
 

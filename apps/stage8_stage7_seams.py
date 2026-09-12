@@ -165,6 +165,27 @@ def stage7_target_response(medium, *, tx_serial: str, station_to_endpoint: dict)
     return response
 
 
+def stage7_device_seams(members, *, channel_center_hz=None):
+    """실행 중 software group의 실 MASS-B endpoint 객체로 `DeviceSeams`를 만든다(no stub).
+
+    `assemble_provider(DeviceSeams)` 경로(poc_run→prepare_poc_workload)가 그대로 실 seam으로 provider를
+    조립하도록, 5개 seam을 실 Stage 7 객체로 채운다: group_tx=실 worker(assemble가 Stage7GroupTxRadioSink로
+    감쌈)·arbiter=실 lane 점유·scheduler=실 hardware clock slot·rx_readiness=실 수신기 RX·waveform=실 frozen PHY.
+    """
+    from vdeter.stage8.integration.assembly import DeviceSeams
+
+    center = channel_center_hz or constants.CHANNEL_EFFECTIVE_CENTER_HZ
+    mass_b = members["MASS-B"].endpoint.dependencies.radio.lease.worker
+    workers = {ep: members[ep].endpoint.dependencies.radio.lease.worker for ep in members}
+    return DeviceSeams(
+        group_tx=mass_b,                                      # 실 group-TX worker(하드웨어 경계 double)
+        arbiter=Stage7WorkerArbiter(mass_b),                  # 실 worker lane 점유
+        scheduler=Stage7HwTimeScheduler(mass_b),              # 실 hardware clock slot
+        rx_readiness=Stage7ReceiverReadiness(workers, center),  # 실 수신기 RX 준비
+        waveform_factory=Link11WaveformFactory(),             # 실 frozen PHY
+    )
+
+
 def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_installed: bool = False):
     """실행 중 software group의 **실 MASS-B endpoint 객체**로 production provider를 조립한다(no stub).
 
@@ -188,5 +209,5 @@ def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_in
 __all__ = (
     "Link11WaveformFactory", "Stage7HwTimeScheduler", "Stage7WorkerArbiter",
     "Stage7ReceiverReadiness", "stage7_terminal_source", "stage7_target_response",
-    "assemble_stage7_provider",
+    "stage7_device_seams", "assemble_stage7_provider",
 )
