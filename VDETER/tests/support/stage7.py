@@ -109,14 +109,22 @@ class Stage7FakeMedium:
         receiver = self.workers.get(rx_serial)
         if receiver is None:
             return
-        if sender.tx_lo_hz != receiver.rx_lo_hz:
+        # 수신 lane의 **실효 중심 주파수**로 정합을 본다. manual common-LO tuning이 걸려 있으면
+        # lane마다 다르므로(effective = rf_lo - dsp), 단일 rx_lo_hz로 판정하면 dual-channel 수신을
+        # 재현할 수 없다. manual tuning을 **적용한 적이 없으면**(rx_rf_lo_hz is None) 종전대로
+        # rx_lo_hz 하나로 판정한다 — 기존 단일 LO 설치 동작을 그대로 보존한다.
+        rx_center = receiver.rx_lo_hz
+        if getattr(receiver, "rx_rf_lo_hz", None) is not None:
+            rx_center = (receiver.lane_rx_center_hz or {}).get(rx_lane, rx_center)
+        if sender.tx_lo_hz != rx_center:
             # tune 불일치 경로는 물리적으로 복원되지 않는다 (진단용 기록만 남긴다).
             self.tune_mismatch_log.append(
                 {
                     "path_id": path_id,
                     "tx_serial": sender.serial,
                     "tx_lo_hz": sender.tx_lo_hz,
-                    "rx_lo_hz": receiver.rx_lo_hz,
+                    "rx_lo_hz": rx_center,
+                    "rx_lane": rx_lane,
                     "raw_ns": raw_ns,
                     "bytes": len(data),
                 }
@@ -153,9 +161,21 @@ class Stage7FakeMediumWorker:
         self.rx_lo_hz = None
         self.pending_bursts = {0: [], 1: []}
         self.rx_windows = {0: [], 1: []}
+        self.rx_continuous = False
+        self.rx_continuous_since = None
         self.async_events = []
         self.closed = False
         self.tx_muted = [False, False]
+        #: manual RX tuning 모델 상태(실 worker의 apply_manual_tuning/read_tuning/restore_tuning).
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
+        self.lane_rx_center_hz = {}
+        self.analog_bandwidth_hz = None
+        #: 시험용 장치 결함 주입(기본 없음) — 적용 실패·복구 실패·LO 오차·BW 상한.
+        self.tuning_fault = None
+        self.restore_fault = None
+        self.tuning_lo_error_hz = 0
+        self.tuning_bandwidth_cap_hz = None
         medium.register(self)
 
     # --- factory surface -----------------------------------------------------
@@ -183,6 +203,11 @@ class Stage7FakeMediumWorker:
         self.plan = plan
         self.tx_lo_hz = plan["tx_lo_hz"]
         self.rx_lo_hz = plan["rx_lo_hz"]
+        # 시작 tuning도 모델 상태에 반영한다(manual 적용 전 read_tuning/복구 기준점).
+        self.analog_bandwidth_hz = int(plan["analog_bandwidth_hz"])
+        self.lane_rx_center_hz = {lane: int(plan["rx_lo_hz"]) for lane in (0, 1)}
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
         lanes = {
             lane: {
                 "tx_center_frequency_hz": plan["tx_lo_hz"],
@@ -223,9 +248,25 @@ class Stage7FakeMediumWorker:
         pass
 
     def start_rx_continuous(self, start_hardware_time_ns=None):
-        """Mirror the B210 worker's service-mode continuous RX contract."""
+        """Mirror the B210 worker's service-mode continuous RX contract.
+
+        실 worker와 같이 **언제부터** 연속 RX가 유효한지 기록한다(실 worker는 dual-channel streamer
+        정렬을 위해 now+200 ms에 시작한다). 상위 readiness가 "켜져 있다"가 아니라 "예약 시각이 시작
+        이후"를 확인할 수 있어야 한다.
+        """
 
         self.rx_continuous = True
+        self.rx_continuous_since = (int(start_hardware_time_ns)
+                                    if start_hardware_time_ns is not None
+                                    else int(self.hardware_time_ns()) + 200_000_000)
+        return True
+
+    def rx_continuous_since_ns(self):
+        return self.rx_continuous_since if self.rx_continuous else None
+
+    def stop_rx_continuous(self):
+        self.rx_continuous = False
+        self.rx_continuous_since = None
         return True
 
     def hardware_time_ns(self):
@@ -233,6 +274,77 @@ class Stage7FakeMediumWorker:
 
     def retune_tx_lo(self, target_hz, command_time_ns):
         self.tx_lo_hz = target_hz
+
+    # --- manual RX tuning model (실 worker와 같은 surface) -----------------------
+    #
+    # echo가 아니라 **장치 모델**이다: analog bandwidth는 장치가 고를 수 있는 격자로 양자화되고,
+    # lane별 실효 중심은 승인된 규약 effective = rf_lo - dsp로 계산된다. 따라서 계획과 다른 값이
+    # 실제로 나올 수 있고 readback 불일치가 시험에서 재현된다(무조건 통과하는 echo 금지).
+
+    #: B210 analog filter가 고르는 최소 격자(모델). 요청보다 좁아지지 않도록 **올림**한다.
+    TUNING_BANDWIDTH_STEP_HZ = 100_000
+
+    def _quantize_bandwidth(self, requested_hz):
+        step = self.TUNING_BANDWIDTH_STEP_HZ
+        return ((int(requested_hz) + step - 1) // step) * step
+
+    def read_tuning(self):
+        return {
+            "lane_center_hz": dict(self.lane_rx_center_hz),
+            "analog_bandwidth_hz": self.analog_bandwidth_hz,
+            **({"rx_lo_hz": self.rx_rf_lo_hz,
+                "lane_dsp_hz": dict(self.lane_dsp_hz)}
+               if self.rx_rf_lo_hz is not None else {}),
+        }
+
+    def apply_manual_tuning(self, rx_lo_hz, lane_dsp_hz, analog_bandwidth_hz):
+        if self.tuning_fault is not None:
+            raise RuntimeError(self.tuning_fault)
+        previous = self.read_tuning()
+        offsets = {int(lane): int(value) for lane, value in dict(lane_dsp_hz).items()}
+        if set(offsets) != {0, 1}:
+            raise ValueError(f"lane DSP offset은 lane 0·1 모두 필요합니다: {sorted(offsets)}")
+        bandwidth = self._quantize_bandwidth(analog_bandwidth_hz)
+        if self.tuning_bandwidth_cap_hz is not None:
+            bandwidth = min(bandwidth, int(self.tuning_bandwidth_cap_hz))
+        self.rx_rf_lo_hz = int(rx_lo_hz) + int(self.tuning_lo_error_hz)
+        self.lane_dsp_hz = dict(offsets)
+        self.analog_bandwidth_hz = bandwidth
+        # 승인된 규약: effective = rf_lo - dsp (WSM-G1 실측).
+        self.lane_rx_center_hz = {lane: self.rx_rf_lo_hz - offsets[lane] for lane in (0, 1)}
+        # 단일 값만 읽는 기존 소비자에게는 lane 0(lower) 실효 중심을 보인다.
+        self.rx_lo_hz = self.lane_rx_center_hz[0]
+        return {
+            "rx_lo_hz": self.rx_rf_lo_hz,
+            "lane_dsp_hz": dict(self.lane_dsp_hz),
+            "analog_bandwidth_hz": self.analog_bandwidth_hz,
+            "lane_rf_lo_hz": {lane: self.rx_rf_lo_hz for lane in (0, 1)},
+            "lane_center_hz": dict(self.lane_rx_center_hz),
+            "previous": previous,
+        }
+
+    def restore_tuning(self, snapshot):
+        if self.restore_fault is not None:
+            raise RuntimeError(self.restore_fault)
+        lane_dsp = snapshot.get("lane_dsp_hz")
+        rx_lo = snapshot.get("rx_lo_hz")
+        bandwidth = snapshot.get("analog_bandwidth_hz")
+        if lane_dsp is not None and rx_lo is not None and bandwidth is not None:
+            saved = self.tuning_lo_error_hz
+            self.tuning_lo_error_hz = 0          # 복구는 기록된 실측값 그대로 되돌린다
+            try:
+                return self.apply_manual_tuning(rx_lo, lane_dsp, bandwidth)
+            finally:
+                self.tuning_lo_error_hz = saved
+        centers = snapshot.get("lane_center_hz") or {}
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
+        if bandwidth is not None:
+            self.analog_bandwidth_hz = int(bandwidth)
+        self.lane_rx_center_hz = {int(lane): value for lane, value in centers.items()
+                                  if value is not None}
+        self.rx_lo_hz = self.lane_rx_center_hz.get(0)
+        return self.read_tuning()
 
     def set_rx_gain(self, lane, gain_db):
         return float(gain_db)

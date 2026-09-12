@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
 import unittest
 
 _LINUX = (hasattr(socket, "AF_UNIX") and hasattr(os, "getuid") and sys.platform != "win32")
@@ -542,39 +543,28 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
 
 
 class CommonLoTuningApplyTest(unittest.TestCase):
-    """P07: common LO/DSP/BW 계획의 적용·readback 검증·실패 복구·capability 광고 근거."""
+    """P07: common LO/DSP/BW 계획을 **실 worker surface**에 적용·readback 검증·복구·capability 광고.
 
-    class _Device:
-        """장치 경계 double — 실제 장치 설정은 이번 범위에서 하지 않는다(절차만 검증)."""
+    장치 double은 `Stage7FakeMediumWorker`다 — 실 `Stage7DualLaneFlowgraphBackend`와 **같은 이름의
+    method**(`apply_manual_tuning`/`read_tuning`/`restore_tuning`)를 가지며, echo가 아니라 장치 모델이다
+    (analog BW를 필터 격자로 양자화하고 lane 실효 중심을 승인 규약 effective = rf_lo - dsp로 계산).
+    실제 B210은 열지 않는다 — UHD 경계만 대체하고 명령·순서·오류·복구를 검증한다.
+    """
 
-        def __init__(self, *, fail=False, wrong_dsp=False):
-            self.applied = []
-            self.restored = []
-            self.current = {"rx_lo_hz": 1, "lane_dsp_hz": {0: 0, 1: 0}, "analog_bandwidth_hz": 1}
-            self._fail = fail
-            self._wrong_dsp = wrong_dsp
-
-        def read_tuning(self):
-            return dict(self.current)
-
-        def apply_manual_tuning(self, *, rx_lo_hz, lane_dsp_hz, analog_bandwidth_hz):
-            if self._fail:
-                raise RuntimeError("injected device tuning failure")
-            self.applied.append((rx_lo_hz, dict(lane_dsp_hz), analog_bandwidth_hz))
-            dsp = dict(lane_dsp_hz)
-            if self._wrong_dsp:                      # 장치가 다른 값을 보고하는 경우
-                dsp[1] = int(dsp[1]) + 1_000
-            self.current = {"rx_lo_hz": rx_lo_hz, "lane_dsp_hz": dsp,
-                            "analog_bandwidth_hz": analog_bandwidth_hz}
-            return dict(self.current)
-
-        def restore_tuning(self, snapshot):
-            self.restored.append(dict(snapshot))
-            self.current = dict(snapshot)
-
-    class _DeviceNoRestore(_Device):
-        """복구 수단(restore_tuning)이 없는 장치 — 복구 불가를 숨기지 않는지 확인용."""
-        restore_tuning = None
+    def _worker(self, **faults):
+        from tests.support.stage7 import Stage7FakeMedium, Stage7FakeMediumWorker
+        medium = Stage7FakeMedium(lambda: 1_000_000_000)
+        worker = Stage7FakeMediumWorker("serial=3515425", "fc32", "sc16", medium=medium)
+        worker.configure_dual({
+            "master_clock_rate_hz": 30_720_000, "cpu_format": "fc32", "otw_format": "sc16",
+            "sample_rate_hz": 307_200, "analog_bandwidth_hz": 200_000,
+            "tx_lo_hz": 2_447_237_500, "rx_lo_hz": 2_447_237_500,
+            "tx_gain_db": [0, 0], "rx_gain_db": [0, 0],
+            "rx_queue_max_bytes": 1 << 20, "device_sample_rate_hz": 307_200,
+        })
+        for name, value in faults.items():
+            setattr(worker, name, value)
+        return worker
 
     def _plan(self):
         from vdeter.stage8.shared_medium.tuning import derive_dual_channel_plan
@@ -583,16 +573,21 @@ class CommonLoTuningApplyTest(unittest.TestCase):
     def test_plan_is_applied_to_device_and_readback_verified(self):
         from apps.stage8_stage7_seams import CommonLoTuningApplier
         from vdeter.stage8.shared_medium import constants
-        device = self._Device()
-        applier = CommonLoTuningApplier(device)
+        worker = self._worker()
+        applier = CommonLoTuningApplier(worker)
         readback = applier.apply(self._plan())
-        # 공통 RF LO와 lane별 DSP, analog BW가 실제로 적용됐다(G1 승인 계획값).
-        self.assertEqual(len(device.applied), 1)
-        lo, dsp, bw = device.applied[0]
-        self.assertEqual(lo, constants.COMMON_RF_LO_HZ)
-        self.assertEqual(dsp, {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ})
-        self.assertEqual(bw, constants.ANALOG_RX_BANDWIDTH_HZ)
+        # 공통 RF LO 하나와 lane별 DSP가 실제로 걸렸다(G1 승인 계획값).
         self.assertEqual(readback["rx_lo_hz"], constants.COMMON_RF_LO_HZ)
+        self.assertEqual(readback["lane_dsp_hz"],
+                         {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ})
+        self.assertEqual(set(readback["lane_rf_lo_hz"].values()), {constants.COMMON_RF_LO_HZ})
+        # 승인 규약 effective = rf_lo - dsp → lane 0=lower, lane 1=upper 실효 중심.
+        self.assertEqual(readback["lane_center_hz"], {
+            0: constants.LOWER_EFFECTIVE_CENTER_HZ,
+            1: constants.UPPER_EFFECTIVE_CENTER_HZ,
+        })
+        self.assertGreaterEqual(readback["analog_bandwidth_hz"],
+                                constants.ANALOG_RX_BANDWIDTH_HZ)
         # 검증된 readback이 있을 때만 capability를 광고한다.
         self.assertIn("observe_dual_physical_channel", applier.advertise_capabilities())
 
@@ -608,35 +603,145 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         # 계획을 만들었다는 이유로 광고하지 않는다(silent single-channel fallback 금지).
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
-    def test_readback_mismatch_rejects_and_recovers(self):
+    def test_readback_mismatch_beyond_tune_tolerance_rejects_and_recovers(self):
         from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
-        device = self._Device(wrong_dsp=True)
-        applier = CommonLoTuningApplier(device)
+        # 승인 계약은 ±1 Hz다. 2 Hz 오차는 거부돼야 한다.
+        worker = self._worker(tuning_lo_error_hz=2)
+        before = worker.read_tuning()
+        applier = CommonLoTuningApplier(worker)
         with self.assertRaises(CommonLoTuningError) as ctx:
             applier.apply(self._plan())
-        self.assertIn("lane_dsp_hz[1]", str(ctx.exception))   # 장치 보고값으로 판정
-        self.assertTrue(device.restored, "불일치 시 이전 tuning으로 복구해야 한다")
+        self.assertIn("rx_lo_hz", str(ctx.exception))         # 장치 보고값으로 판정
         self.assertEqual(applier.advertise_capabilities(), frozenset())
         self.assertIsNone(applier.verified_readback)
+        # 불일치 시 이전 tuning으로 되돌린다.
+        self.assertEqual(worker.read_tuning()["lane_center_hz"], before["lane_center_hz"])
+
+    def test_readback_within_approved_tune_tolerance_is_accepted(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier
+        # 기존 승인 계약(`_validate_dual_readback`)과 같은 ±1 Hz. 여기서 넓히지도 좁히지도 않는다.
+        applier = CommonLoTuningApplier(self._worker(tuning_lo_error_hz=1))
+        readback = applier.apply(self._plan())
+        self.assertIsNotNone(readback)
+        self.assertIn("observe_dual_physical_channel", applier.advertise_capabilities())
+
+    def test_narrower_analog_bandwidth_than_plan_is_rejected(self):
+        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        # 통과대역이 계획보다 좁으면 ±2.3 MHz lane 하나가 잘린다 — 조용히 받아들이면 안 된다.
+        applier = CommonLoTuningApplier(self._worker(tuning_bandwidth_cap_hz=4_000_000))
+        with self.assertRaises(CommonLoTuningError) as ctx:
+            applier.apply(self._plan())
+        self.assertIn("analog_bandwidth_hz", str(ctx.exception))
+        self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_apply_failure_recovers_previous_tuning(self):
         from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
-        device = self._Device(fail=True)
-        before = device.read_tuning()
-        applier = CommonLoTuningApplier(device)
+        worker = self._worker(tuning_fault="injected device tuning failure")
+        before = worker.read_tuning()
+        applier = CommonLoTuningApplier(worker)
         with self.assertRaises(CommonLoTuningError):
             applier.apply(self._plan())
-        self.assertEqual(device.restored[-1], before)          # 직전 상태로 복구
+        self.assertEqual(worker.read_tuning(), before)          # 직전 상태로 복구
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_recovery_failure_is_recorded_not_hidden(self):
         from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
-        device = self._DeviceNoRestore(fail=True)
-        applier = CommonLoTuningApplier(device)
+        worker = self._worker(tuning_fault="injected device tuning failure",
+                              restore_fault="injected restore failure")
+        applier = CommonLoTuningApplier(worker)
         with self.assertRaises(CommonLoTuningError):
             applier.apply(self._plan())
         self.assertTrue(getattr(applier, "recovery_error", None))   # 복구 불가를 보존
         self.assertEqual(applier.advertise_capabilities(), frozenset())
+
+    def test_real_backend_uses_manual_rf_and_dsp_policies_on_the_uhd_boundary(self):
+        """실 `Stage7DualLaneFlowgraphBackend`가 UHD 경계에 거는 **명령 자체**를 검증한다.
+
+        RF/DSP policy를 둘 다 MANUAL로 두지 않으면 UHD가 lane마다 RF LO를 다시 잡아 공통 LO가
+        깨진다. 장치는 열지 않고 UHD 경계 객체만 대체한다.
+        """
+        from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.stage8.shared_medium import constants
+
+        class _TuneRequest:
+            POLICY_MANUAL = "MANUAL"
+
+            def __init__(self, target_freq):
+                self.target_freq = target_freq
+                self.rf_freq_policy = None
+                self.rf_freq = None
+                self.dsp_freq_policy = None
+                self.dsp_freq = None
+
+        class _Uhd:
+            tune_request = _TuneRequest
+
+        class _TuneResult:
+            def __init__(self, rf, dsp):
+                self.actual_rf_freq, self.actual_dsp_freq = rf, dsp
+
+        class _Source:
+            def __init__(self):
+                self.calls = []
+                self.bandwidth = {0: 200_000, 1: 200_000}
+                self.center = {0: 0.0, 1: 0.0}
+
+            def set_bandwidth(self, value, lane):
+                self.calls.append(("set_bandwidth", lane, int(value)))
+                self.bandwidth[lane] = int(value)
+
+            def set_center_freq(self, request, lane):
+                self.calls.append(("set_center_freq", lane, request))
+                self.center[lane] = float(request.rf_freq) - float(request.dsp_freq)
+                return _TuneResult(request.rf_freq, request.dsp_freq)
+
+            def get_center_freq(self, lane):
+                return self.center[lane]
+
+            def get_bandwidth(self, lane):
+                return self.bandwidth[lane]
+
+        backend = Stage7DualLaneFlowgraphBackend.__new__(Stage7DualLaneFlowgraphBackend)
+        backend._uhd = _Uhd()
+        backend._source = source = _Source()
+        backend._control_lock = threading.RLock()
+        backend._manual_rx_tuning = None
+        backend._rx_lo_frequency_hz = None
+
+        readback = backend.apply_manual_tuning(
+            constants.COMMON_RF_LO_HZ,
+            {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ},
+            constants.ANALOG_RX_BANDWIDTH_HZ)
+
+        # 순서: lane마다 **bandwidth 먼저, tune 나중**(좁은 필터로 offset을 걸면 lane이 잘린다).
+        order = [(name, lane) for name, lane, _ in source.calls]
+        self.assertEqual(order, [("set_bandwidth", 0), ("set_center_freq", 0),
+                                 ("set_bandwidth", 1), ("set_center_freq", 1)])
+        for _name, lane, request in source.calls:
+            if _name != "set_center_freq":
+                continue
+            self.assertEqual(request.rf_freq_policy, _TuneRequest.POLICY_MANUAL)
+            self.assertEqual(request.dsp_freq_policy, _TuneRequest.POLICY_MANUAL)
+            self.assertEqual(int(request.rf_freq), constants.COMMON_RF_LO_HZ)
+        self.assertEqual(readback["lane_dsp_hz"],
+                         {0: constants.LOWER_DSP_HZ, 1: constants.UPPER_DSP_HZ})
+        self.assertEqual(set(readback["lane_rf_lo_hz"].values()), {constants.COMMON_RF_LO_HZ})
+
+    def test_real_backend_refuses_when_uhd_lacks_manual_tune_policy(self):
+        """UHD가 manual policy를 제공하지 않으면 **추정하지 않고 거부**한다(fail-closed)."""
+        from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.stage8.shared_medium import constants
+
+        class _Uhd:
+            pass
+
+        backend = Stage7DualLaneFlowgraphBackend.__new__(Stage7DualLaneFlowgraphBackend)
+        backend._uhd = _Uhd()
+        backend._control_lock = threading.RLock()
+        backend._manual_rx_tuning = None
+        with self.assertRaises(RuntimeError):
+            backend.apply_manual_tuning(constants.COMMON_RF_LO_HZ, {0: 1, 1: -1},
+                                        constants.ANALOG_RX_BANDWIDTH_HZ)
 
 
 class NormalDispatchPocRefusalTest(unittest.TestCase):

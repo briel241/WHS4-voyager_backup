@@ -265,12 +265,34 @@ class Stage7ReceiverReadiness:
         self._center = channel_center_hz
 
     @staticmethod
-    def _covering_window(worker, tx_ns: int):
-        """예약 TX 시각을 덮는 **미소비** RX window(있으면). 실 등록 창만 본다(합성 없음)."""
+    def _tuned_lanes(worker, expected_center_hz) -> tuple:
+        """이 채널 실효 중심에 tuned된 **lane 번호들**. manual common-LO면 lane마다 다르다.
+
+        manual common-LO tuning을 **적용한 설치**에서만 lane별 중심을 본다(`rx_rf_lo_hz` 존재).
+        적용 전에는 두 lane이 같은 `rx_lo_hz`이므로 종전대로 단일 값으로 판정한다 — 기존 단일 채널
+        설치의 동작을 바꾸지 않는다. tuned lane이 없으면 빈 tuple이다.
+        """
+        if getattr(worker, "rx_rf_lo_hz", None) is not None:
+            lane_centers = getattr(worker, "lane_rx_center_hz", None) or {}
+            return tuple(sorted(lane for lane, center in lane_centers.items()
+                                if center == expected_center_hz))
+        if getattr(worker, "rx_lo_hz", None) == expected_center_hz:
+            return (0, 1)
+        return ()
+
+    @staticmethod
+    def _covering_window(worker, tx_ns: int, lanes):
+        """예약 TX 시각을 덮는 **미소비** RX window(있으면). 실 등록 창만 본다(합성 없음).
+
+        tuned lane에 등록된 창만 본다 — 다른 lane의 창은 이 채널을 수신하지 않는다.
+        """
         windows = getattr(worker, "rx_windows", None)
         if not windows:
             return None
-        for lane, entries in (windows.items() if hasattr(windows, "items") else enumerate(windows)):
+        items = windows.items() if hasattr(windows, "items") else enumerate(windows)
+        for lane, entries in items:
+            if lanes and lane not in lanes:
+                continue
             for entry in entries or ():
                 if entry.get("consumed"):
                     continue
@@ -281,27 +303,50 @@ class Stage7ReceiverReadiness:
                     return {"lane": lane, "start_ns": start, "count": count}
         return None
 
+    @staticmethod
+    def _continuous_since(worker):
+        """연속 RX가 **유효해지는** hardware ns. 연속 RX가 아니면 None.
+
+        실 worker는 dual-channel streamer 정렬 때문에 `now+200 ms`에 시작한다 — 그 이전 시각은
+        스트림이 아직 열리지 않아 수신되지 않는다. 시작 시각을 모르면(속성 부재) 연속 RX를 준비
+        증거로 쓰지 않는다(모름을 준비 완료로 바꾸지 않는다).
+        """
+        if not bool(getattr(worker, "rx_continuous", False)):
+            return None
+        since = getattr(worker, "rx_continuous_since_ns", None)
+        try:
+            value = since() if callable(since) else since
+        except Exception:  # noqa: BLE001 - 조회 실패를 준비 완료로 바꾸지 않는다
+            return None
+        return None if value is None else int(value)
+
     def window_ready(self, request) -> ReadinessDecision:
         worker = self._workers.get(request.endpoint)
         if worker is None:
             return ReadinessDecision(ready=False, reason="RX_ENDPOINT_UNKNOWN")
         expected = self._center.get(request.channel)
-        actual = getattr(worker, "rx_lo_hz", None)
-        if actual != expected:
+        lanes = self._tuned_lanes(worker, expected)
+        if not lanes:
             # §5.5 자연 관측 행렬상 정상일 수 있는 상태다(수신 실패로 만들지 않는다).
             return ReadinessDecision(ready=False, reason="NOT_TUNED")
-        covering = self._covering_window(worker, int(request.scheduled_hw_timestamp_ns))
+        tx_ns = int(request.scheduled_hw_timestamp_ns)
+        covering = self._covering_window(worker, tx_ns, lanes)
         # 서비스 모드 수신은 **연속 RX**다(`start_rx_continuous`: 창별 유한 스트림 대신 단일 연속
-        # 스트림, 창 경계는 collector가 태그). 따라서 수신 가능 여부는 (a) 예약 시각을 덮는 등록 창이
-        # 있거나 (b) 연속 RX가 켜져 있으면 성립한다. 둘 다 아니면 수신이 계획되지 않은 것이다.
-        continuous = bool(getattr(worker, "rx_continuous", False))
-        if covering is None and not continuous:
-            return ReadinessDecision(ready=False, reason="RX_WINDOW_NOT_PLANNED")
+        # 스트림, 창 경계는 collector가 태그). 연속 RX는 "켜져 있다"만으로 부족하고 **예약 시각이
+        # 스트림 시작 이후**여야 한다 — 시작 전 시각은 수신되지 않는다.
+        since = self._continuous_since(worker)
+        continuous_covers = since is not None and tx_ns >= since
+        if covering is None and not continuous_covers:
+            reason = ("RX_CONTINUOUS_NOT_YET_STARTED"
+                      if since is not None else "RX_WINDOW_NOT_PLANNED")
+            return ReadinessDecision(ready=False, reason=reason)
         return ReadinessDecision(ready=True, reason="READY", proof={
             "endpoint": request.endpoint,
-            "rx_lo_hz": actual,
+            "rx_effective_center_hz": expected,
+            "tuned_lanes": list(lanes),                  # 이 채널을 실제로 듣는 lane
             "rx_window": covering,                       # 실 등록 창(있으면 계획·수락 증거)
-            "rx_continuous": continuous,                 # 실 연속 RX 상태
+            "rx_continuous_since_ns": since,             # 실 연속 RX 시작 시각(coverage 근거)
+            "scheduled_hw_timestamp_ns": tx_ns,
             "clock_id": request.clock_id,
             "bridge_generation": request.bridge_generation,
             "correction_revision": request.correction_revision,
@@ -788,22 +833,39 @@ class CommonLoTuningApplier:
         self._verified = dict(readback or {})
         return dict(self._verified)
 
-    @staticmethod
-    def _mismatch(expected: dict, readback) -> dict:
-        """기대값과 장치 보고값의 차이(없으면 빈 dict). 보고가 없으면 전체 불일치로 본다."""
+    #: tune readback 허용 오차. 기존 승인 계약(`radio_adapter._validate_dual_readback`의
+    #: "TX/RX tune readback 오차가 1 Hz를 넘습니다")과 **같은 값**이다. 임의 완화가 아니며
+    #: 여기서 더 넓히지 않는다.
+    TUNE_TOLERANCE_HZ = 1
+
+    @classmethod
+    def _mismatch(cls, expected: dict, readback) -> dict:
+        """기대값과 장치 보고값의 차이(없으면 빈 dict). 보고가 없으면 전체 불일치로 본다.
+
+        - LO·lane DSP: 승인된 ±1 Hz tune 계약(`TUNE_TOLERANCE_HZ`).
+        - analog bandwidth: 장치는 필터 격자로 양자화하므로 정확히 같기를 요구하지 않는다. 대신
+          **요청보다 좁아지면 실패**다 — 좁아진 통과대역은 ±2.3 MHz lane 하나를 잘라내 dual-channel
+          관측을 조용히 깨뜨린다. 넓은 쪽은 계획을 침해하지 않으므로 허용하고 실측값을 보존한다.
+        - lane별 RF LO가 서로 다르면 **공통 LO가 아니다** — dual-channel 전제가 깨지므로 거부한다.
+        """
         if not isinstance(readback, dict):
             return {"readback": "missing"}
         out = {}
-        if int(readback.get("rx_lo_hz", -1)) != expected["rx_lo_hz"]:
-            out["rx_lo_hz"] = (expected["rx_lo_hz"], readback.get("rx_lo_hz"))
-        if int(readback.get("analog_bandwidth_hz", -1)) != expected["analog_bandwidth_hz"]:
-            out["analog_bandwidth_hz"] = (expected["analog_bandwidth_hz"],
-                                          readback.get("analog_bandwidth_hz"))
+        reported_lo = readback.get("rx_lo_hz")
+        if reported_lo is None or abs(int(reported_lo) - expected["rx_lo_hz"]) > cls.TUNE_TOLERANCE_HZ:
+            out["rx_lo_hz"] = (expected["rx_lo_hz"], reported_lo)
+        reported_bw = readback.get("analog_bandwidth_hz")
+        if reported_bw is None or int(reported_bw) < expected["analog_bandwidth_hz"]:
+            out["analog_bandwidth_hz"] = (expected["analog_bandwidth_hz"], reported_bw)
         reported = readback.get("lane_dsp_hz") or {}
         for lane, want in expected["lane_dsp_hz"].items():
             got = reported.get(lane, reported.get(str(lane)))
-            if got is None or int(got) != int(want):
+            if got is None or abs(int(got) - int(want)) > cls.TUNE_TOLERANCE_HZ:
                 out[f"lane_dsp_hz[{lane}]"] = (want, got)
+        lane_lo = readback.get("lane_rf_lo_hz") or {}
+        values = {int(v) for v in lane_lo.values() if v is not None}
+        if len(values) > 1:
+            out["lane_rf_lo_hz"] = ("공통 RF LO여야 합니다", lane_lo)
         return out
 
     def _recover(self, *, reason: str) -> None:
