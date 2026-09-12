@@ -131,6 +131,77 @@ class Stage7PocDeviceSeam:
             "bridge_locked": getattr(bridge, "clock_id", None) is not None,
         }
 
+    def mac_transmit_slots(self, *, channel_name: str, from_hw_ns: int,
+                           limit: int = 8) -> dict:
+        """**실 MAC slot map**에서 이 endpoint가 송신할 수 있는 다음 slot들을 돌려준다(P03).
+
+        Stage 8 scheduler가 device slot 격자(8,192 표본 등간격)로 시각을 고르면 MAC이 승인하지 않은
+        구간에 송신을 요청할 수 있다. 여기서는 **활성 TBB의 slot map**(없으면 bootstrap)에서
+        `transmit_enabled`인 slot만 모아 준다 — 즉 "MAC이 이 채널에서 송신을 허용한 시각"이다.
+        slot을 새로 만들지 않고 계획표를 읽기만 한다.
+
+        시각은 두 좌표를 **분리해** 싣는다: MAC의 UTC label과 그것을 bridge로 환산한 device
+        hardware ns. 환산이 불가능하면(bridge 미잠금) 그 slot은 싣지 않는다 — 장치가 쓸 수 없는
+        시각을 후보로 주지 않는다.
+        """
+
+        if channel_name not in CHANNEL_NAMES:
+            raise ValueError(f"허용되지 않은 채널 이름: {channel_name!r}")
+        from ...mac.access import enumerate_function_slots
+        from ...mac.tbb import SlotFunction
+        from ...mac.tdma import FRAME_NANOSECONDS
+
+        mac = getattr(getattr(self._endpoint, "stage4", None), "mac", None)
+        # `Stage4Mac`은 port 계약이고 slot map 소유자는 그 뒤의 `MacCoordinator`다.
+        coordinator = getattr(mac, "coordinator", None)
+        state = getattr(mac, "state", None)
+        if coordinator is None or state is None:
+            raise PocDeviceUnavailable("endpoint에서 MAC slot map에 닿을 수 없습니다")
+        slot_map = coordinator.active_slot_map(state)
+        radio = self._radio()
+        bridge = getattr(radio, "bridge", None)
+        to_utc = getattr(bridge, "hardware_ns_to_utc_label", None)
+        to_hw = getattr(bridge, "utc_label_to_hardware_ns", None)
+        if not callable(to_utc) or not callable(to_hw):
+            raise PocDeviceUnavailable("host time bridge가 없어 MAC slot 시각을 환산할 수 없습니다")
+        from_utc = to_utc(int(from_hw_ns))
+        if from_utc is None:
+            raise PocDeviceUnavailable("host time bridge가 잠겨 있지 않습니다")
+
+        channel = PhysicalChannel(channel_name)
+        candidates = []
+        # 두 frame 안에서 찾는다(MAC 자신의 탐색 상한과 같은 폭). 없으면 빈 목록이다.
+        for function in SlotFunction:
+            try:
+                found = enumerate_function_slots(
+                    slot_map=slot_map, function=function, physical_channel=channel,
+                    from_utc_nanoseconds=int(from_utc),
+                    until_utc_nanoseconds=int(from_utc) + 2 * FRAME_NANOSECONDS,
+                    transmit=True)
+            except Exception:  # noqa: BLE001 - 한 function 실패가 전체를 막지 않는다
+                continue
+            for item in found:
+                hardware_ns = to_hw(int(item.start_nanoseconds))
+                if hardware_ns is None:
+                    continue        # 장치 좌표로 환산 불가 → 후보로 주지 않는다
+                candidates.append({
+                    "function": function.value,
+                    "tdma_channel": int(item.tdma_channel),
+                    "slot_in_frame": int(item.slot_in_frame),
+                    "frame_ordinal": int(item.frame_ordinal),
+                    "logical_channel": int(item.logical_channel),
+                    "start_utc_ns": int(item.start_nanoseconds),
+                    "start_hw_ns": int(hardware_ns),
+                    "duration_ns": int(item.duration_nanoseconds),
+                })
+        candidates.sort(key=lambda entry: entry["start_hw_ns"])
+        return {
+            "channel_name": channel_name,
+            "from_hw_ns": int(from_hw_ns),
+            "slot_map_id": str(getattr(slot_map, "map_id", "")),
+            "slots": candidates[:max(1, int(limit))],
+        }
+
     def tx_burst_state(self, burst_id: str):
         """권위 TX 원장 조회(읽기 전용). 원장에 없으면 None — 성공으로 추정하지 않는다."""
 

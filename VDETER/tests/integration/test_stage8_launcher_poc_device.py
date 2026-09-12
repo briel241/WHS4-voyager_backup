@@ -359,6 +359,77 @@ class LauncherProviderTest(LauncherPocDeviceRpcTest):
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
 
 
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET·Stage7 software group 전용")
+class MacSlotBindingTest(LauncherPocDeviceRpcTest):
+    """P03: 송신 시각이 **실 MAC slot map**이 허용한 slot에서 나온다."""
+
+    def test_mac_slots_come_from_the_real_slot_map(self):
+        from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
+
+        state = _C.poc_result(self._call("poc_radio_state", {}))
+        answer = _C.poc_result(self._call("poc_mac_slots", {
+            "channel_name": _LOWER,
+            "from_hw_ns": int(state["hardware_time_ns"]),
+            "limit": 4}))
+        self.assertTrue(answer["slot_map_id"], "활성 slot map id가 있어야 한다")
+        slots = answer["slots"]
+        self.assertTrue(slots, "실 slot map에 송신 가능 slot이 있어야 한다")
+        for slot in slots:
+            # MAC 좌표와 장치 좌표가 **둘 다** 실려야 한다(하나로 뭉개지 않는다).
+            self.assertIn(slot["function"],
+                          ("BBSC", "RAC", "ASC", "DC", "DSCH", "RANGING"))
+            self.assertGreaterEqual(slot["start_hw_ns"], int(state["hardware_time_ns"]))
+            self.assertGreater(slot["start_utc_ns"], 0)
+        # 오름차순이고 요청 상한을 넘지 않는다.
+        self.assertEqual([s["start_hw_ns"] for s in slots],
+                         sorted(s["start_hw_ns"] for s in slots))
+        self.assertLessEqual(len(slots), 4)
+
+    def test_scheduled_transmit_time_lands_on_a_mac_transmit_slot(self):
+        """provider가 고른 송신 시각이 실 MAC slot 시작과 **일치**한다(격자 시각 아님)."""
+        from apps.stage8_launcher_seams import assemble_launcher_provider
+        from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        provider, bindings = assemble_launcher_provider(
+            self.controller, actor_endpoint="MASS-B",
+            endpoint_ids=("MASS-A", "MASS-B", "ROC"),
+            station_id_by_endpoint={"MASS-A": 111_111_111, "MASS-B": 333_333_333,
+                                    "ROC": 222_222_222},
+            mac_channel_name=_LOWER)
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        provider.submit(action, request_id="poc-mac-1")
+        parent = provider.parent_for("poc-mac-1")
+        self.assertIsNotNone(parent)
+        chosen = int(parent.scheduled_hw_timestamp_ns)
+        # 예약 키가 MAC 좌표다 — device 격자 인덱스가 아니다.
+        self.assertTrue(parent.slot_key.startswith("mac-"), parent.slot_key)
+        # 고른 시각이 실제로 MAC이 허용한 slot의 **시작**이다(격자 시각이 아니다).
+        answer = _C.poc_result(self._call("poc_mac_slots", {
+            "channel_name": _LOWER, "from_hw_ns": chosen, "limit": 1}))
+        self.assertEqual(int(answer["slots"][0]["start_hw_ns"]), chosen)
+
+    def test_no_usable_mac_slot_is_refused_not_shifted(self):
+        """권위 lead를 만족하는 MAC slot이 없으면 **거부**한다 — 임의로 당기거나 미루지 않는다."""
+        from apps.stage8_launcher_seams import MacSlotScheduler
+        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        class _NoSlots(MacSlotScheduler):
+            def _query(self):            # launcher가 후보 0개를 준 상황
+                return {"slots": [], "slot_map_id": "empty"}
+
+        from apps.stage8_launcher_seams import LauncherDeviceClient, _RemoteWorker
+        client = LauncherDeviceClient(self.controller, "MASS-B")
+        scheduler = _NoSlots(_RemoteWorker(client), client, channel_name=_LOWER)
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        with self.assertRaises(PocError) as ctx:
+            scheduler.resolve(action, request_id="poc-mac-none")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_DEADLINE_MISSED)
+
+
 @unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
 class PocDeviceDisabledByDefaultTest(unittest.TestCase):
     """device seam을 주입하지 않은 설치에서는 PoC op이 **전부 거부**된다(기본값 = 쓸 수 없음)."""

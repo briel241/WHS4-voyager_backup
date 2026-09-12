@@ -224,6 +224,67 @@ class LauncherLedgerTerminalSource:
         return out
 
 
+class MacSlotScheduler(Stage7HwTimeScheduler):
+    """scheduler seam → **실 MAC slot map**이 송신을 허용한 slot만 고른다(P03).
+
+    기반 `Stage7HwTimeScheduler`가 실 hardware clock·권위 lead(100/200 ms)·반응형 인과성을
+    이미 담당한다. 이 subclass는 그 위에 한 가지를 더한다: 기반이 고른 device-grid 시각 이후로
+    **MAC이 실제로 송신을 허용한 첫 slot**으로 옮긴다.
+
+    왜 필요한가: device slot 격자(8,192 표본 등간격)는 MAC의 TDMA 계획과 무관하다. 격자 시각을
+    그대로 쓰면 MAC이 승인하지 않은 구간에 송신을 요청하게 된다(§7.3 "MAC이 승인하지 않은 동시
+    TX를 이 기능이 새로 허용하지 않는다").
+
+    slot을 만들어내지 않는다 — launcher가 실 slot map에서 읽어 준 후보 중에서만 고른다. 후보가
+    없으면 `POC_DEADLINE_MISSED`로 거부한다(임의로 뒤로 미루거나 격자 시각으로 되돌아가지 않는다).
+    """
+
+    def __init__(self, worker, client: LauncherDeviceClient, *, channel_name: str,
+                 current_channel=None) -> None:
+        super().__init__(worker, current_channel=current_channel)
+        self._client = client
+        self._channel_name = channel_name
+
+    def _query(self) -> dict:
+        """launcher에서 실 MAC 송신 가능 slot 후보를 읽는다(시험이 대체할 수 있는 유일한 지점)."""
+        return self._client.call("poc_mac_slots", {
+            "channel_name": self._channel_name,
+            "from_hw_ns": int(getattr(self, "_base_hw_ns", 0)),
+            "limit": 8,
+        })
+
+    def resolve(self, action, *, request_id: str):
+        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.shared_medium.radiation import ScheduledSlot
+
+        base = super().resolve(action, request_id=request_id)   # 실 clock·권위 lead·인과성
+        self._base_hw_ns = int(base.scheduled_hw_timestamp_ns)
+        answer = self._query()
+        slots = (answer or {}).get("slots") or []
+        # slot 조회 자체가 시간을 쓴다(RPC 왕복). 조회 전에 계산한 lead는 이미 일부 소진됐으므로
+        # **다시 읽은 현재 시각** 기준으로 권위 최소 lead를 여전히 만족하는 첫 후보를 고른다.
+        # lead를 줄여 통과시키지 않는다 — 만족하는 후보가 없으면 거부한다.
+        now_ns = self._hw_now_ns()
+        earliest = now_ns + self._required_lead_ns()
+        usable = [slot for slot in slots if int(slot["start_hw_ns"]) >= earliest]
+        if not usable:
+            raise PocError(
+                PocErrorCode.POC_DEADLINE_MISSED,
+                "실 MAC slot map에 권위 lead를 만족하는 송신 가능 slot이 없습니다 — 이동하지 않음",
+                detail={"channel": self._channel_name,
+                        "earliest_hw_ns": earliest,
+                        "candidates": len(slots),
+                        "slot_map_id": (answer or {}).get("slot_map_id")})
+        chosen = usable[0]
+        return ScheduledSlot(
+            scheduled_sample=base.scheduled_sample,
+            scheduled_hw_timestamp_ns=int(chosen["start_hw_ns"]),
+            # slot_key를 MAC 좌표로 만든다 — 자원 예약 키가 실제 TDMA slot과 1:1이 된다.
+            slot_key=("mac-{frame_ordinal}-{tdma_channel}-{slot_in_frame}"
+                      .format(**chosen)),
+        )
+
+
 def stage7_channel_name(stage8_channel) -> str:
     """Stage 8 `PhysicalChannel` → 권위 Stage 7 canonical 채널 **이름**."""
 
@@ -241,7 +302,7 @@ def stage7_channel_name(stage8_channel) -> str:
 def assemble_launcher_provider(controller, *, actor_endpoint: str,
                                endpoint_ids, station_id_by_endpoint: dict,
                                channel_center_hz=None, dual_channel_installed: bool = False,
-                               guard=None):
+                               guard=None, mac_channel_name=None):
     """launcher 소유 장치에 결속된 production provider를 조립한다.
 
     반환 ``(provider, bindings)``. bindings에 client·sink가 있어 terminal source를 만들 수 있다.
@@ -257,10 +318,17 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
     workers = {endpoint: _RemoteWorker(client) for endpoint, client in clients.items()}
     sink = LauncherRadioSink(actor, channel_name_of=stage7_channel_name,
                              station_id_by_endpoint=station_id_by_endpoint)
+    # `mac_channel_name`을 주면 **실 MAC slot map**이 허용한 slot만 고른다(P03). 주지 않으면
+    # device-grid scheduler 그대로다(MAC 결속 없음을 조용히 숨기지 않고 호출자가 고르게 한다).
+    if mac_channel_name:
+        scheduler = MacSlotScheduler(workers[actor_endpoint], actor,
+                                     channel_name=mac_channel_name)
+    else:
+        scheduler = Stage7HwTimeScheduler(workers[actor_endpoint])
     provider = SharedMediumActionProvider.for_production(
         radio_sink=sink,
         rx_readiness=Stage7ReceiverReadiness(workers, center),
-        scheduler=Stage7HwTimeScheduler(workers[actor_endpoint]),
+        scheduler=scheduler,
         waveform_factory=Link11WaveformFactory(),
         arbiter=Stage7WorkerArbiter(workers[actor_endpoint]),
         dual_channel_installed=dual_channel_installed,

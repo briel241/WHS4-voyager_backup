@@ -40,7 +40,7 @@ _INLINE_STATUS_KEYS = frozenset({"transfer_id"})
 #: §16.2 PoC device 경계 op(Stage 8 PoC supervisor 전용). device seam이 주입되지 않은 설치에서는
 #: 전부 REJECTED다 — 기본값은 "쓸 수 없음"이고 조용한 대체 경로는 없다.
 _POC_OPERATIONS = ("poc_radio_state", "poc_schedule_group_tx", "poc_tx_burst_state",
-                   "poc_tuning")
+                   "poc_tuning", "poc_mac_slots")
 
 #: 각 PoC op body의 **정확한** 허용 키(fail-closed: 그 외 키는 거부).
 _POC_SCHEDULE_KEYS = frozenset(
@@ -48,6 +48,7 @@ _POC_SCHEDULE_KEYS = frozenset(
      "destination_station_id", "request_digest"}
 )
 _POC_BURST_KEYS = frozenset({"burst_id"})
+_POC_MAC_SLOT_KEYS = frozenset({"channel_name", "from_hw_ns", "limit"})
 _POC_TUNING_KEYS = frozenset(
     {"mode", "rx_lo_hz", "lane_dsp_hz", "analog_bandwidth_hz", "snapshot"}
 )
@@ -478,6 +479,13 @@ class Stage7ServiceApiTestAdapter:
                 destination_station_id=int(body["destination_station_id"]),
                 request_digest=str(body["request_digest"] or ""),
             )
+        if name == "poc_mac_slots":
+            if set(body) != _POC_MAC_SLOT_KEYS:
+                raise ValueError("poc_mac_slots body key 집합 위반")
+            return device.mac_transmit_slots(
+                channel_name=str(body["channel_name"]),
+                from_hw_ns=int(body["from_hw_ns"]),
+                limit=int(body["limit"]))
         if name == "poc_tuning":
             if set(body) != _POC_TUNING_KEYS:
                 raise ValueError("poc_tuning body key 집합 위반")
