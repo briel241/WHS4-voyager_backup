@@ -943,10 +943,11 @@ class PocWorkloadHost:
 
     def new_observations(self):
         """지난 호출 이후 도착한 **실 복호 이벤트**를 PoC 관측 record로 만든다."""
-        from vdeter.stage8.poc_api.types import (
-            ObservationRecord, PhysicalChannel, TuningState,
-        )
+        from vdeter.stage8.poc_api.types import ObservationRecord, TuningState
+        from vdeter.stage8.shared_medium.topology import role_rx_channel
 
+        station_to_endpoint = {station: endpoint
+                               for endpoint, station in STATION_BY_ENDPOINT.items()}
         self._events.poll()
         out = []
         for endpoint_id in ENDPOINT_IDS:
@@ -963,8 +964,14 @@ class PocWorkloadHost:
                                 .get("hardware_time_ns"))
                 except Exception:  # noqa: BLE001 - 시각을 못 읽으면 관측을 만들지 않는다
                     continue
+                # 송신 채널은 **수신자 role**이 정한다(addressed 전송은 대상의 RX 채널로 나간다).
+                # 공개 service event에는 physical channel이 없으므로 권위 role 표에서 유도하고,
+                # 그것이 측정값이 아니라 유도값임을 증거에 남긴다(측정으로 위장하지 않는다).
+                dest_endpoint = station_to_endpoint.get(int(destination))
+                if dest_endpoint is None:
+                    continue
                 out.append(ObservationRecord(
-                    physical_channel=PhysicalChannel.UPPER,
+                    physical_channel=role_rx_channel(dest_endpoint),
                     tuning_state=TuningState.TUNED_OBSERVER,
                     observation_id=f"obs-{endpoint_id}-{record.get('payload_sha256', '')[:16]}",
                     source_station=str(source),
@@ -972,7 +979,11 @@ class PocWorkloadHost:
                     device_hw_timestamp_ns=hw_ns,
                     host_mono_timestamp_ns=int(record.get("received_at_ns") or hw_ns),
                     body={"payload_sha256": record.get("payload_sha256"),
-                          "observed_at_endpoint": endpoint_id},
+                          "observed_at_endpoint": endpoint_id,
+                          # 무엇이 실측이고 무엇이 유도인지 분리해 기록한다.
+                          "physical_channel_source": "DERIVED_FROM_ROLE_RX_CHANNEL",
+                          "device_time_source": "ACTOR_HARDWARE_CLOCK_AT_OBSERVATION",
+                          "decode_evidence": "REAL_SERVICE_DATA_RECEIVED"},
                 ))
             self._seen[endpoint_id] = len(records)
         return out
