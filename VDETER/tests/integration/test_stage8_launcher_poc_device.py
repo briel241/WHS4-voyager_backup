@@ -34,7 +34,6 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.mkdtemp(prefix="poc-dev-")
         os.chmod(self._dir, 0o700)
-        self.socket_path = os.path.join(self._dir, "mb.test.sock")
         env = dict(os.environ)
         src = os.path.join(_REPO, "VDETER", "src")
         vdeter = os.path.join(_REPO, "VDETER")
@@ -42,7 +41,7 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
             [src, vdeter, env.get("PYTHONPATH", "")]).strip(os.pathsep)
         self.child = subprocess.Popen(
             [sys.executable, "-m", "tests.support.poc_device_harness",
-             self.socket_path, _PLAN_SHA],
+             self._dir, _PLAN_SHA],
             cwd=vdeter, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self._stop_child)
         ready = self.child.stdout.readline().strip()
@@ -51,8 +50,6 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
                       f"stderr={self.child.stderr.read()[:500]}")
         from vdeter.stage7.testing.controller import Stage7ScenarioController
         from vdeter.stage7.transport import SeqPacketClient
-        self.client = SeqPacketClient(self.socket_path)
-        self.addCleanup(self.client.close)
 
         class _Channel:
             def __init__(self, client):
@@ -69,9 +66,17 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
                         return received
                 raise TimeoutError("PoC device 응답 초과")
 
+        # endpoint마다 **자기 socket**으로 연결한다(실 배치의 launcher별 socket과 같은 경계).
+        channels = {}
+        for endpoint_id in ("MASS-A", "MASS-B", "ROC"):
+            client = SeqPacketClient(os.path.join(self._dir, f"{endpoint_id}.test.sock"))
+            self.addCleanup(client.close)
+            channels[endpoint_id] = _Channel(client)
+            if endpoint_id == "MASS-B":
+                self.client = client
         self.controller = Stage7ScenarioController(
             run_id="stage8-poc-dev", resolved_test_plan_sha256=_PLAN_SHA,
-            adapter_channels={"MASS-B": _Channel(self.client)},
+            adapter_channels=channels,
             host_raw_clock=lambda: int(time.monotonic_ns()))
 
     def _stop_child(self):
@@ -293,6 +298,65 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
             "mode": "RESTORE", "rx_lo_hz": None, "lane_dsp_hz": None,
             "analog_bandwidth_hz": None, "snapshot": before}))
         self.assertEqual(restored["lane_center_hz"], before["lane_center_hz"])
+
+
+@unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET·Stage7 software group 전용")
+class LauncherProviderTest(LauncherPocDeviceRpcTest):
+    """PoC **provider 전체**가 launcher 소유 장치에 프로세스 경계 너머로 결속된다.
+
+    scheduler·arbiter·rx_readiness는 in-process에서 이미 시험된 구현 **그대로**이고, 장치 상태만
+    실 RPC로 온다. sink만 경계를 건너는 구현이다.
+    """
+
+    def _provider(self, **kwargs):
+        from apps.stage8_launcher_seams import assemble_launcher_provider
+        return assemble_launcher_provider(
+            self.controller, actor_endpoint="MASS-B", endpoint_ids=("MASS-A", "MASS-B", "ROC"),
+            station_id_by_endpoint={"MASS-A": 111_111_111, "MASS-B": 333_333_333,
+                                    "ROC": 222_222_222},
+            **kwargs)
+
+    def test_provider_submit_radiates_through_the_launcher_and_confirms_from_the_ledger(self):
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.stage8.shared_medium.radiation import ParentOutcome
+
+        provider, bindings = self._provider()
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        submission = provider.submit(action, request_id="poc-remote-1")
+        self.assertIsNotNone(submission)
+        parent = provider.parent_for("poc-remote-1")
+        self.assertIsNotNone(parent)
+        # 두 lane fan-out이 권위 원장에 등록된다(§5.1 고정 배선).
+        burst_id = bindings["sink"].burst_by_group[parent.parent_id]
+        from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
+        ledger = _C.poc_result(self._call("poc_tx_burst_state", {"burst_id": burst_id}))
+        self.assertEqual(sorted(ledger["children"]), ["0", "1"], ledger)
+        # terminal은 **원장**에서 온다(매질 로그·휴리스틱 아님).
+        terminals = bindings["terminal_source"](action, {}, parent)
+        self.assertTrue(all(v == "COMPLETED" for v in terminals.values()), terminals)
+        self.assertEqual(provider.resolve_outcome("poc-remote-1", terminals),
+                         ParentOutcome.COMPLETED)
+
+    def test_normal_tx_holding_the_lane_refuses_the_poc_reservation(self):
+        """P04: 정상 TX가 lane을 점유하면 **원격 상태**를 읽어 예약을 거부한다(정상 TX 우선)."""
+        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        # 자식 프로세스의 실 worker lane을 mute한다(정상 서비스 TX 점유 상황).
+        # 기존 fault hook allowlist를 쓴다 — production launcher는 hook을 등록하지 않으므로
+        # 실장비에서 이 경로는 항상 거부된다(장치 조작 op을 새로 열지 않는다).
+        response = self.controller.inject_test_fault(
+            "MASS-B", scenario_id="poc", step_id="mute", fault_fixture_id="poc_mute_lane",
+            target_correlation_sha256=hashlib.sha256(b"mute").hexdigest())
+        body = response.get("body") or {}
+        self.assertEqual(body.get("call_outcome"), "OK", body)
+        provider, _bindings = self._provider()
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        with self.assertRaises(PocError) as ctx:
+            provider.submit(action, request_id="poc-remote-conflict")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
 
 
 @unittest.skipUnless(_LINUX, "실 subprocess·SOCK_SEQPACKET 전용")
