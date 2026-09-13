@@ -50,7 +50,12 @@ PHASE_I_BINDINGS_PATH = os.path.join(
 
 def _phase_i_bindings() -> dict:
     with open(PHASE_I_BINDINGS_PATH, encoding="utf-8") as handle:
-        return json.load(handle)
+        bindings = json.load(handle)
+    if (bindings.get("artifact_type") != "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V2"
+            or bindings.get("source_sha256_binding", {}).get("method_id")
+            != "literal-source-lf-v1"):
+        raise ValueError("unsupported Phase-I source hash contract")
+    return bindings
 
 
 def _function_source(lines: list, node: ast.FunctionDef) -> str:

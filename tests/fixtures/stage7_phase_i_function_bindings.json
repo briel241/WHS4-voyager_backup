@@ -5,7 +5,7 @@
   "_shared_hub_topology_check"
  ],
  "approved_utc": "2026-09-10",
- "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V1",
+ "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V2",
  "expected_changed_vs_qualified_commit": [
   "run_mass_roc_session",
   "run_rr_p0",
@@ -38,6 +38,8 @@
  "policy": "Phase I (standalone) approved change (2026-09-04): run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). Pi powered-USB3-hub host profile (2026-09-10, user-approved option (b)): run_rr_p0 derives the approved USB link speed of each endpoint from the resolved host_execution.usb_transport through the single profile definition vdeter.stage7.host_profiles (legacy Pi values unchanged: 5000/480/5000; STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1: 5000/5000/5000) and, for the powered-hub profile only, additionally verifies the live sysfs shared self-powered hub topology; helper functions _expected_usb_speed/_shared_hub_topology_check were added. No RF threshold, deadline, gain, PHY/MAC, waveform, retry or scenario judgement changed. This fixture pins every approved implementation by AST and source SHA-256 (verified identical on CPython 3.12.3 and 3.12.13) so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
  "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
  "source_sha256_binding": {
+  "method_id": "literal-source-lf-v1",
+  "legacy_consumer_policy": "Host tests validate canonical source against these fixed AST/literal pins before translating approved functions to interpreter-local ast.unparse hashes in an in-memory synthetic reference. Production Phase-G verification and historical reference bytes remain unchanged. Unknown method/version is rejected.",
   "changed_utc": "2026-09-13",
   "method": "SHA-256 of the function's literal source text in the approved file (decorators included, LF-normalized, comments and whitespace included)",
   "previous_method": "SHA-256 of ast.unparse(node)",

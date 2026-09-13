@@ -16,6 +16,7 @@ if _REPO not in sys.path:
 
 from apps import stage7_service_layer, stage7_session
 from apps.stage7_trace import NullTrace
+from stage7_binding_fixtures import legacy_phase_i_pins
 
 
 class _Completed:
@@ -163,10 +164,7 @@ def _mutate_function(source: str, name: str) -> str:
 
 
 def _phase_i_pinned() -> dict:
-    with open(os.path.join(_REPO, "tests", "fixtures",
-                           "stage7_phase_i_function_bindings.json"),
-              encoding="utf-8") as handle:
-        return json.load(handle)["functions"]
+    return legacy_phase_i_pins()
 
 
 def _rebind_for_phase_i(profile: dict, source: str, *,
