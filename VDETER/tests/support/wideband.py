@@ -45,6 +45,7 @@ from vdeter.runtime.wiring import (
     build_registries,
     build_wideband_group,
 )
+from vdeter.security.dependencies import E2eSecurityDependencies
 
 VDETER_ROOT = Path(__file__).resolve().parents[2]
 
@@ -176,7 +177,9 @@ def build_wideband_software_group(
             signer, certificate_der, is_control=role is ServiceRole.CONTROL
         )
     built = build_wideband_group(
-        tuple(descriptors), crypto_by_station=crypto_by_station, policy=policy
+        tuple(descriptors), crypto_by_station=crypto_by_station, policy=policy,
+        e2e_security_by_station={station.value: E2eSecurityDependencies.disabled()
+                                 for station in MEMBER_STATION_IDS},
     )
     if built.is_err:
         raise AssertionError(built.error)

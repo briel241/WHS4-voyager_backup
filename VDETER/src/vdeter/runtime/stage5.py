@@ -591,7 +591,7 @@ class Stage5Endpoint(VdeTerEndpoint):
         _stub_presentation, link, phy = build_stage4_layers(
             self._dependencies, self._crypto_dependencies
         )
-        # Presentation Adapter는 frozen registry snapshot 기반 무상태 구현이므로 유지한다.
+        # Presentation Adapter와 endpoint 수명 security collaborator는 stop/start에도 유지한다.
         self._link = link
         self._phy = phy
         if self._stage4 is not None:

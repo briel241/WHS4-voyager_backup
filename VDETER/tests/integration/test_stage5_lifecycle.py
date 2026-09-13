@@ -49,6 +49,7 @@ from vdeter.common.time import TestTimeSource
 from vdeter.radio.software import SoftwareRadioAdapter
 from vdeter.radio.software.faults import SoftwareRadioFault
 from vdeter.runtime.wiring import EndpointDependencies, InternalEventBus, build_stage5_group
+from vdeter.security.dependencies import E2eSecurityDependencies
 
 OPAQUE = PayloadFormat("test.stage0.opaque")
 
@@ -120,7 +121,13 @@ class Stage5GroupCompositionTest(unittest.TestCase):
             crypto_by_station[station_id.value] = crypto_dependencies(
                 signer, certificate_der, is_control=role is ServiceRole.CONTROL
             )
-        return build_stage5_group(tuple(descriptors), crypto_by_station=crypto_by_station)
+        return build_stage5_group(
+            tuple(descriptors), crypto_by_station=crypto_by_station,
+            e2e_security_by_station={
+                item[0].configuration.endpoint.station_id.value: E2eSecurityDependencies.disabled()
+                for item in descriptors
+            },
+        )
 
     def test_TC_STAGE5_002_group_requires_exactly_one_control_two_ships(self):
         two_controls = self._build_group_with_roles(

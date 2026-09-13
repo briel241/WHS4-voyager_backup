@@ -44,6 +44,8 @@ from vdeter.runtime.wiring import (
     build_registries,
     build_stage5_group,
 )
+from vdeter.security.dependencies import E2eSecurityDependencies
+from tests.support.security import make_test_e2e_by_station
 
 VDETER_ROOT = Path(__file__).resolve().parents[2]
 
@@ -123,6 +125,7 @@ def build_stage5_software_group(
     radio_faults_by_endpoint=None,
     service_sink_factory=None,
     policy=None,
+    e2e_security_mode="DISABLED",
 ):
     """결정적인 Ship A, Ship B, ROC Stage 5 group을 만든다. 아직 시작하지 않은 상태다."""
 
@@ -180,8 +183,16 @@ def build_stage5_software_group(
         crypto_by_station[station_id.value] = crypto_dependencies(
             signer, certificate_der, is_control=role is ServiceRole.CONTROL
         )
+    if e2e_security_mode == "ENFORCED":
+        e2e_by_station = make_test_e2e_by_station(STATION_ENDPOINT_IDS)
+    elif e2e_security_mode == "DISABLED":
+        e2e_by_station = {station.value: E2eSecurityDependencies.disabled()
+                          for station in MEMBER_STATION_IDS}
+    else:
+        raise ValueError("Explicit E2E security mode is required")
     built = build_stage5_group(
-        tuple(descriptors), crypto_by_station=crypto_by_station, policy=policy
+        tuple(descriptors), crypto_by_station=crypto_by_station, policy=policy,
+        e2e_security_by_station=e2e_by_station,
     )
     if built.is_err:
         raise AssertionError(built.error)

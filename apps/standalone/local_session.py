@@ -197,6 +197,7 @@ class LocalCoordinatorSession:
                 / "stage7_coordinator_main.py"),
             "--run-id", self.run_id,
             "--phase", self.phase,
+            "--e2e-security-mode", "ENFORCED" if self.phase.startswith("mass-roc") else "DISABLED",
             "--run-root", str(self.run_root),
             "--configs-dir", str(self.configs_dir),
             "--gain-artifact", str(self.gain_artifact_path),

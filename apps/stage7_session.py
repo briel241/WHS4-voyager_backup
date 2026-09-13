@@ -299,6 +299,7 @@ class Stage7ServiceSession:
             + " apps/stage7_coordinator_main.py"
             + " --run-id " + self.session_id
             + " --phase mass-roc-session"
+            + " --e2e-security-mode ENFORCED"
             + " --run-root " + self.remote_run_root
             + " --configs-dir " + self.remote_root + "/run-configs/" + self.session_id
             + " --gain-artifact " + self.remote_root + "/" + gain_rel

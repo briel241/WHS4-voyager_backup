@@ -121,7 +121,7 @@ class SoftwareMassRocHarness:
 
         try:
             self._clock, self._group = build_stage5_software_group(
-                service_sink_factory=sink_factory
+                service_sink_factory=sink_factory, e2e_security_mode="ENFORCED",
             )
             start_stage5_group(self._clock, self._group)
         except Exception as exc:  # noqa: BLE001 - cryptography 등 조립 실패
@@ -155,6 +155,7 @@ class SoftwareMassRocHarness:
     def close(self) -> None:
         try:
             self._group.stop()
+            self._group.close_final()
         except Exception:  # noqa: BLE001 - 종료 최선 노력
             pass
 

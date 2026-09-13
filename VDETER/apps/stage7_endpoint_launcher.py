@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for path in (APP_ROOT, os.path.join(APP_ROOT, "src")):
@@ -102,19 +103,19 @@ def _load_trust(root: str, *, is_control: bool):
     )
 
 
-def service_event_record(event, *, mono_clock=time.monotonic) -> dict:
+def service_event_record(event, *, mono_clock=time.monotonic, include_payload=True) -> dict:
     """public ServiceEvent 하나를 event JSONL record(dict)로 만든다.
 
     기존 필드(t_mono·event_type·transfer_id·transfer_state·error_*·
     payload_sha256·payload_len·source)는 그대로 유지해 기존 RR controller가
     계속 동작한다. DATA_RECEIVED에는 응용 판정에 필요한 public 필드를
-    보탠다: payload_base64(원문 application bytes)·payload_format·
+    보탠다: payload_format·
     original_source·original_destination·received_at_ns.
 
     - `source`는 예전에 `received.source`를 조회해 사실상 항상 누락됐다.
       실제 public DTO 필드는 `received.original_source`다 — 그것으로 채운다.
-    - application bytes만 기록한다. RF frame·Link/MAC/PHY 내부 객체는
-      여기 오지 않는다(ReceivedApplicationData가 이미 응용 계층 DTO다).
+    - ENFORCED JSONL은 application bytes를 남기지 않는다. TEST-only in-memory
+      consumer는 include_payload=True로 원문을 받을 수 있다.
     - private key는 어떤 경로로도 기록하지 않는다.
     """
 
@@ -143,7 +144,8 @@ def service_event_record(event, *, mono_clock=time.monotonic) -> dict:
         payload = getattr(received, "payload", b"") or b""
         record["payload_sha256"] = hashlib.sha256(payload).hexdigest()
         record["payload_len"] = len(payload)
-        record["payload_base64"] = base64.b64encode(payload).decode("ascii")
+        if include_payload:
+            record["payload_base64"] = base64.b64encode(payload).decode("ascii")
         record["payload_format"] = getattr(
             getattr(received, "payload_format", None), "value", None
         )
@@ -237,6 +239,8 @@ def _serve_test_adapter_peers(test_server, adapter, *, expected_uid, stop_event)
 
 
 def main(argv=None) -> int:
+    if os.name == "posix":
+        os.umask(0o077)
     parser = argparse.ArgumentParser(description="Stage 7 endpoint launcher")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--endpoint-id", required=True)
@@ -245,6 +249,7 @@ def main(argv=None) -> int:
     parser.add_argument("--run-root", required=True, help="plans/evidence run 디렉터리")
     parser.add_argument("--lifecycle-generation", type=int, required=True)
     parser.add_argument("--coordinator-pid", type=int, required=True)
+    parser.add_argument("--e2e-security-mode", choices=("ENFORCED", "DISABLED"), required=True)
     parser.add_argument("--gain-artifact", default=None, help="OPERATIONAL 모드 gain artifact JSON")
     parser.add_argument(
         "--test-plan-sha", default=None,
@@ -301,6 +306,33 @@ def main(argv=None) -> int:
     resolved = loaded.value
     if resolved.endpoint_id != arguments.endpoint_id:
         print("[launcher] endpoint_id 불일치", file=sys.stderr)
+        return 2
+
+    from vdeter.security.dependencies import E2eSecurityDependencies
+    from vdeter.security.session.manager import SecuritySessionManager
+    from vdeter.security.session.provider import ProtectedFileSecurityMaterialProvider, validate_endpoint_materials
+    from vdeter.security.session.state_store import SQLiteSecurityStateStore
+
+    try:
+        if arguments.e2e_security_mode == "DISABLED":
+            e2e_security = E2eSecurityDependencies.disabled()
+        else:
+            state_dir = Path("/var/lib/vdeter/security") / arguments.endpoint_id
+            bundle = ProtectedFileSecurityMaterialProvider(state_dir / "materials.json").load_for_endpoint(
+                endpoint_id=arguments.endpoint_id,
+                local_station_id=resolved.endpoint.station_id,
+            )
+            expected_peers = frozenset((222222222,)) if arguments.endpoint_id != "ROC" else frozenset((111111111, 333333333))
+            validate_endpoint_materials(bundle, expected_peers=expected_peers)
+            store = SQLiteSecurityStateStore(state_dir / "state.sqlite3", bundle)
+            try:
+                manager = SecuritySessionManager(resolved.endpoint.station_id, bundle.directions, store)
+                e2e_security = E2eSecurityDependencies.enforced(manager)
+            except Exception:
+                store.close()
+                raise
+    except Exception as error:
+        print(f"[launcher] E2E security startup failed: {type(error).__name__}", file=sys.stderr)
         return 2
 
     is_control = resolved.endpoint.role is ServiceRole.CONTROL
@@ -403,6 +435,7 @@ def main(argv=None) -> int:
     built = build_stage7_b210_endpoint(
         resolved,
         deployment,
+        e2e_security=e2e_security,
         crypto_dependencies=crypto,
         intent_notifier=intent_notifier,
         host_raw_clock=read_monotonic_raw_ns,
@@ -410,6 +443,7 @@ def main(argv=None) -> int:
         time_source_override=_launcher_clock,
     )
     if built.is_err:
+        e2e_security.presentation_security.close_final(timeout_seconds=5.0)
         print(f"[launcher] endpoint 조립 실패: {built.error}", file=sys.stderr)
         return 2
     endpoint = built.value
@@ -2821,7 +2855,9 @@ def main(argv=None) -> int:
                 if len(events) > seen:
                     with open(path, "a", encoding="utf-8") as handle:
                         for event in events[seen:]:
-                            record = service_event_record(event)
+                            record = service_event_record(
+                                event, include_payload=arguments.e2e_security_mode == "DISABLED",
+                            )
                             handle.write(_json_local.dumps(record, ensure_ascii=True))
                             handle.write("\n")
                     seen = len(events)
@@ -2873,6 +2909,16 @@ def main(argv=None) -> int:
         for thread in test_threads:
             thread.join(timeout=2.0)
         _pump_thread.join(timeout=2.0)
+        try:
+            from vdeter.common.contracts.service import ServiceStopRequest
+            endpoint.stop(ServiceStopRequest(reason="launcher final shutdown"))
+        except Exception:
+            pass
+        try:
+            e2e_security.presentation_security.close_final(timeout_seconds=5.0)
+        except Exception as error:
+            print(f"[launcher] E2E security final close failed: {type(error).__name__}", file=sys.stderr)
+            exit_code = 3
         try:
             endpoint.dependencies.radio.close_qualification_lease()
         except Exception:  # noqa: BLE001 - 종료 경로 최선 노력

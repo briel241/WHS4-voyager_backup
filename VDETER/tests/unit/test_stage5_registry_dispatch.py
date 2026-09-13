@@ -20,7 +20,12 @@ from vdeter.common.contracts.presentation import (
 from vdeter.common.errors import ErrorCode
 from vdeter.common.identifiers import PayloadFormat, StationId, TransferId, Vpfi
 from vdeter.common.results import Ok
-from vdeter.presentation.adapter import _CODEC_DECLARATIONS, build_presentation_adapter
+from vdeter.presentation.adapter import _CODEC_DECLARATIONS, build_presentation_adapter as _build_presentation_adapter
+from vdeter.security.dependencies import E2eSecurityDependencies
+
+
+def build_presentation_adapter(registry):
+    return _build_presentation_adapter(registry, e2e_security=E2eSecurityDependencies.disabled())
 from vdeter.presentation.codecs.base import WireDiscriminator
 from vdeter.presentation.registry import build_payload_format_registry
 from vdeter.profiles.models import RegistryScope, SourceReference, SupportStatus

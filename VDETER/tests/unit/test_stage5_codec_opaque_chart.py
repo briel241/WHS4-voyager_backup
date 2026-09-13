@@ -17,7 +17,12 @@ from vdeter.common.contracts.presentation import (
     PresentationEncodeRequest,
 )
 from vdeter.common.identifiers import PayloadFormat, StationId, TransferId
-from vdeter.presentation.adapter import build_presentation_adapter
+from vdeter.presentation.adapter import build_presentation_adapter as _build_presentation_adapter
+from vdeter.security.dependencies import E2eSecurityDependencies
+
+
+def build_presentation_adapter(registry):
+    return _build_presentation_adapter(registry, e2e_security=E2eSecurityDependencies.disabled())
 from vdeter.presentation.codecs.opaque import OPAQUE_WIRE_PREFIX, OpaqueTestCodec
 from vdeter.presentation.registry import build_payload_format_registry
 from vdeter.profiles.models import RegistryScope

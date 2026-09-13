@@ -155,10 +155,13 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
 
 
 def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_artifact_path,
-                      *, test_plan_sha=None, lifecycle_generation=1):
+                      *, e2e_security_mode, test_plan_sha=None, lifecycle_generation=1):
     """launcher process 셋을 spawn하고 socket 연결까지 마친다."""
 
     from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
+
+    if e2e_security_mode not in ("ENFORCED", "DISABLED"):
+        raise ValueError("Explicit E2E security mode is required")
 
     root = runtime_socket_root(run_id)
     processes = {}
@@ -173,6 +176,7 @@ def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_a
             "--run-root", run_root,
             "--lifecycle-generation", str(lifecycle_generation),
             "--coordinator-pid", str(os.getpid()),
+            "--e2e-security-mode", e2e_security_mode,
         ]
         if gain_artifact_path is not None:
             command += ["--gain-artifact", gain_artifact_path]
@@ -3245,6 +3249,7 @@ def run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root: str):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Stage 7 Runtime Coordinator")
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--e2e-security-mode", choices=("ENFORCED", "DISABLED"), required=True)
     parser.add_argument(
         "--phase", required=True,
         choices=("p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
@@ -3279,6 +3284,10 @@ def main(argv=None) -> int:
         help="mass-roc workload의 SC-VDE-001 인증서 분기",
     )
     arguments = parser.parse_args(argv)
+
+    if (arguments.phase in ("mass-roc-service", "mass-roc-session")
+            or arguments.workload == "mass-roc") and arguments.e2e_security_mode != "ENFORCED":
+        raise SystemExit("MASS/ROC workload requires ENFORCED E2E security mode")
 
     if arguments.workload == "mass-roc" and arguments.phase not in (
         "rr-p2-17", "rr-p2-19"
@@ -3334,7 +3343,8 @@ def main(argv=None) -> int:
         ).hexdigest()
     processes, channels = spawn_and_connect(
         arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
-        arguments.gain_artifact, test_plan_sha=test_plan_sha,
+        arguments.gain_artifact, e2e_security_mode=arguments.e2e_security_mode,
+        test_plan_sha=test_plan_sha,
     )
     coordinator = Stage7RuntimeCoordinator(
         plan,

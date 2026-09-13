@@ -804,6 +804,7 @@ def default_phase_runner(context: dict) -> dict:
         str(repo_root / "VDETER" / "apps" / "stage7_coordinator_main.py"),
         "--run-id", context["run_id"],
         "--phase", context["phase"],
+        "--e2e-security-mode", "DISABLED",
         "--run-root", str(context["run_root"]),
         "--configs-dir", str(context["configs_dir"]),
         "--baseline-sha256", context["baseline_sha256"],

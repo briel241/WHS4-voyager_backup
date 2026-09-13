@@ -35,6 +35,7 @@ from vdeter.common.events import InternalEventType
 from vdeter.common.identifiers import PayloadFormat
 from vdeter.config.loader import load_configuration
 from vdeter.runtime.wiring import build_wideband_group
+from vdeter.security.dependencies import E2eSecurityDependencies
 
 FAST_TYPE0 = Type0OverrideProfile(selection_interval=30, short_data_limit=4, system_status=0)
 OPAQUE = PayloadFormat("test.stage0.opaque")
@@ -256,7 +257,8 @@ class WidebandNegativeTest(unittest.TestCase):
         clock, descriptors, crypto = build_wideband_descriptors(data_link_id=17)
         _clock_19, descriptors_19, _crypto_19 = build_wideband_descriptors(data_link_id=19)
         mixed = (descriptors[0], descriptors[1], descriptors_19[2])
-        built = build_wideband_group(mixed, crypto_by_station=crypto)
+        built = build_wideband_group(mixed, crypto_by_station=crypto,
+                                     e2e_security_by_station={item[0].configuration.endpoint.station_id.value: E2eSecurityDependencies.disabled() for item in mixed})
         self.assertTrue(built.is_err)
         self.assertEqual("CONFIG_SEMANTIC_INVALID", built.error.code)
 
@@ -301,7 +303,8 @@ class WidebandNegativeTest(unittest.TestCase):
                     )
                     for dependencies, deployment in descriptors
                 )
-                built = build_wideband_group(crippled, crypto_by_station=crypto)
+                built = build_wideband_group(crippled, crypto_by_station=crypto,
+                                             e2e_security_by_station={item[0].configuration.endpoint.station_id.value: E2eSecurityDependencies.disabled() for item in crippled})
                 self.assertTrue(built.is_err)
                 self.assertEqual("CONFIG_SEMANTIC_INVALID", built.error.code)
 

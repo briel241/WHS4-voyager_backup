@@ -383,6 +383,7 @@ class TC_PHASE_DISPATCH(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 coordinator_main.main([
                     "--run-id", "svc-x", "--phase", "mass-roc-service",
+                    "--e2e-security-mode", "ENFORCED",
                     "--run-root", tmp, "--scenario-id", "all",
                     "--gain-artifact", os.path.join(tmp, "g.json"),
                 ])
@@ -393,6 +394,7 @@ class TC_PHASE_DISPATCH(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 coordinator_main.main([
                     "--run-id", "svc-x", "--phase", "mass-roc-service",
+                    "--e2e-security-mode", "ENFORCED",
                     "--run-root", tmp, "--scenario-id", "SC-VDE-005",
                 ])
             self.assertIn("gain-artifact", str(caught.exception))

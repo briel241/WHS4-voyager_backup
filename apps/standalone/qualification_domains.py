@@ -65,6 +65,7 @@ _RF_AND_OPERATION_FILES = frozenset({
 #: 자격 tooling 명시 파일(standalone 중). setup·qualify·분류기·manifest·
 #: deploy manifest·provenance·templates.
 _TOOLING_ONLY_FILES = frozenset({
+    "VDETER/tools/e2e_security_provision.py",
     "apps/standalone/qualify_cmd.py",
     "apps/standalone/qualification_domains.py",
     "apps/standalone/setup_cmd.py",

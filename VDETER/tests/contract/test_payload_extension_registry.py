@@ -18,7 +18,12 @@ from vdeter.common.addressing import Broadcast
 from vdeter.common.contracts.service import SubmitTransferRequest
 from vdeter.common.exceptions import InvalidValueError
 from vdeter.common.identifiers import PayloadFormat, Vpfi
-from vdeter.presentation.adapter import build_presentation_adapter
+from vdeter.presentation.adapter import build_presentation_adapter as _build_presentation_adapter
+from vdeter.security.dependencies import E2eSecurityDependencies
+
+
+def build_presentation_adapter(registry):
+    return _build_presentation_adapter(registry, e2e_security=E2eSecurityDependencies.disabled())
 from vdeter.presentation.registry import (
     PAYLOAD_FORMAT_REGISTRY_NAME,
     build_payload_format_registry,

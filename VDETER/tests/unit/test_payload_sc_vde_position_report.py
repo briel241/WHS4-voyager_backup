@@ -26,7 +26,12 @@ from vdeter.common.addressing import (
 from vdeter.common.contracts.presentation import PresentationEncodeRequest
 from vdeter.common.errors import ErrorCode
 from vdeter.common.identifiers import PayloadFormat, StationId, TransferId
-from vdeter.presentation.adapter import build_presentation_adapter
+from vdeter.presentation.adapter import build_presentation_adapter as _build_presentation_adapter
+from vdeter.security.dependencies import E2eSecurityDependencies
+
+
+def build_presentation_adapter(registry):
+    return _build_presentation_adapter(registry, e2e_security=E2eSecurityDependencies.disabled())
 from vdeter.presentation.codecs.sc_vde_position_report import (
     POSITION_REPORT_APPLICATION_BYTES,
     POSITION_REPORT_WIRE_BYTES,

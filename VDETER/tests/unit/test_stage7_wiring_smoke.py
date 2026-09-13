@@ -24,6 +24,7 @@ from vdeter.common.addressing import Addressed
 from vdeter.stage7.configuration import Stage7ConfigurationLoader
 from vdeter.stage7.time_bridge import AffineCoefficients, HostUtcAnchor
 from vdeter.stage7.wiring import Stage7RestartFactory, build_stage7_b210_endpoint
+from vdeter.security.dependencies import E2eSecurityDependencies
 
 from tests.support.stage4 import (
     HAS_CRYPTO,
@@ -171,6 +172,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
         built = build_stage7_b210_endpoint(
             resolved.value,
             deployment,
+            e2e_security=E2eSecurityDependencies.disabled(),
             crypto_dependencies=crypto,
             worker_factory=_FakeDualWorker,
             host_raw_clock=time.monotonic_ns,

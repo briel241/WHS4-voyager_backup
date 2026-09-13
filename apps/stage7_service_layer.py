@@ -379,6 +379,7 @@ def build_coordinator_script(profile: dict, run_id: str, scenario_id: str,
         + profile["pi"]["venv_python"] + " apps/stage7_coordinator_main.py"
         + " --run-id " + run_id
         + " --phase mass-roc-service"
+        + " --e2e-security-mode ENFORCED"
         + " --run-root " + root + "/runs/" + run_id
         + " --configs-dir " + root + "/run-configs/" + run_id
         + " --gain-artifact " + root + "/"

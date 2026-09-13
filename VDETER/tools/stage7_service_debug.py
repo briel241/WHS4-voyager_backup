@@ -31,8 +31,11 @@ def main() -> int:
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--configs-dir", required=True)
     parser.add_argument("--with-scenario", action="store_true")
+    parser.add_argument("--e2e-security-mode", choices=("ENFORCED", "DISABLED"), required=True)
     parser.add_argument("--gain-artifact", default=None)
     arguments = parser.parse_args()
+    if arguments.with_scenario and arguments.e2e_security_mode != "ENFORCED":
+        parser.error("--with-scenario requires ENFORCED E2E security mode")
 
     import stage7_coordinator_main as app
     from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
@@ -48,7 +51,8 @@ def main() -> int:
     ).hexdigest()
     processes, channels = app.spawn_and_connect(
         arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
-        arguments.gain_artifact, test_plan_sha=test_plan_sha,
+        arguments.gain_artifact, e2e_security_mode=arguments.e2e_security_mode,
+        test_plan_sha=test_plan_sha,
     )
     coordinator = Stage7RuntimeCoordinator(
         plan, channels, host_raw_clock=read_monotonic_raw_ns,

@@ -615,6 +615,7 @@ def build_stage5_endpoint(
     dependencies: EndpointDependencies,
     deployment: MacDeploymentProfile,
     *,
+    e2e_security,
     crypto_dependencies=None,
     readiness_utc=None,
     policy=None,
@@ -622,10 +623,13 @@ def build_stage5_endpoint(
     """Stage 5 endpoint 하나를 조립한다. group 검증은 `build_stage5_group`이 한다."""
 
     from ..presentation.adapter import build_presentation_adapter
+    from ..security.dependencies import E2eSecurityDependencies
     from ..service.models import Stage5ServicePolicy
     from .stage5 import Stage5Endpoint, Stage5Support
 
     endpoint_config = dependencies.configuration.endpoint
+    if not isinstance(e2e_security, E2eSecurityDependencies):
+        return config_error("명시적 E2E security dependency가 필요합니다")
     if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
         return config_error(
             "Stage 5 profile의 max_payload_bytes는 65,531이어야 합니다",
@@ -658,7 +662,8 @@ def build_stage5_endpoint(
     endpoint = Stage5Endpoint(dependencies, policy or Stage5ServicePolicy())
 
     _stub_presentation, link, phy = build_stage4_layers(dependencies, crypto_dependencies)
-    adapter = build_presentation_adapter(dependencies.registries.payload_format)
+    adapter = build_presentation_adapter(dependencies.registries.payload_format,
+                                         e2e_security=e2e_security)
     if adapter.is_err:
         return adapter
     endpoint._presentation = adapter.value
@@ -713,10 +718,11 @@ class Stage5Group:
     순서로 호출하고 실패 시 역순 rollback을 수행한다.
     """
 
-    __slots__ = ("_endpoints",)
+    __slots__ = ("_endpoints", "_e2e_security_by_station")
 
-    def __init__(self, endpoints: tuple) -> None:
+    def __init__(self, endpoints: tuple, e2e_security_by_station: dict) -> None:
         self._endpoints = endpoints
+        self._e2e_security_by_station = e2e_security_by_station
 
     @property
     def endpoints(self) -> tuple:
@@ -806,8 +812,12 @@ class Stage5Group:
             return Err(tuple(failures))
         return Ok(True)
 
+    def close_final(self):
+        for dependency in self._e2e_security_by_station.values():
+            dependency.presentation_security.close_final(timeout_seconds=5.0)
 
-def build_stage5_group(descriptors, *, crypto_by_station=None, policy=None):
+
+def build_stage5_group(descriptors, *, e2e_security_by_station, crypto_by_station=None, policy=None):
     """세 endpoint descriptor를 한 번에 검증하고 Stage 5 group을 조립한다.
 
     `CONTROL 1 + SHIP 2`, 서로 다른 nonzero station ID, 구성된 member 집합, 동일 TBB
@@ -815,9 +825,16 @@ def build_stage5_group(descriptors, *, crypto_by_station=None, policy=None):
     """
 
     from ..radio.software import SoftwareRadioAdapter
+    from ..security.dependencies import E2eSecurityDependencies
 
     if not isinstance(descriptors, tuple) or len(descriptors) != 3:
         return config_error("Stage 5 group은 정확히 세 endpoint여야 합니다")
+    station_ids = {item[0].configuration.endpoint.station_id.value for item in descriptors}
+    if (not isinstance(e2e_security_by_station, dict)
+            or set(e2e_security_by_station) != station_ids
+            or any(not isinstance(item, E2eSecurityDependencies) for item in e2e_security_by_station.values())
+            or len({item.mode for item in e2e_security_by_station.values()}) != 1):
+        return config_error("Stage 5 group E2E security mode/station mapping이 유효하지 않습니다")
     entries = []
     for dependencies, deployment in descriptors:
         endpoint_config = dependencies.configuration.endpoint
@@ -857,6 +874,7 @@ def build_stage5_group(descriptors, *, crypto_by_station=None, policy=None):
         built = build_stage5_endpoint(
             dependencies,
             deployment,
+            e2e_security=e2e_security_by_station[station_id.value],
             crypto_dependencies=crypto_by_station.get(station_id.value),
             readiness_utc=readiness_utc,
             policy=policy,
@@ -864,7 +882,7 @@ def build_stage5_group(descriptors, *, crypto_by_station=None, policy=None):
         if built.is_err:
             return built
         endpoints.append(built.value)
-    return Ok(Stage5Group(tuple(endpoints)))
+    return Ok(Stage5Group(tuple(endpoints), e2e_security_by_station))
 
 
 def build_stage4_group(descriptors, *, crypto_by_station=None):
@@ -1044,6 +1062,7 @@ def build_wideband_endpoint(
     dependencies: EndpointDependencies,
     deployment: MacDeploymentProfile,
     *,
+    e2e_security,
     crypto_dependencies=None,
     readiness_utc=None,
     policy=None,
@@ -1057,10 +1076,13 @@ def build_wideband_endpoint(
     )
     from ..phy.multilink import MultiRatePhy
     from ..presentation.adapter import build_presentation_adapter
+    from ..security.dependencies import E2eSecurityDependencies
     from ..service.models import Stage5ServicePolicy
     from .stage5 import Stage5Endpoint, Stage5Support
 
     endpoint_config = dependencies.configuration.endpoint
+    if not isinstance(e2e_security, E2eSecurityDependencies):
+        return config_error("명시적 E2E security dependency가 필요합니다")
     if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
         return config_error(
             "wideband profile의 max_payload_bytes는 65,531이어야 합니다",
@@ -1102,7 +1124,8 @@ def build_wideband_endpoint(
         dependencies.registries.link_profile,
         crypto_dependencies=crypto_dependencies,
     )
-    adapter = build_presentation_adapter(dependencies.registries.payload_format)
+    adapter = build_presentation_adapter(dependencies.registries.payload_format,
+                                         e2e_security=e2e_security)
     if adapter.is_err:
         return adapter
     endpoint._presentation = adapter.value
@@ -1159,13 +1182,20 @@ def build_wideband_endpoint(
     return Ok(endpoint)
 
 
-def build_wideband_group(descriptors, *, crypto_by_station=None, policy=None):
+def build_wideband_group(descriptors, *, e2e_security_by_station, crypto_by_station=None, policy=None):
     """세 endpoint의 wideband identity가 exact-equal일 때만 group을 조립한다 (§13.2.2)."""
 
     from ..radio.software import SoftwareRadioAdapter
+    from ..security.dependencies import E2eSecurityDependencies
 
     if not isinstance(descriptors, tuple) or len(descriptors) != 3:
         return config_error("wideband group은 정확히 세 endpoint여야 합니다")
+    station_ids = {item[0].configuration.endpoint.station_id.value for item in descriptors}
+    if (not isinstance(e2e_security_by_station, dict)
+            or set(e2e_security_by_station) != station_ids
+            or any(not isinstance(item, E2eSecurityDependencies) for item in e2e_security_by_station.values())
+            or len({item.mode for item in e2e_security_by_station.values()}) != 1):
+        return config_error("wideband group E2E security mode/station mapping이 유효하지 않습니다")
     entries = []
     for dependencies, deployment in descriptors:
         endpoint_config = dependencies.configuration.endpoint
@@ -1217,6 +1247,7 @@ def build_wideband_group(descriptors, *, crypto_by_station=None, policy=None):
         built = build_wideband_endpoint(
             dependencies,
             deployment,
+            e2e_security=e2e_security_by_station[station_id.value],
             crypto_dependencies=crypto_by_station.get(station_id.value),
             readiness_utc=readiness_utc,
             policy=policy,
@@ -1224,4 +1255,4 @@ def build_wideband_group(descriptors, *, crypto_by_station=None, policy=None):
         if built.is_err:
             return built
         endpoints.append(built.value)
-    return Ok(Stage5Group(tuple(endpoints)))
+    return Ok(Stage5Group(tuple(endpoints), e2e_security_by_station))

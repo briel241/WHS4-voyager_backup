@@ -42,6 +42,7 @@ from ..profiles.payload_formats import (
     SC_VDE_COMMAND_CODEC_REF,
     SC_VDE_POSITION_REPORT_CODEC_REF,
 )
+from ..security.dependencies import E2eSecurityDependencies
 from .codecs.ais_scheme1 import AisAuthenticationScheme1Codec
 from .codecs.base import MAX_ENCODED_BYTES, decode_structure_error, truncated_error
 from .codecs.certificate_report import CertificateReportCodec
@@ -155,7 +156,7 @@ def _validated_encoded_size_bound(
 class RegistryPresentationAdapter:
     """frozen registry snapshot 하나로 송수신을 함께 처리하는 실제 Presentation Adapter."""
 
-    __slots__ = ("_registry", "_codecs", "_fingerprint", "_dispatch_table")
+    __slots__ = ("_registry", "_codecs", "_fingerprint", "_dispatch_table", "_e2e_security")
 
     def __init__(
         self,
@@ -163,11 +164,13 @@ class RegistryPresentationAdapter:
         codecs: dict,
         fingerprint: str,
         dispatch_table: tuple,
+        e2e_security: E2eSecurityDependencies,
     ) -> None:
         self._registry = registry
         self._codecs = codecs
         self._fingerprint = fingerprint
         self._dispatch_table = dispatch_table
+        self._e2e_security = e2e_security
 
     # --- 관찰 ---
 
@@ -202,11 +205,18 @@ class RegistryPresentationAdapter:
                 payload_format=payload_format.value,
             )
         codec = self._codecs[found.value.codec_ref]
-        return _validated_encoded_size_bound(
+        bound = _validated_encoded_size_bound(
             codec,
             application_length,
             payload_format_value=payload_format.value,
         )
+        if bound.is_err:
+            return bound
+        final = bound.value + self._e2e_security.presentation_security.encoded_overhead(found.value)
+        if final > MAX_ENCODED_BYTES:
+            return _error(ErrorCode.INVALID_REQUEST, ErrorCategory.VALIDATION,
+                          "보안 Presentation 크기가 65,535 bytes를 넘습니다")
+        return Ok(final)
 
     # --- PresentationPort ---
 
@@ -280,6 +290,15 @@ class RegistryPresentationAdapter:
                 payload_size=len(wire),
                 expected_size=bound.value,
             )
+        secured = self._e2e_security.presentation_security.protect(
+            entry=entry, codec=codec, plain_wire=wire, route=request.route,
+        )
+        if secured.is_err:
+            return secured
+        wire = secured.value
+        if len(wire) != bound.value + self._e2e_security.presentation_security.encoded_overhead(entry):
+            return _error(ErrorCode.PRESENTATION_STRUCTURE_INVALID, ErrorCategory.PROTOCOL,
+                          "보안 Presentation 결과 길이가 예상과 다릅니다")
         return Ok(
             PresentationData(
                 transfer_id=request.transfer_id,
@@ -319,7 +338,12 @@ class RegistryPresentationAdapter:
                 "addressed 전용 payload wire가 broadcast route로 수신되었습니다",
                 payload_format=entry.payload_format.value,
             )
-        application = codec.decode(data)
+        plain = self._e2e_security.presentation_security.unprotect(
+            entry=entry, codec=codec, secure_wire=data, route=request.route,
+        )
+        if plain.is_err:
+            return plain
+        application = codec.decode(plain.value)
         if application.is_err:
             return application
         return Ok(
@@ -382,7 +406,7 @@ class RegistryPresentationAdapter:
         )
 
 
-def build_presentation_adapter(registry: PayloadFormatRegistry):
+def build_presentation_adapter(registry: PayloadFormatRegistry, *, e2e_security: E2eSecurityDependencies):
     """frozen registry에서 실제 Presentation Adapter를 만든다.
 
     build는 registry freeze 뒤 다음을 모두 검사한다 (`payload_extension_baseline.md`
@@ -412,6 +436,9 @@ def build_presentation_adapter(registry: PayloadFormatRegistry):
             ErrorCategory.VALIDATION,
             "Presentation Adapter는 frozen registry에서만 만들 수 있습니다",
         )
+    if not isinstance(e2e_security, E2eSecurityDependencies):
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, ErrorCategory.VALIDATION,
+                      "명시적 E2E security dependency가 필요합니다")
     # 검사 1 전반부: 선언 sequence의 duplicate ref를 dict 생성 전에 거부한다.
     declared = {}
     for codec_ref, codec in _CODEC_DECLARATIONS:
@@ -536,6 +563,11 @@ def build_presentation_adapter(registry: PayloadFormatRegistry):
                     second_format=second_entry.payload_format.value,
                 )
     # 등록 순서와 무관한 결정적 dispatch 순서를 고정한다.
+    try:
+        e2e_security.presentation_security.policy.validate_registry(registry, codecs)
+    except ValueError:
+        return _error(ErrorCode.CONFIG_SEMANTIC_INVALID, ErrorCategory.VALIDATION,
+                      "Security policy와 active registry가 일치하지 않습니다")
     dispatch_table = tuple(
         sorted(
             ((entry, codec.discriminator) for entry, codec in resolved),
@@ -548,6 +580,7 @@ def build_presentation_adapter(registry: PayloadFormatRegistry):
     )
     return Ok(
         RegistryPresentationAdapter(
-            registry, codecs, registry.fingerprint().fingerprint, dispatch_table
+            registry, codecs, registry.fingerprint().fingerprint, dispatch_table,
+            e2e_security,
         )
     )

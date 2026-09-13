@@ -23,6 +23,7 @@ from vdeter.stage7.records import Stage7TbbActiveRecord
 from vdeter.stage7.runtime_client import Stage7EndpointRuntimeClient
 from vdeter.stage7.time_bridge import AffineCoefficients, HostUtcAnchor
 from vdeter.stage7.wiring import build_stage7_b210_endpoint
+from vdeter.security.dependencies import E2eSecurityDependencies
 
 from tests.support.stage4 import (
     RUN_START_MONOTONIC_NANOSECONDS,
@@ -498,6 +499,7 @@ def build_stage7_software_group(*, data_profile=DATA_PROFILE_17, run_id="stage7-
         built = build_stage7_b210_endpoint(
             resolved.value,
             deployment,
+            e2e_security=E2eSecurityDependencies.disabled(),
             crypto_dependencies=crypto,
             worker_factory=Stage7FakeMediumWorker.factory(medium),
             host_raw_clock=host_raw_clock,

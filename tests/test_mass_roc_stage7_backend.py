@@ -112,7 +112,7 @@ class LoopbackService:
             severity=EventSeverity.INFO,
             received_data=received,
         )
-        record = service_event_record(event)
+        record = service_event_record(event, include_payload=False)
         path = os.path.join(self._events_dir, f"{receiver_ep}.jsonl")
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=True))
@@ -206,6 +206,9 @@ class TC_EVENT_RECORD(unittest.TestCase):
         self.assertEqual(record["original_destination"], 111_111_111)
         self.assertEqual(record["received_at_ns"], _TP.total_nanoseconds())
         self.assertEqual(record["t_mono"], 12.345)
+        secure_record = service_event_record(event, include_payload=False)
+        self.assertNotIn("payload_base64", secure_record)
+        self.assertEqual(secure_record["payload_sha256"], hashlib.sha256(payload).hexdigest())
 
     def test_state_change_record_keeps_existing_shape(self):
         event = ServiceEvent(

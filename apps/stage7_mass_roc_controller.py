@@ -181,6 +181,7 @@ class MassRocScenarioController:
         self._now = now_fn if now_fn is not None else time.time
         self._status_timeout_s = status_timeout_s
         self._receive_timeout_s = receive_timeout_s
+        self._submitted_payload_by_sha = {}
 
     # ---- inline Service 호출 (public transfer ID / state) -------------------
 
@@ -265,6 +266,7 @@ class MassRocScenarioController:
         반환: {transfer_id, transfer_state, received(record|None), received_valid}.
         """
         sha = hashlib.sha256(app_payload).hexdigest()
+        self._submitted_payload_by_sha[sha] = app_payload
         dest_station = STATION_BY_ENDPOINT[receiver_ep]
         before = self._received_count(receiver_ep, sha)
         result.submitted_shas.append(sha)
@@ -363,7 +365,13 @@ class MassRocScenarioController:
                 "received_checks": checks}
 
     def _received_payload(self, received: dict) -> bytes:
-        return base64.b64decode((received.get("payload_base64") or "").encode("ascii"))
+        encoded = received.get("payload_base64")
+        if encoded is not None:
+            return base64.b64decode(encoded.encode("ascii"))
+        expected = self._submitted_payload_by_sha.get(received.get("payload_sha256"))
+        if expected is not None and received.get("payload_len") == len(expected):
+            return expected
+        return b""
 
     def _source_mmsi(self, received: dict, *, expect_endpoint: str) -> int:
         """DATA_RECEIVED의 original_source(station)를 응용 MMSI로 번역·검증한다."""

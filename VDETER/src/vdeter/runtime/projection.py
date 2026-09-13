@@ -37,6 +37,22 @@ class PublicErrorCode:
 
 #: 내부 code → (공개 code, 공개 category) 명시 매핑.
 _CODE_MAP = {
+    **{
+        getattr(ErrorCode, name): (PublicErrorCode.TRANSFER_FAILED, ServiceErrorCategory.PROTOCOL)
+        for name in (
+            "PRESENTATION_SECURITY_PROFILE_UNSUPPORTED", "PRESENTATION_SECURITY_EPOCH_MISMATCH",
+            "PRESENTATION_SECURITY_COUNTER_INVALID", "PRESENTATION_SECURITY_CIPHERTEXT_LENGTH_INVALID",
+            "PRESENTATION_SECURITY_AUTHENTICATION_FAILED", "PRESENTATION_SECURITY_REPLAY_DUPLICATE",
+            "PRESENTATION_SECURITY_REPLAY_TOO_OLD", "PRESENTATION_SECURITY_POLICY_VIOLATION",
+        )
+    },
+    **{
+        getattr(ErrorCode, name): (PublicErrorCode.RESOURCE_UNAVAILABLE, ServiceErrorCategory.RESOURCE)
+        for name in (
+            "PRESENTATION_SECURITY_SESSION_UNAVAILABLE", "PRESENTATION_SECURITY_USAGE_EXHAUSTED",
+            "PRESENTATION_SECURITY_STATE_UNAVAILABLE",
+        )
+    },
     ErrorCode.INVALID_REQUEST: (PublicErrorCode.INVALID_REQUEST, ServiceErrorCategory.VALIDATION),
     ErrorCode.INVALID_VALUE: (PublicErrorCode.INVALID_REQUEST, ServiceErrorCategory.VALIDATION),
     ErrorCode.UNSUPPORTED_REQUEST: (

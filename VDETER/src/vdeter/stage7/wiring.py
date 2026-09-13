@@ -197,6 +197,7 @@ def build_stage7_b210_endpoint(
     resolved: Stage7ResolvedConfiguration,
     deployment,
     *,
+    e2e_security,
     crypto_dependencies=None,
     readiness_utc=None,
     policy=None,
@@ -218,6 +219,9 @@ def build_stage7_b210_endpoint(
 
     if not isinstance(resolved, Stage7ResolvedConfiguration):
         return _config_error("Stage7ResolvedConfiguration이 필요합니다")
+    from ..security.dependencies import E2eSecurityDependencies
+    if not isinstance(e2e_security, E2eSecurityDependencies):
+        return _config_error("명시적 E2E security dependency가 필요합니다")
     endpoint_config = resolved.endpoint
     if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
         return _config_error("max_payload_bytes는 65,531이어야 합니다")
@@ -338,7 +342,8 @@ def build_stage7_b210_endpoint(
         return capacity
 
     endpoint = Stage7Endpoint(dependencies, policy or Stage5ServicePolicy(), resolved=resolved)
-    adapter = build_presentation_adapter(dependencies.registries.payload_format)
+    adapter = build_presentation_adapter(dependencies.registries.payload_format,
+                                         e2e_security=e2e_security)
     if adapter.is_err:
         return adapter
     endpoint._presentation = adapter.value
