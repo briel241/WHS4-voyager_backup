@@ -39,6 +39,26 @@ class LauncherPocDeviceRpcTest(unittest.TestCase):
         vdeter = os.path.join(_REPO, "VDETER")
         env["PYTHONPATH"] = os.pathsep.join(
             [src, vdeter, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+        # 모의 시계 배속은 **필요한 시험만** 실시간(1)으로 고정한다 — `time_acceleration` opt-in.
+        #
+        # harness 기본 배속 4는 모의 시계를 실시간 40 ms마다 **160 ms씩 불연속으로** 점프시킨다.
+        # 권위 최소 lead(100 ms, retune 200 ms)는 그 모의 축 위의 값이므로, slot 선택과 실제
+        # `schedule_tx` 제출 사이의 RPC 왕복·표본 인코딩이 실시간 40 ms만 넘어도 점프 하나가
+        # 끼어들어 예약 시각이 통째로 과거가 된다 -> `RADIO_LATE_REQUEST`. harness `_pump`
+        # docstring이 같은 현상을 경고하며 "pump를 실시간에 가깝게 맞춰 lead 의미를 보존한다"고
+        # 적고 있다. 실제 배치는 1배 장치 시계이므로 production 결함이 아니라 시험 전제다.
+        #
+        # 대조 실측(같은 코드·같은 장비): 배속 1 -> rc=0(2 passed, late 0) /
+        #                                배속 4 -> rc=1(2 failed, late 4). 벽시계 34.57s vs 34.65s로
+        # 사실상 같아 환경 부하가 아니라 시계 전제가 원인임이 분리된다.
+        #
+        # 전제가 필요 없는 시험까지 1로 묶지 않는다: base 12건은 실시간 lead 의미와 무관한데
+        # 전부 묶었더니 이 파일 전체가 900초 예산을 넘겼다(실측 rc=124 timeout). 그래서 실제로
+        # MAC slot 기반 송신을 수행하는 클래스만 opt-in 한다.
+        # lead 검사·timeout·retry는 **그대로 두고** 시계 전제만 바로잡는다.
+        acceleration = getattr(self, "time_acceleration", None)
+        if acceleration is not None:
+            env["STAGE8_TEST_TIME_ACCELERATION"] = str(acceleration)
         self.child = subprocess.Popen(
             [sys.executable, "-m", "tests.support.poc_device_harness",
              self._dir, _PLAN_SHA],
@@ -308,6 +328,9 @@ class LauncherProviderTest(LauncherPocDeviceRpcTest):
     실 RPC로 온다. sink만 경계를 건너는 구현이다.
     """
 
+    #: 실 MAC slot 기반 송신을 수행하므로 모의 시계를 실시간으로 고정한다(setUp 주석 참조).
+    time_acceleration = 1
+
     def _provider(self, **kwargs):
         from apps.stage8_launcher_seams import assemble_launcher_provider
         return assemble_launcher_provider(
@@ -363,6 +386,9 @@ class LauncherProviderTest(LauncherPocDeviceRpcTest):
 class MacSlotBindingTest(LauncherPocDeviceRpcTest):
     """P03: 송신 시각이 **실 MAC slot map**이 허용한 slot에서 나온다."""
 
+    #: 실 MAC slot 기반 송신을 수행하므로 모의 시계를 실시간으로 고정한다(setUp 주석 참조).
+    time_acceleration = 1
+
     def test_mac_slots_come_from_the_real_slot_map(self):
         from vdeter.stage7.testing.controller import Stage7ScenarioController as _C
 
@@ -409,6 +435,50 @@ class MacSlotBindingTest(LauncherPocDeviceRpcTest):
         answer = _C.poc_result(self._call("poc_mac_slots", {
             "channel_name": _LOWER, "from_hw_ns": chosen, "limit": 1}))
         self.assertEqual(int(answer["slots"][0]["start_hw_ns"]), chosen)
+
+    def test_fast_simulated_clock_is_refused_not_silently_transmitted(self):
+        """음성 대조군: 모의 시계가 권위 lead보다 빨라도 **거부**한다(늦은 송신 묵인 금지).
+
+        같은 코드에 모의 시계 배속만 harness 기본값(4)으로 올린다. 배속 4는 실시간 40 ms마다
+        모의 시계를 160 ms씩 점프시키므로 slot 선택과 `schedule_tx` 제출 사이에 권위 최소
+        lead(100 ms)가 통째로 소진된다. 그때 시스템은 **조용히 늦게 송신하지 않고 거부**해야
+        한다. 이 시험은 lead 검사가 살아 있음을 고정한다 — 통과시키려고 lead를 늘리거나
+        timeout·retry를 키우면 여기서 깨진다(그래서 그렇게 고치면 안 된다).
+
+        실측 근거: 같은 장비·같은 코드에서 배속 1 -> rc=0(2 passed, late 0),
+        배속 4 -> rc=1(2 failed, late 4). 벽시계 소요는 34.57s vs 34.65s로 사실상 동일해
+        환경 부하가 아니라 시계 전제가 원인임이 분리된다.
+        """
+        import subprocess as _sp
+        from unittest.mock import patch
+
+        from apps.stage8_launcher_seams import assemble_launcher_provider
+        from vdeter.stage8.poc_api.errors import PocError
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        # 이 시험만 배속 4로 도는 별도 harness child를 띄운다(클래스 기본 고정값은 건드리지 않는다).
+        self._stop_child()
+        original = _sp.Popen
+
+        def _fast(args, *a, **kw):
+            env = dict(kw.get("env") or os.environ)
+            env["STAGE8_TEST_TIME_ACCELERATION"] = "4"
+            kw["env"] = env
+            return original(args, *a, **kw)
+
+        with patch.object(_sp, "Popen", side_effect=_fast):
+            LauncherPocDeviceRpcTest.setUp(self)
+
+        provider, _bindings = assemble_launcher_provider(
+            self.controller, actor_endpoint="MASS-B",
+            endpoint_ids=("MASS-A", "MASS-B", "ROC"),
+            station_id_by_endpoint={"MASS-A": 111_111_111, "MASS-B": 333_333_333,
+                                    "ROC": 222_222_222},
+            mac_channel_name=_LOWER)
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        with self.assertRaises(PocError):
+            provider.submit(action, request_id="poc-mac-lead-guard")
 
     def test_no_usable_mac_slot_is_refused_not_shifted(self):
         """권위 lead를 만족하는 MAC slot이 없으면 **거부**한다 — 임의로 당기거나 미루지 않는다."""

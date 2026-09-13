@@ -91,6 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     results = sub.add_parser("results", help="list runs or show one summary")
     results.add_argument("run_id", nargs="?", default=None)
+
+    capability = sub.add_parser(
+        "capability",
+        help="show, or verify-and-issue, this installation's dual-channel capability "
+             "attestation (RF-off verification only; starts no transmission and does "
+             "not qualify the installation)")
+    capability.add_argument(
+        "action", nargs="?", default="show", choices=("show", "issue"),
+        help="show the current attestation (default), or run this installation's "
+             "RF-off verification and issue an attestation bound to it")
     return parser
 
 
@@ -287,6 +297,9 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
     if args.command == "results":
         from apps.standalone import results_cmd
         return results_cmd.main_results(paths, args.run_id, out=out)
+    if args.command == "capability":
+        from apps.standalone import capability_issue_cmd
+        return capability_issue_cmd.main(args, paths, out=out)
     return EXIT_CONFIG
 
 
