@@ -77,6 +77,12 @@ class StatePaths:
         self.identity_trust = self.identity_dir / "trust"
         self.identity_archive = self.identity_dir / "archive"
         self.identity_manifest = self.identity_dir / "identity-manifest.json"
+        #: 개발용 통제 RF 진단(`vdeter diag`) 상태 — qualification 디렉터리와
+        #: 분리된다. 생성은 `diag authorize`가 담당하며 `ensure_var()`는 만들지
+        #: 않는다(부재 자체가 "진단 승인 없음"의 의미를 가진다).
+        self.diagnostic_dir = self.var_dir / "diagnostic"
+        self.diagnostic_authorization = self.diagnostic_dir / "authorization.json"
+        self.diagnostic_ledger = self.diagnostic_dir / "ledger.json"
 
     def ensure_var(self) -> None:
         """`var/` 계열 영속 디렉터리를 보장한다 (identity는 setup 소관)."""

@@ -101,6 +101,54 @@ def build_parser() -> argparse.ArgumentParser:
         "action", nargs="?", default="show", choices=("show", "issue"),
         help="show the current attestation (default), or run this installation's "
              "RF-off verification and issue an attestation bound to it")
+
+    # 개발용 통제 RF 진단 — 정상 `run`의 UNQUALIFIED 거부는 그대로다. 별도 authorization
+    # (var/diagnostic)에만 결속되며 reference를 발급·승격하지 않는다 (실행 명세 §5A).
+    diag = sub.add_parser(
+        "diag",
+        help="development-time controlled RF diagnostics on an UNQUALIFIED candidate "
+             "(separate authorization; never a qualification, never promotes)")
+    diag_sub = diag.add_subparsers(dest="diag_command", required=True)
+    diag_authorize = diag_sub.add_parser(
+        "authorize",
+        help="issue a diagnostic authorization bound to this installation, hardware "
+             "declaration, identity, a verified calibration source and a test plan "
+             "(RF-off; opens no device)")
+    diag_authorize.add_argument(
+        "--calibration-reference", required=True, metavar="PATH",
+        help="qualification reference (with its .sha256 sidecar) whose gain artifact is "
+             "the calibration source; refused unless its hardware/wiring/profile/library "
+             "bindings equal this candidate")
+    diag_authorize.add_argument(
+        "--plan", required=True, metavar="PATH",
+        help="JSON test plan: label, allowed_scenarios, poc_allowed, max_runs, "
+             "max_workloads_per_run, expires_utc [, max_hold_after_ready_s]")
+    diag_run = diag_sub.add_parser(
+        "run",
+        help="run the authorized diagnostic session (one bring-up attempt, no automatic "
+             "retry; the result is always NOT_QUALIFIED)")
+    add_progress_flag(diag_run)
+    diag_run.add_argument(
+        "scenario", nargs="*", default=[],
+        help="zero or more of SC-VDE-001 | SC-VDE-005 | SC-VDE-006 (none = RX-only "
+             "session: bring-up, optional hold, close)")
+    diag_run.add_argument(
+        "--hold-after-ready", type=float, default=0.0, metavar="SECONDS",
+        help="RX-only: keep the READY session up this long before closing "
+             "(bounded by the plan)")
+    diag_run.add_argument("--diagnostics", action="store_true",
+                          help="raise evidence instrumentation detail")
+    diag_run.add_argument("--json", action="store_true",
+                          help="print the run summary as JSON at the end")
+    diag_run.add_argument("--poc", default=None, metavar="PATH",
+                          help="Stage 8 PoC package <base>.py (only if the plan allows PoC)")
+    diag_run.add_argument("--poc-dir", default=None, metavar="DIR",
+                          help="Stage 8 PoC catalog directory (only if the plan allows PoC)")
+    diag_run.add_argument(
+        "--rf-off-software", action="store_true",
+        help="RF-off software session (no B210; verification only)")
+    diag_sub.add_parser("status",
+                        help="show the diagnostic authorization and its ledger")
     return parser
 
 
@@ -294,6 +342,28 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
             poc=getattr(args, "poc", None), poc_dir=getattr(args, "poc_dir", None),
             rf_off_software=getattr(args, "rf_off_software", False),
             out=out, input_fn=input_fn)
+    if args.command == "diag":
+        from apps.standalone import diag_cmd
+        if args.diag_command == "authorize":
+            try:
+                diag_cmd.authorize(
+                    paths, calibration_reference=args.calibration_reference,
+                    plan_path=args.plan, out=out)
+            except diag_cmd.DiagError as exc:
+                out("Refused (exit %d): %s" % (exc.code, exc))
+                return exc.code
+            return EXIT_PASS
+        if args.diag_command == "run":
+            return diag_cmd.run(
+                paths, scenarios=list(args.scenario), poc=args.poc,
+                poc_dir=args.poc_dir, rf_off_software=args.rf_off_software,
+                diagnostics=args.diagnostics,
+                hold_after_ready_s=args.hold_after_ready, json_summary=args.json,
+                progress=not getattr(args, "no_progress", False),
+                out=out, input_fn=input_fn)
+        if args.diag_command == "status":
+            return diag_cmd.status(paths, out=out)
+        return EXIT_CONFIG
     if args.command == "results":
         from apps.standalone import results_cmd
         return results_cmd.main_results(paths, args.run_id, out=out)

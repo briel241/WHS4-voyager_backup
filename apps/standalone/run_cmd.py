@@ -184,13 +184,32 @@ def compare_critical(reference: dict, *, installation: dict,
     `installation`은 현재 설치 재측정 record(또는 digest 부분집합). Git
     commit·branch·dirty·baseline Markdown SHA는 대조하지 않는다.
     불일치 항목을 전부 모아 돌려준다 — 하나라도 있으면 UNQUALIFIED."""
-    critical = reference.get("standalone_critical") or {}
     mismatches = []
     if reference.get("schema_version") != 2:
         mismatches.append("active reference is schema v%s (legacy git-bound "
                           "binding); a v2 installation-bound reference is "
                           "required — run `vdeter qualify`"
                           % reference.get("schema_version"))
+    mismatches.extend(critical_block_mismatches(
+        reference.get("standalone_critical") or {},
+        installation=installation, hardware=hardware, preflight=preflight,
+        identity_fingerprint=identity_fingerprint,
+        environment_manifest=environment_manifest))
+    return {"pass": not mismatches, "mismatches": mismatches}
+
+
+def critical_block_mismatches(critical: dict, *, installation: dict,
+                              hardware: dict, preflight: dict,
+                              identity_fingerprint: str,
+                              environment_manifest: dict) -> list:
+    """`standalone_critical` 블록 하나를 현재 설치·장비·identity·환경과 대조한다.
+
+    `compare_critical`(정상 reference)과 개발용 진단 authorization(`diag_cmd`)이
+    **같은 검사**를 공유한다. 진단은 자격 상태(active 포인터·schema v2 reference)
+    만 분리하고, installation/rf/operation/tooling digest·배선 승인·platform/host
+    profile·hub topology·serial/속도 등급·identity·라이브러리 4종·gain artifact
+    결속 검사는 그대로 받는다. 반환은 불일치 문자열 목록(비면 통과)."""
+    mismatches = []
     current_digests = installation_manifest.digests_of(installation) \
         if installation.get("domains") else {}
     if critical.get("installation_sha256") != current_digests.get(
@@ -270,7 +289,7 @@ def compare_critical(reference: dict, *, installation: dict,
     if not gain.get("endpoint_common_rx_gain_db") or not gain.get(
             "artifact_sha256"):
         mismatches.append("reference carries no gain artifact")
-    return {"pass": not mismatches, "mismatches": mismatches}
+    return mismatches
 
 
 def gain_input_from_reference(reference: dict) -> dict:
@@ -280,6 +299,32 @@ def gain_input_from_reference(reference: dict) -> dict:
         "endpoint_common_rx_gain_db": gain["endpoint_common_rx_gain_db"],
         "source_gain_artifact_sha256": gain["artifact_sha256"],
     }
+
+
+def is_diagnostic_authority(reference: dict) -> bool:
+    """개발용 진단 authorization인가 (`diag_cmd`, `not_a_qualification`)."""
+    return bool(reference.get("not_a_qualification"))
+
+
+def authority_fields(reference: dict) -> dict:
+    """run.json/summary.json의 권한 표기.
+
+    정상 run은 종전과 같이 `reference_sha256`만 기록한다. 진단 authorization은
+    qualification reference로 기록하지 않는다 — `reference_sha256`은 null이고,
+    `diagnostic_authorization_sha256`과 `qualification_status: NOT_QUALIFIED`를
+    별도 필드로 남긴다(재결속 위장 금지)."""
+    if is_diagnostic_authority(reference):
+        return {"reference_sha256": None,
+                "diagnostic_authorization_sha256":
+                    reference.get("_reference_sha256"),
+                "qualification_status": "NOT_QUALIFIED"}
+    return {"reference_sha256": reference.get("_reference_sha256")}
+
+
+def result_suffix(reference: dict) -> str:
+    """비대화형 `RESULT` 줄 접미 — 진단이면 자격 상태를 명시한다."""
+    return (" qualification=NOT_QUALIFIED"
+            if is_diagnostic_authority(reference) else "")
 
 
 #: bring-up 실패 중 재시도를 **금지**하는 신호 (설정·장비·키·결속 오류).
@@ -322,12 +367,17 @@ def classify_bringup_failure(console_text: str, finalize_summary: dict,
 
 def prepare(paths: StatePaths, *, repo_root=None,
             hardware_path=None, preflight_fn=None, reference_loader=None,
-            environment_manifest=None, progress=None) -> dict:
+            environment_manifest=None, progress=None,
+            critical_check=None) -> dict:
     """RF 접근 전 게이트 전부. 실패는 RunRefusal(code, message).
 
     Git·baseline Markdown·standalone-binding은 읽지 않는다. 결속은
     var/installation manifest(적재 + 현재 파일 재측정)와 active reference
-    v2의 digest 대조로만 성립한다."""
+    v2의 digest 대조로만 성립한다.
+
+    `reference_loader`/`critical_check`는 주입 seam이다 — 기본값(active
+    reference + `compare_critical`)이 정상 `vdeter run`이고, `diag_cmd`는
+    같은 게이트 순서를 유지한 채 권한 원천만 진단 authorization으로 바꾼다."""
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     paths.ensure_var()
 
@@ -400,12 +450,20 @@ def prepare(paths: StatePaths, *, repo_root=None,
     stage("critical comparison")
     environment_manifest = (environment_manifest
                             or local_config.build_environment_manifest())
-    comparison = compare_critical(
+    comparison = (critical_check or compare_critical)(
         reference, installation=current_installation, hardware=hardware,
         preflight=preflight,
         identity_fingerprint=identity_check["fingerprint"],
         environment_manifest=environment_manifest)
     if not comparison["pass"]:
+        if is_diagnostic_authority(reference):
+            raise RunRefusal(
+                EXIT_UNQUALIFIED,
+                "DIAGNOSTIC AUTHORIZATION STALE: current values differ from "
+                "the diagnostic authorization:\n  - "
+                + "\n  - ".join(comparison["mismatches"])
+                + "\nImpact: RF execution is refused. Action: re-issue with "
+                "`vdeter diag authorize` after verifying the candidate.")
         raise RunRefusal(
             EXIT_UNQUALIFIED,
             "UNQUALIFIED: current qualification-critical values differ from "
@@ -552,7 +610,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     write_json_atomic(run_root / "run.json", {
         "artifact_type": "STAGE7_STANDALONE_RUN_V1",
         "run_id": run_id,
-        "reference_sha256": reference.get("_reference_sha256"),
+        **authority_fields(reference),
         "installation_sha256": digests["installation_sha256"],
         "rf_manifest_sha256": digests["rf_manifest_sha256"],
         "operation_manifest_sha256": digests["operation_manifest_sha256"],
@@ -939,7 +997,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             hardware_path=None, poc=None, poc_dir=None, out=print, input_fn=input,
             clock=time.monotonic, progress: bool = True,
             progress_stream=None, progress_ticker: bool = True,
-            topology_probe=None, rf_off_software: bool = False) -> int:
+            topology_probe=None, rf_off_software: bool = False,
+            critical_check=None, workload_plan=None,
+            hold_after_ready_s: float = 0.0) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
@@ -947,13 +1007,26 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
 
     `poc`/`poc_dir`(Stage 8 opt-in)가 주어지면 workload마다 scenario-호환 PoC를 선택·snapshot해
     실제 child·socket·provider로 실행한다. 둘 다 없으면 `poc_run`(stage8) module을 로드하지 않는다
-    (기능 OFF 구조적 0). device 경계는 session이 제공한다(`poc_device_seams`)."""
+    (기능 OFF 구조적 0). device 경계는 session이 제공한다(`poc_device_seams`).
+
+    `workload_plan`(개발용 진단 전용, `diag_cmd`)은 `(scenario_id, case)` 목록으로 비대화형
+    계획을 직접 준다 — 빈 목록이면 bring-up→(선택적 `hold_after_ready_s` 동안 READY 유지)→
+    close만 수행하는 RX-only 세션이다. 정상 `vdeter run`은 이 인자를 쓰지 않는다."""
     try:
-        plan = plan_for(scenario, certificate_case)
+        if workload_plan is not None:
+            plan = [(str(sid), str(case)) for sid, case in workload_plan]
+            for scenario_id, case in plan:
+                if scenario_id not in SCENARIOS or case not in ("normal", "forged"):
+                    raise RunRefusal(EXIT_CONFIG,
+                                     "Unknown workload %r/%r in plan" % (scenario_id, case))
+        else:
+            plan = plan_for(scenario, certificate_case)
     except RunRefusal as exc:
         out("Refused: " + str(exc))
         return exc.code
-    interactive = scenario is None
+    interactive = scenario is None and workload_plan is None
+    rx_only = workload_plan is not None and not plan
+    rx_only_ok = rx_only  # READY 유지 중 coordinator가 죽으면 False
 
     # Stage 8 opt-in: --poc/--poc-dir가 있을 때만 sanctioned adapter를 lazy import한다.
     poc_option = None
@@ -989,16 +1062,24 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 paths, repo_root=repo_root,
                 hardware_path=hardware_path, preflight_fn=preflight_fn,
                 reference_loader=reference_loader,
-                environment_manifest=environment_manifest, progress=gates)
+                environment_manifest=environment_manifest, progress=gates,
+                critical_check=critical_check)
         except RunRefusal as exc:
             reporter.finish("FAILED")
             out("Refused (exit %d): %s" % (exc.code, exc))
             return exc.code
         gates.done()
         reference = context["reference"]
-        out("VDETER standalone — QUALIFIED (reference %s, issued %s)"
-            % ((reference.get("_reference_sha256") or "")[:12],
-               reference.get("issued_utc", "?")))
+        if is_diagnostic_authority(reference):
+            # 개발용 진단 — QUALIFIED/RESEARCH_READY로 표시하지 않는다.
+            out("VDETER standalone — DIAGNOSTIC, NOT_QUALIFIED (authorization "
+                "%s, issued %s; not a qualification, no reference is issued)"
+                % ((reference.get("_reference_sha256") or "")[:12],
+                   reference.get("issued_utc", "?")))
+        else:
+            out("VDETER standalone — QUALIFIED (reference %s, issued %s)"
+                % ((reference.get("_reference_sha256") or "")[:12],
+                   reference.get("issued_utc", "?")))
         observed = context["preflight"]["checks"]["b210"]["observed_by_role"]
         out("[preflight] devices 3/3 (%s)" % " · ".join(
             "%s %s %s" % (role, info["serial"],
@@ -1068,7 +1149,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     "scenarios_planned": len(plan),
                     "workloads": [], "close": summary,
                     "attempts": attempts,
-                    "reference_sha256": reference.get("_reference_sha256"),
+                    **authority_fields(reference),
                     "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                   time.gmtime()),
                 })
@@ -1076,8 +1157,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     % (stopped.run_root, stopped.run_id))
                 if not interactive:
                     out("RESULT overall=FAIL scenarios=0/%d run-id=%s "
-                        "evidence=%s (interrupted during bring-up)"
-                        % (len(plan), stopped.run_id, stopped.run_root))
+                        "evidence=%s (interrupted during bring-up)%s"
+                        % (len(plan), stopped.run_id, stopped.run_root,
+                           result_suffix(reference)))
                 return EXIT_INTERRUPTED
             except BringupFailed as failed:
                 console_text = ""
@@ -1156,6 +1238,20 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             if interactive:
                 results = _menu(session, out=out, input_fn=input_fn,
                                 clock=clock, poc_ctx=poc_ctx)
+            elif rx_only:
+                # 개발용 진단 RX-only: workload 제출 0. READY를 유계 시간 동안 유지한 뒤
+                # 기존 close 경로로 닫는다(Ctrl+C는 아래 인터럽트 처리와 동일).
+                hold = max(0.0, float(hold_after_ready_s or 0.0))
+                out("  RX-only session — no workload will be submitted; holding "
+                    "READY for %.0f s then closing" % hold)
+                held = clock()
+                while clock() - held < hold:
+                    time.sleep(min(1.0, hold - (clock() - held)))
+                    if session.coordinator_exited():
+                        out("  coordinator exited during RX-only hold")
+                        exit_code = EXIT_FAIL
+                        rx_only_ok = False
+                        break
             else:
                 for number, (scenario_id, case) in enumerate(plan, 1):
                     result = _run_workload(session, scenario_id, case,
@@ -1199,7 +1295,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 overall = ("PASS" if summary["pass"] and passed == len(results)
                            else "FAIL")
             else:
-                overall = ("PASS" if summary["pass"] and results
+                # RX-only(진단, workload 0)는 bring-up·READY 유지·close·cleanup PASS만으로
+                # PASS다. 정상 run은 workload_plan을 쓰지 않으므로 종전 판정식 그대로다.
+                overall = ("PASS" if summary["pass"] and (results or rx_only_ok)
                            and passed == len(plan) else "FAIL")
             if topology_after is not None and not topology_after["pass"]:
                 overall = "FAIL"
@@ -1224,7 +1322,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 "workloads": results, "close": summary,
                 "usb_topology_after_close": topology_after,
                 "attempts": attempts,
-                "reference_sha256": reference.get("_reference_sha256"),
+                **authority_fields(reference),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                               time.gmtime()),
             }
@@ -1232,8 +1330,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             out("Evidence: %s   (summary: vdeter results %s)"
                 % (run_root, active_run_id))
             if not interactive:
-                out("RESULT overall=%s scenarios=%d/%d run-id=%s evidence=%s"
-                    % (overall, passed, len(plan), active_run_id, run_root))
+                out("RESULT overall=%s scenarios=%d/%d run-id=%s evidence=%s%s"
+                    % (overall, passed, len(plan), active_run_id, run_root,
+                       result_suffix(reference)))
             if json_summary:
                 out(json.dumps(run_summary, ensure_ascii=True, indent=1,
                                default=str))
