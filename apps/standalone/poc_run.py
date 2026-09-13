@@ -41,6 +41,51 @@ class PocRunError(Exception):
     """PoC 선택·실행 계약 위반(fail-closed). CLI가 종료 코드로 변환한다."""
 
 
+#: 이 adapter가 설치 capability를 판정하는 **유일한** capability 이름(§7.2.4, POC-D22).
+DUAL_CHANNEL_CAPABILITY = "observe_dual_physical_channel"
+
+
+def installed_server_config(paths=None, installation=None) -> ServerCapabilityConfig:
+    """설치 capability 증언에서 server capability 설정을 만든다(유일한 권위 producer).
+
+    A(설치 capability)만 결정한다. runtime readiness(B: `dual_ready`)나 RF 실행 권한/자격(C)은
+    여기에 섞지 않는다. 증언이 없거나 stale·불완전·미검증이면 미광고(fail-closed)다.
+
+    `paths`/`installation`을 주지 않으면 이 프로세스가 속한 설치에서 읽는다 — coordinator·RF-off
+    세션·CLI가 모두 같은 근거를 쓰게 하기 위함이다. 설치 기록을 읽을 수 없으면 미지원으로 답한다.
+    """
+    from apps.standalone import capability_attestation, installation_manifest
+    from apps.standalone.state import StatePaths
+
+    if paths is None:
+        paths = StatePaths()
+    if installation is None:
+        try:
+            installation = installation_manifest.load_installation(paths)
+        except installation_manifest.InstallationError:
+            return ServerCapabilityConfig()          # 설치 기록 없음/변조 → 미광고
+    supported, _reasons = capability_attestation.support(
+        paths, installation, capability=DUAL_CHANNEL_CAPABILITY)
+    return ServerCapabilityConfig(wsm_g1_production_installed=bool(supported))
+
+
+def installed_capability_evidence(paths=None, installation=None) -> dict:
+    """evidence·보고용 설치 capability 요약(판정은 `installed_server_config`와 동일 근거)."""
+    from apps.standalone import capability_attestation, installation_manifest
+    from apps.standalone.state import StatePaths
+
+    if paths is None:
+        paths = StatePaths()
+    if installation is None:
+        try:
+            installation = installation_manifest.load_installation(paths)
+        except installation_manifest.InstallationError as exc:
+            return {"capability": DUAL_CHANNEL_CAPABILITY, "supported": False,
+                    "reasons": [f"installation record unavailable: {exc}"]}
+    return capability_attestation.describe(
+        paths, installation, capability=DUAL_CHANNEL_CAPABILITY)
+
+
 def collision_state_error(message, *, ownership=False):
     """Map internal TEST/RX safety failure to public PoC severity at the sanctioned boundary."""
     return PocError(PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN if ownership
@@ -191,10 +236,23 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
     prepare_scope = getattr(session, "prepare_poc_scope", None)
     if callable(prepare_scope):
         prepare_scope(snapshot.descriptor)
-        runtime_config = getattr(session, "poc_server_config", None)
-        if not callable(runtime_config):
+        session_config = getattr(session, "poc_server_config", None)
+        if not callable(session_config):
             raise PocRunError("prepared RX scope has no verified server capabilities")
-        server_config = runtime_config()
+        resolved = session_config()
+        # 근거가 둘이면 조용히 덮어쓰지 않는다. caller와 session은 같은 설치 증언을 읽어야 하므로
+        # 광고 capability가 다르면 계약 위반으로 거부한다(fail-closed).
+        if server_config is not None and (
+                server_config.advertised_capabilities() != resolved.advertised_capabilities()):
+            raise PocRunError(
+                "server capability conflict: caller advertises %s but the session's installation "
+                "attestation advertises %s — refusing rather than silently overriding"
+                % (sorted(server_config.advertised_capabilities()),
+                   sorted(resolved.advertised_capabilities())))
+        server_config = resolved
+    if server_config is None:
+        # session이 제공하지 않는 경로(RF-off 등)도 같은 권위 producer를 쓴다 — 조용한 기본 False 금지.
+        server_config = installed_server_config()
     device_seams, steps, terminal_source, target_response, provider = _session_device_boundary(
         session, scenario_id)
     if socket_root:

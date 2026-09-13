@@ -3,9 +3,45 @@
 The existing harness owns three endpoints in ONE child process. This test
 does not claim three independent real B210 launchers or hardware timing PASS.
 """
+import contextlib
 import sys
 import unittest
 from tests.integration import test_stage8_launcher_poc_device as harness
+
+
+@contextlib.contextmanager
+def _attested_installation():
+    """이 설치가 dual-channel 지원 조건을 충족한다고 **증언된** 상태를 임시 설치에 만든다.
+
+    위치(`StatePaths`)만 임시 디렉터리로 돌리고 판정 논리는 production 그대로다 — 증언 생성·
+    결속·검사 모두 실제 producer(`capability_attestation`)를 쓴다. 판정을 True로 덮어쓰지 않으며,
+    증언이 stale·불완전하면 여기서도 미지원이 된다.
+
+    이것은 **검증 fixture**이고 실제 후보 설치의 검증 완료가 아니다(후보에는 증언이 없다).
+    """
+    import tempfile
+    from unittest.mock import patch
+    from apps.standalone import capability_attestation as CA
+    from apps.standalone import poc_run
+    from apps.standalone.state import StatePaths
+    capability = poc_run.DUAL_CHANNEL_CAPABILITY
+    original = poc_run.installed_server_config
+    with tempfile.TemporaryDirectory(prefix="cap-attest-") as root:
+        paths = StatePaths(root)
+        installation = {"installation_sha256": "i" * 64,
+                        "domains": {"rf": {"sha256": "r" * 64},
+                                    "operation": {"sha256": "o" * 64},
+                                    "tooling": {"sha256": "t" * 64}}}
+        CA.write_attestation(paths, CA.build_attestation(
+            installation, capability=capability,
+            items={name: {"result": "PASS", "evidence_sha256": "e" * 64,
+                          "note": "RF-OFF TEST FIXTURE - not a candidate verification"}
+                   for name in CA.REQUIRED_VERIFICATION[capability]},
+            producer="rf-off-integration-fixture",
+            method="fixture: end-to-end wiring verification only"))
+        with patch.object(poc_run, "installed_server_config",
+                          lambda *a, **kw: original(paths, installation)):
+            yield
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "real Unix TEST sockets")
@@ -235,23 +271,39 @@ class CollisionSocketTests(unittest.TestCase):
                 required_capabilities=("observe_dual_physical_channel",))
             snapshot = create_snapshot(src, "observe", dest_dir=os.path.join(root, "snapshot"),
                 scenario_id="SC-VDE-006")
-            self.assertTrue(host.selection_capabilities().wsm_g1_production_installed)
-            workload = None
-            try:
-                workload = poc_run.prepare_workload(host, snapshot, scenario_id="SC-VDE-006",
-                    run_id="dual-scope-test", workload_id="w1", socket_root=os.path.join(root, "socket"))
-                self.assertTrue(host._exchange.dual_ready)
-                self.assertIn("observe_dual_physical_channel", host.poc_server_config().advertised_capabilities())
-                workload.deliver_scenario_start()
-                for observation in host.new_observations():
-                    workload.deliver_observation(observation)
-                result = workload.run(ScenarioVerdict.PASS)
-                self.assertEqual(PocInfrastructure.COMPLETED, result.poc_infrastructure)
-            finally:
-                if workload is not None:
-                    workload.abort()
-                host.close_collision_exchange()
+            # 음성 대조군: 증언이 없는 이 설치에서는 A가 미광고다. worker 메서드 존재
+            # (`dual_supported`)나 runtime `dual_ready`로 승격되지 않는다(fail-closed).
+            self.assertFalse(host.selection_capabilities().wsm_g1_production_installed)
+            # 지원 조건을 충족한 설치를 fixture로 세우면 required dual workload가 실제 child·
+            # socket 경로로 준비·실행된다. fixture는 위치만 임시로 돌린 것이며 후보 설치의
+            # 검증 완료를 뜻하지 않는다.
+            with _attested_installation():
+                self.assertTrue(host.selection_capabilities().wsm_g1_production_installed)
+                workload = None
+                try:
+                    workload = poc_run.prepare_workload(host, snapshot, scenario_id="SC-VDE-006",
+                        run_id="dual-scope-test", workload_id="w1",
+                        socket_root=os.path.join(root, "socket"))
+                    # B(runtime readiness)는 별도 경로로 성립한다 — A와 섞이지 않는다.
+                    self.assertTrue(host._exchange.dual_ready)
+                    self.assertIn("observe_dual_physical_channel",
+                                  host.poc_server_config().advertised_capabilities())
+                    workload.deliver_scenario_start()
+                    for observation in host.new_observations():
+                        workload.deliver_observation(observation)
+                    result = workload.run(ScenarioVerdict.PASS)
+                    self.assertEqual(PocInfrastructure.COMPLETED, result.poc_infrastructure)
+                finally:
+                    if workload is not None:
+                        workload.abort()
+                    host.close_collision_exchange()
+                # A는 scope close로 바뀌지 않는다(설치 속성). 이전 시험은 close 후 False가 되는
+                # 것을 단언했는데, 그것은 capability가 runtime readiness를 추종하던 fail-open이었다.
+                self.assertTrue(host.poc_server_config().wsm_g1_production_installed)
+            # 증언을 치우면 같은 host가 다시 미광고로 돌아간다 — A는 설치 증언에만 따른다.
             self.assertFalse(host.poc_server_config().wsm_g1_production_installed)
+            self.assertEqual(host.selection_capabilities().advertised_capabilities(),
+                             host.poc_server_config().advertised_capabilities())
 
     def test_dual_workload_observes_real_lower_and_upper_phy(self):
         import base64

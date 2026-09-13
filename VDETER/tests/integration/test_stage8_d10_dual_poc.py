@@ -4,6 +4,7 @@ RF-off only: endpoints share one harness process; device I/O is the existing
 software group. Launcher D-11/D-18 timing and actual B210 load are NOT proved.
 """
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -37,6 +38,11 @@ class D10DualPocTest(unittest.TestCase):
         from vdeter.stage8.execution.snapshot import create_snapshot
         from vdeter.stage8.testing.execution_fakes import write_poc_package
         from vdeter.stage8.execution.verdict import ScenarioVerdict, PocInfrastructure
+        # required dual workload를 쓰는 시험이므로 지원 조건을 충족한 설치 증언 fixture 안에서
+        # 돈다(위치만 임시. 판정 논리는 production 그대로이며 후보 설치 검증이 아니다).
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(harness._attested_installation())
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         tuning = LauncherDeviceClient(self.controller, 'MASS-B')
@@ -84,7 +90,9 @@ class D10DualPocTest(unittest.TestCase):
                     workload.abort()
                 host.close_collision_exchange()
         self.assertTrue(host._exchange.evidence['cleanup_complete'])
-        self.assertFalse(host.poc_server_config().wsm_g1_production_installed)
+        # A(설치 capability)는 설치 증언에서만 온다. 이 시험은 증언 fixture 안에서 돌므로
+        # 광고되며, 그 값은 scope close 여부와 무관하다(runtime readiness를 추종하지 않는다).
+        self.assertTrue(host.poc_server_config().wsm_g1_production_installed)
         self.assertEqual(before, tuning.call('poc_tuning', read))
         self._stop_child()
         log = self.child.stderr.read()

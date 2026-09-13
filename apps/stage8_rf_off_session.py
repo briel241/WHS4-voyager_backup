@@ -134,6 +134,14 @@ class RfOffStage7DeviceSession:
     def _mass_b_worker(self):
         return self._members["MASS-B"].endpoint.dependencies.radio.lease.worker
 
+    def poc_server_config(self):
+        """RF-off 경로도 **같은 설치 증언**을 근거로 쓴다(조용한 기본 False 금지).
+
+        하드웨어 경계만 software double이고, 설치 capability 판정 근거는 실경로와 동일하다.
+        """
+        from apps.standalone.poc_run import installed_server_config
+        return installed_server_config()
+
     def poc_provider(self):
         """권위 경로 provider를 직접 제공한다(seam 조립 대신). PoC action이 `schedule_tx`로 나간다."""
         return self._provider

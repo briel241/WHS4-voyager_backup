@@ -935,29 +935,40 @@ class PocWorkloadHost:
     # --- poc_run device 경계 계약 --------------------------------------------
 
     def selection_capabilities(self):
-        from apps.standalone.poc_run import ServerCapabilityConfig
-        reply = self._bindings["actor"].call("poc_collision",
-            {"mode": "SUPPORT", "session_id": "capability-discovery"})
-        return ServerCapabilityConfig(wsm_g1_production_installed=bool(reply.get("dual_supported")))
+        """A(설치 capability)만 답한다 — 설치 증언이 유일한 근거다.
+
+        이전 구현은 장치 seam의 `dual_supported`(worker에 read_tuning/apply_manual_tuning/
+        restore_tuning **메서드가 존재하는가**)로 판정했다. 메서드 존재는 설치 적합성의 근거가
+        아니며 미지원 설치에서도 광고될 수 있었다(fail-open). 이제 설치 증언만 본다.
+        """
+        from apps.standalone.poc_run import installed_server_config
+        return installed_server_config()
 
     def prepare_poc_scope(self, descriptor):
         from apps.stage8_collision_exchange import CollisionExchange
         from apps.stage8_launcher_seams import assemble_launcher_provider
+        from apps.standalone.poc_run import DUAL_CHANNEL_CAPABILITY, installed_server_config
         if self._exchange is not None:
             raise RuntimeError("workload RX scope already prepared")
-        dual = "observe_dual_physical_channel" in descriptor.requested_capabilities
+        dual = DUAL_CHANNEL_CAPABILITY in descriptor.requested_capabilities
+        # A: 설치 capability(증언). B: runtime readiness(아래 dual_ready). 둘을 섞지 않는다.
+        installed = DUAL_CHANNEL_CAPABILITY in installed_server_config().advertised_capabilities()
         self._exchange = CollisionExchange(self._bindings["clients"], self._actor, dual=dual)
         self._exchange.start()
         self._provider, self._bindings = assemble_launcher_provider(
             self._controller, actor_endpoint=self._actor, endpoint_ids=ENDPOINT_IDS,
             station_id_by_endpoint=dict(STATION_BY_ENDPOINT),
-            dual_channel_installed=self._exchange.dual_ready)
+            dual_channel_installed=installed)
         self._bindings["actor"].collision_session_id = self._exchange.session_id
 
     def poc_server_config(self):
-        from apps.standalone.poc_run import ServerCapabilityConfig
-        return ServerCapabilityConfig(wsm_g1_production_installed=bool(
-            self._exchange is not None and self._exchange.dual_ready))
+        """설치 capability(A)만 돌려준다. `dual_ready`(B)는 여기에 섞지 않는다.
+
+        runtime readiness는 별도 경로(`CollisionExchange.dual_ready`)가 생산·검증·철회하며,
+        readiness 미충족은 해당 동작 단계에서 거부된다(capability 광고가 그 gate를 대신하지 않는다).
+        """
+        from apps.standalone.poc_run import installed_server_config
+        return installed_server_config()
 
     def poc_provider(self):
         if self._exchange is None:
