@@ -410,6 +410,12 @@ vdeter diag status
 - `run`: authorization(sidecar·만료·plan)과 ledger(한도)를 **장치 접근 전** 검사 → `run_cmd.execute`
   를 그대로 호출(주입: 진단 loader·블록 검사·비대화형 계획·**재시도 없음**). 인자 없이 실행하면
   RX-only 세션(bring-up → `--hold-after-ready` 동안 READY 유지 → close). run id 접두 `diag-`.
+  coordinator는 빈 측정을 설계대로 fail-closed 판정하므로 RX-only 세션은 coordinator rc=1로 끝난다.
+  진단 계층은 실패 사유가 빈 측정 하나뿐이고 `service_stop_rc=0`·cleanup PASS·잔존 worker 0·
+  inhibit 아님·인터럽트 아님·close 후 topology 정상일 때만 이를 "기대된 빈 측정"으로 보고 진단
+  종료코드를 0으로 기록한다(명세 §5A.3). coordinator의 rc·status·error 원문과 보정 사실은
+  ledger의 `rx_only_assessment`·`diagnostic_exit_code_override`에 그대로 남으며, 반환값·콘솔·
+  ledger는 같은 종료코드를 말한다. 사유가 하나라도 더 섞이면 FAIL 그대로다.
   배너 `DIAGNOSTIC, NOT_QUALIFIED`; run.json/summary.json은 `reference_sha256=null`,
   `qualification_status=NOT_QUALIFIED`, `diagnostic_authorization_sha256`; `RESULT … qualification=NOT_QUALIFIED`.
   종료 후 `active.json`·`releases/` 불변을 확인해 ledger에 기록한다.
