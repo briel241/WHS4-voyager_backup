@@ -382,6 +382,87 @@ def test_diag_rx_only_session_submits_nothing():
         assert ledger(paths)["runs"][-1]["rx_only"] is True
 
 
+def test_rx_only_close_assessment_accepts_only_the_empty_measurement_reason():
+    """coordinator는 빈 측정을 설계대로 fail-closed 판정한다
+    (`_service_session_terminal_status`: `if not workloads: …`). RX-only는 workload를
+    제출하지 않는 것이 목적이므로 그 사유 **하나만**인 FAIL은 기대된 결과다. 다른 사유가
+    섞이거나 STOP·cleanup·fault·inhibit·topology에 문제가 있으면 실패 그대로여야 한다."""
+
+    def summary(*, error=diag_cmd.EMPTY_MEASUREMENT_FAILURE, workloads=None,
+                stop_rc=0, cleanup_pass=True, workers=0, inhibited=False,
+                interrupted=False, topology=None):
+        return {"interrupted": interrupted, "usb_topology_after_close": topology,
+                "close": {"coordinator_rc": 1, "closed": {
+                    "status": "FAIL", "error": error, "workloads": workloads or [],
+                    "service_stop_rc": stop_rc, "inhibited": inhibited,
+                    "cleanup": {"pass": cleanup_pass, "workers_after_stop": workers}}}}
+
+    ok = diag_cmd.rx_only_close_assessment(summary())
+    assert ok["expected_empty_measurement"] is True
+    # coordinator의 원래 판정은 숨기지 않고 그대로 실린다.
+    assert ok["coordinator_rc"] == 1 and ok["coordinator_status"] == "FAIL"
+    assert ok["coordinator_error"] == diag_cmd.EMPTY_MEASUREMENT_FAILURE
+    assert ok["failure_reasons"] == [diag_cmd.EMPTY_MEASUREMENT_FAILURE]
+
+    for bad in (
+        summary(error=diag_cmd.EMPTY_MEASUREMENT_FAILURE + "; service STOP 대행 rc=2",
+                stop_rc=2),
+        summary(error=diag_cmd.EMPTY_MEASUREMENT_FAILURE + "; endpoint STOP 미완료"),
+        summary(error="하나 이상의 workload가 FAIL",
+                workloads=[{"workload_id": "w", "status": "FAIL"}]),
+        summary(cleanup_pass=False),
+        summary(workers=2),
+        summary(inhibited=True),
+        summary(interrupted=True),
+        summary(topology={"pass": False}),
+        summary(error=None),
+    ):
+        assert diag_cmd.rx_only_close_assessment(bad)["expected_empty_measurement"] is False, bad
+
+
+def test_diag_rx_only_maps_empty_measurement_to_pass_without_hiding_coordinator():
+    """RX-only 실행에서 coordinator FAIL(rc=1, 빈 측정)만 있을 때 진단 판정은 성공이고,
+    coordinator의 rc·status·error는 출력과 ledger에 그대로 남는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths, _ = fx.prepare_environment(tmp, qualified=False)
+        authorize(paths, tmp)
+        factory = rc.make_session_factory(
+            {"close": {"pass": False,
+                       "problems": ["coordinator exited abnormally (rc=1)"],
+                       "coordinator_rc": 1, "coordinator_exited": True,
+                       "closed": {"status": "FAIL",
+                                  "error": diag_cmd.EMPTY_MEASUREMENT_FAILURE,
+                                  "workloads": [], "service_stop_rc": 0,
+                                  "inhibited": False,
+                                  "cleanup": {"pass": True, "workers_after_stop": 0}}}})
+        code, lines = diag_run(paths, factory, [], hold_after_ready_s=0.0)
+        assert code == run_cmd.EXIT_PASS, lines
+        assert any("designed fail-closed verdict for an empty measurement" in line
+                   for line in lines)
+        assert any("rc=1" in line and "status=FAIL" in line for line in lines)
+        entry = ledger(paths)["runs"][-1]
+        assessment = entry["rx_only_assessment"]
+        assert assessment["expected_empty_measurement"] is True
+        assert assessment["coordinator_rc"] == 1
+        assert assessment["coordinator_error"] == diag_cmd.EMPTY_MEASUREMENT_FAILURE
+        assert entry["exit_code"] == run_cmd.EXIT_PASS
+        assert entry["invariants_unchanged"] is True
+        # 다른 사유가 섞이면 성공으로 바꾸지 않는다.
+        factory2 = rc.make_session_factory(
+            {"close": {"pass": False, "problems": ["coordinator exited abnormally (rc=1)"],
+                       "coordinator_rc": 1, "coordinator_exited": True,
+                       "closed": {"status": "FAIL",
+                                  "error": diag_cmd.EMPTY_MEASUREMENT_FAILURE
+                                           + "; endpoint STOP 미완료",
+                                  "workloads": [], "service_stop_rc": 0,
+                                  "inhibited": False,
+                                  "cleanup": {"pass": True, "workers_after_stop": 0}}}})
+        code2, _ = diag_run(paths, factory2, [], hold_after_ready_s=0.0)
+        assert code2 != run_cmd.EXIT_PASS
+        assert ledger(paths)["runs"][-1]["rx_only_assessment"][
+            "expected_empty_measurement"] is False
+
+
 def test_diag_run_limit_reached_blocks_further_runs():
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp, qualified=False)

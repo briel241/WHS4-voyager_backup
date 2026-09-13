@@ -496,6 +496,53 @@ def unique_run_id(paths: StatePaths, *, clock=time.time) -> str:
     return candidate
 
 
+#: coordinator가 "빈 측정"(workload 0)에 붙이는 정확한 실패 사유
+#: (`VDETER/apps/stage7_coordinator_main.py::_service_session_terminal_status`).
+#: 이 문자열 **하나만** 있을 때가 RX-only 세션의 기대 결과다.
+EMPTY_MEASUREMENT_FAILURE = "workload가 하나도 완료되지 않음"
+
+
+def rx_only_close_assessment(summary: dict) -> dict:
+    """RX-only(workload 0) 세션의 close 결과 해석.
+
+    coordinator는 빈 측정을 **설계상** fail-closed로 판정한다(같은 함수가 workload 실패·
+    불완전 STOP도 함께 본다). RX-only는 workload를 제출하지 않는 것이 목적이므로 그 사유
+    하나만 있는 FAIL은 기대된 결과다. 그러나 다른 사유가 섞이거나 STOP·cleanup·fault·
+    inhibit에 문제가 있으면 **실패 그대로** 취급한다.
+
+    coordinator의 rc·status·error는 바꾸지 않고 그대로 기록한다(숨기지 않는다). 반환:
+    `{"expected_empty_measurement", "reasons", "coordinator_rc", "coordinator_status",
+      "coordinator_error", "service_stop_rc", "cleanup_pass", "inhibited", "workloads"}`.
+    """
+    close = summary.get("close") or {}
+    closed = close.get("closed") or {}
+    cleanup = closed.get("cleanup") or (close.get("cleanup") or {})
+    error = closed.get("error")
+    workloads = closed.get("workloads")
+    reasons = [part.strip() for part in str(error or "").split(";") if part.strip()]
+    assessment = {
+        "coordinator_rc": close.get("coordinator_rc"),
+        "coordinator_status": closed.get("status"),
+        "coordinator_error": error,
+        "service_stop_rc": closed.get("service_stop_rc"),
+        "cleanup_pass": cleanup.get("pass"),
+        "workers_after_stop": cleanup.get("workers_after_stop"),
+        "inhibited": closed.get("inhibited"),
+        "workloads": workloads,
+        "failure_reasons": reasons,
+    }
+    assessment["expected_empty_measurement"] = bool(
+        reasons == [EMPTY_MEASUREMENT_FAILURE]
+        and not workloads
+        and closed.get("service_stop_rc") == 0
+        and cleanup.get("pass") is True
+        and cleanup.get("workers_after_stop") == 0
+        and closed.get("inhibited") is False
+        and summary.get("interrupted") is False
+        and (summary.get("usb_topology_after_close") or {}).get("pass") is not False)
+    return assessment
+
+
 def _qualification_invariants(paths: StatePaths) -> dict:
     releases = paths.qualification_releases
     return {"active_json_present": paths.active_pointer.exists(),
@@ -563,6 +610,7 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
         after = _qualification_invariants(paths)
         summary_path = paths.runs_dir / run_id / "summary.json"
         summary = None
+        rx_only_assessment = None
         if summary_path.is_file():
             try:
                 full = json.loads(summary_path.read_bytes())
@@ -571,10 +619,25 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
                     "qualification_status", "diagnostic_authorization_sha256")}
                 summary["attempts"] = len(full.get("attempts") or [])
                 summary["close_pass"] = (full.get("close") or {}).get("pass")
+                if not scenarios:
+                    rx_only_assessment = rx_only_close_assessment(full)
             except ValueError:
                 summary = {"error": "summary.json unreadable"}
+        # RX-only 보정은 **ledger 기록 전에** 확정한다 — 반환값·콘솔·ledger가 서로
+        # 다른 종료코드를 말하면 그 자체가 증거 결함이다. coordinator의 rc·status·
+        # error는 rx_only_assessment에 그대로 남는다(숨기지 않는다).
+        if (rx_only_assessment is not None
+                and rx_only_assessment["expected_empty_measurement"]
+                and exit_code != EXIT_PASS):
+            coordinator_exit_code = exit_code
+            exit_code = EXIT_PASS
+            rx_only_assessment["diagnostic_exit_code_override"] = {
+                "from": coordinator_exit_code, "to": EXIT_PASS,
+                "reason": ("empty measurement is the purpose of an RX-only stage; "
+                           "the coordinator's fail-closed verdict is recorded as-is")}
         entry.update({"state": "FINISHED", "finished_utc": _utc_now(),
                       "exit_code": exit_code, "summary": summary,
+                      "rx_only_assessment": rx_only_assessment,
                       "invariants_after": after,
                       "invariants_unchanged": before == after,
                       "authorization_still_valid": _authorization_unchanged(
@@ -584,6 +647,18 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
         out("INVARIANT VIOLATION: qualification state changed during a diagnostic "
             "run (%s -> %s) — stop and investigate" % (before, after))
         return EXIT_INTERNAL
+    if (rx_only_assessment or {}).get("diagnostic_exit_code_override"):
+        # RX-only는 workload를 제출하지 않는 것이 목적이다. coordinator는 빈 측정을
+        # 설계대로 fail-closed 판정하므로(_service_session_terminal_status), 그 사유
+        # **하나만**이고 STOP·cleanup·fault·inhibit·topology가 모두 정상일 때에 한해
+        # 진단 판정을 성공으로 본다. coordinator의 rc·status·error는 그대로 남긴다.
+        out("  RX-only: coordinator reported rc=%s status=%s error=%r — this is the "
+            "designed fail-closed verdict for an empty measurement (no workload was "
+            "submitted, which is the purpose of this stage). STOP rc=0, cleanup PASS, "
+            "residual workers 0, no faults, not inhibited."
+            % (rx_only_assessment["coordinator_rc"],
+               rx_only_assessment["coordinator_status"],
+               rx_only_assessment["coordinator_error"]))
     out("DIAGNOSTIC RESULT exit=%d qualification=NOT_QUALIFIED run-id=%s ledger=%s"
         % (exit_code, run_id, paths.diagnostic_ledger))
     return exit_code
@@ -623,4 +698,10 @@ def status(paths: StatePaths, *, out=print, now=None) -> int:
             entry.get("run_id"), entry.get("state"), entry.get("exit_code"),
             summary.get("status"), entry.get("scenarios"),
             entry.get("invariants_unchanged")))
+        rx = entry.get("rx_only_assessment")
+        if rx:
+            out("      RX-only: coordinator rc=%s status=%s reasons=%s → expected "
+                "empty measurement=%s" % (
+                    rx.get("coordinator_rc"), rx.get("coordinator_status"),
+                    rx.get("failure_reasons"), rx.get("expected_empty_measurement")))
     return EXIT_PASS
