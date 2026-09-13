@@ -3,6 +3,9 @@
 - 각 workload 제출 시점에 두 파일을 O_NOFOLLOW로 다시 읽고 함께 검증한다.
 - read 전후의 device/inode/size/mtime과 regular-file·owner·mode를 대조한다. 읽는 동안
   하나라도 바뀌면 부분 저장·교체 race로 보고 RF 전에 거부한다(fail-closed).
+- **PoC 원본 파일의 group/other 쓰기 권한은 거부 사유가 아니다**(2026-09-13 정책). 위
+  전후 대조는 무결성 검사이지 권한 정책이 아니며, catalog·snapshot **directory**의 mode
+  검사는 그대로 유지된다. snapshot 사본은 계속 read-only(0o400)로 확정한다.
 - script·manifest 각각의 SHA-256과 두 파일 결속 digest를 기록한다.
 - child는 원본이 아니라 이 snapshot을 실행한다. snapshot 확정 뒤 원본을 수정해도 현재
   workload에는 반영되지 않으며, 수정본은 다음 workload의 새 snapshot에서만 반영된다.
@@ -103,8 +106,8 @@ def _consistent_read(dir_fd: int, name: str, max_bytes: int, *, uid: int):
             raise SnapshotError(f"{name}이 regular file이 아닙니다")
         if before.st_uid != uid:
             raise SnapshotError(f"{name} 소유자가 현재 UID가 아닙니다")
-        if before.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH):
-            raise SnapshotError(f"{name}이 group/other writable입니다")
+        # PoC 파일의 group/other 쓰기 권한은 **거부 사유가 아니다**(2026-09-13 정책).
+        # 읽는 도중 mode가 바뀌면 아래 전후 대조가 여전히 거부한다(무결성 계약 유지).
         if before.st_size > max_bytes:
             raise SnapshotError(f"{name}이 크기 상한을 초과했습니다")
 

@@ -3,7 +3,10 @@
 - qualified source·installation tree 밖 사용자 소유 directory만 사용한다.
 - directory 바로 아래의 `.poc.toml`만 비재귀적으로 열거하고, exact-basename `.py`가
   있는 항목만 package 후보로 만든다.
-- owner·mode·symlink·hard-link identity·path traversal·count·size를 fail-closed로 검사한다.
+- owner·파일 종류·symlink·hard-link identity·path traversal·count·size를 fail-closed로
+  검사한다. **PoC 파일의 group/other 쓰기 권한은 거부 사유가 아니다**(2026-09-13 정책):
+  쓰기 가능한 파일도 나머지 계약을 충족하면 정상 수락한다. catalog **directory** 자체의
+  mode 검사와 "읽는 도중 변경" 탐지(st_mode 포함 전후 대조)는 유지한다.
 - **Python file을 import·compile·실행하지 않는다.** manifest만 parse한다(§6.1).
 - watcher·주기 polling·RF 중 background scan을 만들지 않는다. 이 함수는 menu 표시 또는
   명시적 rescan에서 한 번 호출되는 control-plane 동작이다(§3.2).
@@ -150,8 +153,8 @@ def _read_regular_file(dir_fd: int, name: str, max_bytes: int, *, uid: int):
             return None, "regular file이 아닙니다"
         if st.st_uid != uid:
             return None, "파일 소유자가 현재 UID가 아닙니다"
-        if st.st_mode & (statmod.S_IWGRP | statmod.S_IWOTH):
-            return None, "파일이 group/other writable입니다"
+        # PoC 파일의 group/other 쓰기 권한은 **거부 사유가 아니다**(2026-09-13 정책).
+        # 나머지 계약(regular file·소유자·symlink·크기·읽는 도중 변조)은 그대로다.
         if st.st_size > max_bytes:
             return None, "파일이 크기 상한을 초과했습니다"
         h = hashlib.sha256()

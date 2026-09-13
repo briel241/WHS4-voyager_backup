@@ -94,15 +94,54 @@ class CatalogScanTest(unittest.TestCase):
         self.assertEqual(len(cat.invalid), 1)
         self.assertIn("sneaky", cat.invalid[0].name)
 
-    def test_writable_package_files_are_invalid(self):
+    def test_writable_package_files_are_accepted(self):
+        """group/other writable인 PoC 파일도 나머지 계약을 충족하면 수락한다.
+
+        2026-09-13 정책: 쓰기 권한 bit는 실행 거부 사유가 아니다. 파일 종류·소유자·
+        symlink·크기·읽는 도중 변조 검사와 catalog directory mode 검사는 그대로다.
+        """
         for filename in ("p.py", "p.poc.toml"):
             with self.subTest(filename=filename):
                 write_poc_package(self.dir, "p", poc_id="p")
                 os.chmod(os.path.join(self.dir, filename), 0o666)
                 cat = scan_catalog(self.dir)
-                self.assertFalse(cat.valid)
-                self.assertIn("writable", cat.invalid[0].reason)
+                self.assertEqual([p.poc_id for p in cat.valid], ["p"],
+                                 [i.reason for i in cat.invalid])
+                self.assertEqual(len(cat.invalid), 0)
+                entry = cat.valid[0]
+                self.assertEqual(entry.binding_digest,
+                                 binding_digest(entry.script_sha256,
+                                                entry.manifest_sha256))
                 os.chmod(os.path.join(self.dir, filename), 0o600)
+
+    def test_same_result_under_umask_0002_and_0022(self):
+        """실행 셸의 umask와 무관하게 같은 결과여야 한다(2026-09-13 정책).
+
+        umask 0002(비대화형 ssh 기본값)에서 만들어진 group-writable package도 0022와
+        똑같이 수락된다. 시험 안에서만 umask를 바꾸고 즉시 되돌린다 — 시스템 설정은
+        건드리지 않는다.
+        """
+        previous = os.umask(0o022)
+        self.addCleanup(os.umask, previous)
+        results, modes = {}, {}
+        for mask in (0o022, 0o002):
+            os.umask(mask)
+            directory = tempfile.mkdtemp(prefix="poc-umask-")
+            os.chmod(directory, 0o700)
+            self.addCleanup(shutil.rmtree, directory, True)
+            write_poc_package(directory, "p", poc_id="p")
+            modes[mask] = os.stat(
+                os.path.join(directory, "p.py")).st_mode & 0o777
+            cat = scan_catalog(directory)
+            results[mask] = ([p.poc_id for p in cat.valid],
+                             [i.reason for i in cat.invalid])
+            self.assertEqual(results[mask], (["p"], []),
+                             f"umask {mask:04o}, mode {modes[mask]:04o}")
+        self.assertEqual(results[0o022], results[0o002])
+        # 이 시험이 실제로 정책을 검증했는지 확인한다: 0002에서는 group-writable
+        # 파일이, 0022에서는 그렇지 않은 파일이 만들어져야 한다.
+        self.assertTrue(modes[0o002] & statmod.S_IWGRP, f"{modes[0o002]:04o}")
+        self.assertFalse(modes[0o022] & statmod.S_IWGRP, f"{modes[0o022]:04o}")
 
     def test_file_owner_mismatch_is_invalid(self):
         write_poc_package(self.dir, "p", poc_id="p")

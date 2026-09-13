@@ -53,15 +53,32 @@ def _phase_i_bindings() -> dict:
         return json.load(handle)
 
 
+def _function_source(lines: list, node: ast.FunctionDef) -> str:
+    """함수의 **문자 그대로의 원문**(decorator 포함, LF 정규화).
+
+    이전에는 `ast.unparse` 출력으로 source 해시를 만들었으나, unparse는 **CPython
+    patch 버전에 따라 출력이 달라진다**(PEP 701 f-string quote reuse). 같은 파일을
+    3.12.13에서 파생한 해시가 3.12.3에서 불일치로 나타나, 함수가 전혀 바뀌지
+    않았는데도 결속 시험이 실패했다(qual-20260913 실측).
+
+    파일 원문은 인터프리터와 무관하므로 버전 안정적이고, 주석·공백까지 포함해
+    unparse보다 **엄격하다**. 함수 본문이 변조되면 당연히 달라진다.
+    """
+    start = min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1
+    return "\n".join(lines[start:node.end_lineno]) + "\n"
+
+
 def _function_hashes(source: str) -> dict:
-    """최상위 함수별 (AST dump, unparse) 해시. 중첩 함수는 부모에 포함된다."""
+    """최상위 함수별 (AST dump, 원문) 해시. 중첩 함수는 부모에 포함된다."""
+    lines = source.replace("\r\n", "\n").split("\n")
     tree = ast.parse(source)
     result = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
             result[node.name] = (
                 hashlib.sha256(ast.dump(node).encode("utf-8")).hexdigest(),
-                hashlib.sha256(ast.unparse(node).encode("utf-8")).hexdigest(),
+                hashlib.sha256(
+                    _function_source(lines, node).encode("utf-8")).hexdigest(),
             )
     return result
 

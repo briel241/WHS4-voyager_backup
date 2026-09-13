@@ -148,6 +148,47 @@ class SnapshotTest(unittest.TestCase):
         snap = create_snapshot(self.poc, "good_poc", dest_dir=self._dest("w-ok"))
         self.assertEqual(len(snap.script_sha256), 64)
 
+    def test_group_other_writable_source_files_are_accepted(self):
+        """group/other writable인 PoC 원본도 snapshot을 만들 수 있다(2026-09-13 정책).
+
+        쓰기 권한 bit는 거부 사유가 아니다. 결속 digest·검증은 그대로이고 snapshot
+        사본은 여전히 read-only(0o400)로 확정된다.
+        """
+        write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
+        for name in ("p.py", "p.poc.toml"):
+            os.chmod(os.path.join(self.poc, name), 0o666)
+        snap = create_snapshot(self.poc, "p", dest_dir=self._dest("w-writable"))
+        self.assertEqual(len(snap.script_sha256), 64)
+        self.assertEqual(snap.binding_digest,
+                         binding_digest(snap.script_sha256, snap.manifest_sha256))
+        self.assertTrue(verify_snapshot(snap))
+        self.assertEqual(os.stat(snap.script_path).st_mode & 0o777, 0o400)
+
+    def test_same_snapshot_under_umask_0002_and_0022(self):
+        """실행 셸의 umask와 무관하게 같은 snapshot 결과여야 한다(2026-09-13 정책).
+
+        시험 안에서만 umask를 바꾸고 즉시 되돌린다 — 시스템 설정은 건드리지 않는다.
+        """
+        previous = os.umask(0o022)
+        self.addCleanup(os.umask, previous)
+        digests, modes = {}, {}
+        for mask in (0o022, 0o002):
+            os.umask(mask)
+            source = tempfile.mkdtemp(prefix="poc-umask-src-")
+            os.chmod(source, 0o700)
+            self.addCleanup(shutil.rmtree, source, True)
+            write_poc_package(source, "p", poc_id="p",
+                              script=b"class Poc:\n    pass\n")
+            modes[mask] = os.stat(os.path.join(source, "p.py")).st_mode & 0o777
+            snap = create_snapshot(source, "p",
+                                   dest_dir=self._dest(f"w-{mask:04o}"))
+            digests[mask] = snap.binding_digest
+            self.assertTrue(verify_snapshot(snap))
+        self.assertEqual(digests[0o022], digests[0o002])
+        # 이 시험이 실제로 정책을 검증했는지 확인한다.
+        self.assertTrue(modes[0o002] & stat.S_IWGRP, f"{modes[0o002]:04o}")
+        self.assertFalse(modes[0o022] & stat.S_IWGRP, f"{modes[0o022]:04o}")
+
     def test_source_directory_permission_rechecked(self):
         write_poc_package(self.poc, "p", poc_id="p")
         os.chmod(self.poc, 0o777)
