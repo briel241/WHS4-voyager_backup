@@ -264,7 +264,11 @@ class SnapshotTest(unittest.TestCase):
         # 목적지에 기존 파일이 있으면 덮어쓰지 않고 fail-closed(§5.3, O_EXCL).
         write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
         dest = self._dest("w1")
-        os.makedirs(dest, exist_ok=True)
+        # 목적지 directory는 production과 같은 명시 mode로 만든다(production도
+        # `os.makedirs(dest_dir, mode=0o700)`). mode를 생략하면 umask 0002에서
+        # group-writable이 되어 목적지 검사에 먼저 걸리고, 이 시험이 검증하려는
+        # "기존 파일 거부"에 도달하지 못한다.
+        os.makedirs(dest, mode=0o700, exist_ok=True)
         # snapshot이 쓸 대상(p.py)을 미리 만들어 둔다.
         with open(os.path.join(dest, "p.py"), "wb") as fh:
             fh.write(b"pre-existing")
@@ -276,7 +280,7 @@ class SnapshotTest(unittest.TestCase):
         # 목적지 대상이 symlink면 링크 대상으로 새지 않고 fail-closed(O_NOFOLLOW/O_EXCL).
         write_poc_package(self.poc, "p", poc_id="p", script=b"class Poc:\n    pass\n")
         dest = self._dest("w1")
-        os.makedirs(dest, exist_ok=True)
+        os.makedirs(dest, mode=0o700, exist_ok=True)  # umask와 무관한 목적지 mode
         outside = os.path.join(self.dest_root, "outside.py")
         with open(outside, "wb") as fh:
             fh.write(b"outside")
