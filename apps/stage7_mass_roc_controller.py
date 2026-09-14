@@ -39,6 +39,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 
@@ -1109,7 +1110,38 @@ def _write_result(run_root: str, scenario_id: str, payload: dict) -> str:
     return out
 
 
+def _install_signal_handlers() -> None:
+    """SIGTERM을 첫 Ctrl+C와 같은 정상 종료 절차로 바꾼다.
+
+    coordinator는 session shutdown·workload abort에서 이 child를 `process.terminate()`로
+    회수하고(`stage7_coordinator_main._terminate_process_bounded`) **30초를 기다린다**
+    (`CHILD_TERMINATE_TIMEOUT_S`). 그런데 이 프로세스에 처분이 없으면 SIGTERM 기본 동작으로
+    즉사해 `run_workload`의 `finally`가 실행되지 않는다 — PoC child·socket 정리
+    (`abort_prepared`), RX scope 복원과 `collision_model_closed`, `poc-result` 기록이 통째로
+    누락된다.
+
+    실측(diag-20260914-142043, dual scope 활성 중 운영자 취소): child가 `exit_code=-15`로
+    죽고 `poc-result.json`·`final-result.json`·`workload-trace.jsonl`이 하나도 남지 않았으며
+    `$XDG_RUNTIME_DIR/vdeter-poc/<nonce>/poc.sock`이 그대로 잔존했다. 같은 코드의 정상 종료
+    회차(라운드 4 diag-20260914-091317)에는 넷 다 정상 기록됐다 — 인터럽트 경로만의 누락이다.
+
+    CLI(`apps/standalone/cli.py::_install_signal_handlers`)가 이미 같은 방식을 쓴다. 여기서
+    새 정리 로직이나 새 상한을 만들지 않는다 — 기존 `finally`가 유예 안에서 돌게만 한다.
+    """
+
+    def to_interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, to_interrupt)
+    except (ValueError, OSError, AttributeError):
+        # 주 스레드가 아니거나 플랫폼이 지원하지 않으면 기존 동작 그대로 둔다.
+        pass
+
+
 def main(argv=None) -> int:
+    # 인자 해석 전에 설치한다 — 이후 모든 구간이 정리 경로를 타야 한다.
+    _install_signal_handlers()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-root", required=True)
