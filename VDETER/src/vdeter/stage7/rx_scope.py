@@ -38,6 +38,10 @@ class WorkloadRxScope:
         self.previous = None
         self.touched = self.active = self.closed = False
         self.readback = None
+        # 복원 뒤 readback과 검증 결과. 값은 restore_tuning 호출이 이미 돌려준 것이라
+        # 추가 장치 조회가 없다. 실패해도 값과 원인을 남긴다(evidence).
+        self.restored = None
+        self.restore_error = None
         self.binding = self._binding()
 
     @property
@@ -126,7 +130,8 @@ class WorkloadRxScope:
             channels = {c.request.channel.name for c in self.radio._rx_children.values() if not c.terminal}
         reply["dual_ready"] = bool(self.dual and not self.closed and not gate.fault
             and {LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME} <= channels)
-        reply["dual_readback"] = self.readback
+        reply["dual_readback"] = self.readback     # 적용 후 readback
+        reply["dual_previous"] = self.previous     # 적용 전 readback(복원 목표)
         return reply
 
     def close(self):
@@ -146,17 +151,27 @@ class WorkloadRxScope:
             return {"disabled": False, "draining": True}
         if self.touched:
             restored = self.seam._worker().restore_tuning(deepcopy(self.previous))
-            _validate_tuning(restored, manual="rx_lo_hz" in self.previous)
-            if (abs(restored.get("analog_bandwidth_hz", 0) - self.previous["analog_bandwidth_hz"]) > 1
-                    or any(self._lane(restored.get("lane_center_hz", {}), i) is None
-                           or abs(self._lane(restored["lane_center_hz"], i)
-                                  - self._lane(self.previous["lane_center_hz"], i)) > 1 for i in (0, 1))):
-                raise CollisionRuntimeError("RX restore unverified; ownership retained")
-            if "rx_lo_hz" in self.previous and (
-                    abs(restored["rx_lo_hz"] - self.previous["rx_lo_hz"]) > 1
-                    or any(abs(self._lane(restored["lane_dsp_hz"], i)
-                               - self._lane(self.previous["lane_dsp_hz"], i)) > 1 for i in (0, 1))):
-                raise CollisionRuntimeError("manual RX restore differs; ownership retained")
+            # 검증 **전에** 보존한다 — 실패해도 값이 남아야 사후에 무엇이 어긋났는지 가릴 수 있다.
+            self.restored = deepcopy(restored) if isinstance(restored, dict) else restored
+            try:
+                _validate_tuning(restored, manual="rx_lo_hz" in self.previous)
+                if (abs(restored.get("analog_bandwidth_hz", 0) - self.previous["analog_bandwidth_hz"]) > 1
+                        or any(self._lane(restored.get("lane_center_hz", {}), i) is None
+                               or abs(self._lane(restored["lane_center_hz"], i)
+                                      - self._lane(self.previous["lane_center_hz"], i)) > 1 for i in (0, 1))):
+                    raise CollisionRuntimeError("RX restore unverified; ownership retained")
+                if "rx_lo_hz" in self.previous and (
+                        abs(restored["rx_lo_hz"] - self.previous["rx_lo_hz"]) > 1
+                        or any(abs(self._lane(restored["lane_dsp_hz"], i)
+                                   - self._lane(self.previous["lane_dsp_hz"], i)) > 1 for i in (0, 1))):
+                    raise CollisionRuntimeError("manual RX restore differs; ownership retained")
+            except CollisionRuntimeError as error:
+                # 예외는 RPC 경계에서 문자열이 된다. 값(목표/실측)을 메시지에 유계로 실어
+                # 상위 evidence에 남긴다 — 소유권 유지(예외) 계약은 그대로다.
+                self.restore_error = str(error)
+                raise CollisionRuntimeError(
+                    f"{error}; previous={self.previous!r}; restored={self.restored!r}") from error
+            self.restore_error = None
             self.touched = False
         if self.dual:
             self.radio.set_rx_lane_channels(None)
@@ -171,4 +186,10 @@ class WorkloadRxScope:
         self.support.collision_gate = None
         for stack in self.support.lane_dispatcher.stacks:
             stack.facade.diagnostic_sink.capture_recent_windows(False)
-        return {"disabled": True}
+        # 복원 readback을 함께 돌려준다 — 위에서 이미 확보한 값이고 추가 조회는 없다.
+        # verified: None = 복원할 것이 없었다(dual 아님/미적용), True/False = 검증 결과.
+        return {"disabled": True,
+                "restore_previous": self.previous,
+                "restore_readback": self.restored,
+                "restore_verified": (None if self.restored is None
+                                     else self.restore_error is None)}

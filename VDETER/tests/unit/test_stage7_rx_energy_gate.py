@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import unittest
 
 import numpy as np
@@ -356,6 +357,110 @@ class EnergyGateContract(unittest.TestCase):
         state = self.host._gate_state[0]
         self.assertEqual(state["passed"], 1)
         self.assertEqual(state["gated"], 1)
+
+    # --- bootstrap 창 기아 (diag-20260914-113630 부검) ----------------------
+    #
+    # 위 `test_all_burst_warmup_...`은 **무장 뒤**의 probe 비율만 본다. 실장비 4차는
+    # 무장 뒤가 아니라 **warm-up 구간**에서 죽었고, 그래서 그 시험은 통과한 채로
+    # 세션이 실패했다. 여기서는 창 기아 자체를 계약으로 고정한다.
+
+    #: TBB publish 예산. `commit_at` +30 s(intent) +90 s(TBB publish) +30 s(endpoint 여유)
+    #: — `stage7/ipc.py`의 `SERVICE_START_*_TIMEOUT_NS`와 `stage7/endpoint.py:423`.
+    _TBB_BUDGET_NS = 150_000_000_000
+    #: TBB 획득 **전** MASS가 감시하는 RX 창은 frame당 1개다: bootstrap slot map이
+    #: BBSC 한 slot만 열고(`mac/tbb.py build_bootstrap_slot_map`) `required_rx_slots`가
+    #: 그 하나만 고르며, frame은 15 hexslot × 160 ms다(`mac/tdma.py`).
+    _FRAME_NS = 2_400_000_000
+    #: 창이 frame마다 하나씩 도착한다고 볼 때 예산 구간에 들어오는 창 수의 **상계**다.
+    #: (실제 첫 창의 도착 시각은 `commit_at`과 다르므로 두 기준을 더하지 않는다.)
+    _BUDGET_WINDOWS = _TBB_BUDGET_NS // _FRAME_NS
+    #: 게이트가 스스로 정한 유계 probe 주기(16창당 1창). 새 문턱을 만들지 않고 이 값을 쓴다.
+    _PROBE_PERIOD = 16
+
+    def _burst_only(self, count: int):
+        """실패 회차 lane 0의 실측 분포 — warm-up 60창이 전부 버스트였다.
+
+        봉인 로그 `pi/runs/diag-20260914-113630/logs/MASS-A.launcher.log:25`:
+            noise_p10=2.828e-03 p50=2.858e-03 min=2.821e-03 max=2.891e-03
+            basis=p10 thr=2.262e-02 trusted=0
+        max/min = 1.025 — 단일 모드다. 같은 구간에서 결정적으로 뽑는다.
+        """
+
+        rnd = random.Random(20260914)
+        return [rnd.uniform(2.821e-03, 2.891e-03) for _ in range(count)]
+
+    @staticmethod
+    def _longest_blackout(flags) -> int:
+        longest = current = 0
+        for zeroed in flags:
+            current = current + 1 if zeroed else 0
+            longest = max(longest, current)
+        return longest
+
+    def _assert_blackout_bounded(self, flags, where: str) -> None:
+        """연속 0-치환 구간이 게이트 자신의 probe 주기 안에 있는지만 본다.
+
+        이 시험이 고정하는 것은 **차단 공백의 상계**이지 "TBB가 획득된다"가 아니다.
+        조립까지의 확인은 별도 집중시험(`FINDINGS-A` §4·§5)이 실제 조립기로 수행한다.
+        환산 시간은 "bootstrap에서 창이 frame마다 하나씩 도착할 때"의 상계이며
+        `commit_at` 기준 예산과 시작점이 다르므로 두 값을 더하지 않는다.
+        """
+        blackout = self._longest_blackout(flags)
+        self.assertLessEqual(
+            blackout, self._PROBE_PERIOD,
+            "%s에서 %d창 연속 복호 차단(창당 frame 1개면 약 %.0f s). 참고: TBB publish "
+            "예산은 commit_at 기준 %.0f s이고 ROC는 BBSC 기회마다 fragment를 보낸다."
+            % (where, blackout, blackout * self._FRAME_NS / 1e9,
+               self._TBB_BUDGET_NS / 1e9))
+
+    def test_burst_only_warmup_does_not_black_out_the_tbb_acquisition_window(self):
+        """**실장비 4차 재현**: 버스트만 오는 bootstrap에서 창이 굶으면 안 된다.
+
+        TBB 획득 전 MASS는 frame당 창 1개만 계획하고 그 창에 오는 것은 ROC의 TBB fragment
+        버스트뿐이다. 그러면 warm-up 임시 문턱(`min(warm) × 8`)이 **버스트 자신**을 0-치환한다
+        — 표본이 단일 모드라 문턱이 버스트 전력에 붙기 때문이다. 실측 결과가 그 상태였다
+        (`gated=1 passed=0`, probe 줄 0개 = 무장 뒤 창이 16개도 오지 못했다는 뜻).
+
+        게이트는 성능 장치다. 전제가 깨졌을 때의 올바른 실패 방향은 **통과**(느려짐)이지
+        전면 차단이 아니며, 따라서 복호 기회는 게이트 자신이 정한 probe 주기 안에 돌아와야
+        한다. 문턱 배수나 예산을 늘려서가 아니라 **탈출구를 두어서** 만족해야 하는 계약이다.
+        """
+
+        flags = self._feed(self._burst_only(self._BUDGET_WINDOWS + self._PROBE_PERIOD))
+        self._assert_blackout_bounded(flags, "버스트-only lane")
+
+    def test_provisional_threshold_does_not_black_out_a_single_mode_warmup(self):
+        """같은 계약을 warm-up 구간에 한정해 고정한다 — 유계 probe는 무장 **뒤**에만 돌고,
+        warm-up 임시 문턱에는 탈출구가 아예 없다(`support.py`의 probe 분기 위치).
+
+        임시 문턱의 목적은 주석대로 '잡음 창 **선별** 0-치환'이다. 표본이 단일 모드면
+        잡음과 버스트를 가를 근거가 없으므로 선별이 성립하지 않으며, 그때 전량 0-치환하는
+        것은 선별이 아니라 전면 차단이다.
+        """
+
+        flags = self._feed(self._burst_only(60))
+        self._assert_blackout_bounded(flags, "warm-up 구간")
+
+    def test_mixed_warmup_never_opens_the_warmup_probe(self):
+        """음성 확인: 잡음 창이 섞인 warm-up(설계가 전제한 정상 상태)에서는 새 탈출구가
+        한 번도 열리지 않는다 — 수정이 정상 경로의 부하·판정을 바꾸지 않는다.
+
+        임시 문턱이 잡음 창만 선별하면 연속 차단은 1창을 넘지 못하므로 warm-probe는 0이다.
+        전부 잡음인 조용한 lane은 여기에 해당하지 않는다(그 비용은
+        `test_quiet_lane_probe_cost_is_bounded_and_documented`가 따로 고정한다).
+        """
+
+        for share in (2, 5, 10):                    # 잡음 50% / 20% / 10%
+            host = W._GateHost()
+            for i in range(60):
+                _gate(host, _request(NOISE_POWER if i % share == 0 else BURST_POWER))
+            state = host._gate_state[0]
+            self.assertEqual(
+                state["warm_probes"], 0,
+                "잡음 1/%d 혼입 warm-up에서 warm-probe %d회 — 정상 경로가 바뀌었다"
+                % (share, state["warm_probes"]))
+            self.assertTrue(state["floor_trusted"], "잡음이 섞였으면 바닥은 신뢰돼야 한다")
+            self.assertEqual(state["blackout"], 0)
 
 
 if __name__ == "__main__":

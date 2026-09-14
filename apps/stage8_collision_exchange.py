@@ -2,6 +2,17 @@
 
 The historical filename is retained for one integration cycle; this object
 exchanges NO transmitter records. Normal RX never waits for these polls.
+
+`evidence` (bounded, memory only; serialized by the caller after the workload):
+  model, rf_collision_measured, session_id, cleanup_complete,
+  endpoints[<endpoint>]:
+    counts, pending, last_decisions      — from POLL
+    dual_previous, dual_readback         — tuning readback before/after apply (None when not dual);
+                                           values the scope already holds, no extra device query
+    restore: {previous, readback, verified}   — from the DISABLE reply; verified is
+                                           None (nothing to restore) / True / False
+    restore_errors                       — bounded (4) history of DISABLE failures, kept even
+                                           when a later retry succeeds
 """
 from collections import deque
 import time
@@ -88,8 +99,12 @@ class CollisionExchange:
             if rx.get("session_id") != self.session_id or rx.get("receiver") != endpoint or rx.get("fault"):
                 self.error = RuntimeError(f"{endpoint}: {rx.get('fault', 'binding mismatch')}")
                 self.check()
-            self.evidence["endpoints"][endpoint] = {
-                "counts": rx["counts"], "pending": rx["pending"], "last_decisions": rx["decisions"][-16:]}
+            record = self.evidence["endpoints"].setdefault(endpoint, {})
+            record.update({
+                "counts": rx["counts"], "pending": rx["pending"], "last_decisions": rx["decisions"][-16:],
+                # tuning readback 값(적용 전/후). scope가 POLL 응답에 이미 싣는 값이라 추가
+                # 조회가 없다. dual이 아닌 endpoint는 None이다.
+                "dual_previous": rx.get("dual_previous"), "dual_readback": rx.get("dual_readback")})
             self.application_receipts.extend(rx.get("application_receipts", ()))
             if endpoint == self.actor:
                 self.dual_ready = bool(rx.get("dual_ready"))
@@ -127,13 +142,25 @@ class CollisionExchange:
         while self.enabled and time.monotonic() < deadline:
             for endpoint in tuple(self.enabled):
                 try:
-                    if self.call(endpoint, "DISABLE").get("disabled"):
+                    reply = self.call(endpoint, "DISABLE")
+                    if reply.get("disabled"):
                         self.enabled.remove(endpoint)
+                        # 복원 readback(적용 전 목표 / 복원 후 실측 / 검증 결과)을 남긴다.
+                        # 값은 scope가 이미 확보한 것이고 여기서 장치를 다시 묻지 않는다.
+                        self.evidence["endpoints"].setdefault(endpoint, {})["restore"] = {
+                            "previous": reply.get("restore_previous"),
+                            "readback": reply.get("restore_readback"),
+                            "verified": reply.get("restore_verified")}
                 except BaseException as exc:
                     if not isinstance(exc, Exception):
                         interrupted = interrupted or exc
                     failures.append(f"{endpoint}: {exc}")
                     failures = failures[-8:]
+                    # 복원 실패도 evidence에 남긴다 — 값은 scope가 예외 메시지에 실어 보낸다.
+                    # 뒤의 재시도가 성공하더라도 실패 이력은 지우지 않는다(유계 4건).
+                    record = self.evidence["endpoints"].setdefault(endpoint, {})
+                    record["restore"] = {"verified": False, "error": str(exc)[:600]}
+                    record["restore_errors"] = (record.get("restore_errors") or [])[-3:] + [str(exc)[:600]]
             if self.enabled:
                 try:
                     time.sleep(.01)

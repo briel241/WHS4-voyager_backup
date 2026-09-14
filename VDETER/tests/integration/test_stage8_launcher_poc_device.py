@@ -436,49 +436,99 @@ class MacSlotBindingTest(LauncherPocDeviceRpcTest):
             "channel_name": _LOWER, "from_hw_ns": chosen, "limit": 1}))
         self.assertEqual(int(answer["slots"][0]["start_hw_ns"]), chosen)
 
-    def test_fast_simulated_clock_is_refused_not_silently_transmitted(self):
-        """음성 대조군: 모의 시계가 권위 lead보다 빨라도 **거부**한다(늦은 송신 묵인 금지).
+    #: 권위 최소 lead보다 확실히 짧은 예약 lead. `_TX_LEAD_NS`(100 ms)·`_RETUNE_LEAD_NS`(200 ms)
+    #: **둘 다**의 아래여야 retune 여부와 무관하게 거부된다 — 아래 음성 시험이 그 관계를 단언으로
+    #: 결속한다(상수를 따로 두고 잊는 일이 없게). 이 값은 실제 지연의 측정값이 아니다.
+    _INSUFFICIENT_LEAD_NS = 10_000_000
 
-        같은 코드에 모의 시계 배속만 harness 기본값(4)으로 올린다. 배속 4는 실시간 40 ms마다
-        모의 시계를 160 ms씩 점프시키므로 slot 선택과 `schedule_tx` 제출 사이에 권위 최소
-        lead(100 ms)가 통째로 소진된다. 그때 시스템은 **조용히 늦게 송신하지 않고 거부**해야
-        한다. 이 시험은 lead 검사가 살아 있음을 고정한다 — 통과시키려고 lead를 늘리거나
-        timeout·retry를 키우면 여기서 깨진다(그래서 그렇게 고치면 안 된다).
+    def _lead_shifting_provider(self, *, lead_ns):
+        """실 배선(`assemble_launcher_provider`) 그대로에 **시험 전용** scheduler 래퍼만 끼운다.
 
-        실측 근거: 같은 장비·같은 코드에서 배속 1 -> rc=0(2 passed, late 0),
-        배속 4 -> rc=1(2 failed, late 4). 벽시계 소요는 34.57s vs 34.65s로 사실상 동일해
-        환경 부하가 아니라 시계 전제가 원인임이 분리된다.
+        래퍼는 실 `MacSlotScheduler`가 고른 slot을 받은 뒤, `lead_ns`가 주어지면 예약 시각만
+        `now + lead_ns`로 바꿔 돌려준다(`None`이면 손대지 않는다 — 양성 대조군). slot 선택·
+        권위 lead·arbiter·sink·launcher·권위 `schedule_tx`는 전부 production 그대로다.
         """
-        import subprocess as _sp
-        from unittest.mock import patch
-
         from apps.stage8_launcher_seams import assemble_launcher_provider
-        from vdeter.stage8.poc_api.errors import PocError
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.stage8.shared_medium.radiation import ScheduledSlot
 
-        # 이 시험만 배속 4로 도는 별도 harness child를 띄운다(클래스 기본 고정값은 건드리지 않는다).
-        self._stop_child()
-        original = _sp.Popen
-
-        def _fast(args, *a, **kw):
-            env = dict(kw.get("env") or os.environ)
-            env["STAGE8_TEST_TIME_ACCELERATION"] = "4"
-            kw["env"] = env
-            return original(args, *a, **kw)
-
-        with patch.object(_sp, "Popen", side_effect=_fast):
-            LauncherPocDeviceRpcTest.setUp(self)
-
-        provider, _bindings = assemble_launcher_provider(
+        provider, bindings = assemble_launcher_provider(
             self.controller, actor_endpoint="MASS-B",
             endpoint_ids=("MASS-A", "MASS-B", "ROC"),
             station_id_by_endpoint={"MASS-A": 111_111_111, "MASS-B": 333_333_333,
                                     "ROC": 222_222_222},
             mac_channel_name=_LOWER)
+        inner = provider._scheduler                     # 실 MacSlotScheduler
+        worker = bindings["workers"]["MASS-B"]
+
+        class _ShiftedLead:
+            def resolve(self, action, *, request_id):
+                slot = inner.resolve(action, request_id=request_id)   # 실 slot·권위 lead 검사
+                if lead_ns is None:
+                    return slot
+                return ScheduledSlot(
+                    scheduled_sample=slot.scheduled_sample,
+                    scheduled_hw_timestamp_ns=int(worker.hardware_time_ns()) + lead_ns,
+                    slot_key=slot.slot_key)
+
+            def __getattr__(self, name):                # register_trigger 등은 실물로 위임
+                return getattr(inner, name)
+
+        provider._scheduler = _ShiftedLead()
+        return provider, bindings
+
+    def test_insufficient_lead_is_refused_with_radio_late_request(self):
+        """음성 대조군: 권위 최소 lead를 만족하지 못하는 예약 시각은 실 sink → launcher →
+        권위 `schedule_tx` 경로에서 **정확히 `RADIO_LATE_REQUEST`로 거부**되고, 장치 제출은
+        0건이며 PoC 자원은 반환된다(늦은 송신 묵인 금지).
+
+        이전 판(`test_fast_simulated_clock_is_refused_not_silently_transmitted`)은 harness
+        모의 시계 배속 4에 기대어 "RPC 왕복 동안 lead가 우연히 소진되기"를 노렸다. 그것은 기계
+        성능과 RPC 타이밍에 달린 조건이라 결정적이지 않았고, f7f6535·0b4d9a0·251e277 세 지점
+        모두에서 실패한 채였다(라운드 4 `FINDINGS-rfoff-negative-control.md`). 여기서는
+        조건을 **시험이 직접 만든다**: 실 scheduler가 고른 slot의 예약 시각만 `now + 10 ms`로
+        바꿔 sink에 넘긴다. production lead·timeout·retry·scheduler는 그대로이고, 주입한
+        값은 실제 지연의 측정값이 아니다. 통과시키려고 lead를 줄이거나 timeout·retry를 키우면
+        여기서 깨진다.
+
+        거부 코드가 `POC_RADIO_RESOURCE_CONFLICT`인 것은 PoC 계약의 severity 사다리다 —
+        방사 **전** 장치 거부는 자원을 반환하고 action만 거부한다(UNKNOWN 승격 금지). 장치가
+        준 정확한 사유(`RADIO_LATE_REQUEST`)는 메시지에 그대로 실린다.
+        """
+        from apps.stage8_stage7_seams import _RETUNE_LEAD_NS, _TX_LEAD_NS
+        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        # 주입 lead는 권위 최소값 **둘 다**의 아래다(상수 결속).
+        self.assertLess(self._INSUFFICIENT_LEAD_NS, min(_TX_LEAD_NS, _RETUNE_LEAD_NS))
+        provider, bindings = self._lead_shifting_provider(lead_ns=self._INSUFFICIENT_LEAD_NS)
         action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
                                   payload={"packet_hex": bytes(range(54)).hex()})
-        with self.assertRaises(PocError):
-            provider.submit(action, request_id="poc-mac-lead-guard")
+        with self.assertRaises(PocError) as ctx:
+            provider.submit(action, request_id="poc-lead-insufficient")
+        message = str(ctx.exception)
+        # 정확한 권위 사유 — route 거부·arbiter 경합과 구분한다.
+        self.assertIn("SCHEDULE_TX_REJECTED", message)
+        self.assertIn("RADIO_LATE_REQUEST", message)
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
+        # 장치 제출 0건: 수락 receipt가 하나도 없다.
+        self.assertEqual(bindings["sink"].receipt_by_group, {})
+        # 자원 반환: arbiter 보유 0, 소유권 불확실 0.
+        self.assertEqual(provider._arbiter.held, frozenset())
+        self.assertFalse(provider.unresolved_ownership())
+
+    def test_untouched_lead_is_accepted_through_the_same_wrapper(self):
+        """양성 대조군: 같은 래퍼에서 예약 시각을 건드리지 않으면(`lead_ns=None`) 같은 경로로
+        수락된다. 위 거부가 래퍼·배선 때문이 아니라 **예약 시각** 때문임을 분리한다."""
+        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+
+        provider, bindings = self._lead_shifting_provider(lead_ns=None)
+        action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
+                                  payload={"packet_hex": bytes(range(54)).hex()})
+        submission = provider.submit(action, request_id="poc-lead-untouched")
+        self.assertIsNotNone(submission)
+        parent = provider.parent_for("poc-lead-untouched")
+        self.assertIn(parent.parent_id, bindings["sink"].receipt_by_group,
+                      "같은 경로에서 수락 receipt가 남아야 한다")
 
     def test_no_usable_mac_slot_is_refused_not_shifted(self):
         """권위 lead를 만족하는 MAC slot이 없으면 **거부**한다 — 임의로 당기거나 미루지 않는다."""

@@ -79,3 +79,63 @@ class RxScopeFaultTests(unittest.TestCase):
         with self.assertRaises(CollisionRuntimeError):
             self.scope.activate()
         self.worker.apply_manual_tuning.assert_not_called()
+
+    # --- readback 값 보존 (라운드 4 미확인 항목 "tuning readback 값") ---------------
+
+    def test_poll_returns_previous_and_applied_readback(self):
+        """적용 전(previous)·적용 후(readback) 값이 POLL 응답에 실린다 — 둘 다 activate가 이미
+        확보한 값이라 여기서 장치를 다시 묻지 않는다."""
+        self.scope.activate()
+        reply = self.scope.poll()
+        self.assertEqual(reply["dual_previous"], self.previous)
+        self.assertEqual(reply["dual_readback"], self.readback)
+        self.worker.read_tuning.assert_called_once()
+
+    def test_disable_returns_restore_readback_and_verdict(self):
+        """disable()가 복원 목표·실측·검증 결과를 함께 돌려준다(추가 조회 없음)."""
+        self.scope.activate()
+        self.scope.close()
+        reply = self.scope.disable()
+        self.assertTrue(reply["disabled"])
+        self.assertEqual(reply["restore_previous"], self.previous)
+        self.assertEqual(reply["restore_readback"], self.previous)
+        self.assertIs(reply["restore_verified"], True)
+        self.worker.restore_tuning.assert_called_once()
+        self.worker.read_tuning.assert_called_once()
+
+    def test_restore_mismatch_keeps_values_and_cause(self):
+        """복원 readback이 목표와 어긋나면 예외(소유권 유지)이고, 값과 원인이 남는다.
+        B210 재발견이나 예외 부재가 아니라 **수치 비교**가 PASS의 근거다."""
+        self.scope.activate()
+        self.scope.close()
+        wrong = {"lane_center_hz": {0: UPPER_RF_TUNE_HZ, 1: LOWER_RF_TUNE_HZ},
+                 "analog_bandwidth_hz": 200000}
+        self.worker.restore_tuning.return_value = wrong
+        with self.assertRaises(CollisionRuntimeError) as ctx:
+            self.scope.disable()
+        message = str(ctx.exception)
+        self.assertIn("RX restore unverified; ownership retained", message)
+        self.assertIn("previous=", message)
+        self.assertIn("restored=", message)
+        self.assertEqual(self.scope.restored, wrong)
+        self.assertIsNotNone(self.scope.restore_error)
+        self.assertTrue(self.scope.touched)                     # 소유권 유지
+        # 재시도로 올바른 값이 오면 검증이 통과하고 원인은 해소된다.
+        self.worker.restore_tuning.return_value = self.previous
+        reply = self.scope.disable()
+        self.assertIs(reply["restore_verified"], True)
+        self.assertIsNone(self.scope.restore_error)
+        self.assertFalse(self.scope.touched)
+
+    def test_non_dual_scope_reports_no_restore(self):
+        """dual이 아니면 복원할 것이 없다 — verified는 None이지 True가 아니다."""
+        scope = WorkloadRxScope(self.scope.seam, "owner", False)
+        scope._replan = Mock()
+        scope.activate()
+        scope.close()
+        reply = scope.disable()
+        self.assertTrue(reply["disabled"])
+        self.assertIsNone(reply["restore_readback"])
+        self.assertIsNone(reply["restore_verified"])
+        self.worker.apply_manual_tuning.assert_not_called()
+        self.worker.restore_tuning.assert_not_called()

@@ -168,8 +168,14 @@ class Stage7LaneRxDispatcher:
                 lane_index,
                 {"warm": [], "med": None, "gated": 0, "passed": 0,
                  "floor_trusted": False, "low_candidate": None,
-                 "corrections": 0, "probes": 0},
+                 "corrections": 0, "probes": 0,
+                 # 연속 0-치환 창 수. warm-up 임시 문턱과 무장 후 유계 probe가
+                 # **같은** 카운터를 쓴다(diag-20260914-113630 부검, 아래 두 분기).
+                 "blackout": 0, "warm_probes": 0},
             )
+            # 유계 probe 주기. 무장 후 분기가 이미 쓰던 값(16창당 1창)을 그대로
+            # 인용한다 — 새 문턱을 만들거나 기존 배수(8.0)를 넓히지 않는다.
+            probe_windows = 16
             if state["med"] is None:
                 if power > 0.0:
                     state["warm"].append(power)
@@ -180,16 +186,47 @@ class Stage7LaneRxDispatcher:
                 # 이후부터는 관측 최솟값(잡음 바닥의 상계)×8 임시 문턱
                 # 으로 잡음 창을 선별 0-치환 — 버스트(잡음 대비 +20dB)
                 # 는 임시 문턱도 항상 통과하므로 TBB 획득 무영향.
+                #
+                # 위 주석의 "버스트는 임시 문턱도 항상 통과"는 **표본에 잡음 창이
+                # 섞여 있을 때만** 참이다. 임시 문턱은 `min(warm) × 8`이므로 표본이
+                # 단일 모드면(TBB 획득 전 bootstrap = BBSC 1 slot뿐이라 창에 ROC의
+                # TBB fragment 버스트만 오는 정상 상태) 최솟값 자체가 버스트 전력이고
+                # 문턱이 버스트 자신을 막는다. diag-20260914-113630 MASS-A lane 0이
+                # 그 상태였다(min 2.821e-03 / max 2.891e-03 = 1.025배).
+                #
+                # 창 번호를 정확히 구분한다(모든 번호는 **이 lane에 도착한 창** 기준이며,
+                # `commit_at`이나 admission 시각 기준이 아니다):
+                #   창 0‥8   전력 표본만 모으고 **원본 통과**(warm < 10이라 문턱 없음)
+                #   창 9‥58  임시 문턱 아래면 0-치환 — 단일 모드에서는 전량 차단
+                #   창 59    무장 창. 이 호출은 0-치환하지 않고 **원본 통과**한다
+                #   창 60‥   무장 문턱 적용, 미신뢰면 유계 probe
+                # 즉 "첫 복호 기회"가 뒤로 밀리는 것이 아니라, 앞의 통과분으로 조립이
+                # 끝나지 못한 경우에 **중간 50창이 연속으로 비는 것**이 문제다. 4-fragment
+                # TBB를 무손실로 받으면 창 4개로 끝나므로(RF-off 실측) 이 구간은 무해하고,
+                # fragment 유실·재전송으로 창 9 이후까지 필요해지면 그때 구조가 드러난다.
+                # 게이트는 성능 장치이므로 전제가 깨졌을 때의 올바른 실패 방향은
+                # 통과(느려짐)다. 무장 **뒤**에만 돌던 유계 probe를 여기에도 둔다.
                 if len(state["warm"]) >= 10:
                     provisional = min(state["warm"]) * 8.0
-                    if 0.0 < power < provisional:
-                        zero_block = _dc.replace(
-                            samples, data=b"\x00" * len(samples.data)
-                        )
-                        if len(state["warm"]) < 60:
+                    if 0.0 < power < provisional and len(state["warm"]) < 60:
+                        state["blackout"] += 1
+                        if state["blackout"] < probe_windows:
+                            zero_block = _dc.replace(
+                                samples, data=b"\x00" * len(samples.data)
+                            )
                             return _dc.replace(
                                 native_request, samples=zero_block
                             )
+                        state["blackout"] = 0
+                        state["warm_probes"] += 1
+                        if state["warm_probes"] <= 5:
+                            print(
+                                f"[launcher] rx-gate warm-probe lane={lane_index} "
+                                f"n={state['warm_probes']} power={power:.3e} "
+                                f"thr={provisional:.3e} (워밍업 임시 문턱)",
+                                file=_sys.stderr, flush=True,
+                            )
+                        return native_request
                 if len(state["warm"]) >= 60:
                     warm = sorted(state["warm"])
                     # 잡음 추정 = 10분위수 (svc-run-k 실측: 버스트 빈번
@@ -234,6 +271,9 @@ class Stage7LaneRxDispatcher:
                         f"trusted={int(state['floor_trusted'])}",
                         file=_sys.stderr, flush=True,
                     )
+                # warm-up에서 통과한 창(임시 문턱 위이거나 무장이 일어난 창)은
+                # 연속 차단을 끊는다 — 무장 전후 경계에서 차단이 이어붙지 않는다.
+                state["blackout"] = 0
                 return native_request
             # 하향 보정. 학습한 바닥보다 확실히 낮은 창이 **실제로 도착하면**,
             # 그 바닥은 잡음이 아니었다는 양성 증거다(같은 표본을 다시 모으는
@@ -268,6 +308,7 @@ class Stage7LaneRxDispatcher:
                     )
             if state["med"] <= 0.0 or power >= state["med"] * 8.0:
                 state["passed"] += 1
+                state["blackout"] = 0
                 # 통과 이벤트 관측 (svc-run-l2 부검: ROC lane0의 유일
                 # 버스트(ACK)가 무음 소실 — 창 미무장/게이트/디코드 3분기
                 # 판별용. 통과가 드문 레인에서 특히 유효.)
@@ -291,7 +332,16 @@ class Stage7LaneRxDispatcher:
             # — 학습값을 신뢰할 수 없을 때 전면 차단으로 TBB 획득 경로가 죽는 것을
             # 막는 최소 장치이며, 복호 부하는 1/16로 묶인다. 하향 보정으로 잡음
             # 근거가 확보되면(`floor_trusted`) 즉시 꺼진다.
-            if not state["floor_trusted"] and state["gated"] % 16 == 0:
+            #
+            # 기준은 누적 `gated`가 아니라 **연속 차단** 수다(diag-20260914-113630):
+            # 누적 기준이면 무장 직후 15창까지 probe가 한 번도 오지 않는데, 창이
+            # frame당 1개뿐인 bootstrap에서 그 15창이 곧 36 s다. 실측 로그에 probe가
+            # 한 줄도 없던 이유가 그것이고(무장 후 창이 16개도 못 왔다), 그 사이
+            # publish deadline이 만료됐다. warm-up 분기와 같은 카운터를 공유해 구간
+            # 경계에서도 차단이 이어붙지 않게 한다. 통과 비율(1/16)은 그대로다.
+            state["blackout"] += 1
+            if not state["floor_trusted"] and state["blackout"] >= probe_windows:
+                state["blackout"] = 0
                 state["probes"] += 1
                 if state["probes"] <= 5 or state["probes"] % 50 == 1:
                     print(
