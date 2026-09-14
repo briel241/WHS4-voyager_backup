@@ -178,7 +178,9 @@ class LauncherRadioSink:
             raise RuntimeError(
                 f"논리 목적지 station id를 알 수 없습니다: {destination!r} "
                 "(물리 수신자 rx_station으로 대체하지 않는다)")
-        samples = to_cf32le(children[0].samples)
+        # 미리 만들어 둔 직렬화가 있으면 그대로 쓴다. 이 지점은 권위 lead 재확인 **이후**라
+        # 여기서 8,192 표본을 다시 pack하는 시간이 곧 lead 소진이다(없으면 종전대로 계산).
+        samples = children[0].samples_cf32le or to_cf32le(children[0].samples)
         result = self._client.call("poc_schedule_group_tx", {
             "burst_id": burst_id,
             "channel_name": self._channel_name_of(children[0].channel),

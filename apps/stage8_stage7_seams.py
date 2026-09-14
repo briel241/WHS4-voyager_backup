@@ -102,10 +102,14 @@ class Link11WaveformFactory:
         if len(device) != resampling.DEVICE_SLOT_SAMPLES:
             raise ValueError(
                 f"device burst count mismatch: {len(device)} != {resampling.DEVICE_SLOT_SAMPLES}")
-        validate_cf32le_full_scale(to_cf32le(device))  # 권위 full-scale 검증
+        # full-scale 검증에 쓴 직렬화 바이트를 버리지 않고 burst에 실어 보낸다. 종전에는 여기서
+        # 계산한 뒤 폐기하고, parent digest와 장치 제출에서 같은 8,192 표본을 다시 pack했다.
+        device_bytes = to_cf32le(device)
+        validate_cf32le_full_scale(device_bytes)  # 권위 full-scale 검증
         import hashlib
         return IqBurst(channel=channel, start_sample=0, samples=device,
-                       wire_packet_digest=hashlib.sha256(packet).hexdigest())
+                       wire_packet_digest=hashlib.sha256(packet).hexdigest(),
+                       cf32le_bytes=device_bytes)
 
 
 class Stage7HwTimeScheduler(NextSafeSlotScheduler):
@@ -669,7 +673,8 @@ class Stage7AuthoritativeRadioSink:
         utc_ns = bridge.hardware_ns_to_utc_label(hw_ns) if bridge is not None else None
         if utc_ns is None:
             raise RuntimeError("host time bridge가 잠겨 있지 않아 TX 시각을 UTC로 변환할 수 없습니다")
-        data = to_cf32le(children[0].samples)
+        # lead 재확인 이후 구간이므로 미리 만들어 둔 직렬화를 재사용한다(없으면 종전대로 계산).
+        data = children[0].samples_cf32le or to_cf32le(children[0].samples)
         # UTC label 축의 clock id는 **bridge가 소유한다**. adapter에는 `clock_id` 속성이 없어
         # 이전 구현은 항상 리터럴 "stage8"로 떨어졌고, `schedule_tx`가 이 필드를 검증하지 않으므로
         # 요청이 갖지 않은 clock 정체를 주장한 채 조용히 통과했다.

@@ -922,7 +922,13 @@ class Stage7B210RadioAdapter:
                 return self._error(
                     ErrorCode.RADIO_LATE_REQUEST, ErrorCategory.TIMEOUT,
                     "TX lead가 최소 lead 미만입니다", correlation,
-                    Details.of(required_lead_ns=required_lead),
+                    # 요구 lead만으로는 "얼마나 모자랐는지"를 알 수 없다. 접수 시각·예정 시각·
+                    # 남은 lead를 함께 남긴다. 네 값 모두 같은 hardware ns 축이라 변환 근거 없이
+                    # 빼지 않는다(다른 clock domain 값을 섞지 않는다).
+                    Details.of(required_lead_ns=required_lead,
+                               scheduled_hw_ns=int(hardware_start),
+                               accepted_at_hw_ns=int(now.value),
+                               remaining_lead_ns=int(hardware_start - now.value)),
                 )
             if retune_needed:
                 for parent in self._tx_parents.values():

@@ -67,6 +67,10 @@ class IqBurst:
     start_sample: int
     samples: tuple
     wire_packet_digest: str | None = None
+    #: 이미 만들어 둔 cf32le 직렬화. `cf32le`/`sha256`이 매 접근마다 8,192 표본을 다시 pack하는
+    #: 것을 막는다(한 action에서 full-scale 검증·parent digest·장치 제출로 최소 3회 반복됐다).
+    #: 생성자가 채워 준 경우에만 쓰며, 없으면 종전대로 계산한다(다른 factory 경로 호환).
+    cf32le_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel, PhysicalChannel):
@@ -81,6 +85,12 @@ class IqBurst:
             raise IqError("IqBurst.samples: 비어 있을 수 없습니다")
         if len(self.samples) > MAX_BURST_SAMPLES:
             raise IqError(f"IqBurst.samples: 상한 {MAX_BURST_SAMPLES} 초과")
+        if self.cf32le_bytes is not None:
+            # 캐시는 편의값이 아니라 계약이다 — samples와 어긋나면 장치에 다른 바이트가 나간다.
+            if not isinstance(self.cf32le_bytes, bytes):
+                raise IqError("IqBurst.cf32le_bytes: bytes여야 합니다")
+            if len(self.cf32le_bytes) != len(self.samples) * BYTES_PER_SAMPLE:
+                raise IqError("IqBurst.cf32le_bytes: samples와 길이가 맞지 않습니다")
 
     @property
     def end_sample(self) -> int:
@@ -90,10 +100,12 @@ class IqBurst:
 
     @property
     def cf32le(self) -> bytes:
-        return to_cf32le(self.samples)
+        return self.cf32le_bytes if self.cf32le_bytes is not None else to_cf32le(self.samples)
 
     @property
     def sha256(self) -> str:
+        if self.cf32le_bytes is not None:
+            return hashlib.sha256(self.cf32le_bytes).hexdigest()
         return sha256_cf32le(self.samples)
 
 

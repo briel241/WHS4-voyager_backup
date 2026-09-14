@@ -142,6 +142,9 @@ class ChildPath:
     #: child가 도달하는 **물리** 수신자라서 둘은 다르다 — fan-out의 첫 child는 논리 target이
     #: 아닐 수 있다(MASS-B의 C4는 ROC). 장치 경계에 목적지를 실을 때는 반드시 이 값을 쓴다.
     addressed_destination: str | None = None
+    #: parent waveform의 cf32le 직렬화(있으면). sink가 commit 직전에 다시 pack하지 않도록
+    #: 함께 나른다 — 그 구간은 권위 lead 재확인 **이후**라 여기서 쓰는 시간이 곧 lead 소진이다.
+    samples_cf32le: bytes | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -297,6 +300,18 @@ class AtomicBroadcast:
         #: parent_id -> ParentOutcome. resolve_outcome이 확정한 결과를 persist한다(evidence 반영).
         self._resolved: dict = {}
 
+    def build_waveform(self, *, source_station: str, channel: PhysicalChannel, payload: bytes):
+        """parent waveform만 먼저 만든다(슬롯·시각과 무관).
+
+        waveform 생성은 변조·보간·full-scale·digest로 이뤄지며 **슬롯 선택에 의존하지 않는다**.
+        상위(provider)가 슬롯을 고르기 **전에** 이 비용을 치르면, 권위 lead 재확인 이후의
+        임계 구간에서 그만큼이 빠진다. lead 값이나 슬롯 의미는 바뀌지 않는다.
+        """
+
+        return self._factory.encode(
+            source_station=source_station, channel=channel, payload=payload
+        )
+
     # --- parent/child 생성 -------------------------------------------------
     def build_parent(
         self,
@@ -314,16 +329,19 @@ class AtomicBroadcast:
         clock_id: int = 1,
         bridge_generation: int = 1,
         correction_revision: int = 1,
+        waveform=None,
     ) -> ParentTransmission:
         if source_station not in constants.SENDER_FANOUT_CABLES:
             raise BroadcastError(f"알 수 없는 송신자: {source_station!r}")
         parent_id = parent_id or f"bp-{uuid.uuid4().hex[:12]}"
         transfer_id = transfer_id or f"tx-{uuid.uuid4().hex[:12]}"
 
-        # waveform은 정확히 한 번 생성한다(single-burst invariant).
-        waveform = self._factory.encode(
-            source_station=source_station, channel=channel, payload=payload
-        )
+        # waveform은 정확히 한 번 생성한다(single-burst invariant). 상위가 슬롯 선택 전에 미리
+        # 만들어 넘겼으면 그것을 쓴다 — 두 번 만들지 않으며, 검증은 아래에서 동일하게 거친다.
+        if waveform is None:
+            waveform = self.build_waveform(
+                source_station=source_station, channel=channel, payload=payload
+            )
         if waveform.channel != channel:
             raise BroadcastAtomicityError("waveform channel이 parent channel과 다릅니다")
         samples = waveform.samples
@@ -357,6 +375,7 @@ class AtomicBroadcast:
                     samples=samples,
                     wire_packet_digest=waveform.wire_packet_digest,
                     addressed_destination=addressed_destination,
+                    samples_cf32le=waveform.cf32le_bytes,
                 )
             )
         parent = ParentTransmission(
@@ -369,7 +388,8 @@ class AtomicBroadcast:
             payload=bytes(payload),
             payload_digest=payload_digest,
             waveform_sha256=waveform_sha256,
-            waveform=IqBurst(channel=channel, start_sample=scheduled_sample, samples=samples),
+            waveform=IqBurst(channel=channel, start_sample=scheduled_sample, samples=samples,
+                             cf32le_bytes=waveform.cf32le_bytes),
             scheduled_sample=scheduled_sample,
             scheduled_hw_timestamp_ns=scheduled_hw_timestamp_ns,
             slot_key=slot_key,

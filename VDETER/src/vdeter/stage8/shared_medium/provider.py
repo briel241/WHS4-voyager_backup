@@ -398,6 +398,21 @@ class SharedMediumActionProvider:
             validate_schedule(action)
             channel = self.derive_physical_channel(target)
             packet = self._packet_resolver(action, request_id)
+            # waveform은 슬롯과 무관하다(변조·보간·full-scale·digest). 슬롯 선택 **전에** 만들어
+            # 권위 lead 재확인 이후의 임계 구간에서 이 비용을 뺀다. 슬롯 의미·lead 값은 불변이며,
+            # NEXT_SAFE_SLOT은 종전대로 resolve 시점에 상대 계산된다(확정 시각을 옮기지 않는다).
+            # 파형 생성 실패의 **공개 오류 코드는 종전 그대로** POC_PROTOCOL_ERROR다. 이 호출이
+            # 검증 블록 안으로 올라왔다고 해서 action schema 오류로 바뀌면 안 된다(계약 불변).
+            try:
+                waveform = self._broadcast.build_waveform(
+                    source_station=constants.ATTACKER_STATION, channel=channel, payload=packet
+                )
+            except PocError:
+                raise
+            except Exception as error:  # noqa: BLE001 - raw 예외를 Stage 3로 올리지 않는다
+                raise PocError(
+                    PocErrorCode.POC_PROTOCOL_ERROR, f"parent waveform 생성 실패: {error}"
+                ) from error
             slot = self._scheduler.resolve(action, request_id=request_id)
             if not isinstance(slot, ScheduledSlot):
                 raise PocError(
@@ -451,6 +466,7 @@ class SharedMediumActionProvider:
                 scheduled_hw_timestamp_ns=slot.scheduled_hw_timestamp_ns,
                 slot_key=slot.slot_key,
                 addressed_destination=target,
+                waveform=waveform,
             )
             # correlation을 방사 시도 시점부터 보존한다(OUTCOME_UNKNOWN 시 evidence·cleanup 위해).
             self._parents[request_id] = parent
