@@ -1300,15 +1300,22 @@ def main(argv=None) -> int:
             thread = _threading.Thread(target=_run_scenarios, daemon=True)
             thread.start()
             delivered = 0
+            not_delivered = 0
             while thread.is_alive():
                 for observation in poc_host.new_observations():
-                    poc_prepared.deliver_observation(observation)
-                    delivered += 1
+                    # 건네준 수가 아니라 **실제로 전달된 수**를 센다. infrastructure 실패가 선
+                    # 뒤의 관측은 전달되지 않으므로 따로 적는다 — 그러지 않으면 evidence가
+                    # 전달량을 과다 기록한다(실패 뒤 관측까지 전달된 것처럼 보인다).
+                    if poc_prepared.deliver_observation(observation):
+                        delivered += 1
+                    else:
+                        not_delivered += 1
                 time.sleep(0.1)
             thread.join(timeout=5.0)
             results = box.get("results") or {}
             run_error = box.get("error")
-            trace.emit("poc_observations_delivered", count=delivered)
+            trace.emit("poc_observations_delivered", count=delivered,
+                       not_delivered=not_delivered)
         else:
             results = run_scenarios(controller, arguments.scenario_id,
                                     arguments.certificate_case, trace=trace)

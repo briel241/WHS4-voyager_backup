@@ -163,18 +163,22 @@ class PocWorkload:
         관장한다. `PocWorkload.run`과 달리 저장된 scenario step을 전달하지 않는다."""
         return self._runner.abort(scenario_verdict, cause=cause)
 
-    def deliver_observation(self, observation) -> None:
+    def deliver_observation(self, observation) -> bool:
         """ARMED 상태에서 **실 scenario 실행 중** 관측 하나를 전달한다(P09, §8.3 인과성).
 
         `run`이 저장된 step을 일괄 전달하는 것과 달리, 이 method는 scenario가 아직 돌고 있는 동안
         실제로 일어난 관측을 그때그때 넣는다 — 그래야 반응형 action이 scenario terminal **이전에**
         제출된다. 관측을 만들어내지 않는다(호출자가 실 이벤트에서 만든 record를 넘긴다).
+
+        반환값은 **실제로 전달했는지**다. infrastructure 실패가 이미 선 뒤에는 전달하지 않으므로,
+        호출자가 건네준 수를 전달 수로 세면 evidence가 전달량을 과다 기록한다(실측 아닌 값 금지).
         """
         from ..execution.runner import observation_step
 
         if self._connection.infrastructure_error is not None:
-            return
+            return False
         self._runner.deliver(observation_step(observation))
+        return True
 
     def deliver_scenario_start(self):
         """Live controller start boundary, once; never replay START at teardown."""

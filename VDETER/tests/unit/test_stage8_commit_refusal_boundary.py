@@ -167,5 +167,50 @@ class CommandLogRefusalEvidenceTest(unittest.TestCase):
         self.assertEqual(entry["command"], "poc_radio_state")
 
 
+class _FakeRunner:
+    def __init__(self) -> None:
+        self.delivered: list = []
+
+    def deliver(self, step) -> None:
+        self.delivered.append(step)
+
+
+class _FakeConnection:
+    def __init__(self, error=None) -> None:
+        self.infrastructure_error = error
+
+
+class ObservationDeliveryCountTest(unittest.TestCase):
+    """전달 수는 **실제로 전달된 수**여야 한다 — 건네준 수가 아니다.
+
+    실물 C의 trace는 `poc_observations_delivered count=16`을 적었지만 engine이 event로 낸
+    관측은 1건뿐이었다(`events_emitted=2`, `delivery_matrix` 1행). infrastructure 실패가 선
+    뒤의 관측은 전달되지 않는데 호출자가 무조건 세고 있었기 때문이다.
+    """
+
+    def _workload(self, error=None):
+        from vdeter.stage8.integration.entry import PocWorkload
+
+        runner = _FakeRunner()
+        return PocWorkload(runner, _FakeConnection(error), None, None, ()), runner
+
+    def test_successful_delivery_reports_true(self):
+        from vdeter.stage8.testing.fakes import make_observation
+
+        workload, runner = self._workload()
+        self.assertIs(workload.deliver_observation(make_observation()), True)
+        self.assertEqual(len(runner.delivered), 1)
+        self.assertEqual(runner.delivered[0].kind, "observation")
+
+    def test_after_infrastructure_failure_nothing_is_delivered_or_counted(self):
+        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.stage8.testing.fakes import make_observation
+
+        failure = PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN, "commit unconfirmed")
+        workload, runner = self._workload(failure)
+        self.assertIs(workload.deliver_observation(make_observation()), False)
+        self.assertEqual(runner.delivered, [])   # 전달하지 않았다 — 세어서도 안 된다
+
+
 if __name__ == "__main__":
     unittest.main()
