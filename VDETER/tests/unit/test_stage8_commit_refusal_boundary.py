@@ -190,6 +190,27 @@ class CommandLogRefusalEvidenceTest(unittest.TestCase):
         self.assertEqual(entry["device_reason"], "SCHEDULE_TX_REJECTED")
         self.assertEqual(entry["device_detail"], "LEAD_TOO_SHORT")
 
+    def test_structured_error_details_survive_to_the_command_log(self):
+        """거부 코드만으로는 원인을 가릴 수 없다 — `required_lead_ns` 같은 값이 남아야 한다.
+
+        실물 C 재검증에서 `RADIO_LATE_REQUEST`만 남고 실제 여유가 얼마였는지는 사라졌다.
+        """
+        controller = self._controller(
+            {"accepted": False, "burst_id": "b", "reason": "SCHEDULE_TX_REJECTED",
+             "detail": "RADIO_LATE_REQUEST",
+             "error_details": {"required_lead_ns": 200_000_000}})
+        controller.poc_command("MASS-B", "poc_schedule_group_tx", {})
+        entry = controller.command_log[-1]
+        self.assertEqual(entry["device_detail"], "RADIO_LATE_REQUEST")
+        self.assertEqual(entry["device_error_details"], {"required_lead_ns": 200_000_000})
+
+    def test_absent_error_details_are_not_invented(self):
+        controller = self._controller(
+            {"accepted": False, "burst_id": "b", "reason": "SCHEDULE_TX_REJECTED",
+             "detail": "RADIO_LATE_REQUEST", "error_details": None})
+        controller.poc_command("MASS-B", "poc_schedule_group_tx", {})
+        self.assertNotIn("device_error_details", controller.command_log[-1])
+
     def test_acceptance_is_recorded_without_a_refusal_reason(self):
         controller = self._controller(
             {"accepted": True, "burst_id": "b", "reason": None, "detail": None})

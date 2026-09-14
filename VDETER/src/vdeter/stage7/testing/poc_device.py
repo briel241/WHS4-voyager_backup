@@ -351,7 +351,11 @@ class Stage7PocDeviceSeam:
                      destination_station_id=int(destination_station_id),
                      request_digest=str(request_digest or ""), wire_packet_digest=wire_packet_digest)
         if getattr(bound, "is_err", False):
+            # schedule_tx 거부와 같은 이유로 `details`를 보존한다(여기에 stage7 private code가 있다).
+            bind_details = getattr(getattr(bound, "error", None), "details", None)
             return {"accepted": False, "burst_id": str(burst_id),
+                    "error_details": (bind_details.as_dict()
+                                      if hasattr(bind_details, "as_dict") else None),
                     "reason": "ROUTE_BIND_REJECTED",
                     "detail": str(getattr(bound, "error", bound))[:200]}
 
@@ -382,9 +386,15 @@ class Stage7PocDeviceSeam:
         result = radio.schedule_tx(request)      # 권위 경로(lead·retune·충돌·원장)
         if getattr(result, "is_err", False):
             error = getattr(result, "error", None)
+            # `code`만 남기면 왜 거부됐는지 사후에 가릴 수 없다 — 실물 C에서 실제로 그랬다
+            # (`RADIO_LATE_REQUEST`만 남고 `required_lead_ns`는 사라졌다). `Details`는 스스로
+            # payload·secret 키를 금지하고 크기 상한을 강제하므로 그대로 실어도 안전하다.
+            # 여기서 값을 만들거나 해석하지 않는다 — 장치가 준 사실만 나른다.
+            details = getattr(error, "details", None)
             return {"accepted": False, "burst_id": str(burst_id),
                     "reason": "SCHEDULE_TX_REJECTED",
-                    "detail": str(getattr(error, "code", error))[:200]}
+                    "detail": str(getattr(error, "code", error))[:200],
+                    "error_details": details.as_dict() if hasattr(details, "as_dict") else None}
         return {"accepted": True, "burst_id": str(burst_id),
                 "transmit_at_utc_ns": int(utc_ns), "reason": None, "detail": None}
 

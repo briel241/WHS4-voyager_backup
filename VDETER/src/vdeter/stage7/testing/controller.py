@@ -229,6 +229,11 @@ class Stage7ScenarioController:
             if not result["accepted"]:
                 entry["device_reason"] = str(result.get("reason"))[:64]
                 entry["device_detail"] = str(result.get("detail"))[:200]
+                # 거부 코드만으로는 원인을 가릴 수 없다. 장치가 실어 보낸 구조화 details를
+                # 그대로 남긴다(`Details`가 이미 키·크기를 제한한다). 없으면 적지 않는다.
+                extra = result.get("error_details")
+                if isinstance(extra, dict) and extra:
+                    entry["device_error_details"] = extra
         self.command_log.append(entry)
         return response
 
