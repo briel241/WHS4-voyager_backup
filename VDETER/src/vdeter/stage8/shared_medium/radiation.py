@@ -138,6 +138,10 @@ class ChildPath:
     scheduled_hw_timestamp_ns: int
     samples: tuple
     wire_packet_digest: str | None = None
+    #: parent의 **논리** 목적지(§15.1 canonical route가 채널을 정하는 기준). `rx_station`은 이
+    #: child가 도달하는 **물리** 수신자라서 둘은 다르다 — fan-out의 첫 child는 논리 target이
+    #: 아닐 수 있다(MASS-B의 C4는 ROC). 장치 경계에 목적지를 실을 때는 반드시 이 값을 쓴다.
+    addressed_destination: str | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -352,6 +356,7 @@ class AtomicBroadcast:
                     scheduled_hw_timestamp_ns=scheduled_hw_timestamp_ns,
                     samples=samples,
                     wire_packet_digest=waveform.wire_packet_digest,
+                    addressed_destination=addressed_destination,
                 )
             )
         parent = ParentTransmission(

@@ -618,16 +618,16 @@ class Stage7AuthoritativeRadioSink:
         from vdeter.stage8.shared_medium.radiation import GroupAdmission
 
         children = self._validate(children)
-        target = None
-        for child in children:
-            station = self._station_id.get(getattr(child, "rx_station", None))
-            if station is not None and getattr(child, "rx_station", None) == children[0].rx_station:
-                target = station
-                break
+        # route 결속에는 parent의 **논리** 목적지를 쓴다(§15.1 canonical route가 논리 주소로
+        # 기대 채널을 정한다). 이전 구현의 loop은 조건이 항상 children[0]에만 맞아 사실상
+        # children[0]의 **물리** 수신자를 고르는 것과 같았고, MASS-B fan-out의 첫 child는
+        # C4=ROC이므로 논리 target이 MASS-A(upper)여도 ROC(lower)로 결속돼 거부됐다.
+        destination = getattr(children[0], "addressed_destination", None)
+        target = self._station_id.get(destination)
         if target is None:
-            target = self._station_id.get(children[0].rx_station)
-        if target is None:
-            raise RuntimeError(f"수신 station id를 알 수 없습니다: {children[0].rx_station}")
+            raise RuntimeError(
+                f"논리 목적지 station id를 알 수 없습니다: {destination!r} "
+                "(물리 수신자 rx_station으로 대체하지 않는다)")
         burst_id = str(uuid.uuid4())
         bound = self._sidecar.bind_broadcast_fanout_burst(
             burst_id, source_station_id=self._source_station_id,

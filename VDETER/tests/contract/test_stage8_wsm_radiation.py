@@ -56,6 +56,18 @@ class SingleBurstInvariantTest(unittest.TestCase):
             self.assertEqual(child.scheduled_sample, parent.scheduled_sample)
             self.assertEqual(child.channel, parent.channel)
 
+    def test_children_carry_the_parent_logical_destination(self):
+        # 장치 경계는 논리 목적지를 child에서 읽는다. `rx_station`(물리 수신자)과 구별되며,
+        # MASS-B fan-out의 **첫** child는 C4(→ROC)라 논리 target과 다르다 — 이 순서가
+        # 목적지를 child에서 유추하면 안 되는 이유다.
+        ab = _broadcast()
+        parent = _parent(ab, sender="MASS-B", channel=PhysicalChannel.UPPER,
+                         addressed="MASS-A")
+        self.assertEqual(parent.addressed_destination, "MASS-A")
+        self.assertEqual([c.rx_station for c in parent.children], ["ROC", "MASS-A"])
+        for child in parent.children:
+            self.assertEqual(child.addressed_destination, "MASS-A")
+
     def test_children_distinct_cables_and_receivers(self):
         ab = _broadcast()
         parent = _parent(ab)

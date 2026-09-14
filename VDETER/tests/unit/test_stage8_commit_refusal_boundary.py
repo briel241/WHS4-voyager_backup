@@ -42,16 +42,21 @@ class _FakeClient:
         self.invalidated += 1
 
 
-def _children(rx_station="MASS-A"):
+def _children(addressed_destination="MASS-A"):
+    """실제 MASS-B fan-out 그대로: 첫 child는 C4(→ROC), 둘째가 C6(→MASS-A)다.
+
+    논리 target(MASS-A)과 첫 child의 물리 수신자(ROC)가 **다르다**는 것이 요점이다.
+    """
     samples = (0j,) * 8
     return tuple(
         ChildPath(child_id=f"p:{cable}", parent_id="p", transfer_id="t", cable=cable,
-                  tx_station="MASS-B", tx_lane=lane, rx_station=rx_station, rx_lane=1,
+                  tx_station="MASS-B", tx_lane=lane, rx_station=rx, rx_lane=1,
                   channel=PhysicalChannel.UPPER, payload_digest="d" * 64,
                   waveform_sha256="w" * 64, scheduled_sample=0,
                   scheduled_hw_timestamp_ns=5_000_000_000, samples=samples,
-                  wire_packet_digest="a" * 64)
-        for cable, lane in (("C4", 0), ("C6", 1))
+                  wire_packet_digest="a" * 64,
+                  addressed_destination=addressed_destination)
+        for cable, lane, rx in (("C4", 0, "ROC"), ("C6", 1, "MASS-A"))
     )
 
 
@@ -62,8 +67,9 @@ def _sink(result):
     return sink, client
 
 
-def _commit(sink, rx_station="MASS-A"):
-    admission = sink.prepare_group(group_id="p", children=_children(rx_station))
+def _commit(sink, addressed_destination="MASS-A"):
+    admission = sink.prepare_group(group_id="p",
+                                   children=_children(addressed_destination))
     sink.commit_group(admission)
 
 
@@ -110,6 +116,42 @@ class LauncherCommitRefusalTest(unittest.TestCase):
         self.assertEqual(receipt["transmit_at_utc_ns"], 1_700_000_000_000_000_000)
         self.assertEqual(receipt["wire_packet_digest"], "a" * 64)
         self.assertEqual(client.calls[0][0], "poc_schedule_group_tx")
+
+
+class LauncherDestinationBindingTest(unittest.TestCase):
+    """장치에 싣는 목적지는 **논리 target**이어야 한다 — fan-out 첫 child의 물리 수신자가 아니다.
+
+    실물 C 재검증(`diag-20260914-042750`)이 정확히 여기서 걸렸다: MASS-B가 MASS-A(upper)를
+    노렸는데 첫 child가 C4(→ROC)라 ROC가 실렸고, 권위 route가 canonical 표에서 ROC의 기대
+    채널(lower)을 골라 요청 채널(upper)과 어긋나 `LANE_ROUTE_INVALID`(→`INTERNAL_ERROR`)로
+    거부했다. 기존 RF-off 시험이 ROC 표적만 밟아 이 결함을 가리고 있었다.
+    """
+
+    @staticmethod
+    def _accepting():
+        return _sink({"accepted": True, "burst_id": "b", "transmit_at_utc_ns": 1,
+                      "reason": None, "detail": None})
+
+    def test_logical_target_is_sent_not_the_first_child_receiver(self):
+        sink, client = self._accepting()
+        _commit(sink, "MASS-A")
+        body = client.calls[0][1]
+        self.assertEqual(body["destination_station_id"], _STATIONS["MASS-A"])
+        self.assertNotEqual(body["destination_station_id"], _STATIONS["ROC"])
+        self.assertEqual(body["channel_name"], PhysicalChannel.UPPER.value)
+
+    def test_roc_target_still_binds_to_roc(self):
+        # 인접 negative: 이전에도 통과하던 방향은 그대로 통과해야 한다.
+        sink, client = self._accepting()
+        _commit(sink, "ROC")
+        self.assertEqual(client.calls[0][1]["destination_station_id"], _STATIONS["ROC"])
+
+    def test_missing_logical_destination_fails_closed_without_calling_the_device(self):
+        sink, client = self._accepting()
+        with self.assertRaises(RuntimeError) as ctx:
+            _commit(sink, None)
+        self.assertIn("논리 목적지", str(ctx.exception))
+        self.assertEqual(client.calls, [])   # 물리 수신자로 대체해 호출하지 않는다
 
 
 class _FakeChannel:
@@ -210,6 +252,56 @@ class ObservationDeliveryCountTest(unittest.TestCase):
         workload, runner = self._workload(failure)
         self.assertIs(workload.deliver_observation(make_observation()), False)
         self.assertEqual(runner.delivered, [])   # 전달하지 않았다 — 세어서도 안 된다
+
+
+class _Bound:
+    def __init__(self, err: bool) -> None:
+        self.is_err = err
+        self.error = "injected route bind failure"
+
+
+class _FakeSidecar:
+    def __init__(self, err: bool = False) -> None:
+        self.bound: list = []
+        self._err = err
+
+    def bind_broadcast_fanout_burst(self, burst_id, *, source_station_id,
+                                    destination_station_id, request_digest):
+        self.bound.append({"burst_id": burst_id,
+                           "source_station_id": source_station_id,
+                           "destination_station_id": destination_station_id})
+        return _Bound(self._err)
+
+
+class AuthoritativeSinkDestinationTest(unittest.TestCase):
+    """RF-off 좌표의 **같은 결함**. 기존 시험이 ROC 표적만 밟아 실물까지 통과시킨 지점이다."""
+
+    def _sink(self):
+        from apps.stage8_stage7_seams import Stage7AuthoritativeRadioSink
+
+        sidecar = _FakeSidecar()
+        sink = Stage7AuthoritativeRadioSink(
+            object(), sidecar=sidecar, source_station_id=333_333_333,
+            station_id_by_endpoint=_STATIONS)
+        return sink, sidecar
+
+    def test_route_binds_the_logical_target_not_the_first_child_receiver(self):
+        sink, sidecar = self._sink()
+        sink.prepare_group(group_id="p", children=_children("MASS-A"))
+        self.assertEqual(sidecar.bound[0]["destination_station_id"], _STATIONS["MASS-A"])
+        self.assertNotEqual(sidecar.bound[0]["destination_station_id"], _STATIONS["ROC"])
+
+    def test_roc_target_still_binds_to_roc(self):
+        sink, sidecar = self._sink()
+        sink.prepare_group(group_id="p", children=_children("ROC"))
+        self.assertEqual(sidecar.bound[0]["destination_station_id"], _STATIONS["ROC"])
+
+    def test_missing_logical_destination_fails_closed_without_binding(self):
+        sink, sidecar = self._sink()
+        with self.assertRaises(RuntimeError) as ctx:
+            sink.prepare_group(group_id="p", children=_children(None))
+        self.assertIn("논리 목적지", str(ctx.exception))
+        self.assertEqual(sidecar.bound, [])   # route를 결속하지 않는다
 
 
 if __name__ == "__main__":

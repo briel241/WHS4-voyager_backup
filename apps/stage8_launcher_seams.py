@@ -168,9 +168,16 @@ class LauncherRadioSink:
         burst_id = self.burst_by_group.get(admission.group_id)
         if burst_id is None:
             raise RuntimeError("commit 전에 prepare_group이 필요합니다(예약 없음)")
-        target = self._station_id.get(getattr(children[0], "rx_station", None))
+        # 장치에 싣는 목적지는 parent의 **논리** 목적지다. child의 `rx_station`은 그 child가
+        # 도달하는 물리 수신자이고, fan-out의 첫 child는 논리 target이 아닐 수 있다
+        # (MASS-B의 fan-out은 C4=ROC가 먼저다). 물리 수신자를 실으면 권위 route가
+        # canonical 표에서 다른 기대 채널을 골라 LANE_ROUTE_INVALID로 거부한다.
+        destination = getattr(children[0], "addressed_destination", None)
+        target = self._station_id.get(destination)
         if target is None:
-            raise RuntimeError(f"수신 station id를 알 수 없습니다: {children[0].rx_station}")
+            raise RuntimeError(
+                f"논리 목적지 station id를 알 수 없습니다: {destination!r} "
+                "(물리 수신자 rx_station으로 대체하지 않는다)")
         samples = to_cf32le(children[0].samples)
         result = self._client.call("poc_schedule_group_tx", {
             "burst_id": burst_id,
