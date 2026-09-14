@@ -142,6 +142,10 @@ class Stage7LaneRxDispatcher:
         디코드 입력 사본에만 적용되고 관측 계약(진단 싱크·ingress·
         결과 타입)은 frozen 경로 그대로다. STAGE7_RX_ENERGY_GATE=0
         으로 비활성.
+
+        무장 전 **전제 검사**와 **1회 한정 재무장**이 있다(diag-20260913-195703
+        부검). 게이트는 성능 장치이지 안전 장치가 아니므로, 학습 전제가 깨졌을
+        때의 올바른 실패 방향은 통과(느려짐)이지 전면 차단(기능 정지)이 아니다.
         """
         import os as _os
 
@@ -162,7 +166,9 @@ class Stage7LaneRxDispatcher:
             power = float(_np.vdot(arr, arr).real) / arr.size
             state = self._gate_state.setdefault(
                 lane_index,
-                {"warm": [], "med": None, "gated": 0, "passed": 0},
+                {"warm": [], "med": None, "gated": 0, "passed": 0,
+                 "floor_trusted": False, "low_candidate": None,
+                 "corrections": 0, "probes": 0},
             )
             if state["med"] is None:
                 if power > 0.0:
@@ -191,15 +197,75 @@ class Stage7LaneRxDispatcher:
                     # 신호 전력으로 오염 → 문턱이 버스트×8로 치솟아
                     # ACK까지 전면 차단, passed 3/3000. 하위 10%는
                     # 버스트가 절반 섞여도 잡음 바닥을 유지한다.)
-                    state["med"] = warm[len(warm) // 10]
+                    percentile10 = warm[len(warm) // 10]
+                    # 전제 검사 (diag-20260913-195703 부검). 위 주석의 "절반"은
+                    # 상한이 아니다. TBB 획득 전 MASS는 bootstrap slot map 때문에
+                    # 프레임(2.4 s)당 RX 창을 사실상 1개만 계획하는데 ROC는 BBSC
+                    # 기회마다 TBB fragment를 보내므로, 워밍업 표본이 버스트 위주가
+                    # 되는 것이 정상 상태다. 실측: p10 2.848e-03(= C1 버스트 전력),
+                    # 정상 회차 2.9e-06 — 1000배.
+                    #
+                    # 최솟값은 워밍업이 이미 임시 문턱으로 쓰는 "잡음 바닥의 상계"다.
+                    # p10이 그 임시 문턱(min×8) 위로 나왔다면 p10 자체가 버스트
+                    # 표본이라는 뜻이므로 잡음 추정치로 쓸 수 없다. 그때는 상계로
+                    # 무장한다 — 문턱 배수(8.0)를 넓히는 것이 아니라, 워밍업 구간에서
+                    # 이미 적용하던 것과 같은 문턱을 유지하는 것이다.
+                    upper_bound = warm[0]
+                    if percentile10 >= upper_bound * 8.0:
+                        state["med"] = upper_bound
+                        basis = "min_upper_bound"
+                    else:
+                        state["med"] = percentile10
+                        basis = "p10"
+                    # 잡음 **근거**의 유무를 값과 분리해 기록한다. 표본이 단일
+                    # 모드(최댓값이 최솟값의 8배 미만)면 저전력 집단이 관측되지
+                    # 않았다는 뜻이고, 그때 학습한 값은 잡음이라는 근거가 없다
+                    # (전부 잡음인 조용한 레인과 전부 버스트인 레인을 표본만으로
+                    # 구분할 수 없다). 값은 쓰되 **신뢰하지 않는다** — 아래
+                    # 하향 보정과 유계 probe가 그 상태에서만 동작한다.
+                    state["floor_trusted"] = warm[-1] >= upper_bound * 8.0
                     state["warm"] = []
                     print(
                         f"[launcher] rx-gate armed lane={lane_index} "
-                        f"noise_p10={state['med']:.3e} "
-                        f"p50={warm[len(warm) // 2]:.3e}",
+                        f"noise_p10={percentile10:.3e} "
+                        f"p50={warm[len(warm) // 2]:.3e} "
+                        f"min={upper_bound:.3e} max={warm[-1]:.3e} "
+                        f"basis={basis} thr={state['med'] * 8.0:.3e} "
+                        f"trusted={int(state['floor_trusted'])}",
                         file=_sys.stderr, flush=True,
                     )
                 return native_request
+            # 하향 보정. 학습한 바닥보다 확실히 낮은 창이 **실제로 도착하면**,
+            # 그 바닥은 잡음이 아니었다는 양성 증거다(같은 표본을 다시 모으는
+            # 것이 아니라 새 관측을 근거로 삼는다 — 재무장은 오염 표본을 재수집할
+            # 뿐이라 해결이 아니었다). 단발 dropout 한 창이 바닥을 무너뜨려 잡음
+            # 창이 전량 통과하는 일이 없도록 **2표본 확인** 후 둘 중 높은 쪽을
+            # 택한다. 하향만 가능하므로 실제 최솟값으로 수렴하고 발산하지 않는다.
+            if 0.0 < power < state["med"] / 8.0:
+                candidate = state["low_candidate"]
+                if candidate is None:
+                    state["low_candidate"] = power
+                elif max(candidate, power) > min(candidate, power) * 1.5:
+                    # 두 저전력 관측이 같은 집단이 아니다. 보존 evidence 18건
+                    # 실측에서 무장 표본 내부 p50/p10은 1.01~1.06 — 잡음 창끼리는
+                    # 6% 안쪽으로 촘촘하다. 1.5배를 넘으면 한쪽은 dropout 같은
+                    # 단발 이상치이므로 정정하지 않고, 더 그럴듯한(높은) 쪽만
+                    # 후보로 남긴다. 이상치 하나가 바닥을 무너뜨리면 잡음 창이
+                    # 전량 통과해 게이트 도입 이유 자체가 사라진다.
+                    state["low_candidate"] = max(candidate, power)
+                else:
+                    previous = state["med"]
+                    state["med"] = max(candidate, power)
+                    state["low_candidate"] = None
+                    state["floor_trusted"] = True
+                    state["corrections"] += 1
+                    print(
+                        f"[launcher] rx-gate floor-correct lane={lane_index} "
+                        f"{previous:.3e} -> {state['med']:.3e} "
+                        f"thr={state['med'] * 8.0:.3e} "
+                        f"n={state['corrections']}",
+                        file=_sys.stderr, flush=True,
+                    )
             if state["med"] <= 0.0 or power >= state["med"] * 8.0:
                 state["passed"] += 1
                 # 통과 이벤트 관측 (svc-run-l2 부검: ROC lane0의 유일
@@ -220,6 +286,21 @@ class Stage7LaneRxDispatcher:
                     f"gated={state['gated']} passed={state['passed']}",
                     file=_sys.stderr, flush=True,
                 )
+            # 잡음 근거를 끝내 확보하지 못한 동안에만 유계 probe(16창당 1창)를
+            # 게이트 밖으로 흘린다. 문턱을 넓히거나 무조건 통과시키는 것이 아니다
+            # — 학습값을 신뢰할 수 없을 때 전면 차단으로 TBB 획득 경로가 죽는 것을
+            # 막는 최소 장치이며, 복호 부하는 1/16로 묶인다. 하향 보정으로 잡음
+            # 근거가 확보되면(`floor_trusted`) 즉시 꺼진다.
+            if not state["floor_trusted"] and state["gated"] % 16 == 0:
+                state["probes"] += 1
+                if state["probes"] <= 5 or state["probes"] % 50 == 1:
+                    print(
+                        f"[launcher] rx-gate probe lane={lane_index} "
+                        f"n={state['probes']} power={power:.3e} "
+                        f"thr={state['med'] * 8.0:.3e} (잡음 근거 미확보)",
+                        file=_sys.stderr, flush=True,
+                    )
+                return native_request
             zero_block = _dc.replace(
                 samples, data=b"\x00" * len(samples.data)
             )
