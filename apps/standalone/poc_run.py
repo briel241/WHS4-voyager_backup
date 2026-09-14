@@ -268,7 +268,16 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
     except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
         # N2: 취소·인터럽트는 cleanup-only(신규 event/action·FINISH 없음) 뒤 **원형 그대로** 재전달한다.
         # PocRunError로 변환하지 않고, cleanup 과정에서 scenario step을 전달하지 않는다(COMPLETED 금지).
-        workload.abort(ScenarioVerdict.NOT_RUN, cause=exc)
+        #
+        # 정리 **결과**를 버리지 않는다. 이전에는 `abort`의 반환을 폐기해서, 실제로 정리가
+        # 수행됐는데도 caller에게 그것을 기록할 근거가 남지 않았다. 값을 만들어내지 않고
+        # 방금 실행된 그 정리 경로가 돌려준 evidence만 인터럽트에 실어 보낸다.
+        # 정리 자체가 실패해도 중단 사유를 그것으로 덮지 않는다(note로만 남긴다).
+        try:
+            exc.evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN, cause=exc)
+        except BaseException as cleanup_exc:  # noqa: BLE001 - 정리 실패가 중단 사유를 대체하지 않는다
+            exc.add_note(
+                f"PoC arm interrupt cleanup: {type(cleanup_exc).__name__}: {cleanup_exc}")
         raise
     except Exception as exc:  # noqa: BLE001 - arm 실패(일반 예외): 자원 정리 후 fail-closed 보고
         evidence = _finalize_evidence(workload, ScenarioVerdict.NOT_RUN, cause=exc)

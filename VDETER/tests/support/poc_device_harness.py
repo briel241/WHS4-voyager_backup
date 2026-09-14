@@ -13,10 +13,55 @@ canonical JSON·adapter 검증·route sidecar·`schedule_tx`·TX 원장은 전�
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 import time
+
+
+def _mark(name: str) -> None:
+    """시험용 명시적 동기화 신호 하나를 남긴다.
+
+    `VDETER_REPRO_MARKER_DIR`이 설정되지 않으면 **아무 일도 하지 않는다** — 기본 경로의
+    동작·판정·시각은 이 계측 유무와 무관하다.
+    """
+    directory = os.environ.get("VDETER_REPRO_MARKER_DIR")
+    if not directory:
+        return
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            return
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(name)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+
+
+def _mark_command(message) -> None:
+    """RX scope ENABLE이 **실 adapter 경로로** 도착한 순간을 표시한다(취소 지점 고정용).
+
+    controller의 `CollisionExchange.call`은 `poc_collision` 명령에 `mode`를 실어 보낸다
+    (`apps/stage8_collision_exchange.py`). 그 ENABLE은 `prepare_poc_scope` 안에서 일어나며
+    이는 `workload.arm()`보다 **앞선** 구간이다. 이 표지가 있으면 고정 sleep이나
+    `/proc/<pid>/wchan` 추정 없이 arm 이전 구간의 취소를 결정적으로 재현할 수 있다.
+
+    message 키 구조를 가정하지 않으려고 직렬화된 본문에서 찾는다 — 계측 전용이며 응답을
+    만들거나 바꾸지 않는다.
+    """
+    if not os.environ.get("VDETER_REPRO_MARKER_DIR"):
+        return
+    try:
+        text = json.dumps(message, default=str)
+    except (TypeError, ValueError):
+        text = str(message)
+    if "poc_collision" in text and '"ENABLE"' in text:
+        _mark("scope-enable.marker")
+
 
 #: 모의 시간 진행 배속(실시간 대비). lead 의미를 보존하면서 시험을 과도하게 늘리지 않는 값.
 _TIME_ACCELERATION = float(os.environ.get("STAGE8_TEST_TIME_ACCELERATION", "4.0"))
@@ -102,6 +147,14 @@ def serve(socket_dir: str, plan_sha: str, *, endpoints=ENDPOINTS) -> int:
 
     threading.Thread(target=_pump, daemon=True).start()
 
+    # bind 직전에 socket 디렉터리를 보증한다.
+    #
+    # `/run/user/<uid>`는 tmpfs이고 이 프로세스가 소유하지 않는다. 호출자가 디렉터리를 만든
+    # 뒤 여기까지 오는 사이에 사라지면 `bind`가 `FileNotFoundError`로 죽는다(실측: 같은 boot
+    # 안에서 `socket_dir_exists: false`). 자기 socket을 놓을 자리를 자기가 확인하는 것이며,
+    # production 경로(`runtime_socket_root`)를 바꾸지 않는다 — 경로는 호출자가 정한 그대로다.
+    os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+
     servers = []
     for endpoint_id in endpoints:
         adapter = _build(endpoint_id)
@@ -115,6 +168,7 @@ def serve(socket_dir: str, plan_sha: str, *, endpoints=ENDPOINTS) -> int:
                     message = server.recv_message(timeout=5.0)
                     if message is None:
                         continue
+                    _mark_command(message)
                     server.send_message(adapter.handle_command(message, peer=(os.getuid(),)))
             except (ConnectionError, OSError):
                 pass

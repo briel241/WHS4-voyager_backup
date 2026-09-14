@@ -446,9 +446,31 @@ def test_prefire_operator_interrupt_survives_a_second_release_failure(seam, inte
         rx_readiness=InterruptedSeam() if seam == "readiness" else TD.ReadyReadiness())
     with pytest.raises(interrupt_type) as raised:
         prov.submit(action(), request_id="r")
+    # 어느 seam이든 원형 그대로 전파되고 correlation을 남기지 않는다.
     assert raised.value is interruption
-    assert prov.unresolved_ownership() == ("lower:slot-1",)
     assert prov.parent_for("r") is None
+
+    if seam == "factory":
+        # `encode`는 자원 예약 **앞**에서 돈다(`submit` 1절: 자원 확보 전 검증). 따라서 여기서
+        # 중단되면 **잡은 자원이 없다**. 잡은 적 없는 식별자를 "소유권 불확실"로 적으면 실제보다
+        # 넓게 억제하는 것이므로 그렇게 단언하지 않고, reserve가 아예 호출되지 않았음을 확인한다.
+        assert arb.reserve_calls == []
+        assert prov.unresolved_ownership() == ()
+        # 같은 seam이 계속 같은 중단을 올린다 — 이는 소유권 억제가 아니라 같은 실패의 재발생이다.
+        # 둘을 구분해 단언한다(SESSION_INHIBIT으로 오인하지 않는다).
+        with pytest.raises(interrupt_type) as again:
+            prov.submit(action(), request_id="next")
+        assert again.value is interruption
+        # release가 여전히 실패하도록 둔 채 정리한다 — 회수할 자원이 없으므로 조용히 끝나야 한다.
+        prov.cleanup()
+        assert arb.release_calls == []
+        assert arb.owner_by_key == {}
+        return
+
+    # `window_ready`는 자원 예약 **뒤**에 돈다. release까지 실패했으므로 소유권이 불확실하게
+    # 남고(fail-closed) 다음 submit이 SESSION_INHIBIT된다. 회수되면 조용히 성공한다.
+    assert arb.reserve_calls == [("lower:slot-1", "POC")]
+    assert prov.unresolved_ownership() == ("lower:slot-1",)
     with pytest.raises(PocError) as inhibited:
         prov.submit(action(), request_id="next")
     assert inhibited.value.code == PocErrorCode.POC_RADIO_OWNERSHIP_UNCERTAIN

@@ -1304,6 +1304,51 @@ def main(argv=None) -> int:
             trace.close()
             print("[mass-roc-controller] 종결 FAIL (poc arm)", flush=True)
             return 1
+        except BaseException as exc:  # noqa: BLE001 - 운영자 중단: 정리·기록 후 **원형 재전파**
+            # arm 구간의 중단(KeyboardInterrupt/SystemExit)은 바로 위 `except Exception`에
+            # 걸리지 않아 종결 기록을 한 줄도 남기지 않았다. 자원 회수는 두 곳이 나눠 맡는다:
+            #   - PoC child·socket·provider 예약 → `poc_run.prepare_workload`가 이미
+            #     cleanup-only로 정리하고(그 evidence를 인터럽트에 싣는다) 원형 재전달한다.
+            #   - workload RX scope(`CollisionExchange`) → **이 프로세스가 소유**하므로 여기서
+            #     닫는다. `prepare_poc_scope`가 `arm()`보다 **먼저** 열기 때문에 중단 창이
+            #     `prepare_workload`의 인터럽트 처리 구간보다 넓다.
+            # 새 정리 로직·새 상한·신규 action을 만들지 않는다 — 일반 예외 경로와 같은 호출이다.
+            collision_cleanup_error = None
+            try:
+                poc_host.close_collision_exchange()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - 중단 사유를 덮지 않는다
+                collision_cleanup_error = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                exc.add_note(f"workload RX scope cleanup: {collision_cleanup_error}")
+            # 값을 합성하지 않는다. 실제로 수행된 정리의 evidence가 인터럽트에 실려 있으면
+            # 그것을 쓰고, 없으면(= scope 준비 중 중단이라 workload가 아직 없음) 그 사실만 적는다.
+            poc_evidence = getattr(exc, "evidence", None) or {
+                "status": "ERROR", "poc_infrastructure": "ABORTED",
+                "error": f"운영자 중단 — PoC arm 중 {type(exc).__name__}"}
+            poc_evidence.setdefault("workload_id", workload_id)
+            poc_evidence.setdefault("scenario_id", arguments.scenario_id)
+            if poc_host._exchange is not None:
+                # close 뒤에 읽는다 — `cleanup_complete`와 복원 readback이 확정된 상태다.
+                poc_evidence["collision_model"] = poc_host._exchange.evidence
+            trace.emit("poc_arm_interrupted", error=type(exc).__name__,
+                       cleanup_error=collision_cleanup_error,
+                       evidence_from_cleanup=getattr(exc, "evidence", None) is not None)
+            _write_result(arguments.run_root, "poc-result", poc_evidence)
+            final = {
+                "artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
+                "run_id": arguments.run_id, "workload_id": workload_id,
+                "lifecycle": arguments.lifecycle, "scenario_id": arguments.scenario_id,
+                "certificate_case": arguments.certificate_case,
+                "status": "FAIL",
+                # 중단 사유를 보존한다 — 정상 종료로 재분류하지 않는다.
+                "error": f"운영자 중단 — PoC arm 중 {type(exc).__name__}(scenario 미제출)",
+                "cleanup_errors": [collision_cleanup_error] if collision_cleanup_error else [],
+                "results": {},
+                "command_log": inline_controller.command_log,
+            }
+            _write_result(arguments.run_root, "final-result", final)
+            trace.close()
+            print("[mass-roc-controller] 종결 ABORT (poc arm 중단)", flush=True)
+            raise
 
     results: dict = {}
     run_error: str | None = None
@@ -1396,6 +1441,94 @@ def main(argv=None) -> int:
                                    f"stop-{endpoint_id}")
                 except Exception as exc:  # noqa: BLE001
                     cleanup_errors.append(f"{endpoint_id} STOP 실패: {exc}")
+        if interrupted is not None and not isinstance(interrupted, Exception):
+            # 운영자 중단의 종결 기록은 **반드시 여기서** 한다.
+            #
+            # 중단은 `except Exception`에 걸리지 않으므로, 이 `finally`가 끝나는 즉시 try 문
+            # **전체 밖으로** 전파된다. 아래 종결 구간(1462행~)은 try 바깥에 있어 도달하지
+            # 못한다 — 그것을 try/finally로 감싸는 것으로는 이 경로가 덮이지 않는다.
+            # 실측으로 확인했다: 감싸기만 넣은 판(fixed-scenario 회차)은 감싸기가 없는 판
+            # (prefix-scenario 회차)과 **동일하게** 산출물 3종 전량 부재·rc -2였고, 두 회차의
+            # traceback이 같은 지점(`deliver_scenario_start` → `pump` → `selectors.select`)을
+            # 가리켰다. 감싸기는 종결 구간 자체가 다시 중단되는 좁은 경우만 막는다.
+            #
+            # 정리는 위에서 이미 끝났다(producer 정지 → PoC abort → RX scope 복원 → STOP).
+            # 그 뒤 상태로 evidence를 기록한다. `WorkloadRunner.abort`는 idempotent이므로
+            # (`_result` 캐시) 아래 종결이 부르는 두 번째 abort는 같은 결과를 돌려줄 뿐
+            # 신규 event·action·FINISH를 만들지 않는다.
+            run_error = run_error or f"운영자 중단 — {type(interrupted).__name__}(scenario 미완)"
+            if poc_prepared is not None:
+                # abort 경로를 강제한다. `finish_workload`는 FINISH를 전달하므로 취소에선 금지.
+                poc_failure = poc_failure or interrupted
+            trace.emit("workload_interrupted", error=type(interrupted).__name__,
+                       phase="scenario")
+            try:
+                _finalize_workload(
+                    arguments=arguments, workload_id=workload_id, results=results,
+                    run_error=run_error, cleanup_errors=cleanup_errors,
+                    poc_prepared=poc_prepared, poc_evidence=poc_evidence,
+                    poc_failure=poc_failure, poc_host=poc_host,
+                    scenario_success=False, events=events, trace=trace,
+                    inline_controller=inline_controller, controller=controller)
+            except BaseException as final_exc:  # noqa: BLE001 - 중단 사유를 덮지 않는다
+                if final_exc is not interrupted:
+                    interrupted.add_note(
+                        f"workload finalize during interrupt: "
+                        f"{type(final_exc).__name__}: {final_exc}")
+                try:
+                    trace.close()
+                except BaseException:  # noqa: BLE001 - 계측 실패가 중단을 바꾸지 않는다
+                    pass
+            # 중단은 삼키지 않는다 — 이 finally가 끝나면 원형 그대로 전파된다.
+
+    # 정상 경로의 종결. 위 `finally`가 중단 경로를 이미 기록했으므로 여기 오는 것은
+    # 중단이 없었던 실행뿐이다(중단은 finally 종료와 함께 전파돼 이 줄에 닿지 않는다).
+    #
+    # 실측 배경(diag-20260914-142043 / diag-20260914-150428, 둘 다 dual scope 활성 중 취소):
+    #   세션 1 child 로그 108 B·traceback 없음·rc -15 (처분 부재 → SIGTERM 즉사)
+    #   세션 2 child 로그 584 B·traceback 있음·rc -2  (처분 발화 → KeyboardInterrupt 미처리 전파;
+    #           Pi Python 3.12.3 실측: 미처리 KeyboardInterrupt는 자기 SIGINT 재발생으로 rc -2)
+    #   두 회차 모두 poc-result.json / final-result.json / workload-trace.jsonl **전량 부재**.
+    #   같은 코드의 정상 종료 회차(diag-20260914-091317)에는 넷 다 남는다.
+    # 두 회차 모두 workload_abort는 terminate_sent=true·kill_sent=false — 발신자는 coordinator의
+    # `_terminate_process_bounded`(SIGTERM) 하나이며 process-group 전파가 아니다.
+    #
+    # 아래 감싸기는 **종결 구간 자체가 다시 중단되는** 경우만 담당한다(그 경우에도 trace를
+    # 닫아 계측을 남긴다). 새 상한·새 정리 로직·신규 action은 만들지 않는다.
+    interrupted_exit: BaseException | None = None
+    try:
+        return _finalize_workload(
+            arguments=arguments, workload_id=workload_id, results=results,
+            run_error=run_error, cleanup_errors=cleanup_errors,
+            poc_prepared=poc_prepared, poc_evidence=poc_evidence,
+            poc_failure=poc_failure, poc_host=poc_host,
+            scenario_success=scenario_success, events=events, trace=trace,
+            inline_controller=inline_controller, controller=controller)
+    except BaseException as exc:  # noqa: BLE001 - 중단을 덮지 않는다
+        if isinstance(exc, Exception):
+            raise
+        interrupted_exit = exc
+        raise
+    finally:
+        if interrupted_exit is not None:
+            # 종결 구간 자체가 다시 중단됐다 — 그 사실을 남기고 원래 중단을 재전파한다.
+            try:
+                trace.emit("workload_finalize_interrupted",
+                           error=type(interrupted_exit).__name__)
+                trace.close()
+            except BaseException:  # noqa: BLE001 - 계측 실패가 중단을 바꾸지 않는다
+                pass
+
+
+def _finalize_workload(*, arguments, workload_id, results, run_error, cleanup_errors,
+                       poc_prepared, poc_evidence, poc_failure, poc_host,
+                       scenario_success, events, trace, inline_controller, controller) -> int:
+    """workload 종결 — PoC 종료·evidence 기록·trace flush.
+
+    중단(KeyboardInterrupt/SystemExit) 중에도 호출된다. 여기서 새 PoC action을 만들지 않고,
+    이미 제출된 action의 상태를 성공이나 취소로 추정하지 않는다(`abort_prepared`는 cleanup-only).
+    실제로 수행되지 않은 복원·결과를 합성하지 않는다 — 각 값은 실행된 경로가 돌려준 것만 쓴다.
+    """
 
     overall = run_error is None and bool(results)         and all(_result_ok(item) for item in results.values())
 
