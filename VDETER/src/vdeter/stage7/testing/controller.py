@@ -234,6 +234,15 @@ class Stage7ScenarioController:
                 extra = result.get("error_details")
                 if isinstance(extra, dict) and extra:
                     entry["device_error_details"] = extra
+        # 수락된 송신의 lead 여유(권위 원장이 남긴 정수 셋)를 evidence까지 보존한다. 거부 때만
+        # 값이 남으면 "통과했을 때 여유가 얼마였는지"를 사후에 알 수 없다. 정수만 유계로 옮기며
+        # 새 조회를 만들지 않는다(terminal 판정이 이미 부르는 응답에 실려 온다).
+        if isinstance(result, dict):
+            lead = result.get("lead")
+            if isinstance(lead, dict) and lead:
+                entry["device_lead"] = {
+                    key: value for key, value in lead.items()
+                    if isinstance(value, int) and not isinstance(value, bool)}
         self.command_log.append(entry)
         return response
 

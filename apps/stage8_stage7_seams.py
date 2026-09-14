@@ -28,7 +28,12 @@ from vdeter.stage8.integration.device_boundary import Stage7GroupTxRadioSink
 from vdeter.stage8.shared_medium import constants
 from vdeter.stage8.shared_medium.iq import IqBurst, to_cf32le
 from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
-from vdeter.stage8.shared_medium.radiation import ChildTerminal, ReadinessDecision, ScheduledSlot
+from vdeter.stage8.shared_medium.radiation import (
+    BroadcastCommitRefused,
+    ChildTerminal,
+    ReadinessDecision,
+    ScheduledSlot,
+)
 
 _LINK11_PACKET_BYTES = 54  # frozen Link 11 packet 크기(실 PHY 입력).
 
@@ -697,7 +702,14 @@ class Stage7AuthoritativeRadioSink:
                                  transmit_at=transmit_at, samples=samples)
         result = self._adapter.schedule_tx(request)     # 권위 경로(lead·retune·충돌·원장)
         if getattr(result, "is_err", False):
-            raise RuntimeError(f"권위 schedule_tx 거부: {getattr(result, 'error', result)}")
+            # 권위 장치가 **방사 전에** 스스로 거부를 회신했다. 이것은 "방사 여부를 모르는 실패"가
+            # 아니므로 UNKNOWN(SESSION_INHIBIT)으로 승격하지 않는다 — 상위가 자원을 반환하고 PoC
+            # action만 거부한다(정상 TX·세션 유지). launcher sink(`LauncherRadioSink.commit_group`)는
+            # 이미 이렇게 동작하고 있었고, 같은 프로세스 경로인 이 sink만 평범한 RuntimeError를 내
+            # `AtomicBroadcast.transmit`의 BaseException 분기로 떨어졌다(같은 거부가 sink에 따라
+            # 다른 severity가 되던 불일치).
+            raise BroadcastCommitRefused(
+                f"권위 schedule_tx 거부: {getattr(result, 'error', result)}")
 
 
 def stage7_device_seams(members, *, channel_center_hz=None):

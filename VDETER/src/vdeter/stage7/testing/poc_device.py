@@ -295,11 +295,22 @@ class Stage7PocDeviceSeam:
         snapshot = query(str(burst_id))
         if snapshot is None:
             return None
-        return {
+        result = {
             "terminal": bool(snapshot.get("terminal")),
             "children": {str(int(lane)): str(state)
                          for lane, state in (snapshot.get("children") or {}).items()},
         }
+        # 권위 원장이 수락 시점에 남긴 lead 관측을 그대로 나른다. 여기서 만들거나 해석하지
+        # 않으며, 없으면 키 자체를 싣지 않는다(0으로 위장 금지). 새 RPC를 만들지 않는다 —
+        # terminal 판정이 이미 부르는 이 조회의 응답에 실려 온다.
+        lead = snapshot.get("lead")
+        if isinstance(lead, dict):
+            carried = {key: int(lead[key])
+                       for key in ("required_lead_ns", "remaining_lead_ns", "margin_ns")
+                       if isinstance(lead.get(key), int) and not isinstance(lead[key], bool)}
+            if carried:
+                result["lead"] = carried
+        return result
 
     # --- 송신 ----------------------------------------------------------------
 
