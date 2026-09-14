@@ -2,13 +2,18 @@
 import json
 import unittest
 
-from vdeter.stage8.execution.runner import scenario_started, WorkloadRunner, WorkloadSpec
+from vdeter.stage8.execution.runner import (
+    observation_step,
+    scenario_started,
+    WorkloadRunner,
+    WorkloadSpec,
+)
 from vdeter.stage8.execution.lease import MassBLease
 from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure, WorkloadResult, ScenarioVerdict
 from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
 from vdeter.stage8.testing.client_runner import RecordingCallbacks
 from vdeter.stage8.testing.execution_fakes import FakeTxExecutor, LoopbackConnection
-from vdeter.stage8.testing.fakes import build_manifest
+from vdeter.stage8.testing.fakes import build_manifest, make_observation
 from .test_stage8_exec_runner import _run, _snap
 
 
@@ -83,6 +88,32 @@ class UnknownSubmissionTest(unittest.TestCase):
         self.assertEqual(conn.server.evidence["provider_submit_calls"], 1)
         self.assertEqual(result.evidence.get("uncertain_submissions", []), [])
         self.assertEqual(executor.calls, 0)
+
+    def observation_case(self, provider=None):
+        """실제 관측 자극이 반응형 action을 만들고, 그 제출이 결과 전에 실패하는 경우."""
+        provider = provider or FailingProvider()
+        def actions(event, ctx):
+            if event.type == "PACKET_OBSERVED":
+                return [ctx.replay(target="ROC", payload={"packet_hex": "00"},
+                                   source_observation_id=event.body.get("observation_id"))]
+            return []
+        result, conn, lease = _run(RecordingCallbacks(event_action_fn=actions),
+                                   provider=provider, executor=FakeTxExecutor(),
+                                   steps=(observation_step(make_observation()),))
+        return result, conn, lease
+
+    def test_unknown_before_result_keeps_the_real_observation_trigger(self):
+        # trigger는 자극의 **실제 event kind**에서 온다. 상수를 끼워 넣거나
+        # source_observation_id 문자열 모양으로 추정하지 않는다.
+        result, _conn, _lease = self.observation_case()
+        self.assertEqual(result.attacks_requested, 1)
+        self.assertEqual(result.attacks[0].trigger, "PACKET_OBSERVED")
+        self.assertEqual(result.attacks[0].action_execution, ActionExecution.TX_UNKNOWN)
+        self.assertNotEqual(result.attacks[0].trigger, "not recorded")
+
+    def test_unknown_before_result_keeps_the_event_trigger(self):
+        result, *_ = self.case()
+        self.assertEqual(result.attacks[0].trigger, "SCENARIO_STARTED")
 
     def test_missing_or_malformed_ids_never_fabricate_confirmation(self):
         for detail in ({}, {"broadcast_parent_id": [], "transfer_id": 42}):

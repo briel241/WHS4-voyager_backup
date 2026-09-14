@@ -7,7 +7,7 @@ deadline·terminal 취합을 검증한다.
 
 from __future__ import annotations
 
-from .radiation import GroupAdmission, ReadinessDecision
+from .radiation import BroadcastCommitRefused, GroupAdmission, ReadinessDecision
 
 
 class CountingRadioSink:
@@ -15,10 +15,12 @@ class CountingRadioSink:
 
     - `fail_on_prepare`: prepare_group에서 예외 -> group 전체 거부, commit 0, 방사 child 0.
     - `fail_on_commit`: commit_group에서 예외 -> group commit 불명확(상위가 OUTCOME_UNKNOWN 처리).
+    - `refuse_on_commit`: commit_group이 **방사 전 명시적 거부**를 올린다(TX 0 확정, 불명확 아님).
     commit_group은 atomic이라 admission의 두 child를 모두 기록하거나(성공) 기록 전에 예외를 던진다.
     """
 
-    def __init__(self, *, fail_on_prepare: bool = False, fail_on_commit: bool = False) -> None:
+    def __init__(self, *, fail_on_prepare: bool = False, fail_on_commit: bool = False,
+                 refuse_on_commit: bool = False) -> None:
         self.prepare_calls = 0
         self.commit_calls = 0
         self.prepared_group_ids: list = []
@@ -28,6 +30,7 @@ class CountingRadioSink:
         self.submitted_parents: dict = {}
         self._fail_prepare = fail_on_prepare
         self._fail_commit = fail_on_commit
+        self._refuse_commit = refuse_on_commit
 
     def prepare_group(self, *, group_id: str, children) -> GroupAdmission:
         self.prepare_calls += 1
@@ -38,6 +41,8 @@ class CountingRadioSink:
 
     def commit_group(self, admission: GroupAdmission) -> None:
         self.commit_calls += 1
+        if self._refuse_commit:
+            raise BroadcastCommitRefused(f"injected commit refusal for {admission.group_id}")
         if self._fail_commit:
             raise RuntimeError(f"injected commit_group failure for {admission.group_id}")
         # atomic: 두 child를 함께 기록(부분 기록 없음).

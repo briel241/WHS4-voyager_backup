@@ -162,6 +162,7 @@ class LauncherRadioSink:
 
     def commit_group(self, admission) -> None:
         from vdeter.stage8.shared_medium.iq import to_cf32le
+        from vdeter.stage8.shared_medium.radiation import BroadcastCommitRefused
 
         children = admission.children
         burst_id = self.burst_by_group.get(admission.group_id)
@@ -181,14 +182,23 @@ class LauncherRadioSink:
             "request_digest": str(getattr(children[0], "payload_digest", "") or ""),
             "wire_packet_digest": children[0].wire_packet_digest,
         })
-        if result.get("accepted"):
+        accepted = result.get("accepted") if isinstance(result, dict) else None
+        if accepted is True:
             self.receipt_by_group[admission.group_id] = {
                 "transmit_at_utc_ns": result["transmit_at_utc_ns"],
                 "wire_packet_digest": children[0].wire_packet_digest}
         self._client.invalidate()     # 송신 후 장치 상태는 달라졌다 — 캐시를 믿지 않는다
-        if not result.get("accepted"):
-            raise RuntimeError(
+        if accepted is True:
+            return
+        if accepted is False:
+            # 권위 장치가 **방사 전에** 스스로 거부를 회신했다(route bind 실패 또는 schedule_tx
+            # 거부). 방사 여부를 모르는 실패가 아니므로 UNKNOWN으로 승격하지 않는다 — 상위가
+            # 자원을 반환하고 PoC action만 거부한다(정상 TX·세션은 유지).
+            raise BroadcastCommitRefused(
                 f"권위 schedule_tx 거부: {result.get('reason')} {result.get('detail')}")
+        # accepted 판정을 읽을 수 없는 응답은 방사 여부가 불명이다 -> UNKNOWN 유지(강등 금지).
+        raise RuntimeError(
+            f"권위 schedule_tx 응답에 accepted 판정이 없습니다: {str(result)[:160]}")
 
 
 class LauncherLedgerTerminalSource:

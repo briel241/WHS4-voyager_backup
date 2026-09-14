@@ -130,6 +130,29 @@ class AtomicBarrierTest(unittest.TestCase):
         self.assertEqual(ab.outcome_of(parent.parent_id), R.ParentOutcome.OUTCOME_UNKNOWN)
         self.assertEqual(ab.active_group_count, 1)  # correlation·cleanup 보존(in-flight 유지)
 
+    def test_commit_refusal_is_not_promoted_to_unknown(self):
+        # 권위 장치가 **방사 전에** 거부를 회신한 경우: TX 0이 확정이므로 불명확이 아니다.
+        sink = TD.CountingRadioSink(refuse_on_commit=True)
+        ab = _broadcast(sink=sink)
+        parent = _parent(ab)
+        with self.assertRaises(R.BroadcastCommitRefused):
+            ab.transmit(parent)
+        self.assertEqual(sink.committed_child_ids, [])           # 방사 child 0
+        self.assertEqual(ab.active_group_count, 0)               # in-flight 잔존 없음
+        self.assertIsNone(ab.outcome_of(parent.parent_id))       # OUTCOME_UNKNOWN으로 남지 않음
+        self.assertFalse(ab.is_resolved(parent.parent_id))
+
+    def test_unknown_commit_path_is_not_weakened_by_the_refusal_branch(self):
+        # 인접 negative: 방사 여부를 **모르는** 실패는 그대로 UNKNOWN이다(강등하지 않는다).
+        sink = TD.CountingRadioSink(fail_on_commit=True)
+        ab = _broadcast(sink=sink)
+        parent = _parent(ab)
+        with self.assertRaises(R.BroadcastOutcomeUnknown) as ctx:
+            ab.transmit(parent)
+        self.assertNotIsInstance(ctx.exception, R.BroadcastCommitRefused)
+        self.assertEqual(ab.outcome_of(parent.parent_id), R.ParentOutcome.OUTCOME_UNKNOWN)
+        self.assertEqual(ab.active_group_count, 1)               # correlation·cleanup 보존
+
     def test_no_per_child_submit_api(self):
         # RadioBurstSink에는 per-child submit 경로가 없다(구조적으로 partial 불가).
         sink = TD.CountingRadioSink()

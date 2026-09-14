@@ -213,15 +213,23 @@ class Stage7ScenarioController:
         if (command_name == "poc_collision" and body.get("mode") == "POLL"
                 and response.get("status") == "COMPLETED" and payload.get("call_outcome") == "OK"):
             return response  # periodic metadata exchange: bounded aggregate evidence, not per-poll logging
-        self.command_log.append(
-            {
-                "endpoint_id": endpoint_id,
-                "command": command_name,
-                "status": response.get("status"),
-                "call_outcome": payload.get("call_outcome"),
-                "reason": payload.get("reason"),
-            }
-        )
+        entry = {
+            "endpoint_id": endpoint_id,
+            "command": command_name,
+            "status": response.get("status"),
+            "call_outcome": payload.get("call_outcome"),
+            "reason": payload.get("reason"),
+        }
+        # 장치가 스스로 "거부했다"고 회신한 사실은 봉투에 나타나지 않는다: op이 정상 반환하면
+        # call_outcome은 OK이고 reason은 None이며, 거부 판정은 result 안에만 있다. 그 판정만
+        # 유계로 남긴다(result 전체를 복사하지 않는다) — 사유 없는 거부 기록을 만들지 않기 위해서다.
+        result = payload.get("result")
+        if isinstance(result, dict) and isinstance(result.get("accepted"), bool):
+            entry["device_accepted"] = result["accepted"]
+            if not result["accepted"]:
+                entry["device_reason"] = str(result.get("reason"))[:64]
+                entry["device_detail"] = str(result.get("detail"))[:200]
+        self.command_log.append(entry)
         return response
 
     @staticmethod

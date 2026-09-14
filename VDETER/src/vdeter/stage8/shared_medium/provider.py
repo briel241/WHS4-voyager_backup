@@ -13,8 +13,10 @@ scheduling(§10.2): PoC는 NEXT_SAFE_SLOT / after_slots / after_ms만 표현한�
 
 오류는 Stage 3 오류 계약(`PocError`)으로만 표출한다: group commit 불명확은
 `POC_TX_OUTCOME_UNKNOWN`(SESSION_INHIBIT)으로 변환하고 request→parent correlation과 cleanup을
-보존한다. RF 방사 전 거부(readiness·staging·capacity)는 `POC_RADIO_RESOURCE_CONFLICT`로 자원을
-반환한다. parent 생성부터 transmit까지는 하나의 보호 구간이라 어떤 예외에서도 예약이 누수되지 않는다.
+보존한다. RF 방사 전 거부(readiness·staging·capacity·**commit 명시 거부**)는
+`POC_RADIO_RESOURCE_CONFLICT`로 자원을 반환한다. 권위 장치가 스스로 거부를 회신한 것은 "방사
+여부 불명"이 아니므로 UNKNOWN으로 승격하지 않는다. parent 생성부터 transmit까지는 하나의 보호
+구간이라 어떤 예외에서도 예약이 누수되지 않는다.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from . import constants, tuning
 from .radiation import (
     AtomicBroadcast,
     BroadcastCapacityError,
+    BroadcastCommitRefused,
     BroadcastError,
     BroadcastNotAdmitted,
     BroadcastNotReady,
@@ -458,9 +461,13 @@ class SharedMediumActionProvider:
             raise PocError(
                 PocErrorCode.POC_TX_OUTCOME_UNKNOWN,
                 f"group commit 불명확 (parent {parent.parent_id})",
-                detail={"broadcast_parent_id": parent.parent_id, "transfer_id": parent.transfer_id},
+                detail={"broadcast_parent_id": parent.parent_id, "transfer_id": parent.transfer_id,
+                        # 불명확의 **원인 문구**를 유계로 보존한다. 이것이 없으면 evidence에
+                        # "unknown"만 남아 사후에 원인을 가릴 수 없다(비밀 없는 요약만).
+                        "commit_failure": str(error)[:200]},
             ) from error
-        except (BroadcastNotReady, BroadcastNotAdmitted, BroadcastCapacityError) as error:
+        except (BroadcastNotReady, BroadcastNotAdmitted, BroadcastCapacityError,
+                BroadcastCommitRefused) as error:
             # RF 방사 전 거부(안전): 자원 반환하고 PoC action만 거부(정상 TX 유지).
             self._abort_attempt(request_id)
             raise PocError(

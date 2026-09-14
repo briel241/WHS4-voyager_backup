@@ -121,6 +121,10 @@ class WorkloadRunner:
         self._interrupt: BaseException | None = None
         self._failure_codes: list[str] = []
         self._arm_started = False
+        #: 지금 전달 중인 자극의 trigger(실제 event kind). 전달 밖에서는 None — 모르면 모른다.
+        self._delivering_trigger: str | None = None
+        #: request_id -> 그 action을 유발한 자극의 trigger. cleanup 경로가 사후 조회한다.
+        self._trigger_by_request: dict[str, str] = {}
 
     # --- lifecycle ----------------------------------------------------------
     def arm(self) -> bool:
@@ -168,12 +172,18 @@ class WorkloadRunner:
             raise self._infra_error() or PocError(
                 PocErrorCode.POC_CONNECTION_LOST, "connection stopped before event delivery")
         trigger = step.event_type or "PACKET_OBSERVED"
-        if step.kind == "observation":
-            self._conn.emit_observation(step.observation)
-        else:
-            self._conn.emit_event(step.event_type, dict(step.body))
-        self._conn.pump()
-        self._drain_actions(trigger)
+        # provider가 ACTION_RESULT 전에 실패해도 이 자극의 trigger를 잃지 않는다(§4). 값을
+        # 만들어내지 않고, 성공 경로가 이미 쓰는 바로 그 값을 실패 경로에도 나른다.
+        self._delivering_trigger = trigger
+        try:
+            if step.kind == "observation":
+                self._conn.emit_observation(step.observation)
+            else:
+                self._conn.emit_event(step.event_type, dict(step.body))
+            self._conn.pump()
+            self._drain_actions(trigger)
+        finally:
+            self._delivering_trigger = None
 
     def _drain_actions(self, trigger: str) -> None:
         for _ in range(_DRAIN_ITER_CAP):
@@ -204,6 +214,7 @@ class WorkloadRunner:
                 if len(self._processed) >= MAX_WORKLOAD_ACTION_REQUESTS:
                     raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "action result limit exceeded")
                 self._processed[request_id] = dict(result)
+                self._trigger_by_request[request_id] = trigger
                 action = self._conn.submitted_action(request_id)
                 if not isinstance(action, dict):
                     raise PocError(PocErrorCode.POC_PROTOCOL_ERROR, "action binding missing")
@@ -445,7 +456,7 @@ class WorkloadRunner:
             if accepted:
                 self._record_failure(PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN))
             self._attacks.append(self._make_attack(
-                request_id, "not recorded", {}, result,
+                request_id, self._trigger_by_request.get(request_id, "not recorded"), {}, result,
                 ActionExecution.TX_UNKNOWN if accepted else ActionExecution.REJECTED_BEFORE_TX,
                 TargetEffect.INDETERMINATE if accepted else TargetEffect.NOT_APPLICABLE,
                 "terminal not confirmed" if accepted else result.get("error_code")))
@@ -492,11 +503,16 @@ class WorkloadRunner:
             value = attempt.get(key)
             captured[key] = value if isinstance(value, str) and value else None
         self._uncertain_submissions[request_id] = captured
+        # 이 실패는 자극 전달 도중 올라온다 — 그 자극의 실제 event kind를 그대로 나른다.
+        # 전달 밖에서 올라왔고 기록도 없으면 trigger를 모르므로 "not recorded"를 유지한다(추정 금지).
+        if self._delivering_trigger is not None:
+            self._trigger_by_request[request_id] = self._delivering_trigger
+        trigger = self._trigger_by_request.get(request_id, "not recorded")
         if not any(a.request_id == request_id for a in self._attacks):
             if len(self._attacks) >= MAX_WORKLOAD_ACTION_REQUESTS:
                 return
             self._attacks.append(self._make_attack(
-                request_id, "not recorded", captured, captured,
+                request_id, trigger, captured, captured,
                 ActionExecution.TX_UNKNOWN, TargetEffect.INDETERMINATE,
                 "provider outcome unconfirmed before accepted ACTION_RESULT"))
 

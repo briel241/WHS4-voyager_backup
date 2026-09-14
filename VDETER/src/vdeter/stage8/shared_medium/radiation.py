@@ -52,6 +52,15 @@ class BroadcastNotAdmitted(BroadcastError):
     """group staging(prepare_group) 실패 — RF 방사 전 거부(안전, TX 0)."""
 
 
+class BroadcastCommitRefused(BroadcastError):
+    """commit 경로가 **방사 전에** 명시적으로 거부했다 — TX 0이 확정이다(불명확 아님).
+
+    `BroadcastOutcomeUnknown`과 나누는 기준은 오직 **증거**다: 권위 장치가 스스로 "거부했다"고
+    회신한 경우에만 쓴다. 전송 실패·응답 누락·인터럽트처럼 방사 여부를 알 수 없는 실패는 여기
+    넣지 않는다 — 그런 실패는 UNKNOWN으로 남아 SESSION_INHIBIT 대상이 된다.
+    """
+
+
 class BroadcastOutcomeUnknown(BroadcastError):
     """group commit 결과 불명확 — TX가 발생했는지 확실치 않음(§6.1, SESSION_INHIBIT 대상)."""
 
@@ -485,6 +494,12 @@ class AtomicBroadcast:
         }
         try:
             self._sink.commit_group(admission)
+        except BroadcastCommitRefused:
+            # 권위 장치가 **방사 전에** 거부했다고 스스로 회신한 경우만 여기로 온다. 방사 0이
+            # 확정이므로 in-flight group을 남기지 않고 되돌린다(staging 거부와 같은 상태).
+            # UNKNOWN으로 승격하지 않는다 — 상위가 자원을 반환하고 PoC action만 거부한다.
+            self._active_groups.pop(parent.parent_id, None)
+            raise
         except BaseException as error:
             # commit에 진입한 뒤의 어떤 실패(Exception·BaseException)도 TX outcome은 불명확하다.
             # 성공으로 만들지 않고 OUTCOME_UNKNOWN으로 남기며 in-flight group을 유지해 correlation·

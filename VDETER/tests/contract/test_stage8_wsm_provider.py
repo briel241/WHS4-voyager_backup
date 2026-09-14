@@ -298,6 +298,36 @@ class CommitUnknownErrorContractTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
         self.assertEqual(sink.submit_calls, 0)
 
+    def test_commit_refusal_rejects_the_action_without_inhibiting_the_session(self):
+        # 권위 장치가 방사 전 거부를 회신 -> 자원 반환 + PoC action만 거부. 세션은 유지된다.
+        from vdeter.stage8.poc_api.errors import Severity
+
+        arbiter = TD.FakeArbiter()
+        sink = TD.CountingRadioSink(refuse_on_commit=True)
+        prov, _s, _f = _provider(sink=sink, arbiter=arbiter)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC"), request_id="ref")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_RADIO_RESOURCE_CONFLICT)
+        self.assertEqual(ctx.exception.severity, Severity.REQUEST_REJECTED)
+        self.assertEqual(sink.submit_calls, 0)                    # 방사 0
+        self.assertEqual(prov.active_group_count, 0)              # in-flight 잔존 0
+        self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
+
+    def test_commit_unknown_still_inhibits_and_retains_the_cause(self):
+        # 인접 negative: 불명확은 그대로 SESSION_INHIBIT이고, 원인 문구가 detail에 남는다.
+        from vdeter.stage8.poc_api.errors import Severity
+
+        sink = TD.CountingRadioSink(fail_on_commit=True)
+        prov, _s, _f = _provider(sink=sink)
+        with self.assertRaises(PocError) as ctx:
+            prov.submit(_action("ROC"), request_id="unk")
+        self.assertEqual(ctx.exception.code, PocErrorCode.POC_TX_OUTCOME_UNKNOWN)
+        self.assertEqual(ctx.exception.severity, Severity.SESSION_INHIBIT)
+        self.assertIn("commit_failure", ctx.exception.detail)
+        self.assertIn("injected commit_group failure",
+                      ctx.exception.detail["commit_failure"])
+        self.assertEqual(prov.active_group_count, 1)              # correlation 보존
+
 
 class ForProductionTest(unittest.TestCase):
     """production 조립은 scheduler·frozen PHY waveform factory를 필수로 fail-closed한다(제안)."""
