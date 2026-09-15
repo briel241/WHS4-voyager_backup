@@ -1988,15 +1988,18 @@ def main(argv=None) -> int:
             # 지연 해부: proc_lag_ms 1.7~2.3초가 큐 앞쪽인지 뒤쪽인지 가른다.
             # completed_at은 adapter가 self._time_source.now_monotonic()으로
             # 채우므로 같은 프로세스 monotonic과 직접 비교된다.
-            try:
-                now_m = _time.monotonic()
-                if len(_c_stamp) > 4096:
-                    _c_stamp.clear()
-                _c_stamp[id(completion)] = now_m
-                done_ns = completion.completed_at.total_nanoseconds()
-                _cost_add("lat.radio2launcher", now_m - done_ns / 1e9)
-            except Exception:  # noqa: BLE001
-                pass
+            # 소비자(lat.queue 차감·[diag] cost)가 _DIAG 아래에만 있으므로
+            # 적재도 같은 조건에서만 한다. 상한·정리는 그대로 안에 남는다.
+            if _DIAG:
+                try:
+                    now_m = _time.monotonic()
+                    if len(_c_stamp) > 4096:
+                        _c_stamp.clear()
+                    _c_stamp[id(completion)] = now_m
+                    done_ns = completion.completed_at.total_nanoseconds()
+                    _cost_add("lat.radio2launcher", now_m - done_ns / 1e9)
+                except Exception:  # noqa: BLE001
+                    pass
             _dispatch_queue.append(
                 ("c", self_d, lane_generation, lane_index, child_key, completion)
             )
@@ -2230,16 +2233,20 @@ def main(argv=None) -> int:
                     lane_index, lane_generation, context,
                     _time.monotonic(),
                 )
-                try:
-                    if len(self._submit_utc) > 4096:
-                        self._submit_utc.clear()
-                    self._submit_utc[job_id] = _utc_ns()
-                except Exception:  # noqa: BLE001
-                    pass
+                # _win_trace 짝. 소비자(_diag_t4)가 _DIAG 아래라 적재도 맞춘다.
+                if _DIAG:
+                    try:
+                        if len(self._submit_utc) > 4096:
+                            self._submit_utc.clear()
+                        self._submit_utc[job_id] = _utc_ns()
+                    except Exception:  # noqa: BLE001
+                        pass
                 _, rx_window_key = context
                 try:
                     self._inflight[lane_index] += 1
-                    _cost_add("depth.inflight", self._inflight[lane_index])
+                    if _DIAG:
+                        _cost_add("depth.inflight",
+                                  self._inflight[lane_index])
                 except Exception:  # noqa: BLE001
                     pass
                 try:
@@ -2310,13 +2317,15 @@ def main(argv=None) -> int:
                 try:
                     self._inflight[pending_lane] = max(
                         0, self._inflight[pending_lane] - 1)
-                    round_trip = _time.monotonic() - _submitted
-                    _cost_add("lat.worker", round_trip)
-                    # 워커가 실은 실제 계산 시간 (마지막 원소).
-                    decode_s = message[-1]
-                    if isinstance(decode_s, float):
-                        _cost_add("lat.decode", decode_s)
-                        _cost_add("lat.jobwait", max(0.0, round_trip - decode_s))
+                    if _DIAG:
+                        round_trip = _time.monotonic() - _submitted
+                        _cost_add("lat.worker", round_trip)
+                        # 워커가 실은 실제 계산 시간 (마지막 원소).
+                        decode_s = message[-1]
+                        if isinstance(decode_s, float):
+                            _cost_add("lat.decode", decode_s)
+                            _cost_add("lat.jobwait",
+                                      max(0.0, round_trip - decode_s))
                 except Exception:  # noqa: BLE001
                     pass
                 try:
@@ -2328,18 +2337,22 @@ def main(argv=None) -> int:
                             attempt_records=message[4],
                         )
                     else:
-                        try:
-                            first_ns = message[5]
-                            sent = self._submit_utc.pop(message[1], None)
-                            if first_ns and sent:
-                                if len(_win_trace) > 4096:
-                                    _win_trace.clear()
-                                _win_trace[first_ns] = (
-                                    (sent - first_ns) / 1e6,
-                                    (_utc_ns() - first_ns) / 1e6,
-                                )
-                        except Exception:  # noqa: BLE001
-                            pass
+                        # 적재와 정리(pop)를 한 조건 안에 둔다 — OFF 에서는
+                        # _submit_utc 가 비어 있으므로 정리할 것도 없다.
+                        if _DIAG:
+                            try:
+                                first_ns = message[5]
+                                sent = self._submit_utc.pop(
+                                    message[1], None)
+                                if first_ns and sent:
+                                    if len(_win_trace) > 4096:
+                                        _win_trace.clear()
+                                    _win_trace[first_ns] = (
+                                        (sent - first_ns) / 1e6,
+                                        (_utc_ns() - first_ns) / 1e6,
+                                    )
+                            except Exception:  # noqa: BLE001
+                                pass
                         self._dispatcher.complete_decoded(
                             generation, pending_lane, context,
                             result=message[3],
@@ -2584,7 +2597,7 @@ def main(argv=None) -> int:
                               file=sys.stderr, flush=True)
                     return
                 _item_started = _time.monotonic()
-                if kind == "c":
+                if kind == "c" and _DIAG:
                     try:
                         _q_at = _c_stamp.pop(id(item[5]), None)
                         if _q_at is not None:
@@ -2601,10 +2614,12 @@ def main(argv=None) -> int:
                 except Exception as error:  # noqa: BLE001
                     print(f"[launcher] dispatch-drain 오류: {error}",
                           file=sys.stderr, flush=True)
-                try:
-                    _cost_add("drain." + kind, _time.monotonic() - _item_started)
-                except Exception:  # noqa: BLE001
-                    pass
+                if _DIAG:
+                    try:
+                        _cost_add("drain." + kind,
+                                  _time.monotonic() - _item_started)
+                    except Exception:  # noqa: BLE001
+                        pass
                 if promoted > 0:
                     promoted -= 1
                 elif mac_cycle is not None:
@@ -2613,12 +2628,14 @@ def main(argv=None) -> int:
                         mac_cycle()
                     except Exception:  # noqa: BLE001
                         pass
-                    try:
-                        _cost_add(
-                            "drain.mac_cycle", _time.monotonic() - _mac_started
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
+                    if _DIAG:
+                        try:
+                            _cost_add(
+                                "drain.mac_cycle",
+                                _time.monotonic() - _mac_started,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                 if (
                     _time.monotonic() - drain_started > 0.3
                     and index + 1 < len(ordered)

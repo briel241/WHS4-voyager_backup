@@ -15,6 +15,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURE = _ROOT / "tests/fixtures/stage7_phase_i_function_bindings.json"
 _RENAME_FIXTURE = (_ROOT /
                    "tests/fixtures/stage7_approved_rename_function_bindings.json")
+_DIAG_FIXTURE = (_ROOT /
+                 "tests/fixtures/stage7_diagnostics_gating_function_bindings.json")
 _SOURCE = _ROOT / "VDETER/apps/coordinator_main.py"
 
 #: 과거 자격 기록(phase-g reference·profile)의 **당시 경로** -> 현재 경로.
@@ -86,4 +88,20 @@ def approved_rename_pins(*, bindings=None):
         bindings = _json.loads(_RENAME_FIXTURE.read_text(encoding="utf-8"))
     if bindings.get("artifact_type") != "STAGE7_APPROVED_RENAME_FUNCTION_HASHES_V1":
         raise ValueError("unsupported approved-rename hash contract")
+    return {name: dict(spec) for name, spec in bindings["functions"].items()}
+
+
+def diagnostics_gating_pins(*, bindings=None):
+    """3-1 진단 게이트로 해시가 바뀐 자격 함수의 **고정 해시**.
+
+    승인 rename 기록과 별개다 — 그쪽은 이름 치환이라 동작이 같았고, 이쪽은 **제한적
+    동작 변경**이라 근거 문서도 다르다(change-scope-proof.json). 이름 allow-list 가
+    아니라 고정 해시이므로 이 기록 이후의 추가 변경은 다시 검출된다.
+    """
+    import json as _json
+
+    if bindings is None:
+        bindings = _json.loads(_DIAG_FIXTURE.read_text(encoding="utf-8"))
+    if bindings.get("artifact_type") != "STAGE7_DIAGNOSTICS_GATING_FUNCTION_HASHES_V1":
+        raise ValueError("unsupported diagnostics-gating hash contract")
     return {name: dict(spec) for name, spec in bindings["functions"].items()}

@@ -888,6 +888,16 @@ def run_rr_p1(coordinator, resolved, plan, run_root: str, *, run_id, metadata):
     return result
 
 
+def _diagnostics_enabled() -> bool:
+    """이 실행에 적용된 진단 설정 (기존 `STAGE7_DIAG` 하나만 읽는다).
+
+    새 설정 출처·우선순위를 만들지 않는다. 부모 CLI 가 `build_child_env` 로 넣은 값을
+    그대로 본다. 모듈 전역 캐시를 쓰지 않는 이유: 같은 인터프리터에서 서로 다른 설정으로
+    도는 시험 격리를 깨뜨리기 때문이다(조회는 spawn·trace 생성 시점의 몇 회뿐이다).
+    """
+    return os.environ.get("STAGE7_DIAG", "0") == "1"
+
+
 def _spawn_controller(run_id, run_root, configs_dir, test_plan_sha, mode,
                       soak_seconds=600, min_transfers=10):
     logs_dir = os.path.join(run_root, "logs")
@@ -933,6 +943,10 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
         "--scenario-id", scenario_id,
         "--certificate-case", certificate_case,
     ]
+    # 부모와 자식의 진단 적용 상태를 일치시킨다(child 는 env 도 상속하지만
+    # workload trace 상세도는 이 옵션으로만 정해진다).
+    if _diagnostics_enabled():
+        command.append("--diagnostics")
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
 
 
@@ -950,7 +964,10 @@ def _open_session_trace(run_root, run_id):
             sys.path.insert(0, repo_root)
         from apps.service_trace import TraceWriter
 
-        return TraceWriter(path, session_id=run_id, diagnostics=True)
+        # 이 실행에 적용된 진단 설정을 그대로 쓴다. 상세도만 바뀌며
+        # 필수 이벤트는 detail_level 기본값("normal")이라 OFF 에서도 남는다.
+        return TraceWriter(path, session_id=run_id,
+                           diagnostics=_diagnostics_enabled())
     except Exception as exc:  # noqa: BLE001
         print(f"[coordinator] 계측 비활성 ({type(exc).__name__}: {exc})", flush=True)
 
@@ -1724,7 +1741,10 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         guard.check()
         guard.progress(name)
         marks[name] = round(time.monotonic() - t0, 1)
-        emit("phase_mark", phase=name, elapsed_s=marks[name])
+        # 단계 시각은 marks(→ phase_elapsed_s·RR 판정)로 항상 남는다.
+        # trace 이벤트는 소비자가 없는 선택 자료라 진단에서만 기록한다.
+        emit("phase_mark", detail_level="diagnostic",
+             phase=name, elapsed_s=marks[name])
 
     def now_ns():
         return int(read_monotonic_raw_ns())
@@ -1908,7 +1928,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 break
             waited = time.monotonic() - intent_t0
             if waited >= next_report:
-                emit("intent_wait", elapsed_s=round(waited, 2), **intent_state())
+                emit("intent_wait", detail_level="diagnostic",
+                     elapsed_s=round(waited, 2), **intent_state())
                 next_report = waited + 5.0
             if start_proxy.poll() is not None:
                 emit("intent_failed", reason="proxy_exited_early",
@@ -1951,7 +1972,8 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 break
             waited = time.monotonic() - tbb_t0
             if waited >= next_tbb_report:
-                emit("tbb_wait", elapsed_s=round(waited, 2), **tbb_state())
+                emit("tbb_wait", detail_level="diagnostic",
+                     elapsed_s=round(waited, 2), **tbb_state())
                 next_tbb_report = waited + 10.0
             if now_ns() >= tbb_deadline:
                 emit("tbb_failed", reason="publish_deadline",

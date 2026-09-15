@@ -440,6 +440,61 @@ vdeter diag status
   RF 계수는 evidence에 없다(transfer 단위 counters만) — 강제한다고 주장하지 않는다.
 - 종료 코드는 §11과 같다(`4`=authorization 없음/변조/만료/stale, `2`=plan 범위·한도 초과).
 
+## 7B. 진단 스위치(`STAGE7_DIAG`)가 바꾸는 것 (2026-09-16, 3-1 — 제한적 동작 변경)
+
+이름과 켜는 방법은 그대로다. 바뀐 것은 **무엇이 이 스위치를 따르는가**이다. 이전에는 세 갈래였다
+— env 소비자만 스위치를 따르고, coordinator trace 는 항상 상세, workload trace 는 항상 기본.
+지금은 한 갈래다.
+
+### 7B.1 우선순위와 단일 출처
+
+1. `vdeter run --diagnostics` 가 **유일한 출처**다. 별도 `--no-diagnostics` 는 없다(생략 = off).
+2. `local_session.build_child_env` 가 자식 env 를 만든다 — 상위 환경의 `STAGE7_*` 는 **전부 제거**되므로
+   ambient `STAGE7_DIAG=1` 만으로는 켜지지 않는다(정식 run 오염 방지, 종전 동작).
+3. coordinator·launcher·workload controller 는 그 env 하나만 읽는다. 새 설정 계층·새 옵션은 없다.
+   coordinator 는 자식 workload controller 에게 같은 상태를 `--diagnostics` 로 넘긴다.
+4. `vdeter qualify` 의 RR 사다리는 `diagnostics` 를 넘기지 않는다 → 항상 off(종전대로).
+
+`run.json`·`summary.json` 의 `diagnostics` 필드는 **요청값이 아니라 적용값**이다 — 자식 env 를 만드는
+같은 함수에서 읽어 적는다.
+
+### 7B.2 항상 남는 기록 (off 에서도)
+
+| 기록 | 왜 |
+| --- | --- |
+| `service_events/*.jsonl` | 시나리오 판정 입력 + stall guard liveness |
+| 단계 시각·`phase_elapsed_s` | RR-004 PASS 조건, `vdeter results` 단계표 |
+| coordinator trace 의 판정 원인·요약 이벤트 | `session_ready`·`intents_complete`·`tbb_complete`·`workload_result`·`session_closed`, 그리고 진행바가 읽는 `rf_time_pre/post_summary` |
+| `closed.json`·RR evidence·재현 환경 필드 | 자격·재현 입력 |
+| lead 여유 3키·tuning readback/복원·lease 소유권 | 성공·실패 공통 계약 |
+| 실패 사유·거부 코드·취소/정리 카운터·잔존 0 | 진단 여부로 달라지면 안 되는 것 |
+
+`session-coordinator-trace.jsonl` **파일 자체는 양쪽에서 생긴다.** 파일을 켜고 끄는 것이 아니라 그
+안의 선택적 이벤트만 나뉜다. guard 진행 통지도 스위치와 무관하게 계속 돈다.
+
+### 7B.3 on 에서만 남는 기록
+
+| 기록 | 성격 |
+| --- | --- |
+| coordinator trace 의 `phase_mark`·`intent_wait`·`tbb_wait` | 주기·표식 자료. 기계 소비자 0 |
+| launcher `_COST` 누적과 `[diag] cost` 한 줄 요약 | 병목 해부 |
+| launcher 창 추적(`_win_trace`)·제출 시각(`_submit_utc`)·큐 적재 시각(`_c_stamp`) | 소비자가 이미 on 전용이었다 — 적재를 소비 조건에 맞췄다 |
+| workload trace 상세도 | 부모가 적용 상태를 자식에게 넘긴다 |
+
+### 7B.4 바꾸지 않은 것
+
+RF·PHY·MAC·TDMA·타이밍·임계값·시나리오 판정·재시도·RX gate·tuning 정책은 그대로다.
+IQ 원파형 덤프(`evidence/iq_debug/`)는 이번에 **손대지 않았다** — 그 JSON sidecar 가
+`collect_phase_evidence_sha256` 를 통해 reference 의 evidence SHA map 에 실리므로, 게이트를 걸면
+자격 reference 가 기록하는 범위가 달라진다(별도 승인 사항).
+
+**이는 제한적 동작 변경이다.** off 로 돌린 실행의 `session-coordinator-trace.jsonl` 에는 이전보다
+이벤트가 적고(7B.3 의 3종), launcher 의 선택적 적재가 돌지 않는다. 자격 판정·필수 evidence·진행
+통지는 불변이며, 해시가 바뀐 자격 함수는
+`tests/fixtures/stage7_diagnostics_gating_function_bindings.json` 에 **고정 해시**로 재결속했다
+(이름 허용목록이 아니므로 이후 추가 변경은 다시 거부된다). 비용 절감은 **측정하지 않았고**
+수치로 주장하지 않는다 — 근거는 구조 일관성(적재와 소비가 같은 조건)이다.
+
 ## 8. qualification-critical 경계 (결정 13·14 정합 정의)
 
 일반 `vdeter run`이 reference와 **대조하는** critical 값 (불일치 = UNQUALIFIED,

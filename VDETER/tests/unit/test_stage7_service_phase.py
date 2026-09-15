@@ -224,16 +224,28 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
     def test_change_is_additive_only(self):
         """변경 함수 집합은 정확히 {run_mass_roc_session(Phase G),
         run_rr_p0(Pi powered-USB3-hub profile, 2026-09-10),
-        run_rr_p3_fault(Phase I)}; 추가 함수는 Phase G helper 2개 +
-        Phase I `_p3_fault_status` + powered-hub helper 2개로 한정."""
+        run_rr_p3_fault(Phase I)} + 3-1 진단 게이트로 재고정한
+        {_open_session_trace, _spawn_mass_roc_controller}; 추가 함수는
+        Phase G helper 2개 + Phase I `_p3_fault_status` + powered-hub
+        helper 2개 + 3-1 `_diagnostics_enabled` 로 한정.
+
+        기대 집합은 fixture 에서 합성하되 **정확 일치**로 판정한다 — 승인
+        기록에 없는 함수가 하나라도 바뀌면 실패다."""
+        bindings = _phase_i_bindings()
+        approved_changed = set(
+            bindings["expected_changed_vs_qualified_commit"])
+        for entry in bindings.get("rebinding_history", ()):
+            approved_changed |= set(entry.get("functions_repinned", ()))
         changed = sorted(n for n in self.old if n in self.new
                          and self.old[n] != self.new[n])
-        self.assertEqual(changed, sorted(_phase_i_bindings()[
-            "expected_changed_vs_qualified_commit"]), str(changed))
-        self.assertEqual(changed, ["run_mass_roc_session", "run_rr_p0",
+        self.assertEqual(changed, sorted(approved_changed), str(changed))
+        self.assertEqual(changed, ["_open_session_trace",
+                                   "_spawn_mass_roc_controller",
+                                   "run_mass_roc_session", "run_rr_p0",
                                    "run_rr_p3_fault"])
         added = sorted(set(self.new) - set(self.old))
-        self.assertEqual(added, ["_expected_usb_speed",
+        self.assertEqual(added, ["_diagnostics_enabled",
+                                 "_expected_usb_speed",
                                  "_p3_fault_status",
                                  "_service_session_terminal_status",
                                  "_shared_hub_topology_check",

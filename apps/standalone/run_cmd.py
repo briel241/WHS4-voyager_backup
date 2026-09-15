@@ -43,6 +43,7 @@ from apps.standalone import (
 from apps.standalone.local_session import (
     LocalCoordinatorSession,
     LocalSessionError,
+    build_child_env,
 )
 from apps.standalone.state import (
     SingleInstanceLock,
@@ -618,6 +619,10 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         "identity_fingerprint": context["identity"]["fingerprint"],
         "requested_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "config_hashes": generated["resolved_sha256"],
+        # 이 실행에 **실제 적용된** 진단 설정. 요청값이 아니라 자식 env 를 만드는
+        # 단일 출처(build_child_env)가 STAGE7_DIAG 를 넣었는지 읽는다.
+        "diagnostics": build_child_env(
+            diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
     })
 
     session = session_factory(
@@ -1060,6 +1065,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     "scenarios_planned": len(plan),
                     "workloads": [], "close": summary,
                     "attempts": attempts,
+                    "diagnostics": build_child_env(
+                        diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
                     **authority_fields(reference),
                     "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                   time.gmtime()),
@@ -1248,6 +1255,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 "workloads": results, "close": summary,
                 "usb_topology_after_close": topology_after,
                 "attempts": attempts,
+                "diagnostics": build_child_env(
+                    diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
                 **authority_fields(reference),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                               time.gmtime()),

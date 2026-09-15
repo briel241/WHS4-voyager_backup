@@ -1,5 +1,6 @@
 {
  "added_functions": [
+  "_diagnostics_enabled",
   "_expected_usb_speed",
   "_p3_fault_status",
   "_shared_hub_topology_check"
@@ -13,8 +14,8 @@
  ],
  "functions": {
   "run_mass_roc_session": {
-   "ast_sha256": "6ed24b222084fe25e326d66d0751c3eb745efddfb414d0652cbfa2ea26fb3eef",
-   "source_sha256": "2261dd4b1fa73108e9e390533150e4691fbf3ac598460caf607500765b89e849"
+   "ast_sha256": "dd004cd1a31c0faf4338f0fb3cddfaf14982dd963246394092277b15da7165a1",
+   "source_sha256": "b31cd8b0b1e490cd82801e3842b5e036c97df551249e3407fb61768c7401851d"
   },
   "run_rr_p0": {
    "ast_sha256": "df18a264d2f5c13c7101b2b184344001eeeacba74e8e77fc47697f0799275054",
@@ -23,6 +24,14 @@
   "run_rr_p3_fault": {
    "ast_sha256": "164498f8564ebc2bac697eeacabacc46c48833a8392d6b82b3e38e62738b5a35",
    "source_sha256": "1d3325b93a046430e121e0069e61852bb0b0987d86fff2450e3547f343abc628"
+  },
+  "_open_session_trace": {
+   "ast_sha256": "f7a39868b3cf5472bb04855af2241c56667ccd40f88a746cbcadd24a4fa73ea2",
+   "source_sha256": "f6a81c440cd8cbe29de1ddc7e910ebdb17ec2f153e2ff20842f4e75bd4978039"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "6566802500be253e2693800831097ac78a923bbe97ed7c29601196798587d91e",
+   "source_sha256": "3202d8a95f6043398861a8c27a0301ec44cd4c37a6ac0aa7c37b511fb42ff469"
   }
  },
  "pi_powered_usb3_hub_2026_09_10": {
@@ -101,6 +110,54 @@
      }
     }
    }
+  },
+  {
+   "reason": "Stage 8 3-1 진단·계측 정리 — 선택적 이벤트·수집을 기존 진단 스위치에 연결한 제한적 동작 변경(자격 판정 입력은 불변)",
+   "approved_utc": "2026-09-16",
+   "base_commit_before_change": "7d0d1d40d57c067c48ff5ac6e0404c7c65f6eee9",
+   "evidence": "step3-1-impl-20260916/change-scope-proof.json (승인 편집만 되돌린 AST == 직전 커밋 AST)",
+   "functions_repinned": [
+    "_open_session_trace",
+    "_spawn_mass_roc_controller",
+    "run_mass_roc_session"
+   ],
+   "helpers_added": [
+    "_diagnostics_enabled"
+   ],
+   "behavior_change": "제한적 동작 변경이다. diagnostics OFF 에서 (1) coordinator trace 가 더 이상 항상 상세 모드가 아니고, (2) 선택적 이벤트 phase_mark·intent_wait·tbb_wait 가 기록되지 않는다. diagnostics ON 에서는 workload controller 자식에게 --diagnostics 가 전달된다. 단계 시각의 인메모리 적재·guard 진행 통지·phase_elapsed_s·최종 판정·필수 이벤트는 양쪽에서 불변이다. RF·PHY·MAC·TDMA·타이밍·임계값·시나리오 판정은 변경하지 않았다.",
+   "functions": {
+    "_open_session_trace": {
+     "previous": {
+      "ast_sha256": "34283644376bae9e3e5dd0dadee9a40fb0e5df08934176e96f2a7d6889467eb2",
+      "source_sha256": "b82cf7f7fc193ccc3619f2aa60acc7fc162235da8054a4845cfa3af05e17311f"
+     },
+     "new": {
+      "ast_sha256": "f7a39868b3cf5472bb04855af2241c56667ccd40f88a746cbcadd24a4fa73ea2",
+      "source_sha256": "f6a81c440cd8cbe29de1ddc7e910ebdb17ec2f153e2ff20842f4e75bd4978039"
+     }
+    },
+    "_spawn_mass_roc_controller": {
+     "previous": {
+      "ast_sha256": "4f9d6f0a4333fc926d4d9375a599794fce0b497aa9a856ac7f78be40f2d7a8c6",
+      "source_sha256": "238715334944d84cf37575f442771b282049a6de4fe8a61ec44e7660f89c762e"
+     },
+     "new": {
+      "ast_sha256": "6566802500be253e2693800831097ac78a923bbe97ed7c29601196798587d91e",
+      "source_sha256": "3202d8a95f6043398861a8c27a0301ec44cd4c37a6ac0aa7c37b511fb42ff469"
+     }
+    },
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "6ed24b222084fe25e326d66d0751c3eb745efddfb414d0652cbfa2ea26fb3eef",
+      "source_sha256": "2261dd4b1fa73108e9e390533150e4691fbf3ac598460caf607500765b89e849"
+     },
+     "new": {
+      "ast_sha256": "dd004cd1a31c0faf4338f0fb3cddfaf14982dd963246394092277b15da7165a1",
+      "source_sha256": "b31cd8b0b1e490cd82801e3842b5e036c97df551249e3407fb61768c7401851d"
+     }
+    }
+   }
   }
- ]
+ ],
+ "expected_changed_note": "`expected_changed_vs_qualified_commit` 는 **이 fixture 만으로** 승인되는 변경 목록이다(phase-g 재결속에서 다른 fixture 가 이미 현재 값으로 고정한 함수는 여기에 들어가지 않는다). 승인 rename·진단 게이트로 재고정된 함수는 각 rebinding_history 항목의 functions_repinned 에 있다."
 }
