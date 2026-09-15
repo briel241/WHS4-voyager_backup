@@ -77,22 +77,22 @@ _TX_LEAD_NS = 100_000_000
 _RETUNE_LEAD_NS = 200_000_000
 
 
-def channel_name(stage8_channel) -> str:
-    """Stage 8 `PhysicalChannel`(lower/upper enum) → 권위 Stage 7 canonical 채널 **이름**.
+def channel_name(poc_channel) -> str:
+    """PoC 계층 `PhysicalChannel`(lower/upper enum) → B210 시스템의 권위 canonical 채널 **이름**.
 
-    두 계층은 이름이 같지만 서로 다른 형식이다(Stage 8은 lower/upper enum, Stage 7은 canonical 채널
+    두 계층은 이름이 같지만 서로 다른 형식이다(PoC 계층은 lower/upper enum, B210 시스템은 canonical 채널
     이름 값). 권위 요청·MAC slot 조회·launcher RPC가 모두 이 한 변환점을 쓴다(launcher 경로와 RF-off
     경로가 각자 매핑을 갖지 않는다).
     """
 
     from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
-    from vdeter.poc.api.types import PhysicalChannel as Stage8Channel
+    from vdeter.poc.api.types import PhysicalChannel as PocChannel
 
-    mapping = {Stage8Channel.LOWER: LOWER_CHANNEL_NAME,
-               Stage8Channel.UPPER: UPPER_CHANNEL_NAME}
-    name = mapping.get(stage8_channel)
+    mapping = {PocChannel.LOWER: LOWER_CHANNEL_NAME,
+               PocChannel.UPPER: UPPER_CHANNEL_NAME}
+    name = mapping.get(poc_channel)
     if name is None:
-        raise RuntimeError(f"알 수 없는 Physical Channel: {stage8_channel!r}")
+        raise RuntimeError(f"알 수 없는 Physical Channel: {poc_channel!r}")
     return name
 
 
