@@ -1,0 +1,8 @@
+{
+ "endpoint_common_rx_gain_db": {
+  "MASS-A": 69,
+  "MASS-B": 69,
+  "ROC": 75
+ },
+ "source_gain_artifact_sha256": "36833ce5018336fa3abec98d6f96dbf5b6da1df87b282581b162f62e07fc3d19"
+}

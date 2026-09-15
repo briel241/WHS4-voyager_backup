@@ -1,0 +1,120 @@
+{
+ "artifact_type": "STAGE7_EXECUTION_PROFILE",
+ "baseline_sha256": "2a87c1d0f7bee78c13def8b153745ecbe42ac7dcf701d69abffc9141bc9cc026",
+ "config_preparation": {
+  "external_power_asset_mass_b": "AT2024T",
+  "rr_phase": "rr-p2-17",
+  "run_mode": "OPERATIONAL",
+  "tool": "VDETER/tools/prepare_stage7_run_configs.py"
+ },
+ "endpoints": {
+  "MASS-A": {
+   "power": "PI_BUS_POWER",
+   "role": "SHIP",
+   "serial": "34D03DD",
+   "speed_mbps": 5000,
+   "station_id": 111111111,
+   "usb_path": "3-1"
+  },
+  "MASS-B": {
+   "power": "EXTERNAL_DC_AT2024T",
+   "role": "SHIP",
+   "serial": "3515425",
+   "speed_mbps": 480,
+   "station_id": 333333333,
+   "usb_path": "4-2"
+  },
+  "ROC": {
+   "power": "PI_BUS_POWER",
+   "role": "CONTROL",
+   "serial": "34D03E8",
+   "speed_mbps": 5000,
+   "station_id": 222222222,
+   "usb_path": "5-1"
+  }
+ },
+ "evidence_root": "VDETER/results/phase-g-fixture-sessions",
+ "gain": {
+  "artifact_input_path": "tests/fixtures/phase-g-reference/gain_artifact_input.json",
+  "artifact_input_sha256": "83f79d75f657078368755fc950f62475d89563690d91f03a23a69ed483fce928",
+  "artifact_path": "tests/fixtures/phase-g-reference/gain_artifact.json",
+  "artifact_sha256": "36833ce5018336fa3abec98d6f96dbf5b6da1df87b282581b162f62e07fc3d19",
+  "remote_artifact_input_relpath": "gain_artifact_input.json",
+  "rx_gain_db": {
+   "MASS-A": 69,
+   "MASS-B": 69,
+   "ROC": 75
+  }
+ },
+ "orchestration": {
+  "coordinator_phase": "mass-roc-session",
+  "deployment_manifest_sha256": "32ee85c5446a1dfa348a5ce714fb8133dd59b66738a85865691a1102417e80cc",
+  "deployment_note": "phase-g-debug-20260901a — 병목 해부 디버그 배포. launcher에 구간별 비용 계측(STAGE7_DIAG 게이트, fail-open)만 추가했다. 자격 실행이 아니다 — RF 자격 판정에 쓰지 않는다. 기준 자격은 mass-roc-rr-p1-20260831g(커밋 5fcd9f7).",
+  "entry_point": "apps/scenario_runner.py menu --transport stage7 --profile <this>",
+  "note": "orchestration provenance — RF qualification 결과를 바꾸지 않는 계층",
+  "service_layer": [
+   "apps/stage7_mass_roc_controller.py",
+   "apps/stage7_profile.py",
+   "apps/stage7_run.py",
+   "apps/stage7_service_layer.py",
+   "apps/stage7_session.py",
+   "apps/stage7_trace.py"
+  ],
+  "source_commit": "5fcd9f7"
+ },
+ "phase_g_deployment": {
+  "deploy_run_id": "phase-fg-requal-20260902c",
+  "manifest_sha256": "f799b311fc60d912c9a9b6bb27d65d1ffaf9849c88828cd0e1831835ce9042e5"
+ },
+ "pi": {
+  "deploy_relpath": "vdeter-stage7/phase-fg-requal-20260902c",
+  "deploy_run_id": "phase-fg-requal-20260902c",
+  "host": "pi@pi.invalid",
+  "venv_python": "$HOME/vdeter-stage7/venv/bin/python3"
+ },
+ "profile_id": "stage7-mass-roc-operational-v1-fixture",
+ "qualification_reference": {
+  "path": "qualification-reference.json",
+  "sha256": "cbe0fc9e0bf7399e6938283d63a31858a39a60ee309eb04db184f547babb329c"
+ },
+ "rf_settings": {
+  "actual_lower_tune_hz": 2447237500,
+  "actual_upper_tune_hz": 2451837500,
+  "analog_bandwidth_hz": 200000,
+  "clock_source": "internal",
+  "cpu_format": "fc32",
+  "implicit_retry": 0,
+  "link_ids": [
+   11,
+   17,
+   19
+  ],
+  "logical_lower_hz": 157237500,
+  "logical_upper_hz": 161837500,
+  "master_clock_rate_hz": 30720000,
+  "otw_format": "sc16",
+  "pps": "NONE",
+  "rx_gain_db": {
+   "MASS-A": 69,
+   "MASS-B": 69,
+   "ROC": 75
+  },
+  "sample_format": "cf32le",
+  "sample_rate_hz": 307200,
+  "time_source": "internal",
+  "translation_hz": 2290000000,
+  "transmit_lead_ns": 250000000,
+  "tx_gain_db": 0,
+  "waveform_bandwidth_hz": 100000
+ },
+ "schema_version": 1,
+ "session_timeout_s": 7800,
+ "trust": {
+  "certificate_path": "VDETER/configs/stage7/trust/roc_tbb_signer_cert.pem",
+  "note": "개인키는 존재·권한·key/cert 일치만 확인한다. 내용·해시는 기록하지 않는다.",
+  "private_key_path": "VDETER/configs/stage7/trust/roc_tbb_signer_key.pem",
+  "private_key_required_mode": "600",
+  "trust_store_path": "VDETER/configs/stage7/trust/tbb_trust_store.pem"
+ },
+ "wiring_profile": "STAGE7_C1_C6_TRIANGLE_V1"
+}

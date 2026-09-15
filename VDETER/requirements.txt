@@ -1,0 +1,6 @@
+# 단계 0 core runtime. Python 3.11 이상은 표준 tomllib를 사용한다.
+tomli>=2.0; python_version < "3.11"
+
+# NumPy는 단계 3 이후 PHY·Radio/DSP 개발용 optional extra다:
+# python -m pip install -e ".[dsp]"
+# GNU Radio, UHD와 PMT는 radio 개발 환경에서 제공한다.

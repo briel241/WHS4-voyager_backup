@@ -1,0 +1,273 @@
+{
+  "artifact_type": "AES_256_GCM_PARAMETER_BENCHMARK_ENVIRONMENT_V1",
+  "created_utc": "2026-09-15T04:17:39.173456+00:00",
+  "python_version": "3.13.3",
+  "python_implementation": "CPython",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cryptography_version": "50.0.1",
+  "cryptography_openssl_version": "OpenSSL 4.0.2 25 Aug 2026",
+  "python_ssl_openssl_version": "OpenSSL 3.0.16 11 Feb 2025",
+  "python_executable": "C:\\Users\\junge\\OneDrive\\바탕 화면\\voyager-work\\voyager_3\\.venv\\Scripts\\python.exe",
+  "processor": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+  "logical_cpu_count": 22,
+  "statistics_unit": "individual operation nanoseconds; pooled samples, not batch averages",
+  "p95_method": "nearest rank: sorted samples[ceil(0.95*N)-1]",
+  "shuffle_seed": 20260915,
+  "warmup_scope": "per condition per batch; excluded from raw and summary",
+  "timer": "time.perf_counter_ns",
+  "timer_resolution_seconds": 1e-07,
+  "measurement_api": "cryptography.hazmat.primitives.ciphers.aead.AESGCM",
+  "key_bits": 256,
+  "key_source": "ephemeral os.urandom; value not persisted",
+  "aad_bytes": 22,
+  "aad_rule": "VDS2 domain + 3-byte prefix + source + destination + security header",
+  "baseline": {
+    "tag_bytes": 16,
+    "nonce_bytes": 12,
+    "plaintext_bytes": 256
+  },
+  "conditions": [
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 12,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 13,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 14,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 15,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 8,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 16,
+      "plaintext_bytes": 256
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 32
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 64
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 128
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 512
+    },
+    {
+      "tag_bytes": 16,
+      "nonce_bytes": 12,
+      "plaintext_bytes": 1024
+    }
+  ],
+  "warmups": 200,
+  "iterations": 5000,
+  "batches": 10,
+  "sweep": "one-at-a-time",
+  "timed_costs_included": [
+    "AESGCM object construction",
+    "encrypt/decrypt call",
+    "tag generation/verification",
+    "decrypt ciphertext+tag concatenation",
+    "timer read overhead; no subtraction"
+  ],
+  "timed_costs_excluded": [
+    "key generation",
+    "plaintext preparation",
+    "nonce allocation",
+    "security header and AAD construction",
+    "serialization",
+    "file output"
+  ],
+  "nonce_safety": "A random per-length prefix plus one process-global 32-bit counter; all generated nonces are checked for uniqueness under the ephemeral key. Non-12-byte nonces are benchmark-only; VDS2 remains fixed at 12 bytes.",
+  "tag_support": "AESGCM encryption natively emits 16 bytes only; 12..15 are rejected without truncation.",
+  "vds2_constants": {
+    "header_bytes": 7,
+    "nonce_bytes": 12,
+    "tag_bytes": 16,
+    "aad_bytes": 22
+  },
+  "command_argv": [
+    "C:\\Users\\junge\\OneDrive\\바탕 화면\\voyager-work\\voyager_3\\.venv\\Scripts\\python.exe",
+    "C:\\Users\\junge\\OneDrive\\바탕 화면\\voyager-work\\voyager_3\\VDETER\\tools\\aes_gcm_benchmark.py",
+    "--sweep",
+    "one-at-a-time",
+    "--tag-lengths",
+    "12,13,14,15,16",
+    "--nonce-lengths",
+    "8,12,16",
+    "--plaintext-sizes",
+    "32,64,128,256,512,1024",
+    "--warmups",
+    "200",
+    "--iterations",
+    "5000",
+    "--batches",
+    "10",
+    "--seed",
+    "20260915",
+    "--output-dir",
+    "results\\aes-gcm-stage2"
+  ],
+  "working_directory": "C:\\Users\\junge\\OneDrive\\바탕 화면\\voyager-work\\voyager_3",
+  "batch_schedule": [
+    {
+      "batch": 1,
+      "conditions": [
+        "tag16_nonce12_body512",
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body32",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body128",
+        "tag16_nonce8_body256"
+      ]
+    },
+    {
+      "batch": 2,
+      "conditions": [
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body32",
+        "tag16_nonce8_body256",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body512"
+      ]
+    },
+    {
+      "batch": 3,
+      "conditions": [
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body32",
+        "tag16_nonce12_body64",
+        "tag16_nonce8_body256",
+        "tag16_nonce12_body512",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body256"
+      ]
+    },
+    {
+      "batch": 4,
+      "conditions": [
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body1024",
+        "tag16_nonce8_body256",
+        "tag16_nonce12_body512",
+        "tag16_nonce12_body32",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body64"
+      ]
+    },
+    {
+      "batch": 5,
+      "conditions": [
+        "tag16_nonce12_body32",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body1024",
+        "tag16_nonce8_body256",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body512"
+      ]
+    },
+    {
+      "batch": 6,
+      "conditions": [
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body32",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body512",
+        "tag16_nonce8_body256"
+      ]
+    },
+    {
+      "batch": 7,
+      "conditions": [
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body32",
+        "tag16_nonce8_body256",
+        "tag16_nonce12_body512",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body256",
+        "tag16_nonce16_body256"
+      ]
+    },
+    {
+      "batch": 8,
+      "conditions": [
+        "tag16_nonce12_body32",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body512",
+        "tag16_nonce8_body256"
+      ]
+    },
+    {
+      "batch": 9,
+      "conditions": [
+        "tag16_nonce12_body64",
+        "tag16_nonce12_body256",
+        "tag16_nonce8_body256",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body512",
+        "tag16_nonce12_body1024",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body32"
+      ]
+    },
+    {
+      "batch": 10,
+      "conditions": [
+        "tag16_nonce8_body256",
+        "tag16_nonce12_body512",
+        "tag16_nonce16_body256",
+        "tag16_nonce12_body1024",
+        "tag16_nonce12_body256",
+        "tag16_nonce12_body128",
+        "tag16_nonce12_body32",
+        "tag16_nonce12_body64"
+      ]
+    }
+  ]
+}

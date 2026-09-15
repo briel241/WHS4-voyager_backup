@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "outcome": "FAIL",
+  "calibration_id": "REPLACE_WITH_CALIBRATION_ID",
+  "device_serial": "REPLACE_WITH_B210_SERIAL",
+  "tx_gain_db": 0,
+  "sample_format": "cf32le",
+  "waveform_id": "VDETER-STAGE2-LINK11-FROZEN-CF32LE",
+  "measurement_plane": "B210_TX_RX_CONNECTOR_EQUIVALENT",
+  "measurement_device_id": "REPLACE_WITH_CALIBRATED_METER_ID",
+  "measured_at_utc": "REPLACE_WITH_UTC_TIMESTAMP",
+  "measurements": [
+    {
+      "frequency_hz": 157237500,
+      "measured_output_millidbm": 999999,
+      "measurement_uncertainty_millidb": -1,
+      "conservative_bound_millidbm": 999998
+    },
+    {
+      "frequency_hz": 161837500,
+      "measured_output_millidbm": 999999,
+      "measurement_uncertainty_millidb": -1,
+      "conservative_bound_millidbm": 999998
+    }
+  ]
+}

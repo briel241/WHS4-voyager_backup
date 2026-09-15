@@ -1,0 +1,58 @@
+#!/bin/sh
+# VDETER standalone launcher (repository: bin/vdeter). POSIX sh, no eval, no
+# shell string assembly: every argument is passed through as-is via exec, so
+# exit codes and SIGINT/SIGTERM reach the Python CLI directly.
+#
+#   ./bin/vdeter setup                first run: uses the system python3, creates var/venv
+#   ./bin/vdeter qualify|run|results  afterwards: uses var/venv/bin/python3
+#
+# It lives in bin/ (not the repository root) because a root-level file named
+# `vdeter` cannot coexist with the `VDETER/` directory on case-insensitive
+# filesystems (the Windows development checkout). After `setup`, the user
+# launcher ~/.local/bin/vdeter provides the one-word `vdeter` command.
+#
+# The repository root is derived from this file's own location, so the
+# launcher works from any current directory (and via a symlink).
+set -u
+
+self="$0"
+case "$self" in
+  */*) ;;
+  *) resolved="$(command -v -- "$self" 2>/dev/null || true)"
+     if [ -n "$resolved" ]; then self="$resolved"; fi ;;
+esac
+if command -v readlink >/dev/null 2>&1; then
+  target="$(readlink -f -- "$self" 2>/dev/null || true)"
+  if [ -n "$target" ]; then self="$target"; fi
+fi
+bindir="$(cd -- "$(dirname -- "$self")" 2>/dev/null && pwd -P)" || {
+  echo "vdeter: cannot resolve the repository root from $self" >&2
+  exit 2
+}
+root="$(cd -- "$bindir/.." 2>/dev/null && pwd -P)" || {
+  echo "vdeter: cannot resolve the repository root from $bindir" >&2
+  exit 2
+}
+cli="$root/apps/standalone/cli.py"
+venv_python="$root/var/venv/bin/python3"
+
+if [ ! -f "$cli" ]; then
+  echo "vdeter: apps/standalone/cli.py not found under $root (is this a VDETER checkout?)" >&2
+  exit 2
+fi
+
+if [ -x "$venv_python" ]; then
+  exec "$venv_python" "$cli" "$@"
+fi
+
+if [ "${1:-}" = "setup" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$cli" "$@"
+  fi
+  echo "vdeter: python3 not found - install it first (sudo apt-get install python3 python3-venv) and re-run ./bin/vdeter setup" >&2
+  exit 2
+fi
+
+echo "vdeter: var/venv is not set up yet in $root" >&2
+echo "vdeter: run './bin/vdeter setup' first (it installs apt/pip dependencies, creates var/venv, identity, hardware.toml draft)" >&2
+exit 2

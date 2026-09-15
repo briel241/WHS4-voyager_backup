@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "dedicated_tests": "12 passed in 1.06s",
+  "raw_round_trips": 400000,
+  "unique_condition_batch_iteration_keys": 400000,
+  "supported_conditions": 8,
+  "condition_batch_groups": 80,
+  "samples_per_group": 5000,
+  "plaintext_matches": 400000,
+  "unsupported_tag_lengths": [12, 13, 14, 15],
+  "measurement_failure_rows": 0,
+  "schedule_matches_raw": true,
+  "raw_recalculated_mean_median_p95_match_summary": true,
+  "first_summary_sha256": "7D1D144B85E0C6C6C38541A1F61B4B8E7CA592F70FD09BA42A0E4A1598228DAA"
+}

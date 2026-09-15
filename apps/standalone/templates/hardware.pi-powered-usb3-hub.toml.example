@@ -1,0 +1,52 @@
+# VDETER standalone — operator hardware declaration (hardware.toml)
+# Pi powered-USB3-hub host profile: STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1 (schema_version 2).
+#
+# Use this schema when the three B210s sit on the downstream ports of ONE
+# self-powered USB3 hub whose uplink is a Raspberry Pi 5 SuperSpeed root port,
+# every link is 5000M, the B210s take their power from the hub and no per-B210
+# external DC brick is used. The legacy Pi topology (MASS-B on USB2/480M with an
+# external DC asset) keeps schema_version 1 — see hardware.toml.example.
+#
+# `vdeter setup` writes a draft of this file when it observes that topology, with
+# the hub VID:PID and the detected serials in comments. Only the operator can
+# record the hub asset ID, the role→serial mapping, the two attestations and
+# wiring.approved = true; until then qualify/run refuse to start.
+#
+# Software observes and records (never declares or binds): USB paths, hub ports,
+# link speeds and device numbers, and the hub descriptor "self-powered" bit.
+# Software cannot measure whether the hub's external supply is actually
+# connected or whether a per-B210 DC brick is absent — those two facts are
+# operator attestations with their source recorded.
+
+schema_version = 2
+platform_profile = "pi"            # this profile is Raspberry Pi only (vcgencmd throttle check)
+hardware_profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"
+
+[usb_hub]
+# Physical asset ID of the powered hub (the operator's inventory ID; probe-impossible).
+asset_id = "HUB-EXAMPLE-01"
+# USB VID:PID of the hub as observed in sysfs (lowercase hex); must match the hub
+# that is the common parent of the three B210s.
+vid_pid = "2109:0817"
+# Operator attestation: the hub's external power supply is connected.
+self_powered = true
+self_powered_source = "operator_attested"
+# Operator attestation: no B210 has its own external DC supply.
+individual_b210_dc = false
+individual_b210_dc_source = "operator_attested"
+
+[endpoints.MASS-A]
+# Every endpoint needs a SuperSpeed (5000M) link on the hub. No power asset field.
+serial = "34D03DD"
+
+[endpoints.MASS-B]
+serial = "3515425"
+
+[endpoints.ROC]
+serial = "34D03E8"
+
+[wiring]
+# Identifier of the approved C1~C6 wiring profile (unchanged by the USB topology).
+profile = "C1-C6-STANDARD"
+# Operator approval: "the current physical wiring is connected as declared above".
+approved = false

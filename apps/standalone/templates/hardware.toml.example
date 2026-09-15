@@ -1,0 +1,38 @@
+# VDETER standalone — operator hardware declaration (hardware.toml)
+#
+# This file holds only the operator-approved environment "intent". Observed
+# values such as USB port paths and measured speeds are not written here —
+# the qualification artifacts record them automatically.
+#
+# `vdeter setup` can write a draft of this file from device discovery, but
+# [wiring].approved = true must be recorded by the operator. Until it is
+# approved, qualify/run refuse to start.
+
+schema_version = 1
+
+# Inspection profile: "pi" (Raspberry Pi — vcgencmd throttle check required)
+#                   | "generic-pc" (generic Ubuntu PC — governor/thermal recorded)
+platform_profile = "pi"
+
+[endpoints.MASS-A]
+# The B210 with this serial takes the MASS-A (SHIP) role. Needs a USB super-speed port.
+serial = "34D03DD"
+
+[endpoints.MASS-B]
+# MASS-B (SHIP) runs on external power. USB high-speed (480M) connection.
+serial = "3515425"
+# Physical asset ID of the external power unit — only the operator can provide it
+# (it cannot be probed electrically).
+external_power_asset = "AT2024T"
+
+[endpoints.ROC]
+# ROC (CONTROL). Needs a USB super-speed port.
+serial = "34D03E8"
+
+[wiring]
+# Identifier of the approved C1~C6 wiring profile. Whether the physical wiring
+# matches is checked fail-closed by the bring-up RF-time path validation
+# (a mismatch fails before the RF run proper).
+profile = "C1-C6-STANDARD"
+# Operator approval: "the current physical wiring is connected as declared above".
+approved = false

@@ -1,0 +1,5 @@
+condition_id,tag_bytes,nonce_bytes,plaintext_bytes,stage,reason
+tag12_nonce12_body256,12,12,256,support-check,cryptography AESGCM encrypt() always generates a 16-byte tag; the public API has no native 12..15-byte tag-generation option. Truncating the generated tag is intentionally not treated as support.
+tag13_nonce12_body256,13,12,256,support-check,cryptography AESGCM encrypt() always generates a 16-byte tag; the public API has no native 12..15-byte tag-generation option. Truncating the generated tag is intentionally not treated as support.
+tag14_nonce12_body256,14,12,256,support-check,cryptography AESGCM encrypt() always generates a 16-byte tag; the public API has no native 12..15-byte tag-generation option. Truncating the generated tag is intentionally not treated as support.
+tag15_nonce12_body256,15,12,256,support-check,cryptography AESGCM encrypt() always generates a 16-byte tag; the public API has no native 12..15-byte tag-generation option. Truncating the generated tag is intentionally not treated as support.

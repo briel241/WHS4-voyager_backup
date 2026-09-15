@@ -1,0 +1,140 @@
+"""
+Application ACK - 응용 수준 확인응답
+
+근거
+    ITU-R M.1371 Annex 5의 IFM FI = 5 "Application acknowledgement"가 선례다.
+    IMO SN.1/Circ.289 1.3이 국제 사용을 권고하는 시스템 메시지 4종 중 하나이며,
+    같은 문서가 링크 계층 ACK와 명확히 구분한다.
+
+        "...system acknowledgement on the VHF Data Link (VDL) by the receiving
+         AIS station. This acknowledgement should not be confused with a user
+         acknowledgment."
+
+    즉 VDE Type 92 ACK(전파가 도달했다)와 응용 ACK(명령을 수락했다)는
+    서로 다른 층위이며 둘 다 두는 것이 표준 관행이다.
+
+주의
+    FI = 5의 정확한 bit 구조는 ITU-R M.1371 Annex 5 소관이며 원문을 확보하지
+    못했다. 아래 Status/Reason 값은 Message Linkage ID로 대상을 참조하는
+    개념만 차용해 본 프로젝트가 정의한 것이다. 원문 확보 시 교체한다.
+    docs/mass_roc_message_set.md 7.1 참조.
+
+필드 구성 (본문 17 bit)
+    [Message Linkage ID 10 | Status 4 | Reason 3]
+
+Status는 S-421 Edition 1.0.0의 routeInfoStatus 코드에 맞춘다
+(docs/mass_roc_control_and_ack_message_format.md 4~5절).
+Reason은 그 문서의 routeInfoDescription을 좁은 링크에 맞게 코드로 대신한 것이다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..bitfield import BitReader, BitWriter
+
+MESSAGE_ID = 3
+NAME = "Application ACK"
+
+LINKAGE_ID_BITS = 10
+STATUS_BITS = 4
+REASON_BITS = 3
+
+BODY_BITS = LINKAGE_ID_BITS + STATUS_BITS + REASON_BITS
+
+# Status - S-421 routeInfoStatus 코드에 정렬한다.
+#
+# STATUS_RECEIVED(0)은 S-421에 없는 본 프로젝트 예약값이며 **송신하지 않는다.**
+#
+#   "수신했다"는 링크 계층 ACK가 이미 답한다. 응용 ACK은 판정 결과만 나르는
+#   것이 SN.1/Circ.289가 두 층위를 구분한 취지다(모듈 상단 인용 참조).
+#   게다가 MassAgent는 receive() 안에서 검증·판정을 끝내므로 "접수했으나
+#   판정 전"이라는 구간 자체가 없다. 판정 전에는 아무것도 보내지 않고
+#   발신 측(RocAgent.unanswered)이 미응답으로 관리한다.
+#
+#   판정을 비동기로 바꾸게 되면 이 값을 쓴다. 그전까지 값만 정의해 둔다.
+STATUS_RECEIVED = 0        # 예약 - 현재 미사용 (S-421 외)
+STATUS_ACKNOWLEDGED = 4    # S-421 Acknowledged - 정상 수신·검증
+STATUS_ERRORS = 7          # S-421 Errors - 스키마/응용 검증 오류
+STATUS_INCOMPLETE = 8      # S-421 Incomplete - 필요한 필드 누락
+STATUS_ROUTE_ISSUES = 9    # S-421 Route issues - 해석되나 경로 문제
+
+STATUS_NAMES = {
+    STATUS_RECEIVED: "received",
+    STATUS_ACKNOWLEDGED: "acknowledged",
+    STATUS_ERRORS: "errors",
+    STATUS_INCOMPLETE: "incomplete",
+    STATUS_ROUTE_ISSUES: "route issues",
+}
+
+# Reason - routeInfoDescription을 대신하는 코드. 본 프로젝트 정의.
+REASON_NONE = 0
+REASON_ROUTE_UNSUITABLE = 1
+REASON_EXPIRED = 2
+REASON_NOT_AUTHORIZED = 3
+
+REASON_NAMES = {
+    REASON_NONE: "none",
+    REASON_ROUTE_UNSUITABLE: "route unsuitable",
+    REASON_EXPIRED: "validity expired",
+    REASON_NOT_AUTHORIZED: "not authorized",
+}
+
+
+@dataclass
+class ApplicationAck:
+    linkage_id: int
+    status: int = STATUS_RECEIVED
+    reason: int = REASON_NONE
+
+    @property
+    def status_name(self) -> str:
+        return STATUS_NAMES.get(self.status, f"reserved({self.status})")
+
+    @property
+    def reason_name(self) -> str:
+        return REASON_NAMES.get(self.reason, f"reserved({self.reason})")
+
+
+# 필드가 전선에 실을 수 있는 값인지 본다. 위반이면 사유 문자열, 아니면 None.
+#
+# 승인된 SC-VDE codec이 보는 허용 집합과 같은 규칙이다
+# (VDETER `sc_vde_route_control.py` `_validate_ack_fields`).
+#
+# 예약 Status를 받아들이면 무효한 응답 한 건이 대기 중인 명령을 종결시킨다 —
+# 발신 측은 답을 받았다고 보는데 무슨 답인지는 정의되어 있지 않은 상태가 된다.
+# Linkage ID는 10 bit 전 범위가 유효하므로 여기서 보지 않는다(0은 not available이며,
+# 그 상관 판정은 RocAgent가 한다).
+def canonical_violation(message: ApplicationAck) -> str | None:
+    if message.status not in STATUS_NAMES:
+        return f"Status {message.status} ({sorted(STATUS_NAMES)}만 허용)"
+    if message.reason not in REASON_NAMES:
+        return f"Reason {message.reason} ({sorted(REASON_NAMES)}만 허용)"
+    return None
+
+
+# 본문 bit를 writer에 이어 붙인다.
+def write_body(writer: BitWriter, message: ApplicationAck) -> None:
+    writer.write_uint(message.linkage_id, LINKAGE_ID_BITS, "Message Linkage ID")
+    writer.write_uint(message.status, STATUS_BITS, "Status")
+    writer.write_uint(message.reason, REASON_BITS, "Reason")
+
+
+# reader에서 본문을 읽어 ApplicationAck을 만든다.
+def read_body(reader: BitReader) -> ApplicationAck:
+    return ApplicationAck(
+        linkage_id=reader.read_uint(LINKAGE_ID_BITS, "Message Linkage ID"),
+        status=reader.read_uint(STATUS_BITS, "Status"),
+        reason=reader.read_uint(REASON_BITS, "Reason"),
+    )
+
+
+# 콘솔 표시용 여러 줄 문자열
+def describe(message: ApplicationAck) -> str:
+    return "\n".join(
+        [
+            f"Linkage ID: {message.linkage_id}",
+            f"Status: {message.status_name}",
+            f"Reason: {message.reason_name}",
+        ]
+    )

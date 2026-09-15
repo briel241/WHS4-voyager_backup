@@ -1,0 +1,57 @@
+"""시나리오 러너 — 확정된 세 시나리오의 합격 판정을 확인.
+
+요청 작업(구현·재현 인터페이스·로그·분석)이 SC-VDE-001·005·006 모두에서
+온전히 도는지 잠근다. cryptography 없이도 대체 백엔드로 실행된다.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from common.textout import ensure_utf8_output
+
+ensure_utf8_output()
+
+from common.observe.scenario_analysis import analyze
+from common.observe.scenario_log import ScenarioRun
+
+from apps.scenario_runner import SCENARIOS
+
+NOW = 1_760_000_000.0  # 현실적 기준 시각 (인증서 유효기간 계산에 필요)
+
+
+def test_three_confirmed_scenarios_registered():
+    for scenario_id in ("SC-VDE-001", "SC-VDE-005", "SC-VDE-006"):
+        assert scenario_id in SCENARIOS, f"{scenario_id} 미등록"
+    print("  확정 3개 시나리오 등록 OK:", ", ".join(sorted(SCENARIOS)))
+
+
+def test_all_scenarios_pass():
+    for scenario_id, (name, runner) in sorted(SCENARIOS.items()):
+        run, expected = runner(now=NOW)
+        assert isinstance(run, ScenarioRun)
+        summary = analyze(run, expected)
+        assert summary["passed"], (
+            f"{scenario_id}({name}) 불합격: "
+            f"{[c for c in summary['checks'] if not c['ok']]}")
+        assert summary["checks"], f"{scenario_id} 판정 항목 없음"
+        print(f"  {scenario_id} {name}: 합격 ({len(summary['checks'])}개 체크)")
+
+
+def test_control_scenario_verifies_control_fields():
+    # SC-VDE-006은 조종 필드(heading/fallback/SOG)가 압축 코덱을 왕복했음을
+    # verify 항목으로 남긴다.
+    run, expected = SCENARIOS["SC-VDE-006"][1](now=NOW)
+    verifies = [e for e in run.entries if e.kind == "verify"]
+    assert verifies, "조종 필드 검증 기록이 없다"
+    assert all(e.detail.get("ok") is True for e in verifies)
+    assert expected.get("verify_ok") is True
+    print("  SC-VDE-006 조종 필드 압축 왕복 검증 기록 OK")
+
+
+if __name__ == "__main__":
+    test_three_confirmed_scenarios_registered()
+    test_all_scenarios_pass()
+    test_control_scenario_verifies_control_fields()
+    print("PASS: 시나리오 러너 (확정 3종)")

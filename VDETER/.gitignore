@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local specifications, generated evidence, and historical experiments remain
+# outside Git. Verification source and immutable test vectors are tracked.
+docs/
+legacy/
+results/
+grc/
+src/vdeter/cli/
+apps/README.md
+configs/README.md
+
+# Machine-local Stage 3 evidence. Commit only the placeholder/example manifest.
+configs/stage3_b210_ubuntu_apt_manifest.json
+
+# Stage 7 provisioned TEST signer private key — 절대 커밋하지 않는다.
+configs/stage7/trust/roc_tbb_signer_key.pem
