@@ -146,31 +146,19 @@ def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
     workload_id = request["workload_id"]
     scenario_id = request.get("scenario_id", "SC-VDE-006")
     poc = request.get("poc") or {}
-    poc_path = poc.get("poc")
-    poc_dir = poc.get("poc_dir")
-    poc_id = poc.get("poc_id")
-    src_path = poc.get("src_path")
 
     child_root = run_root / "workloads" / workload_id
     child_root.mkdir(parents=True, exist_ok=True)
-    dest = child_root / "poc-snapshot"
 
-    # 세션에 도착한 요청은 선택이 **이미 끝난** 것이다 — CLI가 menu(대화형) 또는 진단 계획
-    # (`allowed_workloads`)으로 poc_id를 정해 실어 보낸다. 따라서 catalog(`poc_dir`) 요청은
-    # prompt 없는 확정 선택이며, 그 사실을 명시해야 비대화형 catalog 거부(§6.1)에 걸리지
-    # 않는다(실물 controller `stage7_mass_roc_controller`와 같은 규칙). poc_id가 None/"none"이면
-    # baseline, id면 그 package다. 이 프로세스는 menu를 띄우지 않는다.
-    option = poc_run.resolve_option(poc=poc_path, poc_dir=poc_dir, interactive=False,
-                                    preselected=True)
-    # snapshot은 runtime(coordinator)에서 workload 시작 직전에 만든다(§5.3).
-    snapshot = poc_run.select_snapshot(option, scenario_id=scenario_id,
-                                       dest_dir=str(dest), poc_id=poc_id, interactive=False)
+    # 위임 요청은 선택이 **이미 끝난** 것이다 — 해석 규칙(비대화형·확정 선택·baseline)은 실물 controller와
+    # 같은 `poc_run.snapshot_for_request` 하나가 소유한다. snapshot은 runtime(coordinator)에서 workload
+    # 시작 직전에 만든다(§5.3). 이 프로세스는 menu를 띄우지 않는다.
+    snapshot = poc_run.snapshot_for_request(
+        poc, scenario_id=scenario_id, dest_dir=str(child_root / "poc-snapshot"))
     if snapshot is None:
-        # baseline(none): PoC 자원 0(구조적 0). 형태는 실물 controller
-        # (`stage7_mass_roc_controller`, `poc_infrastructure: NOT_RUN`)와 같게 둔다 — 판정 축이
-        # `poc_infrastructure`인데 RF-off evidence에만 그 축이 비면 RF-off가 실물을 대변하지 못한다.
-        return {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
-                "workload_id": workload_id, "scenario_id": scenario_id}
+        # baseline(none): PoC 자원 0(구조적 0). 실물 controller와 같은 짝(BASELINE / NOT_RUN)이어야
+        # CLI 판정 축(`poc_infrastructure`)에서 RF-off가 실물을 대변한다.
+        return poc_run.baseline_evidence(workload_id=workload_id, scenario_id=scenario_id)
 
     # R1/N1: scenario submit **전에** arm. 준비/ARMED 실패면 scenario 자극 0.
     runtime.begin_workload()
@@ -178,13 +166,10 @@ def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
     try:
         prepared = poc_run.prepare_workload(
             session, snapshot, scenario_id=scenario_id, run_id=run_id,
-            workload_id=workload_id, socket_root=None, src_path=src_path)
+            workload_id=workload_id, socket_root=None, src_path=poc.get("src_path"))
     except poc_run.PocRunError as exc:
         runtime.end_workload()
-        evidence = getattr(exc, "evidence", None) or {
-            "status": "ERROR", "poc_infrastructure": "ERROR", "error": str(exc)}
-        evidence.setdefault("workload_id", workload_id)
-        return evidence
+        return poc_run.arm_failure_evidence(exc, workload_id=workload_id, scenario_id=scenario_id)
     except BaseException:
         runtime.end_workload()
         raise
@@ -219,16 +204,55 @@ def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
     return evidence
 
 
+def build_rf_off_runtime():
+    """RF-off 세션의 resident runtime을 권위 상한으로 만들고 READY까지 올린다.
+
+    상한(bring-up/workload/close)은 stage7 세션 상수 그대로 결속한다(중복 timer 재구현·완화 금지).
+    RF-off는 실 B210 bring-up이 없으므로 bring-up은 즉시 완료된다. 실 coordinator 프로세스와, 그
+    handler를 프로세스 안에서 돌리는 시험이 같은 runtime을 쓴다.
+    """
+    from vdeter.stage8._supervisor.clock import RealMonotonicClock
+    from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+    from vdeter.stage8.execution.session import ResidentSession
+    from vdeter.stage8.integration.runtime import ResidentPocRuntime
+
+    policy = SessionPolicy(stage7=Stage7Timeouts(
+        bringup_s=SESSION_BRINGUP_TIMEOUT_S, workload_s=WORKLOAD_TIMEOUT_S,
+        close_s=SESSION_CLOSE_TIMEOUT_S))
+    runtime = ResidentPocRuntime(ResidentSession(clock=RealMonotonicClock(), policy=policy))
+    runtime.bring_up()
+    return runtime
+
+
+def poc_workload_record(device_session, runtime, request: dict, *, run_root: Path,
+                        run_id: str) -> dict:
+    """PoC workload 요청 하나를 실행해 CLI가 읽는 결과 record를 만든다.
+
+    `STAGE8_RF_OFF_POC_WORKLOAD_RESULT_V1`: PoC evidence는 `poc`에 그대로 싣고(§11.1 독립 판정, severity는
+    CLI가 매긴다), handler 밖으로 나온 예외·인터럽트는 record ERROR로 회신한다(세션 유지 판정은 별도).
+    RF-off 세션은 scenario를 돌리지 않으므로 record status는 요청 처리 자체의 결과다.
+    """
+    record = {"artifact_type": "STAGE8_RF_OFF_POC_WORKLOAD_RESULT_V1",
+              "workload_id": request.get("workload_id"),
+              "scenario_id": request.get("scenario_id"),
+              "quiescence": {"pass": True}}
+    try:
+        evidence = _handle_poc_request(device_session, runtime, request,
+                                       run_root=run_root, run_id=run_id)
+    except BaseException as exc:  # noqa: BLE001 - workload 실패도 결과로 회신(세션 유지 판정 별도)
+        record.update(status="ERROR", error=f"{type(exc).__name__}: {exc}")
+        return record
+    record.update(status="PASS", poc=evidence)
+    return record
+
+
 def run_rf_off_software_session(arguments) -> int:
     """실 coordinator 프로세스의 RF-off software session loop(파일 IPC + in-process PoC 실행).
 
     `arguments`는 `stage7_coordinator_main`의 argparse namespace(run_id·run_root 사용). B210·launcher를
     전혀 spawn하지 않는다. 정상 종료·shutdown 마커·idle/absolute deadline·close 예산을 처리한다.
     """
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
-    from vdeter.stage8.execution.session import ResidentSession, SessionExpired
-    from vdeter.stage8.integration.runtime import ResidentPocRuntime
+    from vdeter.stage8.execution.session import SessionExpired
 
     run_root = Path(arguments.run_root)
     run_id = arguments.run_id
@@ -238,13 +262,8 @@ def run_rf_off_software_session(arguments) -> int:
     for directory in (session_dir, requests_dir, results_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    # 권위 상한을 실제 정의에서 가져온다(중복 timer 재구현·완화 금지).
-    policy = SessionPolicy(stage7=Stage7Timeouts(
-        bringup_s=SESSION_BRINGUP_TIMEOUT_S, workload_s=WORKLOAD_TIMEOUT_S,
-        close_s=SESSION_CLOSE_TIMEOUT_S))
-    session_model = ResidentSession(clock=RealMonotonicClock(), policy=policy)
-    runtime = ResidentPocRuntime(session_model)
-    runtime.bring_up()  # READY(bring-up 상한·absolute 확인). RF-off는 실 B210 bring-up 없음.
+    runtime = build_rf_off_runtime()  # READY(권위 상한 결속). RF-off는 실 B210 bring-up 없음.
+    session_model = runtime.session
 
     # 실 Stage 7 seam에 결속(no stub). software group build 실패는 fail-closed(조용한 stub fallback 금지).
     device_session = RfOffStage7DeviceSession(str(run_root))
@@ -277,20 +296,8 @@ def run_rf_off_software_session(arguments) -> int:
                 request = json.loads(handle.read().decode("utf-8"))
             session_model.note_control_plane_activity()  # workload 요청 → idle timer 재시작.
             print(f"[coordinator] poc workload 시작 {request.get('workload_id')}", flush=True)
-            try:
-                evidence = _handle_poc_request(device_session, runtime, request,
-                                               run_root=run_root, run_id=run_id)
-                record = {"artifact_type": "STAGE8_RF_OFF_POC_WORKLOAD_RESULT_V1",
-                          "status": "PASS", "poc": evidence,
-                          "workload_id": request.get("workload_id"),
-                          "scenario_id": request.get("scenario_id"),
-                          "quiescence": {"pass": True}}
-            except BaseException as exc:  # noqa: BLE001 - workload 실패도 결과로 회신(세션 유지 판정 별도)
-                record = {"artifact_type": "STAGE8_RF_OFF_POC_WORKLOAD_RESULT_V1",
-                          "status": "ERROR", "error": f"{type(exc).__name__}: {exc}",
-                          "workload_id": request.get("workload_id"),
-                          "scenario_id": request.get("scenario_id"),
-                          "quiescence": {"pass": True}}
+            record = poc_workload_record(device_session, runtime, request,
+                                         run_root=run_root, run_id=run_id)
             _write_json(results_dir / request_name, record)
     finally:
         # close 예산(권위 close_s) 안에서 종료를 확정한다(재호출로 연장하지 않음).
@@ -306,7 +313,8 @@ def run_rf_off_software_session(arguments) -> int:
     return 0 if status == "PASS" else 1
 
 
-__all__ = ("RfOffStage7DeviceSession", "run_rf_off_software_session", "main")
+__all__ = ("RfOffStage7DeviceSession", "build_rf_off_runtime", "poc_workload_record",
+           "run_rf_off_software_session", "main")
 
 
 def main(argv=None) -> int:

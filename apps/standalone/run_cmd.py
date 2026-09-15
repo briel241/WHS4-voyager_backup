@@ -683,94 +683,6 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     return session, run_id, run_root, ready
 
 
-def _prepare_poc(poc_ctx, session, *, scenario_id, poc_id, out) -> dict:
-    """R1: scenario submit **전에** PoC를 선택·immutable snapshot·child spawn·on_start·ARMED한다.
-
-    반환 dict: ``{"kind": "baseline"|"armed"|"failed", "workload": PocWorkload|None,
-    "evidence": dict|None}``. 준비/ARMED 실패(kind=failed)면 caller가 scenario를 제출하지 않는다.
-    baseline(none)은 자원 0(kind=baseline).
-    """
-    mod = poc_ctx["module"]
-    counter = poc_ctx.get("_counter", 0) + 1
-    poc_ctx["_counter"] = counter
-    poc_wid = "%s-poc-%s-%03d" % (poc_ctx["run_id"], scenario_id.lower(), counter)
-    dest = Path(poc_ctx["run_root"]) / "workloads" / poc_wid / "poc-snapshot"
-    try:
-        snapshot = mod.select_snapshot(
-            poc_ctx["option"], scenario_id=scenario_id, dest_dir=str(dest),
-            poc_id=poc_id, interactive=poc_ctx.get("interactive", True))
-    except mod.PocRunError as exc:
-        out("  poc refused: %s (scenario not submitted)" % exc)
-        return {"kind": "failed", "workload": None,
-                "evidence": {"status": "REFUSED", "error": str(exc),
-                             "poc_infrastructure": "ERROR"}}
-    if snapshot is None:
-        return {"kind": "baseline", "workload": None, "evidence": None}
-    # socket root는 명세 §4.2(`$XDG_RUNTIME_DIR/vdeter-poc` 또는 `/tmp/vdeter-poc-<uid>`, workload마다
-    # nonce dir)를 쓴다(None → supervisor 선택). run root(`var/runs/<run-id>/…`) 아래에 두면 sun_path
-    # 상한을 넘어 실 child spawn이 실패한다(execute() 종단시험에서 확인). socket nonce digest는 evidence에 남는다.
-    try:
-        workload = mod.prepare_workload(
-            session, snapshot, scenario_id=scenario_id, run_id=poc_ctx["run_id"],
-            workload_id=poc_wid, socket_root=None, src_path=poc_ctx.get("src_path"))
-    except mod.PocRunError as exc:
-        out("  poc prep/arm failed: %s (scenario not submitted)" % exc)
-        evidence = getattr(exc, "evidence", None) or {"status": "ERROR", "error": str(exc),
-                                                      "poc_infrastructure": "ERROR"}
-        return {"kind": "failed", "workload": None, "evidence": evidence}
-    return {"kind": "armed", "workload": workload, "evidence": None}
-
-
-def _finish_poc(poc_ctx, prep, *, scenario_verdict, out) -> dict:
-    """R1: ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집(§5.1). 반환 evidence dict."""
-    mod = poc_ctx["module"]
-    evidence = mod.finish_workload(prep["workload"], scenario_verdict=scenario_verdict)
-    out("  poc infrastructure=%s attacks=%s radiated_children=%s severity=%s"
-        % (evidence.get("poc_infrastructure"), len(evidence.get("attacks") or []),
-           (evidence.get("radiation") or {}).get("radiated_children"),
-           mod.poc_severity(evidence)))
-    return evidence
-
-
-def _run_workload_rf_off_poc(session, scenario_id, certificate_case, *, out, clock,
-                             index=None, total=None, poc_ctx, poc_id=None):
-    """RF-off software 모드의 workload 하나 — PoC를 **실 coordinator 프로세스**에 위임한다.
-
-    CLI는 PoC source·scenario를 request에 실어 `submit_workload(poc=...)`로 발행하고, coordinator가
-    workload-local PoC(실 child·socket·SDK·provider)를 실행 중 scenario event와 함께 처리한 결과를
-    file IPC로 회신한다. CLI는 그 결과의 poc evidence·severity를 그대로 반영한다(in-process 실행 0).
-    """
-    option = poc_ctx["option"]
-    poc_req = {"poc": option.poc, "poc_dir": option.poc_dir,
-               "poc_id": poc_id, "src_path": poc_ctx.get("src_path")}
-    label = scenario_id + (" (%s)" % certificate_case if scenario_id == "SC-VDE-001" else "")
-    out("  running " + label + " (poc via coordinator)")
-    workload_id = session.submit_workload(
-        scenario_id, certificate_case, poc=poc_req,
-        on_settle=lambda remaining, prev: out(
-            "  settling %.0f s (RX pipeline drain after %s)" % (remaining, prev)))
-    started = clock()
-    trace_rows = []
-    result = session.wait_result(workload_id, on_trace=trace_rows.append)
-    result.setdefault("wall_clock_s", round(clock() - started, 1))
-    result.setdefault("workload_id", workload_id)
-    result.setdefault("scenario_id", scenario_id)
-    result.setdefault("certificate_case", certificate_case)
-    try:
-        for line in scenario_report.workload_report_lines(
-                trace_rows, result, run_root=getattr(session, "run_root", None),
-                index=index, total=total):
-            out(line)
-    except Exception:  # noqa: BLE001 - 상세 렌더링 실패가 판정·evidence를 바꾸지 않는다
-        pass
-    out(result_line(result))
-    # coordinator가 result["poc"]에 evidence를 실어 준다(§11.1 독립 판정). severity로 다음 workload 허용 판정.
-    poc_evidence = result.get("poc")
-    if poc_evidence is not None:
-        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
-    return result
-
-
 def _run_workload(session, scenario_id, certificate_case, *, out, clock,
                   index=None, total=None, poc_ctx=None, poc_id=None):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
@@ -783,70 +695,56 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     service_events 폴링·강제 flush·presentation 파일 갱신·실시간 블록은
     실행 경로에 없다(R1 선택 롤백). 상세 블록 렌더링 실패는 판정·close·
     evidence에 영향을 주지 않는다(경고 한 줄). 판정·timeout·evidence 계약은
-    세션 객체가 그대로 소유한다."""
-    # RF-off software 모드: PoC를 CLI에서 in-process 실행하지 않고 실 coordinator 프로세스에 workload
-    # 요청으로 위임한다(실 coordinator↔PoC 연결). 결과 JSON의 poc evidence를 그대로 쓴다.
-    if poc_ctx is not None and (poc_ctx.get("rf_off_software")
-            or getattr(session, "poc_workloads_in_coordinator", False) is True):
-        return _run_workload_rf_off_poc(
-            session, scenario_id, certificate_case, out=out, clock=clock,
-            index=index, total=total, poc_ctx=poc_ctx, poc_id=poc_id)
-    # R1: PoC를 scenario submit **전에** 선택·snapshot·arm한다. 준비/ARMED 실패면 scenario 제출 0.
-    prep = None
+    세션 객체가 그대로 소유한다.
+
+    PoC opt-in(`poc_ctx`)이면 PoC 요청(source·확정된 poc_id·src_path)을 workload
+    request에 실어 **coordinator에 위임**한다. coordinator(실물 controller child 또는
+    RF-off software 세션)가 workload-local PoC(실 child·socket·SDK·provider)를
+    arm → scenario 중 관측 전달 → finish/abort → cleanup까지 소유하고, CLI는 회신된
+    `result["poc"]` evidence와 그 severity(R2: 다음 workload 허용 판정)만 반영한다.
+    CLI 프로세스는 PoC를 실행하지 않는다(장치 경계는 launcher/coordinator 소유).
+    PoC를 coordinator에서 실행한다고 선언하지 않은 세션에 PoC를 요청하면 조용한
+    in-process 대체 없이 fail-closed로 거부한다.
+    """
+    poc_request = None
     if poc_ctx is not None:
-        prep = _prepare_poc(poc_ctx, session, scenario_id=scenario_id, poc_id=poc_id, out=out)
-        if prep["kind"] == "failed":
-            return {
-                "status": "NOT_RUN", "scenario_id": scenario_id,
-                "certificate_case": certificate_case,
-                "quiescence": {"pass": True}, "poc": prep["evidence"],
-                "poc_severity": poc_ctx["module"].poc_severity(prep["evidence"]),
-                "poc_prep_failed": True,
-            }
+        mod = poc_ctx["module"]
+        if getattr(session, "poc_workloads_in_coordinator", False) is not True:
+            raise mod.PocRunError(
+                "session does not run PoC workloads in the coordinator — refusing to run "
+                "the PoC in the CLI process (device boundary is owned by the coordinator)")
+        poc_request = mod.workload_request(poc_ctx["option"], poc_id=poc_id,
+                                           src_path=poc_ctx.get("src_path"))
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
-    out("  running " + label)
-    # N1: PoC를 arm한 뒤 scenario submit·wait·render·finish 중 어디서 예외·인터럽트가 나도 armed PoC를
-    # cleanup-only로 정리한다(신규 action 없음). 원래 예외/인터럽트를 cleanup 오류로 덮지 않고 재전달하며,
-    # coordinator session.close만으로 PoC가 정리됐다고 추정하지 않는다.
-    _poc_armed = prep is not None and prep["kind"] == "armed"
+    out("  running " + label
+        + (" (poc via coordinator)" if poc_request is not None else ""))
+    submit_kwargs = {
+        "on_settle": lambda remaining, prev: out(
+            "  settling %.0f s (RX pipeline drain after %s)" % (remaining, prev)),
+    }
+    if poc_request is not None:
+        submit_kwargs["poc"] = poc_request
+    workload_id = session.submit_workload(scenario_id, certificate_case, **submit_kwargs)
+    started = clock()
+    trace_rows = []
+    result = session.wait_result(workload_id, on_trace=trace_rows.append)
+    result.setdefault("wall_clock_s", round(clock() - started, 1))
+    result.setdefault("workload_id", workload_id)
+    result.setdefault("scenario_id", scenario_id)
+    result.setdefault("certificate_case", certificate_case)
+    # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
     try:
-        workload_id = session.submit_workload(
-            scenario_id, certificate_case,
-            on_settle=lambda remaining, prev: out(
-                "  settling %.0f s (RX pipeline drain after %s)"
-                % (remaining, prev)))
-        started = clock()
-        trace_rows = []
-        result = session.wait_result(workload_id, on_trace=trace_rows.append)
-        result.setdefault("wall_clock_s", round(clock() - started, 1))
-        result.setdefault("workload_id", workload_id)
-        result.setdefault("scenario_id", scenario_id)
-        result.setdefault("certificate_case", certificate_case)
-        # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
         for line in scenario_report.workload_report_lines(
                 trace_rows, result, run_root=getattr(session, "run_root", None),
                 index=index, total=total):
             out(line)
-        out(result_line(result))
-    except BaseException as exc:  # noqa: BLE001 - scenario 경로 실패: armed PoC 정리 후 원형 재전달
-        if _poc_armed:
-            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
-        raise
-    # R1/R4: 실 scenario 실행 뒤 PoC를 종료하고, 실제 scenario verdict(§11.1)를 명시 전달한다.
-    # scenario 판정과 PoC 판정은 독립이며 서로 재계산하지 않는다. finish 중 실패도 cleanup으로 정리한다.
-    if _poc_armed:
-        try:
-            # stage8 직접 import 금지(import 경계): 권위 verdict 매핑은 poc_run adapter가 담당한다.
-            scenario_verdict = poc_ctx["module"].scenario_verdict_from_status(result.get("status"))
-            poc_evidence = _finish_poc(poc_ctx, prep, scenario_verdict=scenario_verdict, out=out)
-        except BaseException as exc:  # noqa: BLE001 - finish 중 예외·인터럽트도 cleanup-only 정리
-            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
-            result["poc"] = prep.get("evidence")
-            result["poc_severity"] = poc_ctx["module"].poc_severity(prep.get("evidence"))
-            raise
-        result["poc"] = poc_evidence
-        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
+    except Exception as exc:  # noqa: BLE001 - 상세 렌더링 실패가 판정·close·evidence를 바꾸지 않는다
+        out("  (workload report rendering failed: %s: %s)" % (type(exc).__name__, exc))
+    out(result_line(result))
+    # coordinator가 result["poc"]에 evidence를 실어 준다(§11.1: scenario 판정과 독립, 재계산하지 않음).
+    if poc_ctx is not None and result.get("poc") is not None:
+        result["poc_severity"] = poc_ctx["module"].poc_severity(result["poc"])
     return result
 
 
@@ -1228,16 +1126,13 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         # workload trace·result·evidence 생성은 세션/coordinator 계약 그대로다.
         mirror.set_path(None)
         out = terminal_out
+        # PoC는 CLI 프로세스에서 실행하지 않는다 — `_run_workload`가 요청을 workload request에 실어
+        # coordinator(실물 controller child 또는 RF-off software 세션)에 위임하고 evidence만 반영한다.
         poc_ctx = None
         if poc_option is not None and poc_option.active:
             poc_ctx = {
-                "module": poc_run, "option": poc_option, "run_root": run_root,
-                "run_id": active_run_id, "interactive": interactive,
-                "input_fn": input_fn,
+                "module": poc_run, "option": poc_option,
                 "src_path": str(Path(context["repo_root"]) / "VDETER" / "src"),
-                # RF-off software 모드: PoC를 CLI 프로세스에서 in-process 실행하지 않고 실
-                # coordinator 프로세스에 workload 요청으로 위임한다(실 coordinator↔PoC 연결).
-                "rf_off_software": rf_off_software,
                 # Catalogue availability only. The owning launcher validates
                 # actual tuning/windows BEFORE runtime WELCOME advertises dual.
                 "selection_config": poc_run.ServerCapabilityConfig(

@@ -218,6 +218,60 @@ def resolve_catalog_selection(option: PocOption, scenario_id: str, choice: str, 
     return "poc", item.poc_id
 
 
+def workload_request(option: PocOption, *, poc_id: str | None, src_path: str | None) -> dict:
+    """CLI가 coordinator에 실어 보내는 PoC workload 요청(`submit_workload(poc=...)`).
+
+    선택은 CLI에서 이미 끝난 것이다(menu 또는 진단 계획이 `poc_id`를 확정). 소비자는 실물 controller
+    (`stage7_mass_roc_controller`, `--poc-request` 파일)와 RF-off software 세션(`stage8_rf_off_session`,
+    request의 `poc`)이며 둘 다 :func:`snapshot_for_request`로 해석한다 — 필드 이름은 여기 한 곳이 소유한다.
+    """
+    return {"poc": option.poc, "poc_dir": option.poc_dir, "poc_id": poc_id, "src_path": src_path}
+
+
+def snapshot_for_request(request: dict, *, scenario_id: str, dest_dir: str,
+                         server_config: ServerCapabilityConfig | None = None):
+    """coordinator 쪽(실물 controller·RF-off 세션)이 위임 요청에서 immutable snapshot을 만든다.
+
+    세션에 도착한 요청은 선택이 **이미 끝난** 것이다 — CLI가 menu(대화형) 또는 진단 계획
+    (`allowed_workloads`)으로 poc_id를 정해 실어 보낸다. 따라서 catalog(`poc_dir`) 요청은 prompt 없는
+    확정 선택(`preselected=True`)이며, 그 사실을 명시해야 비대화형 catalog 거부(§6.1)에 걸리지 않는다.
+    `poc_id`가 None/"none"이면 baseline(반환 None), id면 그 package다. 어떤 경우에도 prompt를 열지 않고
+    새 package를 탐색·추천하지 않는다. 위반·비호환·미지원 capability는 :class:`PocRunError`.
+
+    두 소비자가 각자 해석하면 한쪽만 고쳐지는 회귀가 생긴다(실측: controller만 고친 뒤 RF-off e2e가
+    같은 거부 문구로 실패). 그래서 해석 규칙은 이 함수 하나가 소유한다.
+    """
+    option = resolve_option(poc=request.get("poc"), poc_dir=request.get("poc_dir"),
+                            interactive=False, preselected=True)
+    return select_snapshot(option, scenario_id=scenario_id, dest_dir=dest_dir,
+                           poc_id=request.get("poc_id"), interactive=False,
+                           server_config=server_config)
+
+
+def baseline_evidence(*, workload_id: str, scenario_id: str) -> dict:
+    """baseline(none) workload의 PoC evidence — PoC 자원 0(구조적 0). 실행됐다고 꾸미지 않는다.
+
+    실물 controller와 RF-off 세션이 같은 짝(`status: BASELINE`, `poc_infrastructure: NOT_RUN`)을 내야
+    CLI 최종 판정(`run_cmd._poc_infra_ok`)이 두 경로에서 같다.
+    """
+    return {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
+            "workload_id": workload_id, "scenario_id": scenario_id}
+
+
+def arm_failure_evidence(exc: BaseException, *, workload_id: str, scenario_id: str) -> dict:
+    """arm(선택·snapshot·spawn·ARMED) 실패의 fail-closed evidence(scenario 자극 0).
+
+    `prepare_workload`가 cleanup 결과를 `exc.evidence`에 실었으면 그것을 그대로 쓰고(합성 금지), 없으면
+    원인 오류만 적는다. workload/scenario id는 비어 있을 때만 채운다.
+    """
+    evidence = getattr(exc, "evidence", None) or {
+        "status": "ERROR", "poc_infrastructure": "ERROR",
+        "error": f"{type(exc).__name__}: {exc}"}
+    evidence.setdefault("workload_id", workload_id)
+    evidence.setdefault("scenario_id", scenario_id)
+    return evidence
+
+
 def _session_device_boundary(session, scenario_id: str) -> tuple:
     """session이 제공하는 PoC device 경계 요소(provider|seams·steps·terminal_source·target_response).
 
@@ -430,6 +484,10 @@ __all__ = (
     "resolve_option",
     "select_snapshot",
     "resolve_catalog_selection",
+    "workload_request",
+    "snapshot_for_request",
+    "baseline_evidence",
+    "arm_failure_evidence",
     "prepare_workload",
     "abort_prepared",
     "scenario_verdict_from_status",

@@ -1,3 +1,6 @@
+import ast
+import inspect
+import textwrap
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
@@ -6,27 +9,53 @@ from apps.standalone.local_session import LocalCoordinatorSession
 
 
 class ProductionCliDelegationTests(unittest.TestCase):
+    """CLI(run_cmd)는 PoC를 프로세스 안에서 실행하지 않는다 — 요청을 coordinator 세션에 위임하고
+    회신된 evidence·severity만 반영한다(2-1: in-process 분기 제거)."""
+
     def test_real_session_declares_coordinator_ownership(self):
         self.assertIs(True, LocalCoordinatorSession.poc_workloads_in_coordinator)
 
-    def test_production_poc_uses_same_coordinator_path_without_rf_off_flag(self):
-        session = NS(poc_workloads_in_coordinator=True)
-        context = {"rf_off_software": False}
-        with patch.object(run_cmd, "_run_workload_rf_off_poc", return_value={"from": "coordinator"}) as delegate, \
-                patch.object(run_cmd, "_prepare_poc") as local:
-            result = run_cmd._run_workload(session, "SC-VDE-006", "normal", out=Mock(), clock=lambda: 0,
-                                           poc_ctx=context)
-        self.assertEqual({"from": "coordinator"}, result)
-        delegate.assert_called_once()
-        local.assert_not_called()
+    def test_poc_request_is_delegated_to_the_coordinator_session(self):
+        from apps.standalone import poc_run
 
-    def test_poc_off_never_delegates_to_poc(self):
+        session = NS(poc_workloads_in_coordinator=True,
+                     submit_workload=Mock(return_value="w-1"),
+                     wait_result=Mock(return_value={
+                         "status": "PASS", "quiescence": {"pass": True},
+                         "poc": {"status": "BASELINE", "poc_infrastructure": "NOT_RUN"}}))
+        context = {"module": poc_run, "option": NS(poc="/x.py", poc_dir=None), "src_path": "/src"}
+        result = run_cmd._run_workload(session, "SC-VDE-006", "normal", out=Mock(), clock=lambda: 0,
+                                       poc_ctx=context, poc_id=None)
+        kwargs = session.submit_workload.call_args.kwargs
+        self.assertEqual({"poc": "/x.py", "poc_dir": None, "poc_id": None, "src_path": "/src"},
+                         kwargs["poc"])
+        self.assertEqual("BASELINE", result["poc"]["status"])       # coordinator evidence 그대로
+        self.assertEqual("OK", result["poc_severity"])               # severity만 CLI가 매긴다
+        # CLI in-process PoC 경로는 존재하지 않는다(재도입 방지).
+        for name in ("_prepare_poc", "_finish_poc", "_run_workload_rf_off_poc"):
+            self.assertFalse(hasattr(run_cmd, name), name)
+
+    def test_poc_off_never_sends_a_poc_request(self):
         session = Mock(poc_workloads_in_coordinator=True)
+        session.submit_workload.return_value = "w-1"
         session.wait_result.return_value = {"status": "PASS", "quiescence": {"pass": True}}
-        with patch.object(run_cmd, "_run_workload_rf_off_poc") as delegate:
-            run_cmd._run_workload(session, "SC-VDE-006", "normal", out=Mock(), clock=lambda: 0, poc_ctx=None)
-        delegate.assert_not_called()
+        result = run_cmd._run_workload(session, "SC-VDE-006", "normal", out=Mock(), clock=lambda: 0,
+                                       poc_ctx=None)
+        self.assertNotIn("poc", session.submit_workload.call_args.kwargs)
+        self.assertNotIn("poc", result)
+        self.assertNotIn("poc_severity", result)
 
+    def test_session_without_coordinator_poc_hosting_is_refused_fail_closed(self):
+        """부정 대조: PoC를 coordinator에서 실행한다고 선언하지 않은 세션에 PoC 요청이 오면
+        조용한 in-process 대체 없이 거부하고 workload를 제출하지 않는다."""
+        from apps.standalone import poc_run
+
+        session = Mock(spec=["submit_workload", "wait_result"])     # 선언 없음
+        context = {"module": poc_run, "option": NS(poc="/x.py", poc_dir=None), "src_path": None}
+        with self.assertRaises(poc_run.PocRunError):
+            run_cmd._run_workload(session, "SC-VDE-006", "normal", out=Mock(), clock=lambda: 0,
+                                  poc_ctx=context)
+        session.submit_workload.assert_not_called()
 
 class ControllerSignalDispositionTests(unittest.TestCase):
     """PoC를 호스팅하는 controller child가 SIGTERM에서 정리 경로를 탄다(§취소·복원).
@@ -200,32 +229,66 @@ class ControllerArmInterruptTests(unittest.TestCase):
         self.assertTrue(bare, "인터럽트를 원형 그대로 재전달하지 않는다")
 
 
+class ControllerArmFailureTests(unittest.TestCase):
+    """arm 실패(일반 예외)는 fail-closed다 — scenario에 진입하지 않고, RX scope를 닫고, 공통 evidence
+    조립기(`poc_run.arm_failure_evidence`)로 기록한다. 실제 실행은 RF-off 실 child 시험이 맡는다."""
+
+    def _arm_try(self):
+        from apps import stage7_mass_roc_controller as controller
+
+        tree = ast.parse(inspect.getsource(controller.main))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and any(
+                    "poc_arm_failed" in ast.dump(handler) for handler in node.handlers):
+                return node
+        self.fail("main()에서 PoC arm try 블록을 찾지 못했다")
+
+    def test_arm_failure_returns_before_any_scenario(self):
+        node = self._arm_try()
+        handler = next(h for h in node.handlers
+                       if isinstance(h.type, ast.Name) and h.type.id == "Exception")
+        self.assertIsInstance(handler.body[-1], ast.Return,
+                              "arm 실패 처리가 return으로 끝나지 않는다 — scenario로 흘러간다")
+        called_names = {n.func.id for n in ast.walk(node)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertNotIn("run_scenarios", called_names)
+        called_attrs = {n.func.attr for n in ast.walk(handler)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        self.assertIn("arm_failure_evidence", called_attrs,
+                      "arm 실패 evidence는 poc_run.arm_failure_evidence(공통 조립기)로 만든다")
+        self.assertIn("close_collision_exchange", called_attrs, "arm 실패에도 workload RX scope를 닫는다")
+
+
 class ControllerPreselectedCatalogTests(unittest.TestCase):
     """coordinator에 위임된 PoC 요청은 선택이 **이미 끝난** 것이다.
 
     CLI가 menu(대화형) 또는 진단 계획(`allowed_workloads`)으로 poc_id를 정해 실어 보내므로,
-    controller는 catalog(`poc_dir`) 요청을 prompt 없는 확정 선택으로 해석해야 한다. 그렇지
-    않으면 실물의 `--poc-dir`(계획 기반 조합 포함)이 controller의 비대화형 catalog 거부(§6.1)에
-    걸려 **arm 실패**로 끝난다 — 지금까지 실물이 전부 `--poc` direct라 드러나지 않던 공백이다.
+    coordinator 쪽은 catalog(`poc_dir`) 요청을 prompt 없는 확정 선택으로 해석해야 한다. 그렇지
+    않으면 실물의 `--poc-dir`(계획 기반 조합 포함)이 비대화형 catalog 거부(§6.1)에 걸려
+    **arm 실패**로 끝난다.
 
-    행위 확인은 RF-off 재현(실 controller subprocess에 catalog 요청)이 맡고, 여기서는 결선을
-    잠근다.
+    위임 요청의 소비자는 **둘**이다 — 실물 controller와 RF-off software 세션. 예전엔 둘이 각자
+    해석해 한쪽만 고쳐지는 회귀가 있었다(실측: controller만 고친 뒤 실 coordinator e2e가 같은 거부
+    문구로 실패). 2-1부터 해석 규칙은 `poc_run.snapshot_for_request` **하나**가 소유하고 두 소비자는
+    그것만 부른다. 행위 확인은 RF-off 재현(실 controller subprocess·실 coordinator e2e)이 맡고,
+    여기서는 그 결선을 잠근다.
     """
 
     @staticmethod
-    def _resolve_option_calls(function):
-        import ast
-        import inspect
-
-        tree = ast.parse(inspect.getsource(function))
-        return [node for node in ast.walk(tree)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "resolve_option"]
+    def _calls(function, name):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if ((isinstance(func, ast.Name) and func.id == name)
+                    or (isinstance(func, ast.Attribute) and func.attr == name)):
+                found.append(node)
+        return found
 
     def _assert_preselected_non_interactive(self, function, who):
-        import ast
-
-        calls = self._resolve_option_calls(function)
+        calls = self._calls(function, "resolve_option")
         self.assertEqual(1, len(calls), f"{who}의 resolve_option 호출은 하나여야 한다")
         keywords = {kw.arg: kw.value for kw in calls[0].keywords}
         self.assertIn("preselected", keywords,
@@ -235,22 +298,43 @@ class ControllerPreselectedCatalogTests(unittest.TestCase):
         self.assertIs(keywords["interactive"].value, False,
                       f"{who}는 어떤 경우에도 prompt를 열지 않는다")
 
-    def test_controller_resolves_delegated_catalog_as_preselected(self):
+    def _assert_delegates_resolution(self, function, who):
+        self.assertEqual([], self._calls(function, "resolve_option"),
+                         f"{who}가 위임 요청을 직접 해석한다 — 단일 소유자(snapshot_for_request) 우회")
+        self.assertTrue(self._calls(function, "snapshot_for_request"),
+                        f"{who}가 snapshot_for_request를 부르지 않는다")
+
+    def test_single_owner_resolves_delegated_requests_as_preselected(self):
+        from apps.standalone import poc_run
+
+        self._assert_preselected_non_interactive(poc_run.snapshot_for_request,
+                                                 "poc_run.snapshot_for_request")
+
+    def test_controller_delegates_resolution_to_the_single_owner(self):
         from apps import stage7_mass_roc_controller as controller
 
-        self._assert_preselected_non_interactive(controller.main, "실물 controller")
+        self._assert_delegates_resolution(controller.main, "실물 controller")
 
-    def test_rf_off_session_resolves_delegated_catalog_as_preselected(self):
-        """위임 요청의 소비자는 **둘**이다 — 실물 controller와 RF-off software 세션.
-
-        둘 중 하나만 고치면 RF-off e2e는 통과하는데 실물이 arm 실패하거나 그 반대가 된다.
-        실측: controller만 고친 뒤 실 coordinator e2e가 같은 거부 문구로 실패했다
-        (`--poc-dir는 대화형 mode 전용`, 0.3 s, controller 미기동).
-        """
+    def test_rf_off_session_delegates_resolution_to_the_single_owner(self):
         from apps import stage8_rf_off_session as rf_off
 
-        self._assert_preselected_non_interactive(rf_off._handle_poc_request, "RF-off 세션")
+        self._assert_delegates_resolution(rf_off._handle_poc_request, "RF-off 세션")
 
+    def test_checkers_reject_direct_or_unconfirmed_resolution(self):
+        """부정 대조: 소비자의 직접 해석과 소유자의 미확정(대화형) 해석은 검사기가 거부한다
+        (production 파일 무변조 — 검사 대상은 여기 정의한 잘못된 결선 표본이다)."""
+
+        def direct_consumer(request):                       # 소유자를 우회해 직접 해석
+            return poc_run.resolve_option(poc=request.get("poc"), poc_dir=None,   # noqa: F821
+                                          interactive=False, preselected=True)
+
+        def unconfirmed_owner(request):                     # preselected 없음·대화형
+            return resolve_option(poc=request.get("poc"), poc_dir=None, interactive=True)  # noqa: F821
+
+        with self.assertRaises(AssertionError):
+            self._assert_delegates_resolution(direct_consumer, "직접 해석 소비자")
+        with self.assertRaises(AssertionError):
+            self._assert_preselected_non_interactive(unconfirmed_owner, "미확정 해석 소유자")
 
 class ControllerScenarioInterruptTests(unittest.TestCase):
     """scenario 실행 중 중단도 종결 evidence를 남긴다 — **`finally` 안에서** 기록해야 한다.

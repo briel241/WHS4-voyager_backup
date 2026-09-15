@@ -1262,18 +1262,12 @@ def main(argv=None) -> int:
             poc_request = json.loads(handle.read().decode("utf-8"))
         poc_host = PocWorkloadHost(controller=inline_controller, events=events)
         try:
-            # coordinator에 도착한 요청은 선택이 **이미 끝난** 것이다 — CLI가 menu(대화형) 또는
-            # 진단 계획(`allowed_workloads`)으로 poc_id를 정해 실어 보낸다. 따라서 catalog
-            # (`poc_dir`) 요청은 prompt 없는 확정 선택이며, 그 사실을 명시해야 비대화형 catalog
-            # 거부(§6.1)에 걸리지 않는다. poc_id가 None/"none"이면 baseline, id면 그 package다.
-            # 이 프로세스는 menu를 띄우지 않고 새 package를 탐색·추천하지 않는다.
-            option = _poc_run.resolve_option(poc=poc_request.get("poc"),
-                                             poc_dir=poc_request.get("poc_dir"),
-                                             interactive=False, preselected=True)
-            snapshot = _poc_run.select_snapshot(
-                option, scenario_id=arguments.scenario_id,
+            # 위임 요청은 선택이 **이미 끝난** 것이다(CLI menu 또는 진단 계획이 poc_id를 확정). 해석
+            # 규칙(비대화형·확정 선택·baseline 판정)은 RF-off 세션과 같은 `poc_run.snapshot_for_request`
+            # 하나가 소유한다 — 이 프로세스는 menu를 띄우지 않고 새 package를 탐색·추천하지 않는다.
+            snapshot = _poc_run.snapshot_for_request(
+                poc_request, scenario_id=arguments.scenario_id,
                 dest_dir=os.path.join(arguments.run_root, "poc-snapshot"),
-                poc_id=poc_request.get("poc_id"), interactive=False,
                 server_config=poc_host.selection_capabilities())
             if snapshot is not None:
                 poc_prepared = _poc_run.prepare_workload(
@@ -1281,18 +1275,16 @@ def main(argv=None) -> int:
                     run_id=arguments.run_id, workload_id=workload_id,
                     socket_root=None, src_path=poc_request.get("src_path"))
             else:
-                poc_evidence = {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
-                                "workload_id": workload_id}
+                poc_evidence = _poc_run.baseline_evidence(
+                    workload_id=workload_id, scenario_id=arguments.scenario_id)
         except Exception as exc:  # noqa: BLE001 - arm 실패는 fail-closed: scenario를 돌리지 않는다
             collision_cleanup_error = None
             try:
                 poc_host.close_collision_exchange()
             except Exception as cleanup_exc:
                 collision_cleanup_error = str(cleanup_exc)
-            poc_evidence = getattr(exc, "evidence", None) or {
-                "status": "ERROR", "poc_infrastructure": "ERROR",
-                "error": f"{type(exc).__name__}: {exc}"}
-            poc_evidence.setdefault("workload_id", workload_id)
+            poc_evidence = _poc_run.arm_failure_evidence(
+                exc, workload_id=workload_id, scenario_id=arguments.scenario_id)
             trace.emit("poc_arm_failed", error=f"{type(exc).__name__}: {exc}")
             _write_result(arguments.run_root, "poc-result", poc_evidence)
             final = {
