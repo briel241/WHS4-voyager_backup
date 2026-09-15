@@ -1,0 +1,44 @@
+{
+  "run_id": "software-213bf93a4aa24c969ff3dc4d2ac7df9b",
+  "backend": "software",
+  "hardware_executed": false,
+  "config": {
+    "security": "ON",
+    "body_sizes": [
+      3,
+      7,
+      8,
+      10,
+      29,
+      39,
+      164
+    ],
+    "iterations": 1,
+    "interval_s": 2,
+    "timeout_s": 90,
+    "budget_s": 600,
+    "sender": "ROC",
+    "receiver": "MASS-A",
+    "ack_required": false
+  },
+  "attempted": 5,
+  "budget_exhausted": false,
+  "compare_settings_sha256": "0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155",
+  "link_settings": {
+    "harness": "stage5_software_group",
+    "configuration": "stage5_software_ship/control"
+  },
+  "planned_attempts": 5,
+  "elapsed_s": 21.903131900005974,
+  "delivery_definition": "unique application SUBMIT attempts with verified DATA_RECEIVED observed before controller timeout / unique attempts",
+  "identity": "existing linkage field + format + route + body SHA256; no wire additions",
+  "key_distribution": "preprovisioned; preparation and distribution time excluded",
+  "rf_bytes": "not measured; PDU and built packets are not total air traffic",
+  "environment": {
+    "python": "3.13.3 (tags/v3.13.3:6280bb5, Apr  8 2025, 14:47:33) [MSC v.1943 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cryptography": "50.0.1",
+    "timer": "controller perf_counter; per-endpoint perf_counter_ns for crypto",
+    "timer_resolution_s": 1e-07
+  }
+}

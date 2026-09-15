@@ -70,6 +70,7 @@ class LinkDataPlane:
         "_transfers",
         "_reassembler",
         "_tbb_assembler",
+        "experiment_observer",
     )
 
     def __init__(
@@ -83,6 +84,7 @@ class LinkDataPlane:
         crypto_dependencies: LinkCryptoDependencies | None = None,
     ) -> None:
         self._id_source = id_source
+        self.experiment_observer = None
         self._message_registry = message_registry
         self._link_profile_registry = link_profile_registry
         self._maximum_reassembly_contexts = maximum_reassembly_contexts
@@ -100,7 +102,18 @@ class LinkDataPlane:
         return self._transfers.analyze_transfer(request)
 
     def build_packet(self, request: LinkBuildRequest):
-        return self._transfers.build_packet(request)
+        result = self._transfers.build_packet(request)
+        if self.experiment_observer is not None and result.is_ok:
+            packet = result.value
+            self.experiment_observer.record(
+                stage="packet_build", transfer_id=packet.transfer_id.value,
+                link_id=packet.link_id.value, procedure=request.plan.procedure.value,
+                packet_id=packet.packet_id.value,
+                segment_offset=packet.segment_offset, segment_length=packet.segment_length,
+                retransmission_number=request.retransmission_number,
+                packet_bytes=len(packet.packet),
+            )
+        return result
 
     def control_transfer(self, request: LinkTransferControlRequest):
         return self._transfers.control_transfer(request)

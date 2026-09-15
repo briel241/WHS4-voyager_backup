@@ -1,0 +1,3 @@
+requested_body_bytes,reason
+7,"No VDS2-required codec accepts this Body size: ACK=3B, position=14B, command=ceil((76+77*n)/8), n=0..16. Use 10B or 14B separately; AIS/certificate/opaque formats are not encrypted by the existing policy."
+8,"No VDS2-required codec accepts this Body size: ACK=3B, position=14B, command=ceil((76+77*n)/8), n=0..16. Use 10B or 14B separately; AIS/certificate/opaque formats are not encrypted by the existing policy."

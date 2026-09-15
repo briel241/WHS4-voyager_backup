@@ -87,11 +87,12 @@ class InternalEventBus:
     routing 여부를 판단한다.
     """
 
-    __slots__ = ("_sink", "_router")
+    __slots__ = ("_sink", "_router", "experiment_observer")
 
     def __init__(self, sink) -> None:
         self._sink = sink
         self._router = None
+        self.experiment_observer = None
 
     @property
     def sink(self):
@@ -104,6 +105,17 @@ class InternalEventBus:
 
     def publish(self, event):
         result = self._sink.publish(event)
+        if self.experiment_observer is not None and event.event_type.value in (
+            "BURST_ENCODED", "BURST_SCHEDULED", "BURST_COMPLETED", "LAYER_ERROR", "INTERNAL_ERROR"
+        ):
+            correlation = event.correlation
+            self.experiment_observer.record(
+                stage=event.event_type.value,
+                transfer_id=correlation.transfer_id.value if correlation.transfer_id else None,
+                packet_id=correlation.packet_id.value if correlation.packet_id else None,
+                burst_id=correlation.burst_id.value if correlation.burst_id else None,
+                error=event.error.code if event.error else None,
+            )
         if result.is_err:
             return result
         if self._router is not None:

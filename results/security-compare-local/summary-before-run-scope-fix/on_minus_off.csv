@@ -1,0 +1,6 @@
+backend,condition_id,compare_settings_sha256,off_failures,on_failures,off_latency_samples,on_latency_samples,delivery_rate_on_minus_off,completion_observed_mean_ns_on_minus_off,completion_observed_median_ns_on_minus_off,completion_observed_p95_ns_on_minus_off
+software,body-10,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,1554392800.0,1554392800.0,1554392800.0
+software,body-164,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,773032799.0,773032799.0,773032799.0
+software,body-29,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,2901255699.0,2901255699.0,2901255699.0
+software,body-3,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,-4079700.0,-4079700.0,-4079700.0
+software,body-39,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,1991247200.0,1991247200.0,1991247200.0

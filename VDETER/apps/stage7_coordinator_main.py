@@ -155,7 +155,8 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
 
 
 def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_artifact_path,
-                      *, e2e_security_mode, test_plan_sha=None, lifecycle_generation=1):
+                      *, e2e_security_mode, test_plan_sha=None, lifecycle_generation=1,
+                      security_compare_experiment=False):
     """launcher process 셋을 spawn하고 socket 연결까지 마친다."""
 
     from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
@@ -180,6 +181,8 @@ def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_a
         ]
         if gain_artifact_path is not None:
             command += ["--gain-artifact", gain_artifact_path]
+        if security_compare_experiment:
+            command += ["--security-compare-experiment"]
         if test_plan_sha is not None:
             command += [
                 "--test-plan-sha", test_plan_sha,
@@ -914,7 +917,7 @@ def _spawn_controller(run_id, run_root, configs_dir, test_plan_sha, mode,
 
 
 def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
-                               scenario_id, certificate_case):
+                               scenario_id, certificate_case, experiment_config=None):
     """MASS/ROC 업무 시나리오 controller를 spawn한다 (RR controller와 별개).
 
     기존 RR scenario controller는 그대로 보존한다 — MASS/ROC workload는
@@ -937,6 +940,9 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
         "--scenario-id", scenario_id,
         "--certificate-case", certificate_case,
     ]
+    if experiment_config is not None:
+        command += ["--security-compare-config", experiment_config,
+                    "--security-compare-configs-dir", configs_dir]
     return subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
 
 
@@ -1215,7 +1221,7 @@ SERVICE_RF_TIME_PAIRS = ("RA", "RB", "AB")
 
 def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
                          metadata, configs_dir, gain_artifact_path, test_plan_sha,
-                         scenario_id, certificate_case, processes=None):
+                         scenario_id, certificate_case, processes=None, experiment_config=None):
     """`OPERATIONAL_SERVICE`: qualification 없이 서비스 구간만 수행한다 (Phase G).
 
     Phase F에서 발급한 qualification reference가 유효하다는 전제 위에서, 이미
@@ -1411,6 +1417,7 @@ def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
         controller = _spawn_mass_roc_controller(
             run_id, run_root, configs_dir, test_plan_sha,
             scenario_id, certificate_case,
+            experiment_config=experiment_config,
         )
         gate_dir = os.path.join(run_root, "controller_gate")
         os.makedirs(gate_dir, exist_ok=True)
@@ -3250,6 +3257,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Stage 7 Runtime Coordinator")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--e2e-security-mode", choices=("ENFORCED", "DISABLED"), required=True)
+    parser.add_argument("--security-compare-config", default=None,
+                        help="Explicit isolated hardware ON/OFF workload JSON (mass-roc-service only)")
     parser.add_argument(
         "--phase", required=True,
         choices=("p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
@@ -3285,8 +3294,24 @@ def main(argv=None) -> int:
     )
     arguments = parser.parse_args(argv)
 
+    if arguments.security_compare_config is not None:
+        if arguments.phase != "mass-roc-service" or arguments.workload != "rr":
+            raise SystemExit("Security comparison requires mass-roc-service, default workload=rr")
+        repo_root = os.path.dirname(APP_ROOT)
+        sys.path.insert(0, repo_root)
+        from apps.aes_gcm_hardware_compare import read_config, supported_conditions
+        experiment = read_config(arguments.security_compare_config)
+        expected = "ENFORCED" if experiment["security"] == "ON" else "DISABLED"
+        if arguments.e2e_security_mode != expected:
+            raise SystemExit("Experiment config and endpoint security mode mismatch")
+        if not supported_conditions(experiment):
+            raise SystemExit("No supported comparison conditions; refusing hardware startup")
+        if 14 in experiment["body_sizes"] and experiment["ack_required"]:
+            raise SystemExit("Position codec requires Link ACK false")
+        arguments.security_compare_config = os.path.abspath(arguments.security_compare_config)
+
     if (arguments.phase in ("mass-roc-service", "mass-roc-session")
-            or arguments.workload == "mass-roc") and arguments.e2e_security_mode != "ENFORCED":
+            or arguments.workload == "mass-roc") and arguments.e2e_security_mode != "ENFORCED" and arguments.security_compare_config is None:
         raise SystemExit("MASS/ROC workload requires ENFORCED E2E security mode")
 
     if arguments.workload == "mass-roc" and arguments.phase not in (
@@ -3345,6 +3370,7 @@ def main(argv=None) -> int:
         arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
         arguments.gain_artifact, e2e_security_mode=arguments.e2e_security_mode,
         test_plan_sha=test_plan_sha,
+        security_compare_experiment=arguments.security_compare_config is not None,
     )
     coordinator = Stage7RuntimeCoordinator(
         plan,
@@ -3443,6 +3469,7 @@ def main(argv=None) -> int:
                 scenario_id=arguments.scenario_id,
                 certificate_case=arguments.certificate_case,
                 processes=processes,
+                experiment_config=arguments.security_compare_config,
             )
         elif arguments.phase == "rr-p3-fault":
             phase_result = run_rr_p3_fault(

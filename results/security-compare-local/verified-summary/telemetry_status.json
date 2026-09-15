@@ -1,0 +1,6 @@
+{
+  "dropped_metadata_rows": 0,
+  "authentication_failures": 0,
+  "replay_rejections": 0,
+  "note": "Tag/ciphertext failures may match an opaque existing-header/route fingerprint, never a delivery proof. Corrupted headers remain unassigned in security_failures.csv. Missing metadata is left blank."
+}

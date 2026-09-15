@@ -1,0 +1,39 @@
+{
+  "branch": "hardware-test",
+  "push_remote": "https://github.com/briel241/voyager_backup.git",
+  "hardware_executed": false,
+  "security_tests": "51 passed in 2.50s (includes 22 comparison checks)",
+  "additional_integration": "16 passed, 1 deselected, 11 subtests passed in 58.55s",
+  "earlier_arch_service_contract": "76 passed, 7 subtests passed",
+  "existing_service_session_backend": "51 passed; 23 failed due to baseline fixture raw CRLF SHA vs LF sidecar",
+  "large_payload_test": "65531B/1873-fragment test interrupted; not counted as passed",
+  "final_radio_simulation": {
+    "OFF": {
+      "attempted": 5,
+      "delivered": 4,
+      "timeouts": 1
+    },
+    "ON": {
+      "attempted": 5,
+      "delivered": 5,
+      "timeouts": 0
+    }
+  },
+  "earlier_successful_simulation": "off-final and on-final: 5/5 each",
+  "summary_path": "results\\security-compare-local\\final-summary",
+  "secret_scan": "No actual credential files/private PEM blocks or tokens found among changed/new files",
+  "source_sha256": {
+    "VDETER/apps/stage7_coordinator_main.py": "f25013c5e3ab4351a74ce79221c350c337ce6f26049fca327884f775c27e518c",
+    "VDETER/apps/stage7_endpoint_launcher.py": "b6bfe5bb1e4fe5acaddaac1fb0c5c8ff1dfbbd447674369ec4dbf3b059e9e86f",
+    "VDETER/src/vdeter/common/experiment.py": "c35adc8fff1d47b0efd0473903e87888576a10432f531e85c0bc07ba9f9861f8",
+    "VDETER/src/vdeter/link/data_plane.py": "2a6b755ff9db433abca18f67c7ca0171fcec6c8f862783b5a848c429635572ca",
+    "VDETER/src/vdeter/presentation/adapter.py": "a28802afabe4abe8dd49072de3b3584adfcdbdafa1119582d0f0a6a5212d2c67",
+    "VDETER/src/vdeter/runtime/wiring.py": "093c874852f51cfeb05cefd89a0d266fdc23e1e1ecc2d90aa34c9162f98d09aa",
+    "VDETER/src/vdeter/security/presentation.py": "8756f4293bec8031abd5901dd9a81e6c58384bb9adee07b756e76ea006205189",
+    "VDETER/tests/unit/security/test_hardware_compare.py": "2e5a88dad78a01e61a4d2f9de6dc08ee91f70266e820f8c7ed541946bbdee406",
+    "VDETER/tools/e2e_security_provision.py": "83c4ffc2f5dc0abc5d94c40d04fd0d004a2a5e57dcf828102f03b1e1c24e131b",
+    "apps/aes_gcm_hardware_compare.py": "8c439cd754e993e8eb1d47a2f4d14d4c51d13e02833ca8794ee6f7ba926ba06a",
+    "apps/mass_roc_software.py": "3292d1e7cd6b56ec83f1ca027e8d4627341165df8c37c993c6eff573d3a3156c",
+    "apps/stage7_mass_roc_controller.py": "503af33e6c04183875fcf844b0a17ac315d381b73fd3cbdff7cc057016e86321"
+  }
+}

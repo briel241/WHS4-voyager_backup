@@ -1,0 +1,6 @@
+backend,condition_id,compare_settings_sha256,off_failures,on_failures,off_latency_samples,on_latency_samples,delivery_rate_on_minus_off,pdu_bytes_off_observed,pdu_bytes_on_observed,pdu_bytes_on_minus_off,fragments_built_off_observed,fragments_built_on_observed,fragments_built_on_minus_off,completion_observed_mean_ns_on_minus_off,completion_observed_median_ns_on_minus_off,completion_observed_p95_ns_on_minus_off
+software,body-10,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,1,0,0,1,1.0,13,36,23,1,2,1,,,
+software,body-164,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,167,190,23,5,6,1,-112289801.0,-112289801.0,-112289801.0
+software,body-29,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,32,55,23,1,2,1,2932937100.0,2932937100.0,2932937100.0
+software,body-3,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,6,29,23,1,1,0,-32825601.0,-32825601.0,-32825601.0
+software,body-39,0c4e86f8fdf3caeb5369ecc3cb30d70a6d4ae755a8a92dc02bee3d8ac1461155,0,0,1,1,0.0,42,65,23,2,2,0,2198480501.0,2198480501.0,2198480501.0

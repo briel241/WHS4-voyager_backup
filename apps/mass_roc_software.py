@@ -88,7 +88,7 @@ class _DrivenEventLog:
 class SoftwareMassRocHarness:
     """소프트웨어 무선 그룹 + TEST adapter + inline controller 한 벌."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, e2e_security_mode="ENFORCED", experiment=False) -> None:
         try:
             from tests.support.stage5 import (
                 MASS_A_STATION_ID,
@@ -121,7 +121,7 @@ class SoftwareMassRocHarness:
 
         try:
             self._clock, self._group = build_stage5_software_group(
-                service_sink_factory=sink_factory, e2e_security_mode="ENFORCED",
+                service_sink_factory=sink_factory, e2e_security_mode=e2e_security_mode,
             )
             start_stage5_group(self._clock, self._group)
         except Exception as exc:  # noqa: BLE001 - cryptography 등 조립 실패
@@ -129,6 +129,15 @@ class SoftwareMassRocHarness:
                 f"소프트웨어 무선 그룹 조립 실패: {exc}") from exc
 
         by_station = self._group.by_station()
+        self.experiment_buffers = {}
+        if experiment:
+            from vdeter.common.experiment import ExperimentBuffer
+            for station, endpoint in by_station.items():
+                buffer = ExperimentBuffer()
+                endpoint._presentation._e2e_security.presentation_security.experiment_observer = buffer
+                endpoint._link.experiment_observer = buffer
+                endpoint.dependencies.internal_event_sink.experiment_observer = buffer
+                self.experiment_buffers[station] = buffer
         channels = {}
         self.adapters = {}
         for endpoint_id, station in self.station_by_endpoint.items():
@@ -151,6 +160,21 @@ class SoftwareMassRocHarness:
 
     def drive(self, steps: int) -> None:
         self._drive_fn(self._clock, self._group, steps)
+
+    def write_experiment_telemetry(self, run_root, *, run_id):
+        import json
+        from pathlib import Path
+        from uuid import uuid4
+        directory = Path(run_root) / "evidence/security_compare"
+        directory.mkdir(parents=True, exist_ok=True)
+        for station, buffer in self.experiment_buffers.items():
+            rows = buffer.drain()
+            rows.append(dict(stage="buffer_status", dropped=buffer.dropped))
+            path = directory / f"software-{station}-{uuid4().hex}.jsonl"
+            with path.open("x", encoding="utf-8") as handle:
+                for row in rows:
+                    row.update(run_id=run_id, station=station)
+                    handle.write(json.dumps(row) + "\n")
 
     def close(self) -> None:
         try:

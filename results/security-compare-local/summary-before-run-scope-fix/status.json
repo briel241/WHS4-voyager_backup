@@ -1,0 +1,4 @@
+{
+  "valid": false,
+  "reason": "Derived before run ID scoping fix. Do not use these statistics. Raw experiment records retained; use verified-summary instead."
+}

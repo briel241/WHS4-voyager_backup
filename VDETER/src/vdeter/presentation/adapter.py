@@ -292,6 +292,7 @@ class RegistryPresentationAdapter:
             )
         secured = self._e2e_security.presentation_security.protect(
             entry=entry, codec=codec, plain_wire=wire, route=request.route,
+            transfer_id=request.transfer_id.value,
         )
         if secured.is_err:
             return secured

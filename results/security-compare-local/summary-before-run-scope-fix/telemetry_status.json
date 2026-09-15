@@ -1,0 +1,6 @@
+{
+  "dropped_metadata_rows": 0,
+  "authentication_failures": 0,
+  "replay_rejections": 0,
+  "note": "Corrupted secure wire hashes cannot be safely assigned to a message; all such events remain in security_failures.csv. Missing metadata is left blank."
+}
