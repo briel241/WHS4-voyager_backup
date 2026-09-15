@@ -62,14 +62,12 @@ _RF_AND_OPERATION_FILES = frozenset({
     "apps/standalone/local_config.py",              # RF config 생성에 관여
     "apps/standalone/hardware_profiles.py",         # host profile→template·provisioning 입력
 })
-#: 자격 tooling 명시 파일(standalone 중). setup·qualify·분류기·manifest·
-#: deploy manifest·provenance·templates.
+#: 자격 tooling 명시 파일(standalone 중). setup·qualify·분류기·초안 생성.
 _TOOLING_ONLY_FILES = frozenset({
     "apps/standalone/qualify_cmd.py",
     "apps/standalone/qualification_domains.py",
     "apps/standalone/setup_cmd.py",
     "apps/standalone/hardware_draft.py",         # setup 전용 hardware.toml 초안 생성
-    "apps/standalone/deploy_manifest.py",
 })
 #: tooling이면서 일반 실행도 쓰는 파일(교차영향 → 두 영역).
 _TOOLING_AND_OPERATION_FILES = frozenset({

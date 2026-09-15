@@ -6,10 +6,12 @@
 띄우고(실 PoC child·Unix socket·SDK·engine·provider), scenario event를 실행 중 전달하며 판정·evidence·
 cleanup을 확정한다(연결 API 명세 §3.1: supervisor는 VDETER runtime 안, child만 별도 process).
 
-**하드웨어 경계만** software double로 대체한다: B210 group TX·arbiter·RX readiness·waveform·terminal은
-`vdeter.stage8.integration.rf_off`의 **명시 주입** double이다(production 기본값 아님). 실 launcher socket
-IPC와 실 Stage 7 MAC seam 결속은 in-process fake 매질이 3개 launcher 프로세스를 가로지를 수 없어
-RF-off로 재현할 수 없다(실장비 또는 cross-process 매질 subsystem 필요) — 그 부분은 미검증으로 분리한다.
+**하드웨어 경계만** software double로 대체한다: `RfOffStage7DeviceSession`이 실 Stage 7 software
+group(`tests.support.stage7`)을 프로세스 안에서 띄우고 PoC provider seam을 그 **실 endpoint 객체**
+(worker·frozen PHY·hardware clock·route sidecar·수신기)에 결속한다 — B210 device I/O만 fake medium
+worker다(production 기본값 아님). 실 launcher socket IPC와 실 Stage 7 MAC seam 결속은 in-process
+fake 매질이 3개 launcher 프로세스를 가로지를 수 없어 RF-off로 재현할 수 없다(실장비 또는
+cross-process 매질 subsystem 필요) — 그 부분은 미검증으로 분리한다.
 
 deadline은 `ResidentPocRuntime`(권위 상한: bring-up 2700 / workload 900 / close 600 / absolute 7200 /
 READY idle 2700)에 결속한다. RF-off는 실 900초 wall-clock을 돌리지 않으므로 그 강제는 fake-clock 경계
@@ -56,52 +58,14 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
-class RfOffPocDeviceSession:
-    """poc_run이 읽는 device-boundary 공급자 — **명시적 RF-off software double**.
-
-    실 `LocalCoordinatorSession`이 (아직) device 경계를 주지 못하는 자리를, RF-off 검증 한정으로 이
-    coordinator-side 공급자가 명시적으로 채운다(production silent fallback 아님). 정상 설치에서는 실 Stage 7
-    MAC seam이 이 자리를 대신한다(실장비 Stage 6). scenario 자극은 실행 중 전달되는 관측 step으로 구성해
-    반응형 action이 scenario terminal 이전에 제출되게 한다(연결 §8.3 인과성; 관측 hw-time이 반응형 slot을
-    유도한다 — 단순 counter 아님).
-    """
-
-    def __init__(self, run_root: str, *, reactive: bool = True) -> None:
-        self.run_root = Path(run_root)
-        self._reactive = reactive
-
-    def poc_device_seams(self):
-        from vdeter.stage8.integration.rf_off import rf_off_seams
-        return rf_off_seams()
-
-    def poc_terminal_source(self):
-        from vdeter.stage8.integration.rf_off import rf_off_terminal_source
-        return rf_off_terminal_source()
-
-    def poc_target_response(self):
-        # 실 RX/application 수신 증거는 실장비에서만 온다. RF-off는 INDETERMINATE(합성 금지).
-        return None
-
-    def poc_workload_steps(self, scenario_id):
-        from vdeter.stage8.execution.runner import observation_step, scenario_started
-        from vdeter.stage8.testing.fakes import make_observation
-        if not self._reactive:
-            return [scenario_started()]
-        # scenario 진행 중 MASS-B가 관측하는(overhear) 브로드캐스트. device_hw_timestamp_ns가 반응형
-        # slot 기준이다(shared-medium 참조 모델의 예약 슬롯 시각; RF-off VDETER-owned 관측).
-        observation = make_observation(
-            source_station="ROC", destination_station="MASS-A",
-            device_hw_timestamp_ns=2 * 8192)
-        return [scenario_started(), observation_step(observation)]
-
-
 class RfOffStage7DeviceSession:
     """poc_run이 읽는 device-boundary 공급자 — **실 Stage 7 software group 객체에 결속**(no stub).
 
     `--rf-off-software` coordinator 프로세스 안에서 실행 중 Stage 7 software group(`build_stage7_software_group`
     + `start_stage7_group`)을 한 번 띄우고, PoC provider seam을 그 **실 endpoint 객체**(worker·frozen PHY·
     hardware clock·route 매질·수신기)에 결속한다. 하드웨어 경계(B210 device I/O)만 fake medium worker.
-    이전 `RfOffPocDeviceSession`은 rf_off **stub** seam을 썼고, 이 class가 그것을 실 seam으로 교체한다.
+    rf_off **stub** seam(`vdeter.stage8.integration.rf_off`)을 쓰던 이전 세션 class는 이 class로
+    대체된 뒤 제거됐다(2026-09-15, 호출자 0). stub seam 자체는 시험 harness용으로 남아 있다.
 
     device delivery는 `tx_lo_hz==rx_lo_hz`를 요구하므로(WSM-G1 common-LO), PoC 대상 채널(lower=ROC)로
     수신기 RX LO 정합을 RF-off 한정 주입한다(실 동시 service-tuned 도달은 실장비). 실 service scenario를
@@ -342,8 +306,7 @@ def run_rf_off_software_session(arguments) -> int:
     return 0 if status == "PASS" else 1
 
 
-__all__ = ("RfOffPocDeviceSession", "RfOffStage7DeviceSession",
-           "run_rf_off_software_session", "main")
+__all__ = ("RfOffStage7DeviceSession", "run_rf_off_software_session", "main")
 
 
 def main(argv=None) -> int:

@@ -24,12 +24,25 @@ for _entry in (os.path.join(_REPO, "VDETER"),
 
 from pathlib import Path
 
-from apps.standalone import deploy_manifest
+from apps.standalone import installation_manifest as im
 from apps.standalone import qualification_domains as qd
 
 
 def _manifest_from(paths):
     return {"files": [{"path": p, "sha256": s} for p, s in paths.items()]}
+
+
+def _repo_v1_manifest() -> dict:
+    """실제 설치 tree를 production 측정기(installation_manifest.measure, v2)로 실측해
+    v1 manifest 모양(`files: [{path, sha256}]`)으로 투영한다.
+
+    v1 producer였던 apps/standalone/deploy_manifest.py는 production 호출자가 없어
+    제거됐다(2026-09-15). 파일 집합은 배포 prefix가 아니라 설치 scan(제외 규칙 적용)
+    이며, 아래 partition·핵심 영역 계약은 그 집합 위에서 그대로 성립해야 한다."""
+    record = im.measure(Path(_REPO))
+    return {"file_count": record["file_count"],
+            "files": [{"path": path, "sha256": entry["sha256"]}
+                      for path, entry in sorted(record["files"].items())]}
 
 
 # --------------------------------------------------------- classification
@@ -164,9 +177,9 @@ def test_evaluate_reuse_v2_rules():
 
 
 def test_every_deployed_file_classifies_into_exactly_one_domain():
-    """실제 배포 tree measure로 completeness/partition을 고정한다."""
-    manifest = deploy_manifest.measure(Path(_REPO))
-    assert manifest["file_count"] > 400  # 배포 규모 sanity
+    """실제 설치 tree 실측(v2 measure → v1 투영)으로 completeness/partition을 고정한다."""
+    manifest = _repo_v1_manifest()
+    assert manifest["file_count"] > 400  # 설치 규모 sanity
     split = qd.split_manifest(manifest)
     # 모든 영역 키 존재.
     assert set(split) == set(qd.DOMAINS)
@@ -186,7 +199,7 @@ def test_every_deployed_file_classifies_into_exactly_one_domain():
 
 
 def test_rf_domain_contains_core_and_tests_are_tooling():
-    manifest = deploy_manifest.measure(Path(_REPO))
+    manifest = _repo_v1_manifest()
     split = qd.split_manifest(manifest)
     rf = split[qd.RF]["files"]
     assert "VDETER/apps/stage7_coordinator_main.py" in rf
@@ -199,7 +212,6 @@ def test_rf_domain_contains_core_and_tests_are_tooling():
         assert not any(p.startswith("VDETER/tests/")
                        for p in split[d]["files"])
     # v2 실측: 결속 파일은 비결속과 겹치지 않고 교차영향 파일은 두 영역에.
-    from apps.standalone import installation_manifest as im
     record = im.measure(Path(_REPO))
     files = record["files"]
     assert set(files["VDETER/apps/stage7_scenario_controller.py"]["domains"]) == {

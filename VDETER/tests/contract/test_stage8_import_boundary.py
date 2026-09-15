@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import ast
+import copy
 import os
 import subprocess
 import sys
@@ -24,10 +26,14 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
 
 # Stage 6 coordinator↔PoC 연결에서 명시 승인된 **RF-off software 세션 host** adapter.
 # production CLI adapter(poc_run)와 달리, 이것은 `--rf-off-software`에서만 진입하는 **명시적
-# 하드웨어 경계 double** harness다(실장비 실행에서는 진입하지 않는다). 따라서 rf_off·testing seam을
-# 의도적으로 import하며(그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
+# 하드웨어 경계 double** harness다(실장비 실행에서는 진입하지 않는다). 따라서 시험 support의 Stage 7
+# software group(`tests.support.stage7`)과 `vdeter.stage8.testing` seam을 의도적으로 import하며
+# (그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
 # 광범위 allowlist가 아니라 실제 결선에 필요한 파일만 명시 추가한다.
 # - stage8_rf_off_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
+#   `RfOffStage7DeviceSession`이 실 Stage 7 software group을 띄우고(하드웨어 경계만 fake medium
+#   worker) 권위 provider(`assemble_authoritative_provider`)를 그 members에 결속한다 — 그 결선
+#   계약은 아래 `_rf_off_session_wiring`(AST)이 검사한다.
 # - stage8_stage7_seams.py: Stage 8 PoC provider seam을 **실 Stage 7 객체**(worker·frozen PHY·MAC
 #   hardware clock·route sidecar·수신기)에 결속하는 RF-off 통합 adapter(하드웨어 경계만 double).
 _SANCTIONED_RF_OFF_SESSION = frozenset({
@@ -58,6 +64,162 @@ def _run_py(code: str) -> subprocess.CompletedProcess:
         [_SRC, _PROJECT_ROOT, os.path.join(_PROJECT_ROOT, "VDETER")]
     ) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+
+
+_RF_OFF_SESSION_HOST = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py"))
+_RF_OFF_SESSION_CLASS = "RfOffStage7DeviceSession"
+_STAGE7_GROUP_SUPPORT = "tests.support.stage7"
+_STAGE7_GROUP_BUILDER = "build_stage7_software_group"
+_STAGE7_GROUP_STARTER = "start_stage7_group"
+_STAGE7_SEAMS_MODULE = "apps.stage8_stage7_seams"
+_AUTHORITATIVE_PROVIDER = "assemble_authoritative_provider"
+
+
+def _call_name(node):
+    """`Call` node의 호출 대상이 단순 이름이면 그 이름, 아니면 None."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _is_self_attr(node, attr):
+    return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id == "self" and node.attr == attr)
+
+
+def _rf_off_session_wiring(tree):
+    """`RfOffStage7DeviceSession`↔실 Stage 7 software group 결선을 AST에서 읽어 dict로 돌려준다.
+
+    - `imported_from`: `__init__` 안 from-import 이름 → module.
+    - `group_names`: `build_stage7_software_group()` 반환값을 받은 변수 이름들(clock·medium·members…).
+    - `group_started`: `start_stage7_group(...)`이 그 group 변수들로 호출됐는지.
+    - `provider_factory` / `provider_members_arg` / `provider_has_station_map`: `self._provider`에
+      대입되는 호출의 함수 이름, 그 첫 위치 인자(group members여야 한다), `station_id_by_endpoint` kw 유무.
+    - `poc_provider_returns_wired`: `poc_provider()`가 `self._provider`를 그대로 돌려주는지.
+    """
+    klass = next((n for n in tree.body
+                  if isinstance(n, ast.ClassDef) and n.name == _RF_OFF_SESSION_CLASS), None)
+    if klass is None:
+        return None
+    methods = {n.name: n for n in klass.body if isinstance(n, ast.FunctionDef)}
+    init = methods.get("__init__")
+    result = {"imported_from": {}, "group_names": set(), "group_started": False,
+              "provider_factory": None, "provider_members_arg": None,
+              "provider_has_station_map": False, "poc_provider_returns_wired": False}
+    if init is None:
+        return result
+    for node in ast.walk(init):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                result["imported_from"][alias.asname or alias.name] = node.module
+    for node in ast.walk(init):
+        if isinstance(node, ast.Assign) and _call_name(node.value) == _STAGE7_GROUP_BUILDER:
+            for target in node.targets:
+                elts = target.elts if isinstance(target, ast.Tuple) else [target]
+                result["group_names"].update(e.id for e in elts if isinstance(e, ast.Name))
+    for node in ast.walk(init):
+        if isinstance(node, ast.Expr) and _call_name(node.value) == _STAGE7_GROUP_STARTER:
+            args = [a.id for a in node.value.args if isinstance(a, ast.Name)]
+            if args and set(args) <= result["group_names"]:
+                result["group_started"] = True
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            targets = []
+            for target in node.targets:
+                targets.extend(target.elts if isinstance(target, ast.Tuple) else [target])
+            if any(_is_self_attr(t, "_provider") for t in targets):
+                call = node.value
+                result["provider_factory"] = _call_name(call)
+                first = call.args[0] if call.args else None
+                result["provider_members_arg"] = first.id if isinstance(first, ast.Name) else None
+                result["provider_has_station_map"] = any(
+                    kw.arg == "station_id_by_endpoint" for kw in call.keywords)
+    poc_provider = methods.get("poc_provider")
+    if poc_provider is not None:
+        result["poc_provider_returns_wired"] = any(
+            isinstance(n, ast.Return) and _is_self_attr(n.value, "_provider")
+            for n in ast.walk(poc_provider))
+    return result
+
+
+def _assert_rf_off_session_wired(case, tree):
+    """결선 계약: 실 software group을 만들고 시작한 뒤, 그 members로 **권위 provider**를 조립해
+    `poc_provider()`로 낸다. (문자열 부분 일치가 아니라 AST 구조로 판정한다.)"""
+    wiring = _rf_off_session_wiring(tree)
+    case.assertIsNotNone(wiring, f"{_RF_OFF_SESSION_CLASS} class가 세션 host에 없다")
+    imported = wiring["imported_from"]
+    case.assertEqual(imported.get(_STAGE7_GROUP_BUILDER), _STAGE7_GROUP_SUPPORT,
+                     "software group builder는 tests.support.stage7에서 가져와야 한다")
+    case.assertEqual(imported.get(_STAGE7_GROUP_STARTER), _STAGE7_GROUP_SUPPORT,
+                     "software group starter는 tests.support.stage7에서 가져와야 한다")
+    case.assertTrue(wiring["group_names"], "build_stage7_software_group() 반환값을 받지 않는다")
+    case.assertTrue(wiring["group_started"],
+                    "start_stage7_group이 그 group(clock·medium·coordinator·members·resolved)으로 "
+                    "호출되지 않는다 — Stage 7 software group 연결이 끊겼다")
+    case.assertEqual(wiring["provider_factory"], _AUTHORITATIVE_PROVIDER,
+                     "self._provider는 권위 schedule_tx 경로 provider(assemble_authoritative_provider)"
+                     "여야 한다(stub·fallback seam 아님)")
+    case.assertEqual(imported.get(_AUTHORITATIVE_PROVIDER), _STAGE7_SEAMS_MODULE,
+                     "권위 provider 조립기는 apps.stage8_stage7_seams에서 가져와야 한다")
+    case.assertIn(wiring["provider_members_arg"], wiring["group_names"],
+                  "provider는 실행 중 software group의 members로 조립해야 한다")
+    case.assertTrue(wiring["provider_has_station_map"],
+                    "provider 조립에 station_id_by_endpoint 매핑이 빠졌다")
+    case.assertTrue(wiring["poc_provider_returns_wired"],
+                    "poc_provider()가 결속된 self._provider를 돌려주지 않는다")
+
+
+class _RenameCalls(ast.NodeTransformer):
+    """이름 `old`(import alias·호출 대상)를 `new`로 바꾼다. 부정 대조용 in-memory 변조."""
+
+    def __init__(self, old, new, module=None):
+        self.old, self.new, self.module, self.changed = old, new, module, 0
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            if alias.name == self.old:
+                alias.name = self.new
+                if self.module is not None:
+                    node.module = self.module
+                self.changed += 1
+        return node
+
+    def visit_Name(self, node):
+        if node.id == self.old:
+            self.changed += 1
+            return ast.copy_location(ast.Name(id=self.new, ctx=node.ctx), node)
+        return node
+
+
+class _DropCall(ast.NodeTransformer):
+    """`name(...)` 문장을 제거한다(연결 제거). 부정 대조용 in-memory 변조."""
+
+    def __init__(self, name):
+        self.name, self.changed = name, 0
+
+    def visit_Expr(self, node):
+        if _call_name(node.value) == self.name:
+            self.changed += 1
+            return None
+        return node
+
+
+class _DetachProviderMembers(ast.NodeTransformer):
+    """권위 provider 조립의 첫 인자만 group members가 아닌 다른 객체로 바꾼다(연결 제거).
+
+    이름을 전역으로 바꾸면 group 변수·start 호출까지 같이 바뀌어 변조 후에도 자기 일관적이므로
+    (검사가 통과해 버린다), 호출 인자 하나만 바꾼다.
+    """
+
+    def __init__(self):
+        self.changed = 0
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if _call_name(node) == _AUTHORITATIVE_PROVIDER and node.args:
+            node.args[0] = ast.copy_location(
+                ast.Name(id="detached_members", ctx=ast.Load()), node.args[0])
+            self.changed += 1
+        return node
 
 
 class ImportBoundaryTest(unittest.TestCase):
@@ -136,21 +298,48 @@ class ImportBoundaryTest(unittest.TestCase):
 
         production CLI 파일(cli/run_cmd/local_session)은 이들을 통해서도 stage8을 직접 참조하지 않는다
         (여전히 stage8 문자열 0). coordinator(VDETER/apps)는 scan root 밖이라 여기서 검사하지 않는다.
-        각 파일은 하드웨어 경계 double 성격을 명시한다: rf_off_session은 명시적 RF-off double(rf_off),
-        stage7_seams는 실 Stage 7 객체 결속 + fake medium worker 경계다.
+        각 파일의 double 성격: rf_off_session은 `RfOffStage7DeviceSession`이 **실 Stage 7 software
+        group**(tests.support.stage7; 하드웨어 경계만 fake medium worker)을 띄워 권위 provider를 그
+        members에 결속한다(AST 결선 계약 검사); stage7_seams는 실 frozen PHY·production provider 조립이다.
         """
         hits = set(self._stage8_referencing_files())
         for adapter in _SANCTIONED_RF_OFF_SESSION:
             self.assertIn(adapter, hits, "RF-off 통합 adapter가 stage8을 실제로 import해야 함")
-        session_host = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps",
-                                                     "stage8_rf_off_session.py"))
-        with open(session_host, "r", encoding="utf-8") as fh:
-            self.assertIn("rf_off", fh.read(), "RF-off 세션 host는 명시적 RF-off double(rf_off)을 쓴다")
+        with open(_RF_OFF_SESSION_HOST, "r", encoding="utf-8") as fh:
+            _assert_rf_off_session_wired(self, ast.parse(fh.read(), filename=_RF_OFF_SESSION_HOST))
         seams = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py"))
         with open(seams, "r", encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("Phy11Transmitter", text, "seams adapter는 실 frozen PHY에 결속한다")
         self.assertIn("for_production", text, "seams adapter는 stub 아닌 production provider를 조립한다")
+
+    def test_rf_off_session_wiring_check_rejects_broken_or_wrong_wiring(self):
+        """부정 대조: 결선 검사는 (a) software group 연결 제거, (b) 잘못된 provider 결속에서 실패한다.
+
+        production 파일은 건드리지 않고 그 AST의 in-memory 사본만 변조한다. 각 변조가 실제로 노드를
+        바꿨음을 함께 확인해 검사가 공허하게 통과하지 않게 한다.
+        """
+        with open(_RF_OFF_SESSION_HOST, "r", encoding="utf-8") as fh:
+            original = ast.parse(fh.read(), filename=_RF_OFF_SESSION_HOST)
+        _assert_rf_off_session_wired(self, original)     # 대조 기준: 원본은 통과
+
+        mutations = {
+            # (a) 연결 제거: software group을 시작하지 않는다.
+            "group_not_started": _DropCall(_STAGE7_GROUP_STARTER),
+            # (a) 연결 제거: provider를 group members가 아닌 다른 객체로 조립한다.
+            "provider_not_from_group": _DetachProviderMembers(),
+            # (b) 잘못된 공급자: 권위 경로 대신 worker 직접 제출 fallback 조립기.
+            "fallback_provider": _RenameCalls(_AUTHORITATIVE_PROVIDER, "assemble_stage7_provider"),
+            # (b) 잘못된 공급자: 실 Stage 7 객체가 아닌 rf_off stub seam module에서 조립.
+            "stub_seam_module": _RenameCalls(_AUTHORITATIVE_PROVIDER, _AUTHORITATIVE_PROVIDER,
+                                             module="vdeter.stage8.integration.rf_off"),
+        }
+        for label, transformer in mutations.items():
+            with self.subTest(mutation=label):
+                mutated = transformer.visit(copy.deepcopy(original))
+                self.assertGreater(transformer.changed, 0, f"{label}: 변조가 아무 노드도 바꾸지 않았다")
+                with self.assertRaises(AssertionError, msg=f"{label}: 깨진 결선을 통과시켰다"):
+                    _assert_rf_off_session_wired(self, mutated)
 
     def test_sanctioned_adapter_does_not_import_testing_or_rf_off(self):
         """production adapter는 어떤 .testing이나 RF-off harness(rf_off)도 import하지 않는다(§4).

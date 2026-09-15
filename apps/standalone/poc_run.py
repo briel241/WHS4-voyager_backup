@@ -30,7 +30,6 @@ from vdeter.stage8.execution.selection import SelectionError, SourceMode, resolv
 from vdeter.stage8.execution.verdict import ScenarioVerdict
 from vdeter.stage8.integration.entry import (
     prepare_poc_workload,
-    run_poc_workload,
     select_and_snapshot,
 )
 from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
@@ -425,32 +424,6 @@ def poc_severity(evidence: dict) -> str:
         return "POC_ABORT"  # 알 수 없는 code(예외 등)는 보수적으로 abort
 
 
-def run_for_workload(session, snapshot, *, scenario_id: str, run_id: str, workload_id: str,
-                     socket_root: str, scenario_verdict: ScenarioVerdict = ScenarioVerdict.PASS,
-                     server_config: ServerCapabilityConfig | None = None,
-                     src_path: str | None = None) -> dict:
-    """한 workload의 PoC를 arm+run 원자적으로 실행한다(순서 무관 focused 경로). 반환 JSON evidence.
-
-    scenario 실행 순서(arm→scenario→run)가 필요한 CLI는 `prepare_workload`+`finish_workload`를 쓴다.
-    """
-    device_seams, steps, terminal_source, target_response, provider = _session_device_boundary(
-        session, scenario_id)
-    os.makedirs(socket_root, exist_ok=True)
-    result, seams = run_poc_workload(
-        snapshot=snapshot, steps=steps, scenario_id=scenario_id, run_id=run_id,
-        workload_id=workload_id, session_id=run_id, socket_root=socket_root,
-        device_seams=device_seams, terminal_source=terminal_source, target_response=target_response,
-        scenario_verdict=scenario_verdict,
-        server_config=server_config or ServerCapabilityConfig(), src_path=src_path)
-    evidence = result.as_json_value()
-    group_tx = getattr(seams, "group_tx", None)
-    evidence["radiation"] = {
-        "committed_groups": int(getattr(group_tx, "committed_groups", 0) or 0),
-        "radiated_children": int(getattr(group_tx, "radiated_children", 0) or 0),
-    }
-    return evidence
-
-
 __all__ = (
     "PocRunError",
     "PocOption",
@@ -462,5 +435,4 @@ __all__ = (
     "scenario_verdict_from_status",
     "finish_workload",
     "poc_severity",
-    "run_for_workload",
 )
