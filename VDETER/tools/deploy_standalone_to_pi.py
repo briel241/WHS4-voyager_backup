@@ -1,7 +1,7 @@
 """standalone 배포 패키지 생성·전송 — 개발 환경 전용 (Phase I V2, b안).
 
 패키지 = 지정 commit의 **추적 파일**(`git archive`, blob 원본 그대로)
-       + 생성된 `VDETER/configs/stage7/standalone-binding.json`(미커밋 산출물)
+       + 생성된 `VDETER/configs/b210_system/standalone-binding.json`(미커밋 산출물)
        + `deploy-package-manifest.json`(파일별 SHA-256, 자기 기술).
 제외 = .git(archive가 애초에 미포함), results/, VDETER/results/, var/,
        identity/, hardware.toml.
@@ -34,7 +34,7 @@ for _entry in (REPO_ROOT,):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
-BINDING_RELPATH = "VDETER/configs/stage7/standalone-binding.json"
+BINDING_RELPATH = "VDETER/configs/b210_system/standalone-binding.json"
 PACKAGE_MANIFEST_NAME = "deploy-package-manifest.json"
 EXCLUDED_PREFIXES = ("results/", "VDETER/results/", "var/", "identity/",
                      ".git/")
@@ -54,7 +54,7 @@ for entry in manifest["files"]:
     if digest != entry["sha256"]:
         mismatch.append(entry["path"])
 binding = json.load(open(os.path.join(
-    root, "VDETER/configs/stage7/standalone-binding.json"), encoding="utf-8"))
+    root, "VDETER/configs/b210_system/standalone-binding.json"), encoding="utf-8"))
 print(json.dumps({
     "checked": len(manifest["files"]), "missing": missing,
     "mismatch": mismatch, "binding_source_head": binding["source_head"],

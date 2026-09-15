@@ -377,7 +377,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         OperationalGainInput,
     )
 
-    template_dir = repo_root / "VDETER" / "configs" / "stage7"
+    template_dir = repo_root / "VDETER" / "configs" / "b210_system"
     try:
         host_definition = hardware_profiles.definition_of(hardware)
     except ValueError as exc:

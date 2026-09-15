@@ -75,7 +75,7 @@ def copy_tracked_tree(tmp) -> Path:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
     assert not (root / ".git").exists()
-    assert not (root / "VDETER" / "configs" / "stage7"
+    assert not (root / "VDETER" / "configs" / "b210_system"
                 / "standalone-binding.json").exists()
     assert not (root / "var").exists() and not (root / "identity").exists()
     assert not (root / "hardware.toml").exists()

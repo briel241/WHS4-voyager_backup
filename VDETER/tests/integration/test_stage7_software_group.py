@@ -38,7 +38,7 @@ def bring_group_to_admission(coordinator, members, resolved_by_endpoint, host_ra
         {
             m: {
                 "deployment_sha256": resolved_by_endpoint[m].deployment_manifest_sha256,
-                "endpoint_plan_relpath": f"configs/stage7/endpoints/{m.lower()}.toml",
+                "endpoint_plan_relpath": f"configs/b210_system/endpoints/{m.lower()}.toml",
                 "endpoint_plan_sha256": resolved_by_endpoint[m].resolved_sha256,
                 "environment_manifest_sha256": _sha("environment"),
                 "member_set_sha256": _sha("member-set"),

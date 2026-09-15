@@ -336,10 +336,10 @@ def test_legacy_config_generation_and_loader_rules_unchanged():
         assert 'profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"' in mass_b
         assert generated["git_state"]["hardware"]["host_profile"] == LEGACY
         assert generated["installation_state"]["endpoint_template_dir"] == (
-            "VDETER/configs/stage7/endpoints")
+            "VDETER/configs/b210_system/endpoints")
         # legacy MASS-B must not accept the powered-hub power token as a DC asset.
         loader = configuration.ConfigurationLoader()
-        profile_text = (REPO / "VDETER/configs/stage7/profiles/data-profile.toml").read_text(
+        profile_text = (REPO / "VDETER/configs/b210_system/profiles/data-profile.toml").read_text(
             encoding="utf-8")
         forged = mass_b.replace('external_power_asset = "AT2024T"',
                                 'external_power_asset = "POWERED_USB3_HUB_BUS_POWER"')
@@ -499,7 +499,7 @@ def test_hub_config_generation_with_real_loader_and_fail_closed_provisioning():
         assert generated["git_state"]["hardware"]["host_profile"] == HUB
         assert generated["installation_state"]["host_profile"] == HUB
         assert generated["installation_state"]["endpoint_template_dir"] == (
-            "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub")
+            "VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub")
         loader = configuration.ConfigurationLoader()
         profile_text = (configs / "profiles" / "data-profile.toml").read_text(encoding="utf-8")
         for endpoint, role in (("mass-a", "MASS-A"), ("mass-b", "MASS-B"), ("roc", "ROC")):
@@ -854,7 +854,7 @@ def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
     assert qd.classify_domains("VDETER/src/vdeter/b210_system/host_profiles.py") == (qd.RF,)
     for endpoint in ("mass-a", "mass-b", "roc"):
         assert qd.classify_domains(
-            f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml") == (qd.RF,)
+            f"VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/{endpoint}.toml") == (qd.RF,)
     assert qd.classify_domains("apps/standalone/hardware_profiles.py") == (qd.RF, qd.OPERATION)
     assert qd.classify_domains(
         "apps/standalone/templates/hardware.pi-powered-usb3-hub.toml.example") == (qd.TOOLING,)
@@ -866,12 +866,12 @@ def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
     assert files["VDETER/src/vdeter/b210_system/host_profiles.py"]["domains"] == ["rf"]
     assert files["apps/standalone/hardware_profiles.py"]["domains"] == ["rf", "operation"]
     for endpoint in ("mass-a", "mass-b", "roc"):
-        path = f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml"
+        path = f"VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/{endpoint}.toml"
         assert files[path]["domains"] == ["rf"]
-        assert files[f"VDETER/configs/stage7/endpoints/{endpoint}.toml"]["domains"] == ["rf"]
+        assert files[f"VDETER/configs/b210_system/endpoints/{endpoint}.toml"]["domains"] == ["rf"]
     rf_files = installation_manifest.domain_manifest(first, qd.RF)["files"]
     assert "VDETER/src/vdeter/b210_system/host_profiles.py" in rf_files
-    assert "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/mass-b.toml" in rf_files
+    assert "VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/mass-b.toml" in rf_files
 
 
 if __name__ == "__main__":

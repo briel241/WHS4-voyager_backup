@@ -235,7 +235,7 @@ def test_setup_identity_passes_default_preflight():
 
 def test_endpoint_launcher_loads_standalone_identity():
     """launcher가 identity root 전달 시 같은 fingerprint를 실제 적재하고,
-    미전달 시 기존 configs/stage7/trust 경로를 그대로 쓴다."""
+    미전달 시 기존 configs/b210_system/trust 경로를 그대로 쓴다."""
     from apps.standalone import identity as identity_module
 
     launcher_path = (Path(_REPO) / "VDETER" / "apps"
@@ -267,9 +267,9 @@ def test_endpoint_launcher_loads_standalone_identity():
 
         store_path, key_path = launcher._trust_material_paths("/deploy/root")
         assert store_path.replace("\\", "/").endswith(
-            "configs/stage7/trust/tbb_trust_store.pem")
+            "configs/b210_system/trust/tbb_trust_store.pem")
         assert key_path.replace("\\", "/").endswith(
-            "configs/stage7/trust/roc_tbb_signer_key.pem")
+            "configs/b210_system/trust/roc_tbb_signer_key.pem")
 
 
 def test_setup_rerun_keeps_installation_digest_and_reports_changed_domain():

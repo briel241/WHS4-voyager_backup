@@ -6,7 +6,7 @@
 이전에는 launcher가 시험 fixture module(`tests.support.stage4`)의 `tbb_fixture`·`deployment_profile`을
 직접 import해 배치 값을 얻었다(STR-07). 값과 계산은 그대로 옮겼다:
 
-- 구성원 station ID(111111111·222222222·333333333; `configs/stage7/endpoints/*.toml`의 `station_id`와
+- 구성원 station ID(111111111·222222222·333333333; `configs/b210_system/endpoints/*.toml`의 `station_id`와
   같다), ROC station ID, TBB control station ID 7, 배치 service area, Stage 4 canonical fixture ID.
 - TBB 유효창: 실 UTC **자정**(2000-epoch 초; 세 endpoint가 같은 UTC 날에 독립 계산해도 같은 값) 시작,
   48 h(2,880분) 유효. 시험 fixture 기본값(2000-epoch 800,000,000 s ≈ 2025-05, 60분)은 실 UTC에서

@@ -1,4 +1,4 @@
-# Stage 7 ROC endpoint source template (`stage7_b210_system_baseline.md` §15).
+# Stage 7 MASS-A endpoint source template (`stage7_b210_system_baseline.md` §15).
 # `REQUIRED_UNSET`은 exact serial, host_execution provisioning field와
 # [[radio.channels]].rx_gain_db에만 허용된다. run resolve 시 deployment tooling이
 # run_mode/deployment manifest/rx gain을 채워 immutable run config를 만든다.
@@ -6,9 +6,9 @@
 schema_version = 4
 
 [endpoint]
-id = "ROC"
-role = "CONTROL"
-station_id = 222222222
+id = "MASS-A"
+role = "SHIP"
+station_id = 111111111
 scope = "TEST"
 code_version = "stage7-b210-system"
 
@@ -21,8 +21,8 @@ supported_link_ids = [11, 17, 19]
 
 [mac]
 link_id = 11
-tx_channel = "VDETER_UPPER_100_TEST"
-rx_channel = "VDETER_LOWER_100_TEST"
+tx_channel = "VDETER_LOWER_100_TEST"
+rx_channel = "VDETER_UPPER_100_TEST"
 transmit_lead_nanoseconds = 250000000
 
 [phy]
@@ -30,7 +30,7 @@ sample_rate_hz = 307200
 
 [radio]
 adapter = "b210-stage7-affine"
-device_selector = "serial=34D03E8"
+device_selector = "serial=34D03DD"
 clock_reference = "INTERNAL"
 sample_format = "cf32le"
 
@@ -61,22 +61,22 @@ name = "VDETER_LOWER_100_TEST"
 center_frequency_hz = 157237500
 sample_rate_hz = 307200
 tx_gain_db = 0
-rx_gain_db = "REQUIRED_UNSET"
+rx_gain_db = 0
 waveform_bandwidth_hz = 100000
 analog_bandwidth_hz = 200000
-tx_enabled = false
-rx_enabled = true
+tx_enabled = true
+rx_enabled = false
 
 [[radio.channels]]
 name = "VDETER_UPPER_100_TEST"
 center_frequency_hz = 161837500
 sample_rate_hz = 307200
 tx_gain_db = 0
-rx_gain_db = 0
+rx_gain_db = "REQUIRED_UNSET"
 waveform_bandwidth_hz = 100000
 analog_bandwidth_hz = 200000
 tx_enabled = true
-rx_enabled = false
+rx_enabled = true
 
 [sources]
 time = "SYSTEM"
@@ -88,9 +88,9 @@ jsonl_enabled = true
 console_enabled = false
 
 [security]
-private_key_ref = "configs/stage7/trust/roc_tbb_signer_key.pem"
-certificate_ref = "configs/stage7/trust/roc_tbb_signer_cert.pem"
-trust_store_ref = ""
+private_key_ref = ""
+certificate_ref = ""
+trust_store_ref = "configs/b210_system/trust/tbb_trust_store.pem"
 
 [host_execution]
 profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
@@ -102,7 +102,7 @@ host_machine_id = "a70b2048eb6743bd83ac9e0920b8d0b2"
 pi_model_revision = "Raspberry Pi 5 Model B Rev 1.1 (d04171)"
 pi_power_profile = "PI5_5V5A_HIGH_CURRENT"
 usb_transport = "DIRECT_USB3_5000M"
-usb_physical_path = "5-1"
+usb_physical_path = "3-1"
 external_power_asset = "PI_BUS_POWER"
 environment_manifest_path = "REQUIRED_UNSET"
 environment_manifest_sha256 = "REQUIRED_UNSET"

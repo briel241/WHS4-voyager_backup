@@ -4,7 +4,7 @@ Runtime Coordinator가 Pi에서 endpoint별로 spawn하는 process다. resolved
 endpoint config를 적재하고 `Endpoint`+`LaneB210RadioAdapter`를 조립한
 뒤 `SOCK_SEQPACKET` socket에서 coordinator command를 처리한다.
 
-TBB 신뢰자료는 기본적으로 `configs/stage7/trust/`의 provisioned TEST
+TBB 신뢰자료는 기본적으로 `configs/b210_system/trust/`의 provisioned TEST
 identity를 쓴다. standalone 실행(Phase I)은 환경변수
 `VDETER_STANDALONE_IDENTITY_ROOT`로 배포 tree 밖 identity 저장소를 명시
 전달한다 — 미지정이면 기존 host 경로 동작이 그대로 보존된다.
@@ -46,7 +46,7 @@ def _trust_material_paths(root: str) -> tuple:
 
     `VDETER_STANDALONE_IDENTITY_ROOT`가 지정되면 standalone identity
     저장소(개인키는 `private/`, trust store는 `trust/` — 배포 tree 밖)를
-    쓴다. 미지정이면 기존 `configs/stage7/trust/` 경로 그대로다 —
+    쓴다. 미지정이면 기존 `configs/b210_system/trust/` 경로 그대로다 —
     Phase F~H host 실행 경로의 동작 보존.
     """
     identity_root = os.environ.get("VDETER_STANDALONE_IDENTITY_ROOT")
@@ -55,7 +55,7 @@ def _trust_material_paths(root: str) -> tuple:
             os.path.join(identity_root, "trust", "tbb_trust_store.pem"),
             os.path.join(identity_root, "private", "roc_tbb_signer_key.pem"),
         )
-    trust_dir = os.path.join(root, "configs", "stage7", "trust")
+    trust_dir = os.path.join(root, "configs", "b210_system", "trust")
     return (
         os.path.join(trust_dir, "tbb_trust_store.pem"),
         os.path.join(trust_dir, "roc_tbb_signer_key.pem"),

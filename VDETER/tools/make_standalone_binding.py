@@ -1,6 +1,6 @@
 """standalone-binding 생성 — **개발 환경 전용** 패키징 도구 (Phase I W4).
 
-배포물이 잘리는 시점의 결속 상수를 `VDETER/configs/stage7/
+배포물이 잘리는 시점의 결속 상수를 `VDETER/configs/b210_system/
 standalone-binding.json`에 기록한다 (apps/standalone/README.md §5):
 
     source_head / source_branch     git 실측 (dirty 트리는 거부)
@@ -29,7 +29,7 @@ import sys
 
 VDETER_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(VDETER_ROOT)
-DEFAULT_OUT = os.path.join(VDETER_ROOT, "configs", "stage7",
+DEFAULT_OUT = os.path.join(VDETER_ROOT, "configs", "b210_system",
                            "standalone-binding.json")
 #: docs는 git 밖·저장소 옆에 있다 (개발 환경 배치).
 DEFAULT_BASELINE_DOC = os.path.join(

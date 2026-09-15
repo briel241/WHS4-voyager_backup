@@ -12,12 +12,12 @@ service_start_tbb_publish_timeout_ns = 90000000000
 
 [[members]]
 endpoint_id = "MASS-A"
-config_relpath = "configs/stage7/endpoints/mass-a.toml"
+config_relpath = "configs/b210_system/endpoints/mass-a.toml"
 
 [[members]]
 endpoint_id = "MASS-B"
-config_relpath = "configs/stage7/endpoints/mass-b.toml"
+config_relpath = "configs/b210_system/endpoints/mass-b.toml"
 
 [[members]]
 endpoint_id = "ROC"
-config_relpath = "configs/stage7/endpoints/roc.toml"
+config_relpath = "configs/b210_system/endpoints/roc.toml"

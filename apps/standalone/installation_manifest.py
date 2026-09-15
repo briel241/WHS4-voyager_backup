@@ -55,7 +55,7 @@ EXCLUDED_DIR_NAMES = frozenset({
 #: 스캔 제외 파일(설치 상대경로 또는 파일명).
 EXCLUDED_FILES = frozenset({
     "hardware.toml",
-    "VDETER/configs/stage7/standalone-binding.json",
+    "VDETER/configs/b210_system/standalone-binding.json",
     ".DS_Store",
     ".git",   # git worktree checkout에서는 `.git`이 gitdir 포인터 **파일**이다
 })

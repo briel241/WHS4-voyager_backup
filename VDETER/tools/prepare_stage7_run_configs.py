@@ -134,7 +134,7 @@ def main(argv=None) -> int:
     print(f"[environment] {environment_path} sha256={environment_sha}")
 
     with open(
-        os.path.join(VDETER_ROOT, "configs", "stage7", "profiles", "data-profile.toml"),
+        os.path.join(VDETER_ROOT, "configs", "b210_system", "profiles", "data-profile.toml"),
         "r", encoding="utf-8",
     ) as handle:
         data_profile_text = handle.read()
@@ -144,7 +144,7 @@ def main(argv=None) -> int:
     written = []
     for endpoint in ENDPOINTS:
         template_path = os.path.join(
-            VDETER_ROOT, "configs", "stage7", "endpoints", f"{endpoint}.toml"
+            VDETER_ROOT, "configs", "b210_system", "endpoints", f"{endpoint}.toml"
         )
         with open(template_path, "r", encoding="utf-8") as handle:
             text = handle.read()
@@ -204,7 +204,7 @@ def main(argv=None) -> int:
         print(f"[config] {endpoint} resolved_sha256={loaded.value.resolved_sha256}")
 
     for name in ("system.toml",):
-        source = os.path.join(VDETER_ROOT, "configs", "stage7", name)
+        source = os.path.join(VDETER_ROOT, "configs", "b210_system", name)
         with open(source, "rb") as handle:
             payload = handle.read()
         with open(os.path.join(out_dir, name), "wb") as handle:
@@ -363,7 +363,7 @@ def main(argv=None) -> int:
                 )
         subprocess.run(
             ["scp", "-q",
-             os.path.join(VDETER_ROOT, "configs", "stage7", "profiles", "data-profile.toml"),
+             os.path.join(VDETER_ROOT, "configs", "b210_system", "profiles", "data-profile.toml"),
              f"{arguments.host}:{remote_config_dir}/profiles/"],
             timeout=60, check=True,
         )

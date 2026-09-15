@@ -257,7 +257,7 @@ M.2092-2에서 profile과 wire 구조를 가져왔다는 것은 해당 기능의
 |---|---|---|---|---|
 | 실행 host | Raspberry Pi 5 한 대 | 표준은 computer 수와 process 배치를 정하지 않음 | `PROJECT_DEFINED` | Stage 7 §6 |
 | endpoint/process | MASS-A, MASS-B, ROC와 전용 B210 worker, Runtime Coordinator | 표준은 local process 구조를 정하지 않음 | `PROJECT_DEFINED` | Stage 7 §14 |
-| process 통신 | local Unix socket | 표준 밖의 runtime IPC | `PROJECT_DEFINED` | `configs/stage7/system.toml` |
+| process 통신 | local Unix socket | 표준 밖의 runtime IPC | `PROJECT_DEFINED` | `configs/b210_system/system.toml` |
 | B210 배치 | endpoint별 B210 한 대, 총 3대 | 표준은 SDR 모델·serial을 정하지 않음 | `PROJECT_DEFINED` | Stage 7 §5·§7 |
 | RF lane | C1~C6 50 Ω SMA cable, RF-A=ch0, RF-B=ch1 | 표준 밖의 시험 fixture | `PROJECT_DEFINED` | Stage 7 §5·§10.1 |
 | antenna port | 송신 `TX/RX`, 수신 `RX2` | B210 장비 설정 | `PROJECT_DEFINED` | Stage 7 §15 |

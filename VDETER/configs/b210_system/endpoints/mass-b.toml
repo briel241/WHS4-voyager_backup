@@ -1,13 +1,9 @@
-# Stage 7 MASS-B endpoint source template — Pi powered-USB3-hub host profile
-# STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1 (`stage7_b210_system_baseline.md` §15; additive 2026-09-10).
-# Same Raspberry Pi 5, same RF/PHY/MAC/timing values as the legacy `endpoints/` template;
-# only [host_execution] differs: all three B210s are 5000M links on the downstream ports of ONE
-# self-powered USB3 hub (uplink on a Pi SuperSpeed root port), powered by the hub's bus power —
-# no per-B210 external DC asset exists, so external_power_asset is the fixed hub-power token.
-# `REQUIRED_UNSET` is allowed only for the exact serial, host_execution provisioning fields and
-# [[radio.channels]].rx_gain_db: run resolve fills serial / usb_physical_path (observed sysfs
-# topology path) / host_machine_id (/etc/machine-id) from the approved hardware.toml and the
-# running host, plus run_mode / deployment manifest / rx gain as for the legacy template.
+# Stage 7 MASS-B endpoint source template (`stage7_b210_system_baseline.md` §15).
+# `REQUIRED_UNSET`은 exact serial, host_execution provisioning field와
+# [[radio.channels]].rx_gain_db에만 허용된다. run resolve 시 deployment tooling이
+# run_mode/deployment manifest/rx gain을 채워 immutable run config를 만든다.
+# external_power_asset은 실제 외부 DC 전원 inventory 값이 필요한 provisioning
+# 항목이며 임의 값을 만들지 않는다.
 
 schema_version = 4
 
@@ -36,7 +32,7 @@ sample_rate_hz = 307200
 
 [radio]
 adapter = "b210-stage7-affine"
-device_selector = "serial=REQUIRED_UNSET"
+device_selector = "serial=3515425"
 clock_reference = "INTERNAL"
 sample_format = "cf32le"
 
@@ -96,20 +92,20 @@ console_enabled = false
 [security]
 private_key_ref = ""
 certificate_ref = ""
-trust_store_ref = "configs/stage7/trust/tbb_trust_store.pem"
+trust_store_ref = "configs/b210_system/trust/tbb_trust_store.pem"
 
 [host_execution]
-profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"
+profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
 provider_id = "none"
 provider_version = "none"
 host_os_id = "ubuntu"
 host_os_version = "24.04"
-host_machine_id = "REQUIRED_UNSET"
+host_machine_id = "a70b2048eb6743bd83ac9e0920b8d0b2"
 pi_model_revision = "Raspberry Pi 5 Model B Rev 1.1 (d04171)"
 pi_power_profile = "PI5_5V5A_HIGH_CURRENT"
-usb_transport = "POWERED_USB3_HUB_5000M"
-usb_physical_path = "REQUIRED_UNSET"
-external_power_asset = "POWERED_USB3_HUB_BUS_POWER"
+usb_transport = "DIRECT_USB2_480M_EXTERNAL_DC"
+usb_physical_path = "4-2"
+external_power_asset = "REQUIRED_UNSET"
 environment_manifest_path = "REQUIRED_UNSET"
 environment_manifest_sha256 = "REQUIRED_UNSET"
 

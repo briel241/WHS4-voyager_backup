@@ -54,9 +54,9 @@ def test_known_files_classify_to_expected_domain():
         "VDETER/apps/scenario_controller.py": qd.RF,   # 주영역(rf+operation)
         "VDETER/src/vdeter/b210_system/pi_runtime.py": qd.RF,
         "VDETER/src/vdeter/phy/resampling.py": qd.RF,
-        "VDETER/configs/stage7/system.toml": qd.RF,
-        "VDETER/configs/stage7/endpoints/mass-a.toml": qd.RF,
-        "VDETER/configs/stage7/profiles/data-profile.toml": qd.RF,
+        "VDETER/configs/b210_system/system.toml": qd.RF,
+        "VDETER/configs/b210_system/endpoints/mass-a.toml": qd.RF,
+        "VDETER/configs/b210_system/profiles/data-profile.toml": qd.RF,
         "apps/standalone/qualify_cmd.py": qd.TOOLING,
         "apps/standalone/qualification_domains.py": qd.TOOLING,
         "apps/standalone/setup_cmd.py": qd.TOOLING,
@@ -266,7 +266,7 @@ def test_rf_symbol_diff_empty_when_identical():
 _BASE = {
     "VDETER/apps/coordinator_main.py": "rf1",
     "VDETER/src/vdeter/b210_system/pi_runtime.py": "rf2",
-    "VDETER/configs/stage7/standalone-binding.json": "rf3",
+    "VDETER/configs/b210_system/standalone-binding.json": "rf3",
     "apps/standalone/cli.py": "op1",
     "apps/standalone/run_cmd.py": "op2",
     "common/codec.py": "op3",

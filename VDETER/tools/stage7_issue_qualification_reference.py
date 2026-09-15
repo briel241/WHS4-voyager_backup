@@ -55,11 +55,11 @@ ORCHESTRATION_PATH = ROOT
 
 #: RF config 원본 — 정확한 allowlist. trust/개인키는 절대 포함하지 않는다.
 CONFIG_ALLOWLIST = (
-    PREFIX + "configs/stage7/endpoints/mass-a.toml",
-    PREFIX + "configs/stage7/endpoints/mass-b.toml",
-    PREFIX + "configs/stage7/endpoints/roc.toml",
-    PREFIX + "configs/stage7/profiles/data-profile.toml",
-    PREFIX + "configs/stage7/system.toml",
+    PREFIX + "configs/b210_system/endpoints/mass-a.toml",
+    PREFIX + "configs/b210_system/endpoints/mass-b.toml",
+    PREFIX + "configs/b210_system/endpoints/roc.toml",
+    PREFIX + "configs/b210_system/profiles/data-profile.toml",
+    PREFIX + "configs/b210_system/system.toml",
 )
 
 REQUIRED_TCS = ("TC-STAGE7-RR-002", "TC-STAGE7-RR-003", "TC-STAGE7-RR-004")

@@ -231,7 +231,7 @@ approved = true                    # "현재 배선이 선언대로"를 사용�
 > 제외된다.
 
 일반 실행·qualify가 host Git·Markdown을 읽지 않기 위한 **결속 상수 파일**.
-경로: `VDETER/configs/stage7/standalone-binding.json`.
+경로: `VDETER/configs/b210_system/standalone-binding.json`.
 
 **생성 주체는 개발 환경 전용 패키징 도구 `VDETER/tools/
 make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이며 대상
@@ -671,7 +671,7 @@ Pi SuperSpeed root 포트) 아래에 두는 topology를 위한 두 번째 host p
 | 전원 | MASS-A/ROC `PI_BUS_POWER`, MASS-B 실제 외부 DC asset(`external_power_asset`) | 세 endpoint `POWERED_USB3_HUB_BUS_POWER`; 개별 DC asset 선언 금지 |
 | usb_transport | `DIRECT_USB3_5000M` / `DIRECT_USB2_480M_EXTERNAL_DC` | `POWERED_USB3_HUB_5000M` ×3 |
 | topology 검사 | serial↔역할 + 속도 등급 | + 세 장치가 **같은** class-09 SuperSpeed hub 아래, hub는 root 포트 직결, descriptor self-powered 비트, 승인 VID:PID, 초과 B210 없음 |
-| endpoint template | `VDETER/configs/stage7/endpoints/` | `VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/` (serial·usb_physical_path·host_machine_id provisioning) |
+| endpoint template | `VDETER/configs/b210_system/endpoints/` | `VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/` (serial·usb_physical_path·host_machine_id provisioning) |
 | reference 결속 | 종전 critical subset | + `standalone_critical.host_profile`, `standalone_critical.usb_topology`(hub asset/VID:PID·역할별 serial/speed_class/transport·전원 출처), `hardware_observations`(기록만) |
 
 규칙의 단일 출처는 `VDETER/src/vdeter/b210_system/host_profiles.py`다. `local_preflight.

@@ -126,7 +126,7 @@ console_enabled = false
 [security]
 private_key_ref = ""
 certificate_ref = ""
-trust_store_ref = "configs/stage7/trust/tbb_trust_store.pem"
+trust_store_ref = "configs/b210_system/trust/tbb_trust_store.pem"
 
 [host_execution]
 profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
@@ -425,7 +425,7 @@ console_enabled = false
 [security]
 private_key_ref = ""
 certificate_ref = ""
-trust_store_ref = "configs/stage7/trust/tbb_trust_store.pem"
+trust_store_ref = "configs/b210_system/trust/tbb_trust_store.pem"
 '''
 
 

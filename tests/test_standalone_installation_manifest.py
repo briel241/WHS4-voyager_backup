@@ -44,9 +44,9 @@ def make_root(tmp) -> Path:
     (root / "VDETER" / "src" / "vdeter" / "b210_system").mkdir(parents=True)
     (root / "VDETER" / "src" / "vdeter" / "b210_system" / "pi_runtime.py"
      ).write_text("RF = 1\n")
-    (root / "VDETER" / "configs" / "stage7").mkdir(parents=True)
-    (root / "VDETER" / "configs" / "stage7" / "system.toml").write_text("a=1\n")
-    (root / "VDETER" / "configs" / "stage7"
+    (root / "VDETER" / "configs" / "b210_system").mkdir(parents=True)
+    (root / "VDETER" / "configs" / "b210_system" / "system.toml").write_text("a=1\n")
+    (root / "VDETER" / "configs" / "b210_system"
      / "standalone-binding.json").write_text("{}")   # legacy: 제외
     (root / "VDETER" / "tests" / "unit").mkdir(parents=True)
     (root / "VDETER" / "tests" / "unit" / "test_x.py").write_text("T = 1\n")
@@ -73,7 +73,7 @@ def test_scan_excludes_state_and_git_and_generated_files():
         assert "apps/standalone/qualify_cmd.py" in files
         assert "README.md" in files
         for excluded in ("hardware.toml", ".git",
-                         "VDETER/configs/stage7/standalone-binding.json",
+                         "VDETER/configs/b210_system/standalone-binding.json",
                          "var/installation/junk.json",
                          "identity/private/key.pem", "apps/__pycache__/x.pyc"):
             assert excluded not in files, excluded

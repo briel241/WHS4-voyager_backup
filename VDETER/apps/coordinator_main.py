@@ -3236,7 +3236,7 @@ def run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root: str):
     ).hexdigest()
     prepare_bodies = {
         m: {
-            "endpoint_plan_relpath": f"configs/stage7/endpoints/{m.lower()}.toml",
+            "endpoint_plan_relpath": f"configs/b210_system/endpoints/{m.lower()}.toml",
             "endpoint_plan_sha256": resolved[m].resolved_sha256,
             "deployment_sha256": resolved[m].deployment_manifest_sha256,
             "environment_manifest_sha256": resolved[m].host_execution.environment_manifest_sha256,
@@ -3286,7 +3286,7 @@ def main(argv=None) -> int:
     parser.add_argument("--edge", choices=("MASS-A", "MASS-B"), default=None,
                         help="p1 signed qualification edge")
     parser.add_argument("--run-root", required=True)
-    parser.add_argument("--configs-dir", default=os.path.join(APP_ROOT, "configs", "stage7"))
+    parser.add_argument("--configs-dir", default=os.path.join(APP_ROOT, "configs", "b210_system"))
     parser.add_argument("--gain-artifact", default=None)
     parser.add_argument(
         "--baseline-sha256", default=None,

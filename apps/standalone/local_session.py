@@ -171,7 +171,7 @@ class LocalCoordinatorSession:
         self.group_signal = group_signal
         #: standalone identity 저장소 root — 지정 시 launcher가 배포 tree
         #: 밖 identity(키·trust store)를 쓴다 (W4 보완 1). None이면 기존
-        #: configs/stage7/trust 동작 그대로.
+        #: configs/b210_system/trust 동작 그대로.
         self.identity_root = (Path(identity_root)
                               if identity_root is not None else None)
         #: Stage 8 RF-off software 모드 — coordinator를 B210 없이 in-process PoC 실행 세션으로

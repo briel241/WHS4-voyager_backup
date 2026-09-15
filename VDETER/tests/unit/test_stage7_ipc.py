@@ -70,7 +70,7 @@ def make_prepare():
         "prepare",
         {
             "deployment_sha256": "d" * 64,
-            "endpoint_plan_relpath": "configs/stage7/endpoints/mass-a.toml",
+            "endpoint_plan_relpath": "configs/b210_system/endpoints/mass-a.toml",
             "endpoint_plan_sha256": "e" * 64,
             "environment_manifest_sha256": "f" * 64,
             "member_set_sha256": "0" * 64,
