@@ -12,7 +12,7 @@ frozen Runtime의 `link_command_id`는 wrapper method 인자가 아니므로 rou
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 
 from ..common.addressing import Address, AddressKind
@@ -73,6 +73,16 @@ PAIRWISE_EDGE_CHILD = {
     "MASS-B": (1, "C3"),
 }
 
+#: Stage 8 공유매체 fan-out(§5.1 고정 배선): 송신자 → 그 송신자의 두 물리 경로.
+#: 유선 공유매체에서 한 논리 burst는 송신자의 두 lane으로 **동시** 방사되어 비송신 두 endpoint에
+#: 물리적으로 도달한다. 논리 주소는 바뀌지 않으며, 수신 endpoint가 실제로 복호하는지는 그 endpoint의
+#: tuning(§5.5 자연 관측 행렬)이 정한다. ROC의 두 경로는 기존 BROADCAST entry와 동일하다.
+BROADCAST_FANOUT_CHILDREN = {
+    "ROC": ((0, "C1"), (1, "C3")),
+    "MASS-A": ((0, "C2"), (1, "C5")),
+    "MASS-B": ((0, "C4"), (1, "C6")),
+}
+
 _ROUTE_BEARING_GENERAL_TYPES = frozenset({0, 4, 13, 90})
 
 
@@ -100,6 +110,11 @@ class Stage7RouteContext:
     original_destination_kind: str | None
     original_destination_station_id: int | None
     request_digest: str
+    #: Stage 8 유선 공유매체 opt-in 표시(기본 False = legacy 동작 그대로). True면 addressed 전송도
+    #: 송신자의 두 물리 경로로 fan-out한다(논리 주소·정상 tuning은 보존). 이 값을 켜는 경로는
+    #: `Stage7RouteSidecar.bind_broadcast_fanout_burst` 하나뿐이며 정상 MAC route 승격은 켜지 않는다.
+    broadcast_fanout_optin: bool = False
+    wire_packet_digest: str | None = None
 
     def destination_key(self):
         return (self.destination_kind, self.destination_station_id)
@@ -308,6 +323,19 @@ def resolve_lane_plan_route(
         )
     skipped = ()
     fanout_scope = "SINGLE_CHILD" if len(children) == 1 else "TWO_CHILD_BROADCAST"
+    if getattr(context, "broadcast_fanout_optin", False) and destination_endpoint != "BROADCAST":
+        # Stage 8 유선 공유매체 opt-in: 논리 주소(addressed)는 그대로 두고 **물리 fan-out만** 송신자의
+        # 두 경로로 확장한다. 두 child는 같은 선택 채널을 공유한다(B210 TX A/B 공유 LO).
+        # legacy/feature OFF 경로는 이 분기에 들어오지 않는다(context 기본값 False).
+        fanned = BROADCAST_FANOUT_CHILDREN.get(endpoint_id)
+        if fanned is None:
+            return None, _private_error(
+                Stage7PrivateErrorCode.LANE_ROUTE_INVALID,
+                "공유매체 fan-out 표에 없는 송신자입니다",
+                endpoint_id=endpoint_id,
+            )
+        children = fanned
+        fanout_scope = "OPTIN_TWO_CHILD_FANOUT"
     if destination_endpoint == "BROADCAST" and pairwise_edge is not None:
         kept = PAIRWISE_EDGE_CHILD.get(pairwise_edge)
         if kept is None:
@@ -357,6 +385,7 @@ class Stage7RouteSidecar:
         "_bursts",
         "_reservations",
         "_evidence",
+        "_wired_broadcast_optin",
     )
 
     def __init__(self, *, lane_generation: int = 0) -> None:
@@ -368,6 +397,11 @@ class Stage7RouteSidecar:
         self._bursts = {}
         self._reservations = {}
         self._evidence = []
+        #: Stage 8 유선 공유 매질 opt-in(session 범위). **기본 False = legacy 동작 그대로**.
+        #: True면 이후 승격되는 정상 route context도 fan-out opt-in을 달고 나가, addressed 정상
+        #: 송신이 송신자의 두 물리 경로로 방사된다(§4.1 "항상 방사하는 운용 송신"). 논리 주소·
+        #: 정상 tuning 행렬·qualification 예외 경로는 그대로다.
+        self._wired_broadcast_optin = False
 
     @property
     def lane_generation(self) -> int:
@@ -449,6 +483,8 @@ class Stage7RouteSidecar:
                     else None
                 ),
                 request_digest=entry.request_digest,
+                # session 범위 opt-in이 켜져 있을 때만 정상 송신도 fan-out한다(기본 False).
+                broadcast_fanout_optin=self._wired_broadcast_optin,
             )
             for packet_id in packet_ids:
                 self._packets[(self._lane_generation, packet_id.value)] = context
@@ -475,7 +511,31 @@ class Stage7RouteSidecar:
                 )
             return Ok(context)
 
-    def bind_burst(self, packet_id_value: str, burst_id_value: str):
+    def set_wired_broadcast_optin(self, enabled: bool) -> bool:
+        """Stage 8 유선 공유매체 opt-in을 session 범위로 켜고 끈다(§4.1). 반환: 직전 값.
+
+        켜면 **이후 승격되는** 정상 route도 송신자의 두 물리 경로로 fan-out한다. 이미 승격된
+        context는 immutable이라 바뀌지 않는다 — 켠 시점 이후의 송신에만 적용된다(진행 중인 burst의
+        예약 계획을 도중에 바꾸지 않는다).
+
+        끄면 즉시 legacy 단일 child로 돌아간다. 기본값은 꺼짐이며, 이 method를 부르지 않는 설치의
+        동작은 Stage 8 이전과 **완전히 동일**하다.
+        """
+
+        with self._lock:
+            previous = self._wired_broadcast_optin
+            self._wired_broadcast_optin = bool(enabled)
+            if previous != self._wired_broadcast_optin:
+                self._record("wired_broadcast_optin_changed",
+                             enabled=self._wired_broadcast_optin)
+            return previous
+
+    @property
+    def wired_broadcast_optin(self) -> bool:
+        with self._lock:
+            return self._wired_broadcast_optin
+
+    def bind_burst(self, packet_id_value: str, burst_id_value: str, *, wire_packet_digest=None):
         with self._lock:
             context = self._packets.get((self._lane_generation, packet_id_value))
             if context is None:
@@ -491,10 +551,56 @@ class Stage7RouteSidecar:
                     "Burst ID가 이미 다른 route에 결속되어 있습니다",
                     local_id=burst_id_value,
                 )
+            if wire_packet_digest is not None:
+                context = replace(context, wire_packet_digest=wire_packet_digest)
             self._bursts[(self._lane_generation, burst_id_value)] = context
             self._record(
                 "burst_bound", bound_packet=packet_id_value, bound_burst=burst_id_value
             )
+            return Ok(context)
+
+    def burst_context(self, burst_id_value):
+        with self._lock:
+            return self._bursts.get((self._lane_generation, burst_id_value))
+
+    def bind_broadcast_fanout_burst(self, burst_id_value: str, *, source_station_id: int,
+                                 destination_station_id: int, request_digest: str,
+                                 method_kind: str = "STAGE8_SHARED_MEDIUM", wire_packet_digest=None):
+        """Stage 8 유선 공유매체 opt-in burst의 route context를 결속한다(§15.1 예약 경로 재사용).
+
+        정상 MAC packet을 거치지 않는 Stage 8 PoC action을 기존 `reserve_burst`·`schedule_tx`·충돌
+        검사·TX 원장에 태우기 위한 최소 진입점이다. context에 `broadcast_fanout_optin=True`를 달아
+        `resolve_lane_plan_route`가 송신자의 두 물리 경로로 fan-out하게 한다. 논리 주소는 그대로다.
+
+        기존 정상 route 승격 경로(`note_route_call`→`_packets`)는 이 flag를 켜지 않으므로 legacy 및
+        feature OFF 동작은 변하지 않는다. 같은 burst_id가 다른 route에 이미 결속돼 있으면 거부한다.
+        """
+
+        with self._lock:
+            key = (self._lane_generation, burst_id_value)
+            existing = self._bursts.get(key)
+            if existing is not None:
+                if not getattr(existing, "broadcast_fanout_optin", False):
+                    return _private_error(
+                        Stage7PrivateErrorCode.LANE_ROUTE_INVALID,
+                        "Burst ID가 이미 다른 route에 결속되어 있습니다",
+                        local_id=burst_id_value,
+                    )
+                return Ok(existing)
+            context = Stage7RouteContext(
+                method_kind=method_kind,
+                source_station_id=source_station_id,
+                destination_kind="ADDRESSED",
+                destination_station_id=destination_station_id,
+                original_source_station_id=None,
+                original_destination_kind=None,
+                original_destination_station_id=None,
+                request_digest=request_digest,
+                broadcast_fanout_optin=True,
+                wire_packet_digest=wire_packet_digest,
+            )
+            self._bursts[key] = context
+            self._record("broadcast_fanout_burst_bound", bound_burst=burst_id_value)
             return Ok(context)
 
     def release_packet(self, packet_id_value: str) -> None:

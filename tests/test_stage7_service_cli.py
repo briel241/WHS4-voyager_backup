@@ -31,6 +31,7 @@ import apps.scenario_runner as runner
 import apps.stage7_profile as stage7_profile
 import apps.stage7_run as stage7_run
 import apps.stage7_service_layer as service_layer
+from stage7_binding_fixtures import legacy_phase_i_pins
 
 #: Phase G reference의 **tracked fixture** (phase-g-formal-20260902b 사본 —
 #: reference·sidecar는 byte-identical, profile은 host 익명화 + fixture 경로).
@@ -213,10 +214,7 @@ def test_topology_and_trust_gates():
     # host 코드는 건드리지 않는다 (2026-09-04 조건부 승인). 패치하지 않은
     # 실제 결속이 현재 coordinator를 거부하는 것은
     # tests/test_stage7_host_fail_closed.py가 별도로 증명한다.
-    with open(os.path.join(_REPO, "tests", "fixtures",
-                           "stage7_phase_i_function_bindings.json"),
-              encoding="utf-8") as handle:
-        phase_i = json.load(handle)["functions"]
+    phase_i = legacy_phase_i_pins()
     for candidate, spec in bound_specs.items():
         with open(os.path.join(_REPO, candidate), encoding="utf-8") as handle:
             source = handle.read()

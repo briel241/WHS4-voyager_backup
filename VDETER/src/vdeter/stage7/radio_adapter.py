@@ -66,6 +66,8 @@ _LEAD_NS = 100_000_000
 # → 단문 시나리오 간헐 실패의 원인).
 _RX_LEAD_NS = 20_000_000
 _RETUNE_LEAD_NS = 200_000_000
+#: 확정된 TX burst의 per-lane 결과를 보존하는 유계 이력 크기(원장에서 제거된 뒤 조회용).
+_TX_TERMINAL_HISTORY = 64
 _SWITCH_GAP_NS = 100_000_000
 _UTC_FLAGS = (
     RadioUtcFlag.HOST_ESTIMATE,
@@ -200,6 +202,24 @@ class _TxParent:
     fanout_scope: str
     terminal: bool = False
     retune_return: int | None = None
+    #: 수락 시점의 lead 관측(전부 같은 hardware ns 축). 거부 경로에만 값이 남으면 "통과했을 때
+    #: 여유가 얼마였는지"를 사후에 알 수 없다. `schedule_tx`가 **이미 계산한** 정수를 담을 뿐이며
+    #: 새 시각 읽기·RPC·디스크 쓰기를 하지 않는다.
+    required_lead_ns: int | None = None
+    remaining_lead_ns: int | None = None
+    margin_ns: int | None = None
+
+
+def _lead_record(parent: _TxParent):
+    """수락 시점 lead 관측 dict. 기록이 없으면 `None` — 0으로 위장하지 않는다."""
+
+    if parent.required_lead_ns is None or parent.remaining_lead_ns is None:
+        return None
+    return {
+        "required_lead_ns": parent.required_lead_ns,
+        "remaining_lead_ns": parent.remaining_lead_ns,
+        "margin_ns": parent.margin_ns,
+    }
 
 
 @dataclass(slots=True)
@@ -242,12 +262,13 @@ class Stage7B210RadioAdapter:
         "_time_source", "_id_source", "_event_sink", "_resolved", "_sidecar",
         "_lane_dispatcher", "_worker_factory", "_lease", "_state", "_generation",
         "_lane_generation", "_configuration", "_applied", "_applied_lane_settings",
-        "_bridge", "_tx_parents", "_rx_children", "_terminal_keys",
+        "_bridge", "_tx_parents", "_rx_children", "_terminal_keys", "_tx_terminal_outcomes",
         "_last_stopped", "_lock", "_condition", "_stopping", "_monitor_thread",
         "_monitor_stop", "_underflow_count", "_overflow_count", "_late_command_count",
         "_tx_rejected", "_rx_rejected", "_last_tx_tune_hz", "_pairwise_edge",
         "_delivery_status", "_endpoint_id", "_private_faults", "_hardware_clock_id",
         "_calibration_only", "_monitor_enabled",
+        "_rx_lane_channels",
     )
 
     def __init__(
@@ -282,6 +303,9 @@ class Stage7B210RadioAdapter:
         self._tx_parents = {}
         self._rx_children = {}
         self._terminal_keys = set()
+        #: burst_id -> {lane: 최종 state}. 유계(_TX_TERMINAL_HISTORY).
+        self._tx_terminal_outcomes = {}
+        self._rx_lane_channels = None
         self._last_stopped = None
         self._lock = RLock()
         self._condition = Condition(self._lock)
@@ -627,6 +651,7 @@ class Stage7B210RadioAdapter:
             self._tx_parents.clear()
             self._rx_children.clear()
             self._terminal_keys.clear()
+            self._tx_terminal_outcomes.clear()   # generation 재설정 시 과거 결과가 새지 않게
             self._rx_pending = []
             self._rx_issued = []
             self._last_stopped = None
@@ -909,13 +934,23 @@ class Stage7B210RadioAdapter:
             current_tune = self._last_tx_tune_hz
             retune_needed = current_tune is not None and current_tune != desired_tune
             required_lead = _RETUNE_LEAD_NS if retune_needed else _LEAD_NS
-            if hardware_start - now.value < required_lead:
+            # 같은 hardware ns 축의 뺄셈을 **한 번만** 한다. 거부 경로와 수락 경로가 같은 값을
+            # 말하도록 하기 위함이다(성공 때 시각을 다시 읽으면 두 경로가 서로 다른 시각을
+            # 근거로 삼게 된다). 판정 기준은 그대로다.
+            remaining_lead = int(hardware_start - now.value)
+            if remaining_lead < required_lead:
                 self._late_command_count += 1
                 self._reject_tx_locked(request.channel)
                 return self._error(
                     ErrorCode.RADIO_LATE_REQUEST, ErrorCategory.TIMEOUT,
                     "TX lead가 최소 lead 미만입니다", correlation,
-                    Details.of(required_lead_ns=required_lead),
+                    # 요구 lead만으로는 "얼마나 모자랐는지"를 알 수 없다. 접수 시각·예정 시각·
+                    # 남은 lead를 함께 남긴다. 네 값 모두 같은 hardware ns 축이라 변환 근거 없이
+                    # 빼지 않는다(다른 clock domain 값을 섞지 않는다).
+                    Details.of(required_lead_ns=required_lead,
+                               scheduled_hw_ns=int(hardware_start),
+                               accepted_at_hw_ns=int(now.value),
+                               remaining_lead_ns=remaining_lead),
                 )
             if retune_needed:
                 for parent in self._tx_parents.values():
@@ -964,6 +999,12 @@ class Stage7B210RadioAdapter:
                     Details.of(reason=type(error).__name__),
                 )
             parent = _TxParent(key, request, children, plan.fanout_scope)
+            # 수락된 송신의 lead 여유를 원장에 남긴다(정수 3개 대입뿐 — 임계 구간에 시각 읽기·
+            # RPC·동기 디스크 쓰기를 더하지 않는다). margin은 두 값의 차이이며 새 판정 기준이
+            # 아니다: 여기까지 왔다는 것은 이미 `remaining_lead >= required_lead`라는 뜻이다.
+            parent.required_lead_ns = int(required_lead)
+            parent.remaining_lead_ns = remaining_lead
+            parent.margin_ns = remaining_lead - int(required_lead)
             if retune_needed:
                 parent.retune_return = self._default_tx_tune_hz()
             self._tx_parents[request.burst_id.value] = parent
@@ -1004,12 +1045,14 @@ class Stage7B210RadioAdapter:
                     "active bridge 없이 timed RX를 수락할 수 없습니다",
                 )
                 return self._error(ErrorCode.CLOCK_MAPPING_UNAVAILABLE, ErrorCategory.DEVICE, "host affine bridge가 잠겨 있지 않습니다")
+            if not self.rx_lanes_for(request.channel.name):
+                return self._error(ErrorCode.RADIO_UNSUPPORTED_SETTING, ErrorCategory.VALIDATION, "channel is not tuned")
             hardware_end = hardware_start + request.duration_nanoseconds
             base_key = (
                 self._generation, request.channel.name,
                 request.start_at.total_nanoseconds(), request.duration_nanoseconds,
             )
-            for lane_index in (0, 1):
+            for lane_index in self.rx_lanes_for(request.channel.name):
                 child_key = ("rx", base_key, lane_index)
                 if child_key in self._terminal_keys or child_key in self._rx_children:
                     self._rx_reject_probe(
@@ -1023,7 +1066,7 @@ class Stage7B210RadioAdapter:
             # 이미 연속으로 열려 있으므로, 여기서는 collector 창 등록만 한다
             # (장치 명령 0회 — 창 경계는 합성 rx_time 태그가 공급).
             worker = self._lease.worker
-            for lane_index in (0, 1):
+            for lane_index in self.rx_lanes_for(request.channel.name):
                 try:
                     worker.register_rx_window_lane(lane_index, hardware_start, expected)
                 except Exception as error:  # noqa: BLE001
@@ -1197,6 +1240,46 @@ class Stage7B210RadioAdapter:
             pass
         self._last_tx_tune_hz = parent.retune_return
 
+    def tx_burst_state(self, burst_id_value: str):
+        """burst의 **권위 TX 원장** 상태 조회(읽기 전용). Stage 8 terminal 판정이 쓴다.
+
+        반환: ``{"terminal": bool, "children": {lane: state}, "lead": {...}|None}`` — state는
+        SUBMITTED|COMPLETED|FAILED. `lead`는 **수락 시점에 이미 계산된** 요구/남은/여유 lead이며
+        조회 때 새로 재지 않는다(기록이 없으면 `None`; 0으로 위장하지 않는다).
+        아직 제출되지 않았거나 원장에 없으면 ``None``. 진행 중(SUBMITTED)과 확정(COMPLETED/FAILED)을
+        구분할 수 있고, 과거 burst의 결과가 현재 burst로 새지 않는다(burst_id 키). 상태를 만들지 않고
+        원장이 기록한 것만 돌려준다.
+        """
+
+        with self._condition:
+            parent = self._tx_parents.get(burst_id_value)
+            if parent is not None:
+                return {"terminal": bool(parent.terminal),
+                        "children": {child.lane_index: child.state
+                                     for child in parent.children.values()},
+                        "lead": _lead_record(parent)}
+            recorded = self._tx_terminal_outcomes.get(burst_id_value)
+            if recorded is None:
+                return None
+            lead = recorded.get("lead")
+            return {"terminal": True,
+                    "children": dict(recorded.get("children") or {}),
+                    "lead": dict(lead) if lead else None}
+
+    def rx_lanes_for(self, channel_name):
+        mapping = self._rx_lane_channels
+        return (0, 1) if mapping is None else tuple(
+            lane for lane in (0, 1) if mapping.get(lane) == channel_name)
+
+    def set_rx_lane_channels(self, mapping):
+        """Scope owner calls only after all admitted RX children have drained."""
+        with self._condition:
+            if any(not child.terminal for child in self._rx_children.values()):
+                raise RuntimeError("RX windows must drain before changing lane bindings")
+            if mapping is not None and (set(mapping) != {0, 1} or len(set(mapping.values())) != 2):
+                raise ValueError("two distinct canonical RX channels required")
+            self._rx_lane_channels = None if mapping is None else dict(mapping)
+
     def _maybe_complete_parent_locked(self, parent: _TxParent):
         if parent.terminal:
             return
@@ -1205,6 +1288,14 @@ class Stage7B210RadioAdapter:
             return
         parent.terminal = True
         self._terminal_keys.add(parent.key)
+        # 확정된 per-lane 결과를 유계로 보존한다(parent는 아래에서 원장에서 제거되므로, 이후 조회가
+        # "기록 없음"과 "실패"를 혼동하지 않게 한다). 상한 초과 시 가장 오래된 것부터 버린다.
+        self._tx_terminal_outcomes[parent.request.burst_id.value] = {
+            "children": {child.lane_index: child.state
+                         for child in parent.children.values()},
+            "lead": _lead_record(parent)}
+        while len(self._tx_terminal_outcomes) > _TX_TERMINAL_HISTORY:
+            self._tx_terminal_outcomes.pop(next(iter(self._tx_terminal_outcomes)), None)
         self._tx_parents.pop(parent.request.burst_id.value, None)
         self._finish_retune_locked(parent)
         if all(state == "COMPLETED" for state in states):

@@ -267,6 +267,11 @@ def make_session_factory(script=None):
                 self._close_interrupted = True
                 raise KeyboardInterrupt
             self.closed = True
+            # `close`(dict)를 주면 그 finalize 요약을 그대로 돌려준다 — coordinator가
+            # rc≠0으로 끝나는 종료(예: 빈 측정 fail-closed)를 재현하기 위한 seam.
+            scripted = script.get("close")
+            if scripted is not None:
+                return json.loads(json.dumps(scripted))
             return {"pass": True, "problems": [],
                     "closed": {"status": "PASS", "cleanup": {"pass": True}},
                     "residual_processes": [], "coordinator_rc": 0}

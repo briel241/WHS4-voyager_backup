@@ -2030,6 +2030,9 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             workload_id = request["workload_id"]
             scenario_id = request["scenario_id"]
             certificate_case = request.get("certificate_case", "normal")
+            # Stage 8 opt-in: workload를 소유한 controller child가 PoC 수명주기를 실행한다
+            # (§3.1 supervisor는 workload 소유 프로세스). 요청이 없으면 아무것도 바뀌지 않는다.
+            poc_request = request.get("poc")
             print(f"[coordinator] workload 시작 {workload_id} {scenario_id}",
                   flush=True)
             guard.progress(f"workload:{workload_id}")
@@ -2087,6 +2090,13 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 "--events-dir", os.path.join(run_root, "evidence",
                                              "service_events"),
             ]
+            poc_result_path = os.path.join(child_root, "mass-roc-events",
+                                           "poc-result.json")
+            if poc_request is not None:
+                # PoC 요청은 child가 읽을 파일로 건네고 경로만 argv에 싣는다(argv에 payload 금지).
+                poc_request_path = os.path.join(child_root, "poc-request.json")
+                write_json(poc_request_path, poc_request)
+                command += ["--poc-request", poc_request_path]
             child = subprocess.Popen(command, stdout=log_handle,
                                      stderr=subprocess.STDOUT)
             emit("workload_child_spawn", workload=workload_id, pid=child.pid,
@@ -2200,6 +2210,21 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             except OSError:
                 pass
 
+            # PoC evidence(있으면)를 그대로 싣는다. scenario 판정과 **독립**이며 서로 재계산하지
+            # 않는다(§11.1). PoC를 요청했는데 evidence가 없으면 조용히 넘어가지 않는다 —
+            # PoC 없이 scenario만 돌고 PASS로 보고되는 거짓 성공을 막는다.
+            poc_evidence = None
+            if poc_request is not None:
+                try:
+                    with open(poc_result_path, "rb") as handle:
+                        poc_evidence = json.loads(handle.read().decode("utf-8"))
+                except OSError:
+                    poc_evidence = {
+                        "status": "ERROR", "poc_infrastructure": "ERROR",
+                        "infrastructure_error_code": "POC_EVIDENCE_MISSING",
+                        "error": "controller child가 PoC evidence를 남기지 않았습니다",
+                    }
+
             # --- workload quiescence gate ----------------------------------
             pump_events()
             transfers = []
@@ -2250,10 +2275,14 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 "session_health_before": health,
                 "quiescence": quiescence,
                 "scenario": scenario_result,
+                # PoC 판정은 scenario 판정과 독립이다. workload status는 기존 세 조건 그대로이며,
+                # PoC를 요청했는데 evidence가 아예 없는 경우에만 추가로 FAIL이다(거짓 성공 차단).
+                "poc": poc_evidence,
                 "status": "PASS" if (
                     child.returncode == 0
                     and (scenario_result or {}).get("status") == "PASS"
-                    and quiescence["pass"]) else "FAIL",
+                    and quiescence["pass"]
+                    and (poc_request is None or poc_evidence is not None)) else "FAIL",
             }
             write_json(os.path.join(results_dir, request_name), record)
             workloads.append({k: record[k] for k in

@@ -104,7 +104,7 @@ class Stage7DualLaneFlowgraphBackend:
         "_cleanup_event", "_cleanup_failure", "_cleanup_thread", "_cleanup_lock",
         "_connected", "_activity_event", "_tx_muted", "_companion_windows",
         "_rx_plan_max_bytes", "_rx_plan_sample_rate_hz", "_rx_assembler_resets",
-        "_tx_probe_count",
+        "_tx_probe_count", "_manual_rx_tuning", "_rx_continuous_since_ns",
     )
 
     def __init__(self, device_selector: str, cpu_format: str, otw_format: str) -> None:
@@ -338,6 +338,10 @@ class Stage7DualLaneFlowgraphBackend:
         self._cleanup_lock = Lock()
         self._connected = False
         self._tx_muted = [False, False]
+        #: 마지막으로 적용한 manual RX tuning(WSM-G1 공통 LO + lane DSP + BW). None이면 미적용.
+        self._manual_rx_tuning = None
+        #: 연속 RX가 유효해지는 hardware ns(서비스 모드). 연속 RX가 아니면 None.
+        self._rx_continuous_since_ns = None
 
     @staticmethod
     def discover(device_selector: str) -> tuple[str, ...]:
@@ -518,6 +522,152 @@ class Stage7DualLaneFlowgraphBackend:
             "tx_lo_lane1_hz": int(round(self._sink.get_center_freq(1))),
             "rx_lo_lane1_hz": int(round(self._source.get_center_freq(1))),
         }
+
+    def poc_runtime_state(self) -> dict:
+        """Owner-process state in one RPC; no repeated tuning/sensor USB reads.
+
+        RX center is the verified configure/restore state (manual scope supplies
+        its own verified per-lane readback). TX LO is the last accepted command,
+        not proof that a future timed retune has already occurred.
+        """
+        with self._control_lock:
+            return {
+                "hardware_time_ns": self.hardware_time_ns(),
+                "tx_lo_hz": self._tx_lo_frequency_hz,
+                "rx_lo_hz": self._rx_lo_frequency_hz,
+                "tx_muted": list(self._tx_muted),
+                "rx_continuous": self._rx_continuous_since_ns is not None,
+                "rx_continuous_since_ns": self._rx_continuous_since_ns,
+                "state_basis": "DEVICE_OWNER_CONTROL_STATE",
+                "tx_lo_basis": "LAST_ACCEPTED_COMMAND_NOT_TIMED_COMPLETION",
+            }
+
+    # --- manual RX tuning (WSM-G1 공통 LO + lane DSP + analog BW) ---------------
+
+    def _tune_policy(self, name: str):
+        """`uhd.tune_request`의 MANUAL policy 상수. 없으면 미지원으로 거부한다(추정 금지)."""
+
+        request_type = getattr(self._uhd, "tune_request", None)
+        if request_type is None:
+            raise RuntimeError("uhd.tune_request가 없습니다 — manual tuning 미지원 설치")
+        policy = getattr(request_type, name, None)
+        if policy is None:
+            raise RuntimeError(f"uhd.tune_request.{name}가 없습니다 — manual tuning 미지원 설치")
+        return policy
+
+    def _rx_tuning_snapshot(self) -> dict:
+        """현재 RX tuning을 **장치에서 읽어** 돌려준다(계획값 되풀이 아님).
+
+        `lane_center_hz`는 장치가 보고하는 lane별 실제 중심 주파수(= RF LO와 DSP의 합성 결과)다.
+        manual tuning을 적용한 적이 있으면 그때 장치가 보고한 RF/DSP 분해값도 함께 보존한다.
+        """
+
+        snapshot = {
+            "lane_center_hz": {
+                lane: int(round(self._source.get_center_freq(lane)))
+                for lane in range(LANE_COUNT)
+            },
+            "analog_bandwidth_hz": int(round(self._source.get_bandwidth(0))),
+        }
+        applied = self._manual_rx_tuning
+        if applied is not None:
+            snapshot["rx_lo_hz"] = int(applied["rx_lo_hz"])
+            snapshot["lane_dsp_hz"] = dict(applied["lane_dsp_hz"])
+        return snapshot
+
+    def read_tuning(self) -> dict:
+        """RX tuning 실측 snapshot(복구용). 장치를 변경하지 않는다."""
+
+        with self._control_lock:
+            return self._rx_tuning_snapshot()
+
+    def apply_manual_tuning(self, rx_lo_hz: int, lane_dsp_hz, analog_bandwidth_hz: int) -> dict:
+        """두 lane에 **공통 RF LO + lane별 DSP offset + analog RX bandwidth**를 적용한다.
+
+        WSM-G1 공통 LO 계획(lower/upper 동시 수신)을 장치에 거는 유일한 경로다. UHD `tune_request`의
+        RF/DSP policy를 **둘 다 MANUAL**로 두어 공통 RF LO를 고정하고 lane별 CORDIC(DSP) offset만
+        다르게 준다 — 그렇게 하지 않으면 UHD가 lane마다 RF LO를 임의로 다시 잡아 공통 LO가 깨진다.
+
+        반환은 **장치가 보고한 값**이다(요청값 반복이 아니다): `tune_result`의 실제 RF/DSP와
+        `get_center_freq`/`get_bandwidth` readback. 상위(`CommonLoTuningApplier`)가 이 값으로 계획
+        일치를 판정한다. 여기서는 판정하지 않고 실측만 돌려준다.
+        """
+
+        uhd = self._uhd
+        offsets = {}
+        for lane in range(LANE_COUNT):
+            value = (lane_dsp_hz.get(lane, lane_dsp_hz.get(str(lane)))
+                     if hasattr(lane_dsp_hz, "get") else lane_dsp_hz[lane])
+            if value is None:
+                raise ValueError(f"lane {lane}의 DSP offset이 없습니다")
+            offsets[lane] = int(value)
+        manual_rf = self._tune_policy("POLICY_MANUAL")
+        with self._control_lock:
+            previous = self._rx_tuning_snapshot()
+            lanes = {}
+            for lane in range(LANE_COUNT):
+                # analog filter를 먼저 넓힌다 — 좁은 상태로 DSP offset을 걸면 그 순간 lane 하나가
+                # 통과대역 밖에 놓인다.
+                self._source.set_bandwidth(int(analog_bandwidth_hz), lane)
+                request = uhd.tune_request(float(int(rx_lo_hz) - offsets[lane]))
+                request.rf_freq_policy = manual_rf
+                request.rf_freq = float(int(rx_lo_hz))
+                request.dsp_freq_policy = manual_rf
+                request.dsp_freq = float(offsets[lane])
+                result = self._source.set_center_freq(request, lane)
+                lanes[lane] = {
+                    "actual_rf_freq_hz": int(round(float(result.actual_rf_freq))),
+                    "actual_dsp_freq_hz": int(round(float(result.actual_dsp_freq))),
+                    "center_freq_hz": int(round(self._source.get_center_freq(lane))),
+                    "analog_bandwidth_hz": int(round(self._source.get_bandwidth(lane))),
+                }
+            # 장치가 보고한 lane별 RF LO가 서로 다르면 공통 LO가 아니다 — 상위가 거부할 수 있게
+            # 사실대로 싣는다(여기서 평균·대표값으로 뭉개지 않는다).
+            readback = {
+                "rx_lo_hz": lanes[0]["actual_rf_freq_hz"],
+                "lane_dsp_hz": {lane: lanes[lane]["actual_dsp_freq_hz"]
+                                for lane in range(LANE_COUNT)},
+                "analog_bandwidth_hz": min(lanes[lane]["analog_bandwidth_hz"]
+                                           for lane in range(LANE_COUNT)),
+                "lane_rf_lo_hz": {lane: lanes[lane]["actual_rf_freq_hz"]
+                                  for lane in range(LANE_COUNT)},
+                "lane_center_hz": {lane: lanes[lane]["center_freq_hz"]
+                                   for lane in range(LANE_COUNT)},
+                "previous": previous,
+            }
+            self._manual_rx_tuning = {
+                "rx_lo_hz": readback["rx_lo_hz"],
+                "lane_dsp_hz": dict(readback["lane_dsp_hz"]),
+                "analog_bandwidth_hz": readback["analog_bandwidth_hz"],
+            }
+            self._rx_lo_frequency_hz = readback["rx_lo_hz"]
+            return readback
+
+    def restore_tuning(self, snapshot: dict) -> dict:
+        """`read_tuning`/`apply_manual_tuning`이 준 직전 상태로 되돌린다(복구 경로).
+
+        분해된 RF/DSP가 있으면 그대로 manual로 되돌리고, 없으면(=manual 적용 전 상태) lane별 실제
+        중심 주파수를 그대로 다시 건다. 되돌린 뒤의 **실측**을 돌려준다.
+        """
+
+        lane_dsp = snapshot.get("lane_dsp_hz")
+        rx_lo = snapshot.get("rx_lo_hz")
+        bandwidth = snapshot.get("analog_bandwidth_hz")
+        if lane_dsp is not None and rx_lo is not None and bandwidth is not None:
+            return self.apply_manual_tuning(int(rx_lo), dict(lane_dsp), int(bandwidth))
+        centers = snapshot.get("lane_center_hz") or {}
+        with self._control_lock:
+            for lane in range(LANE_COUNT):
+                center = centers.get(lane, centers.get(str(lane)))
+                if center is None:
+                    continue
+                if bandwidth is not None:
+                    self._source.set_bandwidth(int(bandwidth), lane)
+                self._source.set_center_freq(float(int(center)), lane)
+            self._manual_rx_tuning = None
+            restored = self._rx_tuning_snapshot()
+            self._rx_lo_frequency_hz = restored["lane_center_hz"][0]
+            return restored
 
     def sensor_readback(self) -> dict:
         readback = {}
@@ -706,11 +856,20 @@ class Stage7DualLaneFlowgraphBackend:
         # ("stream now on multiple channels ... fail to time align") —
         # 시각 지정 시작으로 양 채널을 정렬한다.
         command.stream_now = False
-        command.time_spec = self._time_spec(int(self.hardware_time_ns()) + 200_000_000)
+        start_ns = int(self.hardware_time_ns()) + 200_000_000
+        command.time_spec = self._time_spec(start_ns)
         for collector in self._rx_collectors:
             collector._svc_anchor = None
             collector._svc_continuous = True
         self._source.issue_stream_cmd(command)
+        # 연속 RX가 **언제부터** 유효한지 보존한다. 상위 readiness는 "연속 RX가 켜져 있다"가 아니라
+        # "예약 TX 시각이 이 시작 이후"임을 확인해야 한다 — 시작 전 시각은 수신되지 않는다.
+        self._rx_continuous_since_ns = start_ns
+
+    def rx_continuous_since_ns(self):
+        """연속 RX 스트림이 유효해지는 hardware ns. 연속 RX가 아니면 None."""
+
+        return self._rx_continuous_since_ns
 
     def stop_rx_continuous(self) -> None:
         command = self._uhd.stream_cmd(
@@ -722,6 +881,7 @@ class Stage7DualLaneFlowgraphBackend:
         finally:
             for collector in self._rx_collectors:
                 collector._svc_continuous = False
+            self._rx_continuous_since_ns = None
 
     def read_rx_cf32_lane(
         self,
@@ -837,8 +997,22 @@ class Stage7IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
     def lo_readback(self) -> dict:
         return self._rpc("lo_readback")
 
+    def read_tuning(self) -> dict:
+        return self._rpc("read_tuning")
+
+    def apply_manual_tuning(self, rx_lo_hz: int, lane_dsp_hz, analog_bandwidth_hz: int) -> dict:
+        return self._rpc("apply_manual_tuning", int(rx_lo_hz),
+                         {int(lane): int(value) for lane, value in dict(lane_dsp_hz).items()},
+                         int(analog_bandwidth_hz))
+
+    def restore_tuning(self, snapshot: dict) -> dict:
+        return self._rpc("restore_tuning", dict(snapshot))
+
     def sensor_readback(self) -> dict:
         return self._rpc("sensor_readback")
+
+    def poc_runtime_state(self) -> dict:
+        return self._rpc("poc_runtime_state")
 
     def set_tx_mute(self, lane: int, muted: bool) -> None:
         self._rpc("set_tx_mute", lane, muted)
@@ -869,6 +1043,9 @@ class Stage7IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
 
     def start_rx_continuous(self) -> None:
         self._rpc("start_rx_continuous")
+
+    def rx_continuous_since_ns(self):
+        return self._rpc("rx_continuous_since_ns")
 
     def stop_rx_continuous(self) -> None:
         self._rpc("stop_rx_continuous")

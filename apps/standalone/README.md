@@ -389,6 +389,49 @@ installation_audit.py`). 두 값은 서로 위장할 수 없다(40-hex ≠ 64-he
 - `unit-contract.log` — unit+contract suite 로컬 완주 로그.
 - `integration-stage7.log` — stage7 integration 부분집합 완주 로그.
 
+## 7A. vdeter diag — 개발용 통제 RF 진단 (2026-09-14, 실행 명세 §5A)
+
+미자격 후보에서 승인된 범위의 소규모 실물 진단을 수행하는 별도 경로. **qualification이 아니며**
+reference를 발급·승격하지 않고, §7·§8의 정상 run 거부 규칙을 바꾸지 않는다.
+
+```
+vdeter diag authorize --calibration-reference <reference.json> --plan <plan.json>
+vdeter diag run [SCENARIO ...] [--hold-after-ready S] [--poc PATH|--poc-dir DIR] [--rf-off-software]
+vdeter diag status
+```
+
+- `authorize`(RF-off, 장치 open 없음): 배선 승인 → installation 적재·재측정 → identity → 필수
+  preflight(sysfs·키) → 출처 reference 적재(sidecar·TC PASS) → 후보 결속 블록 조립(§8과 같은 항목)
+  → **교정 적합성**(출처와 후보의 platform/host profile·배선 profile·endpoints·hub topology·
+  라이브러리 4종·RF-critical 심볼 동일; 아니면 발급 거부 + 필요한 교정 보고) → 정상 run과 같은
+  블록 검사로 자기 검증 → `var/diagnostic/authorization.json` + `.sha256`. `var/qualification`에는
+  쓰지 않는다. plan: `label, allowed_scenarios, poc_allowed, max_runs, max_workloads_per_run,
+  expires_utc[, max_hold_after_ready_s ≤ 600][, allowed_workloads]`.
+  `allowed_workloads`(선택)는 `{scenario, case, poc_id}` 객체 목록으로 **조합**을 표현한다 —
+  `case`는 `normal`/`forged`(기본 `normal`), `poc_id`는 `--poc-dir` catalog에서 prompt 없이
+  고를 PoC id(생략·`null`이면 그 workload는 baseline). 이것이 있어야 SC-VDE-001 `forged`와
+  동일 세션 baseline↔PoC 전환을 비대화형 진단에서 지정할 수 있다. 각 `scenario`는
+  `allowed_scenarios`에 있어야 하고, `poc_id`는 `poc_allowed=true`일 때만 쓸 수 있으며,
+  항목 수는 `max_workloads_per_run`을 넘을 수 없다. 없으면 종전대로
+  `allowed_scenarios × normal`로 해석한다(기존 계획 파일 호환). 선택·실행은 정상 run과 **같은**
+  `run_cmd.execute`·`select_and_snapshot` 경로이며 별도 실행 엔진을 만들지 않는다.
+- `run`: authorization(sidecar·만료·plan)과 ledger(한도)를 **장치 접근 전** 검사 → `run_cmd.execute`
+  를 그대로 호출(주입: 진단 loader·블록 검사·비대화형 계획·**재시도 없음**). 인자 없이 실행하면
+  RX-only 세션(bring-up → `--hold-after-ready` 동안 READY 유지 → close). run id 접두 `diag-`.
+  coordinator는 빈 측정을 설계대로 fail-closed 판정하므로 RX-only 세션은 coordinator rc=1로 끝난다.
+  진단 계층은 실패 사유가 빈 측정 하나뿐이고 `service_stop_rc=0`·cleanup PASS·잔존 worker 0·
+  inhibit 아님·인터럽트 아님·close 후 topology 정상일 때만 이를 "기대된 빈 측정"으로 보고 진단
+  종료코드를 0으로 기록한다(명세 §5A.3). coordinator의 rc·status·error 원문과 보정 사실은
+  ledger의 `rx_only_assessment`·`diagnostic_exit_code_override`에 그대로 남으며, 반환값·콘솔·
+  ledger는 같은 종료코드를 말한다. 사유가 하나라도 더 섞이면 FAIL 그대로다.
+  배너 `DIAGNOSTIC, NOT_QUALIFIED`; run.json/summary.json은 `reference_sha256=null`,
+  `qualification_status=NOT_QUALIFIED`, `diagnostic_authorization_sha256`; `RESULT … qualification=NOT_QUALIFIED`.
+  종료 후 `active.json`·`releases/` 불변을 확인해 ledger에 기록한다.
+- 한도: run 수·run당 workload·시나리오 집합·PoC 허용·READY 유지·만료는 CLI가 강제(장치 접근 전).
+  bring-up 2700 s·workload 900 s·close 600 s·단일 인스턴스는 기존 세션 코드가 강제(불변). burst 단위
+  RF 계수는 evidence에 없다(transfer 단위 counters만) — 강제한다고 주장하지 않는다.
+- 종료 코드는 §11과 같다(`4`=authorization 없음/변조/만료/stale, `2`=plan 범위·한도 초과).
+
 ## 8. qualification-critical 경계 (결정 13·14 정합 정의)
 
 일반 `vdeter run`이 reference와 **대조하는** critical 값 (불일치 = UNQUALIFIED,

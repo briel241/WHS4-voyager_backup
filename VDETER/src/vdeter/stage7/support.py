@@ -10,6 +10,7 @@ encode/accept/completion과 Service dispatch는 inherited path를 사용한다.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from threading import RLock
 
 from ..common.contracts.phy import PhyRecoveryStatus, RecoveredPacketSet
@@ -85,6 +86,7 @@ class _LogicalWindow:
         "errors",
         "first_sample_utc_ns",
         "terminal_lanes",
+        "expected_lanes",
         "delivered",
     )
 
@@ -96,6 +98,7 @@ class _LogicalWindow:
         self.errors = {}
         self.first_sample_utc_ns = {}
         self.terminal_lanes = set()
+        self.expected_lanes = {0, 1}
         self.delivered = False
 
 
@@ -139,6 +142,10 @@ class Stage7LaneRxDispatcher:
         디코드 입력 사본에만 적용되고 관측 계약(진단 싱크·ingress·
         결과 타입)은 frozen 경로 그대로다. STAGE7_RX_ENERGY_GATE=0
         으로 비활성.
+
+        무장 전 **전제 검사**와 **1회 한정 재무장**이 있다(diag-20260913-195703
+        부검). 게이트는 성능 장치이지 안전 장치가 아니므로, 학습 전제가 깨졌을
+        때의 올바른 실패 방향은 통과(느려짐)이지 전면 차단(기능 정지)이 아니다.
         """
         import os as _os
 
@@ -159,8 +166,16 @@ class Stage7LaneRxDispatcher:
             power = float(_np.vdot(arr, arr).real) / arr.size
             state = self._gate_state.setdefault(
                 lane_index,
-                {"warm": [], "med": None, "gated": 0, "passed": 0},
+                {"warm": [], "med": None, "gated": 0, "passed": 0,
+                 "floor_trusted": False, "low_candidate": None,
+                 "corrections": 0, "probes": 0,
+                 # 연속 0-치환 창 수. warm-up 임시 문턱과 무장 후 유계 probe가
+                 # **같은** 카운터를 쓴다(diag-20260914-113630 부검, 아래 두 분기).
+                 "blackout": 0, "warm_probes": 0},
             )
+            # 유계 probe 주기. 무장 후 분기가 이미 쓰던 값(16창당 1창)을 그대로
+            # 인용한다 — 새 문턱을 만들거나 기존 배수(8.0)를 넓히지 않는다.
+            probe_windows = 16
             if state["med"] is None:
                 if power > 0.0:
                     state["warm"].append(power)
@@ -171,16 +186,47 @@ class Stage7LaneRxDispatcher:
                 # 이후부터는 관측 최솟값(잡음 바닥의 상계)×8 임시 문턱
                 # 으로 잡음 창을 선별 0-치환 — 버스트(잡음 대비 +20dB)
                 # 는 임시 문턱도 항상 통과하므로 TBB 획득 무영향.
+                #
+                # 위 주석의 "버스트는 임시 문턱도 항상 통과"는 **표본에 잡음 창이
+                # 섞여 있을 때만** 참이다. 임시 문턱은 `min(warm) × 8`이므로 표본이
+                # 단일 모드면(TBB 획득 전 bootstrap = BBSC 1 slot뿐이라 창에 ROC의
+                # TBB fragment 버스트만 오는 정상 상태) 최솟값 자체가 버스트 전력이고
+                # 문턱이 버스트 자신을 막는다. diag-20260914-113630 MASS-A lane 0이
+                # 그 상태였다(min 2.821e-03 / max 2.891e-03 = 1.025배).
+                #
+                # 창 번호를 정확히 구분한다(모든 번호는 **이 lane에 도착한 창** 기준이며,
+                # `commit_at`이나 admission 시각 기준이 아니다):
+                #   창 0‥8   전력 표본만 모으고 **원본 통과**(warm < 10이라 문턱 없음)
+                #   창 9‥58  임시 문턱 아래면 0-치환 — 단일 모드에서는 전량 차단
+                #   창 59    무장 창. 이 호출은 0-치환하지 않고 **원본 통과**한다
+                #   창 60‥   무장 문턱 적용, 미신뢰면 유계 probe
+                # 즉 "첫 복호 기회"가 뒤로 밀리는 것이 아니라, 앞의 통과분으로 조립이
+                # 끝나지 못한 경우에 **중간 50창이 연속으로 비는 것**이 문제다. 4-fragment
+                # TBB를 무손실로 받으면 창 4개로 끝나므로(RF-off 실측) 이 구간은 무해하고,
+                # fragment 유실·재전송으로 창 9 이후까지 필요해지면 그때 구조가 드러난다.
+                # 게이트는 성능 장치이므로 전제가 깨졌을 때의 올바른 실패 방향은
+                # 통과(느려짐)다. 무장 **뒤**에만 돌던 유계 probe를 여기에도 둔다.
                 if len(state["warm"]) >= 10:
                     provisional = min(state["warm"]) * 8.0
-                    if 0.0 < power < provisional:
-                        zero_block = _dc.replace(
-                            samples, data=b"\x00" * len(samples.data)
-                        )
-                        if len(state["warm"]) < 60:
+                    if 0.0 < power < provisional and len(state["warm"]) < 60:
+                        state["blackout"] += 1
+                        if state["blackout"] < probe_windows:
+                            zero_block = _dc.replace(
+                                samples, data=b"\x00" * len(samples.data)
+                            )
                             return _dc.replace(
                                 native_request, samples=zero_block
                             )
+                        state["blackout"] = 0
+                        state["warm_probes"] += 1
+                        if state["warm_probes"] <= 5:
+                            print(
+                                f"[launcher] rx-gate warm-probe lane={lane_index} "
+                                f"n={state['warm_probes']} power={power:.3e} "
+                                f"thr={provisional:.3e} (워밍업 임시 문턱)",
+                                file=_sys.stderr, flush=True,
+                            )
+                        return native_request
                 if len(state["warm"]) >= 60:
                     warm = sorted(state["warm"])
                     # 잡음 추정 = 10분위수 (svc-run-k 실측: 버스트 빈번
@@ -188,17 +234,81 @@ class Stage7LaneRxDispatcher:
                     # 신호 전력으로 오염 → 문턱이 버스트×8로 치솟아
                     # ACK까지 전면 차단, passed 3/3000. 하위 10%는
                     # 버스트가 절반 섞여도 잡음 바닥을 유지한다.)
-                    state["med"] = warm[len(warm) // 10]
+                    percentile10 = warm[len(warm) // 10]
+                    # 전제 검사 (diag-20260913-195703 부검). 위 주석의 "절반"은
+                    # 상한이 아니다. TBB 획득 전 MASS는 bootstrap slot map 때문에
+                    # 프레임(2.4 s)당 RX 창을 사실상 1개만 계획하는데 ROC는 BBSC
+                    # 기회마다 TBB fragment를 보내므로, 워밍업 표본이 버스트 위주가
+                    # 되는 것이 정상 상태다. 실측: p10 2.848e-03(= C1 버스트 전력),
+                    # 정상 회차 2.9e-06 — 1000배.
+                    #
+                    # 최솟값은 워밍업이 이미 임시 문턱으로 쓰는 "잡음 바닥의 상계"다.
+                    # p10이 그 임시 문턱(min×8) 위로 나왔다면 p10 자체가 버스트
+                    # 표본이라는 뜻이므로 잡음 추정치로 쓸 수 없다. 그때는 상계로
+                    # 무장한다 — 문턱 배수(8.0)를 넓히는 것이 아니라, 워밍업 구간에서
+                    # 이미 적용하던 것과 같은 문턱을 유지하는 것이다.
+                    upper_bound = warm[0]
+                    if percentile10 >= upper_bound * 8.0:
+                        state["med"] = upper_bound
+                        basis = "min_upper_bound"
+                    else:
+                        state["med"] = percentile10
+                        basis = "p10"
+                    # 잡음 **근거**의 유무를 값과 분리해 기록한다. 표본이 단일
+                    # 모드(최댓값이 최솟값의 8배 미만)면 저전력 집단이 관측되지
+                    # 않았다는 뜻이고, 그때 학습한 값은 잡음이라는 근거가 없다
+                    # (전부 잡음인 조용한 레인과 전부 버스트인 레인을 표본만으로
+                    # 구분할 수 없다). 값은 쓰되 **신뢰하지 않는다** — 아래
+                    # 하향 보정과 유계 probe가 그 상태에서만 동작한다.
+                    state["floor_trusted"] = warm[-1] >= upper_bound * 8.0
                     state["warm"] = []
                     print(
                         f"[launcher] rx-gate armed lane={lane_index} "
-                        f"noise_p10={state['med']:.3e} "
-                        f"p50={warm[len(warm) // 2]:.3e}",
+                        f"noise_p10={percentile10:.3e} "
+                        f"p50={warm[len(warm) // 2]:.3e} "
+                        f"min={upper_bound:.3e} max={warm[-1]:.3e} "
+                        f"basis={basis} thr={state['med'] * 8.0:.3e} "
+                        f"trusted={int(state['floor_trusted'])}",
                         file=_sys.stderr, flush=True,
                     )
+                # warm-up에서 통과한 창(임시 문턱 위이거나 무장이 일어난 창)은
+                # 연속 차단을 끊는다 — 무장 전후 경계에서 차단이 이어붙지 않는다.
+                state["blackout"] = 0
                 return native_request
+            # 하향 보정. 학습한 바닥보다 확실히 낮은 창이 **실제로 도착하면**,
+            # 그 바닥은 잡음이 아니었다는 양성 증거다(같은 표본을 다시 모으는
+            # 것이 아니라 새 관측을 근거로 삼는다 — 재무장은 오염 표본을 재수집할
+            # 뿐이라 해결이 아니었다). 단발 dropout 한 창이 바닥을 무너뜨려 잡음
+            # 창이 전량 통과하는 일이 없도록 **2표본 확인** 후 둘 중 높은 쪽을
+            # 택한다. 하향만 가능하므로 실제 최솟값으로 수렴하고 발산하지 않는다.
+            if 0.0 < power < state["med"] / 8.0:
+                candidate = state["low_candidate"]
+                if candidate is None:
+                    state["low_candidate"] = power
+                elif max(candidate, power) > min(candidate, power) * 1.5:
+                    # 두 저전력 관측이 같은 집단이 아니다. 보존 evidence 18건
+                    # 실측에서 무장 표본 내부 p50/p10은 1.01~1.06 — 잡음 창끼리는
+                    # 6% 안쪽으로 촘촘하다. 1.5배를 넘으면 한쪽은 dropout 같은
+                    # 단발 이상치이므로 정정하지 않고, 더 그럴듯한(높은) 쪽만
+                    # 후보로 남긴다. 이상치 하나가 바닥을 무너뜨리면 잡음 창이
+                    # 전량 통과해 게이트 도입 이유 자체가 사라진다.
+                    state["low_candidate"] = max(candidate, power)
+                else:
+                    previous = state["med"]
+                    state["med"] = max(candidate, power)
+                    state["low_candidate"] = None
+                    state["floor_trusted"] = True
+                    state["corrections"] += 1
+                    print(
+                        f"[launcher] rx-gate floor-correct lane={lane_index} "
+                        f"{previous:.3e} -> {state['med']:.3e} "
+                        f"thr={state['med'] * 8.0:.3e} "
+                        f"n={state['corrections']}",
+                        file=_sys.stderr, flush=True,
+                    )
             if state["med"] <= 0.0 or power >= state["med"] * 8.0:
                 state["passed"] += 1
+                state["blackout"] = 0
                 # 통과 이벤트 관측 (svc-run-l2 부검: ROC lane0의 유일
                 # 버스트(ACK)가 무음 소실 — 창 미무장/게이트/디코드 3분기
                 # 판별용. 통과가 드문 레인에서 특히 유효.)
@@ -217,6 +327,30 @@ class Stage7LaneRxDispatcher:
                     f"gated={state['gated']} passed={state['passed']}",
                     file=_sys.stderr, flush=True,
                 )
+            # 잡음 근거를 끝내 확보하지 못한 동안에만 유계 probe(16창당 1창)를
+            # 게이트 밖으로 흘린다. 문턱을 넓히거나 무조건 통과시키는 것이 아니다
+            # — 학습값을 신뢰할 수 없을 때 전면 차단으로 TBB 획득 경로가 죽는 것을
+            # 막는 최소 장치이며, 복호 부하는 1/16로 묶인다. 하향 보정으로 잡음
+            # 근거가 확보되면(`floor_trusted`) 즉시 꺼진다.
+            #
+            # 기준은 누적 `gated`가 아니라 **연속 차단** 수다(diag-20260914-113630):
+            # 누적 기준이면 무장 직후 15창까지 probe가 한 번도 오지 않는데, 창이
+            # frame당 1개뿐인 bootstrap에서 그 15창이 곧 36 s다. 실측 로그에 probe가
+            # 한 줄도 없던 이유가 그것이고(무장 후 창이 16개도 못 왔다), 그 사이
+            # publish deadline이 만료됐다. warm-up 분기와 같은 카운터를 공유해 구간
+            # 경계에서도 차단이 이어붙지 않게 한다. 통과 비율(1/16)은 그대로다.
+            state["blackout"] += 1
+            if not state["floor_trusted"] and state["blackout"] >= probe_windows:
+                state["blackout"] = 0
+                state["probes"] += 1
+                if state["probes"] <= 5 or state["probes"] % 50 == 1:
+                    print(
+                        f"[launcher] rx-gate probe lane={lane_index} "
+                        f"n={state['probes']} power={power:.3e} "
+                        f"thr={state['med'] * 8.0:.3e} (잡음 근거 미확보)",
+                        file=_sys.stderr, flush=True,
+                    )
+                return native_request
             zero_block = _dc.replace(
                 samples, data=b"\x00" * len(samples.data)
             )
@@ -265,6 +399,7 @@ class Stage7LaneRxDispatcher:
                     "이미 등록된 logical RX window key입니다",
                 )
             window = _LogicalWindow(key, command, canonical_allowed)
+            window.expected_lanes = set(self._support._endpoint._radio.rx_lanes_for(request.channel.name))
             self._windows[key] = window
         rx_window_key = (
             request.channel.name,
@@ -273,6 +408,8 @@ class Stage7LaneRxDispatcher:
             request.duration_nanoseconds,
         )
         for stack in self._stacks:
+            if stack.lane_index not in window.expected_lanes:
+                continue
             admitted = stack.bridge.admit_window(
                 request.channel, request.start_at, request.duration_nanoseconds,
                 canonical_allowed,
@@ -461,7 +598,7 @@ class Stage7LaneRxDispatcher:
                 window.first_sample_utc_ns[lane_index] = received_at_ns
             if error is not None:
                 window.errors[lane_index] = error
-            if len(window.terminal_lanes) == len(self._stacks):
+            if window.terminal_lanes == window.expected_lanes:
                 window.delivered = True
                 deliver = True
                 self._windows.pop(window.key, None)
@@ -480,7 +617,39 @@ class Stage7LaneRxDispatcher:
             self._support.finish_logical_window(window.command, window.key, error=representative)
             return
         merged = self._merge_results(window)
-        self._support.finish_logical_window(window.command, window.key, merged=merged)
+        gate = getattr(self._support, "collision_gate", None)
+        if gate is None or not gate.accepting:
+            self._support.finish_logical_window(window.command, window.key, merged=merged)
+            return
+        request = window.command.payload.request
+        rx_key = (request.channel.name, request.start_at.clock_id,
+                  request.start_at.total_nanoseconds(), request.duration_nanoseconds)
+        metadata, packets = {}, []
+        for lane, result in sorted(window.results.items()):
+            records = self._stacks[lane].facade.diagnostic_sink.recent_records_for_window(rx_key)
+            for packet in result.packets:
+                digest = hashlib.sha256(packet.packet).hexdigest()
+                matches = [r for r in records if r.packet_digest == digest and r.estimator_status == "RECOVERED"]
+                # Ambiguous/missing actual PHY time is not replaced by requested window time.
+                meta = None
+                if len(matches) == 1:
+                    record = matches[0]
+                    meta = {
+                        "physical_channel": request.channel.name, "link_id": record.link_id,
+                        "device_hw_timestamp_ns": record.rx_sample0_hardware_ns,
+                        "rx_utc_ns": self._support._endpoint._radio.bridge.hardware_ns_to_utc_label(record.rx_sample0_hardware_ns),
+                        "duration_ns": (8192 * 1_000_000_000 + 307199) // 307200,
+                        "host_mono_timestamp_ns": self._support._endpoint._time().now_monotonic().total_nanoseconds(),
+                        "lane": lane, "lane_generation": record.lane_generation,
+                        "stream_epoch_id": record.stream_epoch_id,
+                        "device_time_source": "PHY_RECOVERED_SAMPLE0_HARDWARE_NS",
+                        "physical_channel_source": "ACTUAL_RX_WINDOW",
+                    }
+                packets.append(packet)
+                metadata[packet.packet_id.value] = meta
+        # Keep independently decoded equal packets until AFTER overlap classification.
+        self._support.finish_logical_window(window.command, window.key,
+            merged=replace(merged, packets=tuple(packets)), metadata=metadata)
 
     def _merge_results(self, window) -> RecoveredPacketSet:
         winners = {}
@@ -544,22 +713,54 @@ class Stage7LaneRxDispatcher:
 class Stage7Stage5Support(Stage5Support):
     """frozen `Stage5Support`의 four-method RX override (§15)."""
 
-    __slots__ = ("_lane_dispatcher",)
+    __slots__ = ("_lane_dispatcher", "collision_gate", "_collision_pump_lock")
 
     def __init__(self, endpoint, mac, outbox, ingress, health, lock) -> None:
         super().__init__(endpoint, mac, outbox, ingress, health, lock)
         self._lane_dispatcher = None
+        self.collision_gate = None
+        self._collision_pump_lock = RLock()
+
+    def pump(self):
+        # The RF/decoder producer only enqueues. Deliver on the existing pump,
+        # never on the TEST socket thread, never under the RX dispatcher lock.
+        if self.collision_gate is None:
+            super().pump()
+            return
+        if self._collision_pump_lock.acquire(blocking=False):
+            try:
+                gate = self.collision_gate
+                if gate is not None:
+                    for item, packets, failure in gate.drain():
+                        command, key, merged, _, _ = item
+                        if failure:
+                            self._finish_collision_window(command, key, error=_private_error(
+                                Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID, failure).error)
+                        else:
+                            self._finish_collision_window(command, key,
+                                merged=replace(merged, packets=packets,
+                                    status=PhyRecoveryStatus.RECOVERED if packets else PhyRecoveryStatus.NO_BURST_DETECTED))
+            finally:
+                self._collision_pump_lock.release()
+        super().pump()
 
     def bind_lane_runtime(self, dispatcher: Stage7LaneRxDispatcher) -> None:
         """restart factory가 완전한 새 lane set을 한 번 atomic rebind한다."""
 
         self._lane_dispatcher = dispatcher
 
+    def note_application_delivery(self, packet_id):
+        gate = self.collision_gate
+        if gate is not None:
+            gate.application_delivered(packet_id.value)
+
     @property
     def lane_dispatcher(self):
         return self._lane_dispatcher
 
     def reset_for_restart(self) -> None:
+        if self.collision_gate is not None:
+            self.collision_gate.fail("ENDPOINT_RESTART")
         super().reset_for_restart()
         self._lane_dispatcher = None
 
@@ -672,11 +873,31 @@ class Stage7Stage5Support(Stage5Support):
 
     # --- merge terminal --------------------------------------------------------
 
-    def finish_logical_window(self, command, key, *, merged=None, error=None) -> None:
+    def finish_logical_window(self, command, key, *, merged=None, error=None, metadata=None) -> None:
+        gate = self.collision_gate
+        if (gate is not None and merged is not None and merged.packets
+                and command.payload.request.start_at.total_nanoseconds() >= gate.active_from_ns):
+            request = command.payload.request
+            start = request.start_at.total_nanoseconds()
+            item = (command, key, merged, start, start + request.duration_nanoseconds)
+            packets = tuple((p, (metadata or {}).get(p.packet_id.value))
+                            for p in merged.packets)
+            held = gate.hold(key, item, packets)
+            if held is None:
+                self._finish_collision_window(command, key, merged=merged)
+                return
+            if held:
+                return
+            error = _private_error(Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                                   "MODEL_COLLISION_RX_CAPACITY").error
+            merged = None
+        self._finish_collision_window(command, key, merged=merged, error=error)
+
+    def _finish_collision_window(self, command, key, *, merged=None, error=None):
         from ..common.events import InternalEventType
         from ..common.contracts.mac_execution import PhyRxWindowClosedEvent
 
-        if merged is not None:
+        if merged is not None and (merged.packets or self.collision_gate is None):
             self._endpoint._record(
                 InternalEventType.PACKETS_RECOVERED, Layer.PHY, payload=merged
             )

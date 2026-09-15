@@ -184,13 +184,32 @@ def compare_critical(reference: dict, *, installation: dict,
     `installation`은 현재 설치 재측정 record(또는 digest 부분집합). Git
     commit·branch·dirty·baseline Markdown SHA는 대조하지 않는다.
     불일치 항목을 전부 모아 돌려준다 — 하나라도 있으면 UNQUALIFIED."""
-    critical = reference.get("standalone_critical") or {}
     mismatches = []
     if reference.get("schema_version") != 2:
         mismatches.append("active reference is schema v%s (legacy git-bound "
                           "binding); a v2 installation-bound reference is "
                           "required — run `vdeter qualify`"
                           % reference.get("schema_version"))
+    mismatches.extend(critical_block_mismatches(
+        reference.get("standalone_critical") or {},
+        installation=installation, hardware=hardware, preflight=preflight,
+        identity_fingerprint=identity_fingerprint,
+        environment_manifest=environment_manifest))
+    return {"pass": not mismatches, "mismatches": mismatches}
+
+
+def critical_block_mismatches(critical: dict, *, installation: dict,
+                              hardware: dict, preflight: dict,
+                              identity_fingerprint: str,
+                              environment_manifest: dict) -> list:
+    """`standalone_critical` 블록 하나를 현재 설치·장비·identity·환경과 대조한다.
+
+    `compare_critical`(정상 reference)과 개발용 진단 authorization(`diag_cmd`)이
+    **같은 검사**를 공유한다. 진단은 자격 상태(active 포인터·schema v2 reference)
+    만 분리하고, installation/rf/operation/tooling digest·배선 승인·platform/host
+    profile·hub topology·serial/속도 등급·identity·라이브러리 4종·gain artifact
+    결속 검사는 그대로 받는다. 반환은 불일치 문자열 목록(비면 통과)."""
+    mismatches = []
     current_digests = installation_manifest.digests_of(installation) \
         if installation.get("domains") else {}
     if critical.get("installation_sha256") != current_digests.get(
@@ -270,7 +289,7 @@ def compare_critical(reference: dict, *, installation: dict,
     if not gain.get("endpoint_common_rx_gain_db") or not gain.get(
             "artifact_sha256"):
         mismatches.append("reference carries no gain artifact")
-    return {"pass": not mismatches, "mismatches": mismatches}
+    return mismatches
 
 
 def gain_input_from_reference(reference: dict) -> dict:
@@ -280,6 +299,32 @@ def gain_input_from_reference(reference: dict) -> dict:
         "endpoint_common_rx_gain_db": gain["endpoint_common_rx_gain_db"],
         "source_gain_artifact_sha256": gain["artifact_sha256"],
     }
+
+
+def is_diagnostic_authority(reference: dict) -> bool:
+    """개발용 진단 authorization인가 (`diag_cmd`, `not_a_qualification`)."""
+    return bool(reference.get("not_a_qualification"))
+
+
+def authority_fields(reference: dict) -> dict:
+    """run.json/summary.json의 권한 표기.
+
+    정상 run은 종전과 같이 `reference_sha256`만 기록한다. 진단 authorization은
+    qualification reference로 기록하지 않는다 — `reference_sha256`은 null이고,
+    `diagnostic_authorization_sha256`과 `qualification_status: NOT_QUALIFIED`를
+    별도 필드로 남긴다(재결속 위장 금지)."""
+    if is_diagnostic_authority(reference):
+        return {"reference_sha256": None,
+                "diagnostic_authorization_sha256":
+                    reference.get("_reference_sha256"),
+                "qualification_status": "NOT_QUALIFIED"}
+    return {"reference_sha256": reference.get("_reference_sha256")}
+
+
+def result_suffix(reference: dict) -> str:
+    """비대화형 `RESULT` 줄 접미 — 진단이면 자격 상태를 명시한다."""
+    return (" qualification=NOT_QUALIFIED"
+            if is_diagnostic_authority(reference) else "")
 
 
 #: bring-up 실패 중 재시도를 **금지**하는 신호 (설정·장비·키·결속 오류).
@@ -322,12 +367,17 @@ def classify_bringup_failure(console_text: str, finalize_summary: dict,
 
 def prepare(paths: StatePaths, *, repo_root=None,
             hardware_path=None, preflight_fn=None, reference_loader=None,
-            environment_manifest=None, progress=None) -> dict:
+            environment_manifest=None, progress=None,
+            critical_check=None) -> dict:
     """RF 접근 전 게이트 전부. 실패는 RunRefusal(code, message).
 
     Git·baseline Markdown·standalone-binding은 읽지 않는다. 결속은
     var/installation manifest(적재 + 현재 파일 재측정)와 active reference
-    v2의 digest 대조로만 성립한다."""
+    v2의 digest 대조로만 성립한다.
+
+    `reference_loader`/`critical_check`는 주입 seam이다 — 기본값(active
+    reference + `compare_critical`)이 정상 `vdeter run`이고, `diag_cmd`는
+    같은 게이트 순서를 유지한 채 권한 원천만 진단 authorization으로 바꾼다."""
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     paths.ensure_var()
 
@@ -400,12 +450,20 @@ def prepare(paths: StatePaths, *, repo_root=None,
     stage("critical comparison")
     environment_manifest = (environment_manifest
                             or local_config.build_environment_manifest())
-    comparison = compare_critical(
+    comparison = (critical_check or compare_critical)(
         reference, installation=current_installation, hardware=hardware,
         preflight=preflight,
         identity_fingerprint=identity_check["fingerprint"],
         environment_manifest=environment_manifest)
     if not comparison["pass"]:
+        if is_diagnostic_authority(reference):
+            raise RunRefusal(
+                EXIT_UNQUALIFIED,
+                "DIAGNOSTIC AUTHORIZATION STALE: current values differ from "
+                "the diagnostic authorization:\n  - "
+                + "\n  - ".join(comparison["mismatches"])
+                + "\nImpact: RF execution is refused. Action: re-issue with "
+                "`vdeter diag authorize` after verifying the candidate.")
         raise RunRefusal(
             EXIT_UNQUALIFIED,
             "UNQUALIFIED: current qualification-critical values differ from "
@@ -516,7 +574,8 @@ def _close_with_interrupt_guard(session, out) -> dict:
 
 
 def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
-              diagnostics, out, clock, reporter=None, mirror=None) -> tuple:
+              diagnostics, out, clock, reporter=None, mirror=None,
+              rf_off_software: bool = False) -> tuple:
     """run 디렉터리 할당 → config 생성 → 세션 spawn → READY 대기.
 
     실패는 BringupFailed(summary) — summary는 finalize 결과(정직).
@@ -551,7 +610,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     write_json_atomic(run_root / "run.json", {
         "artifact_type": "STAGE7_STANDALONE_RUN_V1",
         "run_id": run_id,
-        "reference_sha256": reference.get("_reference_sha256"),
+        **authority_fields(reference),
         "installation_sha256": digests["installation_sha256"],
         "rf_manifest_sha256": digests["rf_manifest_sha256"],
         "operation_manifest_sha256": digests["operation_manifest_sha256"],
@@ -566,7 +625,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         configs_dir=generated["configs_dir"], gain_artifact_path=gain_path,
         baseline_sha256=provenance_module.STAGE7_BASELINE_PIN["sha256"],
         phase="mass-roc-session", diagnostics=diagnostics,
-        identity_root=paths.identity_dir)
+        identity_root=paths.identity_dir, rf_off_software=rf_off_software)
     out(f"[config]    {run_id} generated and validated")
     out("Bringing up hardware session (~20-23 min, once per run)")
     started = clock()
@@ -624,8 +683,96 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     return session, run_id, run_root, ready
 
 
+def _prepare_poc(poc_ctx, session, *, scenario_id, poc_id, out) -> dict:
+    """R1: scenario submit **전에** PoC를 선택·immutable snapshot·child spawn·on_start·ARMED한다.
+
+    반환 dict: ``{"kind": "baseline"|"armed"|"failed", "workload": PocWorkload|None,
+    "evidence": dict|None}``. 준비/ARMED 실패(kind=failed)면 caller가 scenario를 제출하지 않는다.
+    baseline(none)은 자원 0(kind=baseline).
+    """
+    mod = poc_ctx["module"]
+    counter = poc_ctx.get("_counter", 0) + 1
+    poc_ctx["_counter"] = counter
+    poc_wid = "%s-poc-%s-%03d" % (poc_ctx["run_id"], scenario_id.lower(), counter)
+    dest = Path(poc_ctx["run_root"]) / "workloads" / poc_wid / "poc-snapshot"
+    try:
+        snapshot = mod.select_snapshot(
+            poc_ctx["option"], scenario_id=scenario_id, dest_dir=str(dest),
+            poc_id=poc_id, interactive=poc_ctx.get("interactive", True))
+    except mod.PocRunError as exc:
+        out("  poc refused: %s (scenario not submitted)" % exc)
+        return {"kind": "failed", "workload": None,
+                "evidence": {"status": "REFUSED", "error": str(exc),
+                             "poc_infrastructure": "ERROR"}}
+    if snapshot is None:
+        return {"kind": "baseline", "workload": None, "evidence": None}
+    # socket root는 명세 §4.2(`$XDG_RUNTIME_DIR/vdeter-poc` 또는 `/tmp/vdeter-poc-<uid>`, workload마다
+    # nonce dir)를 쓴다(None → supervisor 선택). run root(`var/runs/<run-id>/…`) 아래에 두면 sun_path
+    # 상한을 넘어 실 child spawn이 실패한다(execute() 종단시험에서 확인). socket nonce digest는 evidence에 남는다.
+    try:
+        workload = mod.prepare_workload(
+            session, snapshot, scenario_id=scenario_id, run_id=poc_ctx["run_id"],
+            workload_id=poc_wid, socket_root=None, src_path=poc_ctx.get("src_path"))
+    except mod.PocRunError as exc:
+        out("  poc prep/arm failed: %s (scenario not submitted)" % exc)
+        evidence = getattr(exc, "evidence", None) or {"status": "ERROR", "error": str(exc),
+                                                      "poc_infrastructure": "ERROR"}
+        return {"kind": "failed", "workload": None, "evidence": evidence}
+    return {"kind": "armed", "workload": workload, "evidence": None}
+
+
+def _finish_poc(poc_ctx, prep, *, scenario_verdict, out) -> dict:
+    """R1: ARMED된 PoC를 실 scenario 실행 뒤 종료·evidence 수집(§5.1). 반환 evidence dict."""
+    mod = poc_ctx["module"]
+    evidence = mod.finish_workload(prep["workload"], scenario_verdict=scenario_verdict)
+    out("  poc infrastructure=%s attacks=%s radiated_children=%s severity=%s"
+        % (evidence.get("poc_infrastructure"), len(evidence.get("attacks") or []),
+           (evidence.get("radiation") or {}).get("radiated_children"),
+           mod.poc_severity(evidence)))
+    return evidence
+
+
+def _run_workload_rf_off_poc(session, scenario_id, certificate_case, *, out, clock,
+                             index=None, total=None, poc_ctx, poc_id=None):
+    """RF-off software 모드의 workload 하나 — PoC를 **실 coordinator 프로세스**에 위임한다.
+
+    CLI는 PoC source·scenario를 request에 실어 `submit_workload(poc=...)`로 발행하고, coordinator가
+    workload-local PoC(실 child·socket·SDK·provider)를 실행 중 scenario event와 함께 처리한 결과를
+    file IPC로 회신한다. CLI는 그 결과의 poc evidence·severity를 그대로 반영한다(in-process 실행 0).
+    """
+    option = poc_ctx["option"]
+    poc_req = {"poc": option.poc, "poc_dir": option.poc_dir,
+               "poc_id": poc_id, "src_path": poc_ctx.get("src_path")}
+    label = scenario_id + (" (%s)" % certificate_case if scenario_id == "SC-VDE-001" else "")
+    out("  running " + label + " (poc via coordinator)")
+    workload_id = session.submit_workload(
+        scenario_id, certificate_case, poc=poc_req,
+        on_settle=lambda remaining, prev: out(
+            "  settling %.0f s (RX pipeline drain after %s)" % (remaining, prev)))
+    started = clock()
+    trace_rows = []
+    result = session.wait_result(workload_id, on_trace=trace_rows.append)
+    result.setdefault("wall_clock_s", round(clock() - started, 1))
+    result.setdefault("workload_id", workload_id)
+    result.setdefault("scenario_id", scenario_id)
+    result.setdefault("certificate_case", certificate_case)
+    try:
+        for line in scenario_report.workload_report_lines(
+                trace_rows, result, run_root=getattr(session, "run_root", None),
+                index=index, total=total):
+            out(line)
+    except Exception:  # noqa: BLE001 - 상세 렌더링 실패가 판정·evidence를 바꾸지 않는다
+        pass
+    out(result_line(result))
+    # coordinator가 result["poc"]에 evidence를 실어 준다(§11.1 독립 판정). severity로 다음 workload 허용 판정.
+    poc_evidence = result.get("poc")
+    if poc_evidence is not None:
+        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
+    return result
+
+
 def _run_workload(session, scenario_id, certificate_case, *, out, clock,
-                  index=None, total=None):
+                  index=None, total=None, poc_ctx=None, poc_id=None):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
 
     RF 활성 구간(submit→result)에는 `running …`과 settle 안내만 표시하고
@@ -637,27 +784,69 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     실행 경로에 없다(R1 선택 롤백). 상세 블록 렌더링 실패는 판정·close·
     evidence에 영향을 주지 않는다(경고 한 줄). 판정·timeout·evidence 계약은
     세션 객체가 그대로 소유한다."""
+    # RF-off software 모드: PoC를 CLI에서 in-process 실행하지 않고 실 coordinator 프로세스에 workload
+    # 요청으로 위임한다(실 coordinator↔PoC 연결). 결과 JSON의 poc evidence를 그대로 쓴다.
+    if poc_ctx is not None and (poc_ctx.get("rf_off_software")
+            or getattr(session, "poc_workloads_in_coordinator", False) is True):
+        return _run_workload_rf_off_poc(
+            session, scenario_id, certificate_case, out=out, clock=clock,
+            index=index, total=total, poc_ctx=poc_ctx, poc_id=poc_id)
+    # R1: PoC를 scenario submit **전에** 선택·snapshot·arm한다. 준비/ARMED 실패면 scenario 제출 0.
+    prep = None
+    if poc_ctx is not None:
+        prep = _prepare_poc(poc_ctx, session, scenario_id=scenario_id, poc_id=poc_id, out=out)
+        if prep["kind"] == "failed":
+            return {
+                "status": "NOT_RUN", "scenario_id": scenario_id,
+                "certificate_case": certificate_case,
+                "quiescence": {"pass": True}, "poc": prep["evidence"],
+                "poc_severity": poc_ctx["module"].poc_severity(prep["evidence"]),
+                "poc_prep_failed": True,
+            }
     label = scenario_id + (" (%s)" % certificate_case
                            if scenario_id == "SC-VDE-001" else "")
     out("  running " + label)
-    workload_id = session.submit_workload(
-        scenario_id, certificate_case,
-        on_settle=lambda remaining, prev: out(
-            "  settling %.0f s (RX pipeline drain after %s)"
-            % (remaining, prev)))
-    started = clock()
-    trace_rows = []
-    result = session.wait_result(workload_id, on_trace=trace_rows.append)
-    result.setdefault("wall_clock_s", round(clock() - started, 1))
-    result.setdefault("workload_id", workload_id)
-    result.setdefault("scenario_id", scenario_id)
-    result.setdefault("certificate_case", certificate_case)
-    # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
-    for line in scenario_report.workload_report_lines(
-            trace_rows, result, run_root=getattr(session, "run_root", None),
-            index=index, total=total):
-        out(line)
-    out(result_line(result))
+    # N1: PoC를 arm한 뒤 scenario submit·wait·render·finish 중 어디서 예외·인터럽트가 나도 armed PoC를
+    # cleanup-only로 정리한다(신규 action 없음). 원래 예외/인터럽트를 cleanup 오류로 덮지 않고 재전달하며,
+    # coordinator session.close만으로 PoC가 정리됐다고 추정하지 않는다.
+    _poc_armed = prep is not None and prep["kind"] == "armed"
+    try:
+        workload_id = session.submit_workload(
+            scenario_id, certificate_case,
+            on_settle=lambda remaining, prev: out(
+                "  settling %.0f s (RX pipeline drain after %s)"
+                % (remaining, prev)))
+        started = clock()
+        trace_rows = []
+        result = session.wait_result(workload_id, on_trace=trace_rows.append)
+        result.setdefault("wall_clock_s", round(clock() - started, 1))
+        result.setdefault("workload_id", workload_id)
+        result.setdefault("scenario_id", scenario_id)
+        result.setdefault("certificate_case", certificate_case)
+        # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
+        for line in scenario_report.workload_report_lines(
+                trace_rows, result, run_root=getattr(session, "run_root", None),
+                index=index, total=total):
+            out(line)
+        out(result_line(result))
+    except BaseException as exc:  # noqa: BLE001 - scenario 경로 실패: armed PoC 정리 후 원형 재전달
+        if _poc_armed:
+            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
+        raise
+    # R1/R4: 실 scenario 실행 뒤 PoC를 종료하고, 실제 scenario verdict(§11.1)를 명시 전달한다.
+    # scenario 판정과 PoC 판정은 독립이며 서로 재계산하지 않는다. finish 중 실패도 cleanup으로 정리한다.
+    if _poc_armed:
+        try:
+            # stage8 직접 import 금지(import 경계): 권위 verdict 매핑은 poc_run adapter가 담당한다.
+            scenario_verdict = poc_ctx["module"].scenario_verdict_from_status(result.get("status"))
+            poc_evidence = _finish_poc(poc_ctx, prep, scenario_verdict=scenario_verdict, out=out)
+        except BaseException as exc:  # noqa: BLE001 - finish 중 예외·인터럽트도 cleanup-only 정리
+            poc_ctx["module"].abort_prepared(prep, cause=exc, out=out)
+            result["poc"] = prep.get("evidence")
+            result["poc_severity"] = poc_ctx["module"].poc_severity(prep.get("evidence"))
+            raise
+        result["poc"] = poc_evidence
+        result["poc_severity"] = poc_ctx["module"].poc_severity(poc_evidence)
     return result
 
 
@@ -670,7 +859,43 @@ def _clean_choice(raw: str) -> str:
     return _ESCAPE_SEQ_RE.sub("", str(raw)).strip()
 
 
-def _menu(session, *, out, input_fn, clock) -> list:
+def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
+    """catalog(`--poc-dir`) mode에서 scenario-호환 PoC를 대화형 선택한다(§6.1, R7). 반환 (kind, poc_id).
+
+    kind ∈ {"poc","baseline","rescan","quit","invalid"}. direct(`--poc`)면 ("poc", None): 고정 package.
+    표시한 제어(q/r/none/숫자)를 그대로 poc_id로 넘기지 않고 menu.resolve로 해석한다.
+    """
+    if poc_ctx is None or not poc_ctx["option"].poc_dir:
+        return ("poc", None)
+    selection_kwargs = ({"server_config": poc_ctx["selection_config"]}
+                        if poc_ctx.get("selection_config") is not None else {})
+    for line in poc_ctx["module"].catalog_menu_lines(poc_ctx["option"], scenario_id, **selection_kwargs):
+        out("  " + line)
+    try:
+        choice = _clean_choice(
+            input_fn("  select poc [number / id / none / r=rescan / q=quit] > "))
+    except EOFError:
+        return ("baseline", None)
+    return poc_ctx["module"].resolve_catalog_selection(
+        poc_ctx["option"], scenario_id, choice, **selection_kwargs)
+
+
+def _stop_after_workload(result, out) -> bool:
+    """workload 뒤 다음 workload 제출을 멈춰야 하는지(§14.1, R2).
+
+    quiescence 실패 또는 PoC SESSION_INHIBIT(TX 결과·소유권 불확실)면 멈추고 session을 닫는다.
+    """
+    if not (result.get("quiescence") or {}).get("pass"):
+        out("  session can no longer accept workloads (quiescence failed) — closing")
+        return True
+    if result.get("poc_severity") == "SESSION_INHIBIT":
+        out("  PoC session inhibit (TX outcome/ownership uncertain) — no further "
+            "workloads, closing session")
+        return True
+    return False
+
+
+def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
     ordered = sorted(SCENARIOS)
     results = []
     while True:
@@ -690,14 +915,21 @@ def _menu(session, *, out, input_fn, clock) -> list:
             break
         if lowered in ("a", "all"):
             for number, (scenario_id, case) in enumerate(DEFAULT_BATCH_PLAN, 1):
+                kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out,
+                                            input_fn=input_fn)
+                if kind == "quit":
+                    return results
+                if kind in ("rescan", "invalid"):
+                    out("  poc %s — no RF action for this scenario" % kind)
+                    continue
                 result = _run_workload(session, scenario_id, case,
                                        out=out, clock=clock, index=number,
-                                       total=len(DEFAULT_BATCH_PLAN))
+                                       total=len(DEFAULT_BATCH_PLAN),
+                                       poc_ctx=poc_ctx,
+                                       poc_id=None if kind == "baseline" else poc_id)
                 results.append(result)
-                if result.get("status") != "PASS" or not (
-                        result.get("quiescence") or {}).get("pass"):
-                    out("  stopping batch — session can no longer accept "
-                        "workloads")
+                if result.get("status") != "PASS" or _stop_after_workload(result, out):
+                    out("  stopping batch")
                     return results
             continue
         if choice.isdigit() and 1 <= int(choice) <= len(ordered):
@@ -720,12 +952,21 @@ def _menu(session, *, out, input_fn, clock) -> list:
                     % answer)
                 continue
             case = answer
+        # R7: PoC 선택. q=session 종료, r=rescan(READY 유지), 무효=거부 — 모두 scenario submit 0.
+        kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out, input_fn=input_fn)
+        if kind == "quit":
+            break
+        if kind == "rescan":
+            out("  rescan — returning to menu (no RF action, READY preserved)")
+            continue
+        if kind == "invalid":
+            out("  invalid poc selection (no RF action taken)")
+            continue
         result = _run_workload(session, scenario_id, case, out=out,
-                               clock=clock)
+                               clock=clock, poc_ctx=poc_ctx,
+                               poc_id=None if kind == "baseline" else poc_id)
         results.append(result)
-        if not (result.get("quiescence") or {}).get("pass"):
-            out("  session can no longer accept workloads (quiescence "
-                "failed) — closing")
+        if _stop_after_workload(result, out):
             break
     return results
 
@@ -753,20 +994,64 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             session_factory=LocalCoordinatorSession,
             preflight_fn=None, reference_loader=None, usb_probe=None,
             environment_manifest=None, repo_root=None,
-            hardware_path=None, out=print, input_fn=input,
+            hardware_path=None, poc=None, poc_dir=None, out=print, input_fn=input,
             clock=time.monotonic, progress: bool = True,
             progress_stream=None, progress_ticker: bool = True,
-            topology_probe=None) -> int:
+            topology_probe=None, rf_off_software: bool = False,
+            critical_check=None, workload_plan=None,
+            hold_after_ready_s: float = 0.0) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
-    표시 계층은 판정·evidence 결과에 영향을 주지 않는다."""
+    표시 계층은 판정·evidence 결과에 영향을 주지 않는다.
+
+    `poc`/`poc_dir`(Stage 8 opt-in)가 주어지면 workload마다 scenario-호환 PoC를 선택·snapshot해
+    실제 child·socket·provider로 실행한다. 둘 다 없으면 `poc_run`(stage8) module을 로드하지 않는다
+    (기능 OFF 구조적 0). device 경계는 session이 제공한다(`poc_device_seams`).
+
+    `workload_plan`(개발용 진단 전용, `diag_cmd`)은 `(scenario_id, case)` 목록으로 비대화형
+    계획을 직접 준다 — 빈 목록이면 bring-up→(선택적 `hold_after_ready_s` 동안 READY 유지)→
+    close만 수행하는 RX-only 세션이다. 정상 `vdeter run`은 이 인자를 쓰지 않는다."""
     try:
-        plan = plan_for(scenario, certificate_case)
+        if workload_plan is not None:
+            # 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`. poc_id는 catalog
+            # 선택을 비대화형으로 고정하기 위한 값이며 None이면 종전과 같다.
+            plan = []
+            for item in workload_plan:
+                sid, case = item[0], item[1]
+                poc_id_of = item[2] if len(item) > 2 else None
+                plan.append((str(sid), str(case),
+                             None if poc_id_of is None else str(poc_id_of)))
+            for scenario_id, case, _poc_id in plan:
+                if scenario_id not in SCENARIOS or case not in ("normal", "forged"):
+                    raise RunRefusal(EXIT_CONFIG,
+                                     "Unknown workload %r/%r in plan" % (scenario_id, case))
+        else:
+            plan = plan_for(scenario, certificate_case)
     except RunRefusal as exc:
         out("Refused: " + str(exc))
         return exc.code
-    interactive = scenario is None
+    interactive = scenario is None and workload_plan is None
+    rx_only = workload_plan is not None and not plan
+    rx_only_ok = rx_only  # READY 유지 중 coordinator가 죽으면 False
+
+    # Stage 8 opt-in: --poc/--poc-dir가 있을 때만 sanctioned adapter를 lazy import한다.
+    poc_option = None
+    poc_run = None
+    if poc is not None or poc_dir is not None:
+        from apps.standalone import poc_run as poc_run
+        # 계획이 workload마다 poc_id를 확정해 두었으면 menu를 띄우지 않는다. 그 경우에만
+        # 비대화형 catalog가 허용된다(§6.1의 "prompt 금지" 취지는 그대로 — prompt를 열지
+        # 않는 경로다). 계획에 id가 하나도 없으면 종전대로 비대화형 catalog는 거부된다.
+        preselected = bool(workload_plan) and any(
+            len(item) > 2 and item[2] is not None for item in workload_plan)
+        try:
+            poc_option = poc_run.resolve_option(poc=poc, poc_dir=poc_dir,
+                                                interactive=interactive,
+                                                preselected=preselected)
+        except poc_run.PocRunError as exc:
+            out("Refused: " + str(exc))
+            return EXIT_CONFIG
 
     lock = SingleInstanceLock(paths.lock_path)
     try:
@@ -790,16 +1075,24 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 paths, repo_root=repo_root,
                 hardware_path=hardware_path, preflight_fn=preflight_fn,
                 reference_loader=reference_loader,
-                environment_manifest=environment_manifest, progress=gates)
+                environment_manifest=environment_manifest, progress=gates,
+                critical_check=critical_check)
         except RunRefusal as exc:
             reporter.finish("FAILED")
             out("Refused (exit %d): %s" % (exc.code, exc))
             return exc.code
         gates.done()
         reference = context["reference"]
-        out("VDETER standalone — QUALIFIED (reference %s, issued %s)"
-            % ((reference.get("_reference_sha256") or "")[:12],
-               reference.get("issued_utc", "?")))
+        if is_diagnostic_authority(reference):
+            # 개발용 진단 — QUALIFIED/RESEARCH_READY로 표시하지 않는다.
+            out("VDETER standalone — DIAGNOSTIC, NOT_QUALIFIED (authorization "
+                "%s, issued %s; not a qualification, no reference is issued)"
+                % ((reference.get("_reference_sha256") or "")[:12],
+                   reference.get("issued_utc", "?")))
+        else:
+            out("VDETER standalone — QUALIFIED (reference %s, issued %s)"
+                % ((reference.get("_reference_sha256") or "")[:12],
+                   reference.get("issued_utc", "?")))
         observed = context["preflight"]["checks"]["b210"]["observed_by_role"]
         out("[preflight] devices 3/3 (%s)" % " · ".join(
             "%s %s %s" % (role, info["serial"],
@@ -839,7 +1132,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 session, active_run_id, run_root, _ready = _bring_up(
                     context, paths, run_id=run_id if attempt == 1 else None,
                     session_factory=session_factory, diagnostics=diagnostics,
-                    out=out, clock=clock, reporter=reporter, mirror=mirror)
+                    out=out, clock=clock, reporter=reporter, mirror=mirror,
+                    rf_off_software=rf_off_software)
                 attempts.append({"attempt": attempt, "run_id": active_run_id,
                                  "bringup": "READY"})
                 break
@@ -868,7 +1162,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     "scenarios_planned": len(plan),
                     "workloads": [], "close": summary,
                     "attempts": attempts,
-                    "reference_sha256": reference.get("_reference_sha256"),
+                    **authority_fields(reference),
                     "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                   time.gmtime()),
                 })
@@ -876,8 +1170,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     % (stopped.run_root, stopped.run_id))
                 if not interactive:
                     out("RESULT overall=FAIL scenarios=0/%d run-id=%s "
-                        "evidence=%s (interrupted during bring-up)"
-                        % (len(plan), stopped.run_id, stopped.run_root))
+                        "evidence=%s (interrupted during bring-up)%s"
+                        % (len(plan), stopped.run_id, stopped.run_root,
+                           result_suffix(reference)))
                 return EXIT_INTERRUPTED
             except BringupFailed as failed:
                 console_text = ""
@@ -933,18 +1228,59 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         # workload trace·result·evidence 생성은 세션/coordinator 계약 그대로다.
         mirror.set_path(None)
         out = terminal_out
+        poc_ctx = None
+        if poc_option is not None and poc_option.active:
+            poc_ctx = {
+                "module": poc_run, "option": poc_option, "run_root": run_root,
+                "run_id": active_run_id, "interactive": interactive,
+                "input_fn": input_fn,
+                "src_path": str(Path(context["repo_root"]) / "VDETER" / "src"),
+                # RF-off software 모드: PoC를 CLI 프로세스에서 in-process 실행하지 않고 실
+                # coordinator 프로세스에 workload 요청으로 위임한다(실 coordinator↔PoC 연결).
+                "rf_off_software": rf_off_software,
+                # Catalogue availability only. The owning launcher validates
+                # actual tuning/windows BEFORE runtime WELCOME advertises dual.
+                "selection_config": poc_run.ServerCapabilityConfig(
+                    wsm_g1_production_installed=(
+                        getattr(session, "poc_workloads_in_coordinator", False) is True)),
+            }
+            out("[poc]       Stage 8 PoC opt-in active (%s%s)"
+                % ("catalog" if poc_option.poc_dir else "direct",
+                   ", rf-off-software" if rf_off_software else ""))
         try:
             if interactive:
                 results = _menu(session, out=out, input_fn=input_fn,
-                                clock=clock)
+                                clock=clock, poc_ctx=poc_ctx)
+            elif rx_only:
+                # 개발용 진단 RX-only: workload 제출 0. READY를 유계 시간 동안 유지한 뒤
+                # 기존 close 경로로 닫는다(Ctrl+C는 아래 인터럽트 처리와 동일).
+                hold = max(0.0, float(hold_after_ready_s or 0.0))
+                out("  RX-only session — no workload will be submitted; holding "
+                    "READY for %.0f s then closing" % hold)
+                held = clock()
+                while clock() - held < hold:
+                    time.sleep(min(1.0, hold - (clock() - held)))
+                    if session.coordinator_exited():
+                        out("  coordinator exited during RX-only hold")
+                        exit_code = EXIT_FAIL
+                        rx_only_ok = False
+                        break
             else:
-                for number, (scenario_id, case) in enumerate(plan, 1):
+                for number, entry in enumerate(plan, 1):
+                    # 계획 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`다.
+                    # 세 번째 값은 catalog(`--poc-dir`)에서 **prompt 없이** 고를 PoC id이며,
+                    # None/"none"이면 그 workload는 baseline(PoC 자원 0)이다. 선택 계약은
+                    # 대화형과 같은 `select_and_snapshot`을 그대로 쓴다(별도 선택기 없음).
+                    scenario_id, case = entry[0], entry[1]
+                    planned_poc_id = entry[2] if len(entry) > 2 else None
                     result = _run_workload(session, scenario_id, case,
                                            out=out, clock=clock,
-                                           index=number, total=len(plan))
+                                           index=number, total=len(plan),
+                                           poc_ctx=poc_ctx,
+                                           poc_id=planned_poc_id)
                     results.append(result)
-                    if result.get("status") != "PASS" or not (
-                            result.get("quiescence") or {}).get("pass"):
+                    # R2: scenario 실패·quiescence 실패·PoC SESSION_INHIBIT면 다음 workload 제출 0.
+                    if result.get("status") != "PASS" or _stop_after_workload(result, out):
                         break
         except KeyboardInterrupt:
             interrupted = True
@@ -979,9 +1315,30 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 overall = ("PASS" if summary["pass"] and passed == len(results)
                            else "FAIL")
             else:
-                overall = ("PASS" if summary["pass"] and results
+                # RX-only(진단, workload 0)는 bring-up·READY 유지·close·cleanup PASS만으로
+                # PASS다. 정상 run은 workload_plan을 쓰지 않으므로 종전 판정식 그대로다.
+                overall = ("PASS" if summary["pass"] and (results or rx_only_ok)
                            and passed == len(plan) else "FAIL")
             if topology_after is not None and not topology_after["pass"]:
+                overall = "FAIL"
+            # R2: PoC experiment 인프라 실패(ABORTED/ERROR)를 최종 판정·exit에 정직하게 반영한다
+            # (scenario verdict는 보존하되 experiment 실패를 숨기지 않는다). REQUEST_REJECTED 단일
+            # action 거부는 poc_infrastructure=COMPLETED이므로 여기 걸리지 않는다.
+            def _poc_infra_ok(result):
+                poc = result.get("poc") or {}
+                infra = poc.get("poc_infrastructure")
+                if infra in (None, "COMPLETED"):
+                    return True
+                # baseline(none) workload는 PoC를 **쓰지 않기로 한** 것이지 인프라 실패가 아니다.
+                # 실물 controller와 RF-off 세션 모두 {"status": "BASELINE",
+                # "poc_infrastructure": "NOT_RUN"} 짝으로만 NOT_RUN을 낸다. 이전에는 이 값이
+                # 인프라 실패로 집계돼 **scenario가 전부 PASS인 run이 FAIL**로 떨어졌다(동일
+                # 세션 baseline↔PoC 전환을 처음 태우면서 드러난 거짓 FAIL). NOT_RUN을 통째로
+                # 허용하지 않고 BASELINE 상태와 짝일 때만 허용한다 — ABORTED/ERROR는 그대로 FAIL.
+                return infra == "NOT_RUN" and poc.get("status") == "BASELINE"
+
+            poc_infra_ok = all(_poc_infra_ok(r) for r in results)
+            if not poc_infra_ok:
                 overall = "FAIL"
             if overall != "PASS":
                 exit_code = exit_code or EXIT_FAIL
@@ -996,7 +1353,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 "workloads": results, "close": summary,
                 "usb_topology_after_close": topology_after,
                 "attempts": attempts,
-                "reference_sha256": reference.get("_reference_sha256"),
+                **authority_fields(reference),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                               time.gmtime()),
             }
@@ -1004,8 +1361,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             out("Evidence: %s   (summary: vdeter results %s)"
                 % (run_root, active_run_id))
             if not interactive:
-                out("RESULT overall=%s scenarios=%d/%d run-id=%s evidence=%s"
-                    % (overall, passed, len(plan), active_run_id, run_root))
+                out("RESULT overall=%s scenarios=%d/%d run-id=%s evidence=%s%s"
+                    % (overall, passed, len(plan), active_run_id, run_root,
+                       result_suffix(reference)))
             if json_summary:
                 out(json.dumps(run_summary, ensure_ascii=True, indent=1,
                                default=str))

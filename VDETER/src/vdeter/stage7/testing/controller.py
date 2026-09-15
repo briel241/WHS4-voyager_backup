@@ -14,6 +14,10 @@ from ..canonical_json import encode_canonical_json
 from ..ipc import TEST_PROTOCOL, body_sha256_of
 
 
+class PocDeviceCallError(RuntimeError):
+    """launcher PoC device op이 거부·실패했다. 성공으로 위장하지 않는다."""
+
+
 class Stage7ScenarioController:
     """§16.2 test command 발행자. transport는 주입형이다.
 
@@ -194,6 +198,65 @@ class Stage7ScenarioController:
         )
         return self._channels[endpoint_id].request(message)
 
+    # --- §16.2 PoC device 경계 (Stage 8 supervisor → launcher 소유 radio) ---------
+
+    def poc_command(self, endpoint_id: str, command_name: str, body: dict) -> dict:
+        """PoC device op 하나를 보내고 응답을 그대로 돌려준다.
+
+        판정하지 않는다 — 호출자가 `status`/`call_outcome`/`reason`을 보고 결정한다. 거부를
+        성공으로 바꾸거나 결과를 합성하지 않는다(장치 경계의 사실만 전달).
+        """
+
+        message = self._command(endpoint_id, command_name, dict(body))
+        response = self._channels[endpoint_id].request(message)
+        payload = response.get("body") or {}
+        if (command_name == "poc_collision" and body.get("mode") == "POLL"
+                and response.get("status") == "COMPLETED" and payload.get("call_outcome") == "OK"):
+            return response  # periodic metadata exchange: bounded aggregate evidence, not per-poll logging
+        entry = {
+            "endpoint_id": endpoint_id,
+            "command": command_name,
+            "status": response.get("status"),
+            "call_outcome": payload.get("call_outcome"),
+            "reason": payload.get("reason"),
+        }
+        # 장치가 스스로 "거부했다"고 회신한 사실은 봉투에 나타나지 않는다: op이 정상 반환하면
+        # call_outcome은 OK이고 reason은 None이며, 거부 판정은 result 안에만 있다. 그 판정만
+        # 유계로 남긴다(result 전체를 복사하지 않는다) — 사유 없는 거부 기록을 만들지 않기 위해서다.
+        result = payload.get("result")
+        if isinstance(result, dict) and isinstance(result.get("accepted"), bool):
+            entry["device_accepted"] = result["accepted"]
+            if not result["accepted"]:
+                entry["device_reason"] = str(result.get("reason"))[:64]
+                entry["device_detail"] = str(result.get("detail"))[:200]
+                # 거부 코드만으로는 원인을 가릴 수 없다. 장치가 실어 보낸 구조화 details를
+                # 그대로 남긴다(`Details`가 이미 키·크기를 제한한다). 없으면 적지 않는다.
+                extra = result.get("error_details")
+                if isinstance(extra, dict) and extra:
+                    entry["device_error_details"] = extra
+        # 수락된 송신의 lead 여유(권위 원장이 남긴 정수 셋)를 evidence까지 보존한다. 거부 때만
+        # 값이 남으면 "통과했을 때 여유가 얼마였는지"를 사후에 알 수 없다. 정수만 유계로 옮기며
+        # 새 조회를 만들지 않는다(terminal 판정이 이미 부르는 응답에 실려 온다).
+        if isinstance(result, dict):
+            lead = result.get("lead")
+            if isinstance(lead, dict) and lead:
+                entry["device_lead"] = {
+                    key: value for key, value in lead.items()
+                    if isinstance(value, int) and not isinstance(value, bool)}
+        self.command_log.append(entry)
+        return response
+
+    @staticmethod
+    def poc_result(response: dict):
+        """PoC op 응답에서 result를 꺼낸다. 거부·오류면 `PocDeviceCallError`."""
+
+        body = response.get("body") or {}
+        if response.get("status") != "COMPLETED" or body.get("call_outcome") != "OK":
+            raise PocDeviceCallError(
+                f"{body.get('poc_operation')}: status={response.get('status')} "
+                f"outcome={body.get('call_outcome')} reason={body.get('reason')}")
+        return body.get("result")
+
     @staticmethod
     def fixture_bytes(value: dict) -> tuple:
         """(exact bytes, sha256) — source endpoint의 local fixture preload용."""
@@ -202,4 +265,4 @@ class Stage7ScenarioController:
         return data, hashlib.sha256(data).hexdigest()
 
 
-__all__ = ("Stage7ScenarioController",)
+__all__ = ("Stage7ScenarioController", "PocDeviceCallError")

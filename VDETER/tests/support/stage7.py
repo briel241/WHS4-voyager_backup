@@ -109,14 +109,22 @@ class Stage7FakeMedium:
         receiver = self.workers.get(rx_serial)
         if receiver is None:
             return
-        if sender.tx_lo_hz != receiver.rx_lo_hz:
+        # 수신 lane의 **실효 중심 주파수**로 정합을 본다. manual common-LO tuning이 걸려 있으면
+        # lane마다 다르므로(effective = rf_lo - dsp), 단일 rx_lo_hz로 판정하면 dual-channel 수신을
+        # 재현할 수 없다. manual tuning을 **적용한 적이 없으면**(rx_rf_lo_hz is None) 종전대로
+        # rx_lo_hz 하나로 판정한다 — 기존 단일 LO 설치 동작을 그대로 보존한다.
+        rx_center = receiver.rx_lo_hz
+        if getattr(receiver, "rx_rf_lo_hz", None) is not None:
+            rx_center = (receiver.lane_rx_center_hz or {}).get(rx_lane, rx_center)
+        if sender.tx_lo_hz != rx_center:
             # tune 불일치 경로는 물리적으로 복원되지 않는다 (진단용 기록만 남긴다).
             self.tune_mismatch_log.append(
                 {
                     "path_id": path_id,
                     "tx_serial": sender.serial,
                     "tx_lo_hz": sender.tx_lo_hz,
-                    "rx_lo_hz": receiver.rx_lo_hz,
+                    "rx_lo_hz": rx_center,
+                    "rx_lane": rx_lane,
                     "raw_ns": raw_ns,
                     "bytes": len(data),
                 }
@@ -129,7 +137,10 @@ class Stage7FakeMedium:
             return
         receiver_hw_ns = raw_ns - WORKER_T0_NS[rx_serial]
         receiver.pending_bursts.setdefault(rx_lane, []).append(
-            {"hardware_time_ns": receiver_hw_ns, "data": data, "path_id": path_id}
+            {"hardware_time_ns": receiver_hw_ns, "data": data, "path_id": path_id,
+             # 합성 경계(§7.1)가 채널을 구분하고 같은 도달을 두 번 합산하지 않게 하는 값.
+             "tx_lo_hz": sender.tx_lo_hz,
+             "arrival_id": f"{path_id}-{raw_ns}-{len(self.delivery_log)}"}
         )
         self.delivery_log.append(
             {
@@ -153,9 +164,23 @@ class Stage7FakeMediumWorker:
         self.rx_lo_hz = None
         self.pending_bursts = {0: [], 1: []}
         self.rx_windows = {0: [], 1: []}
+        self.rx_continuous = False
+        self.rx_continuous_since = None
+        #: lane별 마지막 창 합성 결과(§7.1 모델 증거). 시험이 겹침·clip을 확인한다.
+        self.last_rx_composite = {0: None, 1: None}
         self.async_events = []
         self.closed = False
         self.tx_muted = [False, False]
+        #: manual RX tuning 모델 상태(실 worker의 apply_manual_tuning/read_tuning/restore_tuning).
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
+        self.lane_rx_center_hz = {}
+        self.analog_bandwidth_hz = None
+        #: 시험용 장치 결함 주입(기본 없음) — 적용 실패·복구 실패·LO 오차·BW 상한.
+        self.tuning_fault = None
+        self.restore_fault = None
+        self.tuning_lo_error_hz = 0
+        self.tuning_bandwidth_cap_hz = None
         medium.register(self)
 
     # --- factory surface -----------------------------------------------------
@@ -183,6 +208,11 @@ class Stage7FakeMediumWorker:
         self.plan = plan
         self.tx_lo_hz = plan["tx_lo_hz"]
         self.rx_lo_hz = plan["rx_lo_hz"]
+        # 시작 tuning도 모델 상태에 반영한다(manual 적용 전 read_tuning/복구 기준점).
+        self.analog_bandwidth_hz = int(plan["analog_bandwidth_hz"])
+        self.lane_rx_center_hz = {lane: int(plan["rx_lo_hz"]) for lane in (0, 1)}
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
         lanes = {
             lane: {
                 "tx_center_frequency_hz": plan["tx_lo_hz"],
@@ -223,9 +253,27 @@ class Stage7FakeMediumWorker:
         pass
 
     def start_rx_continuous(self, start_hardware_time_ns=None):
-        """Mirror the B210 worker's service-mode continuous RX contract."""
+        """Mirror the B210 worker's service-mode continuous RX contract.
+
+        실 worker와 같이 **언제부터** 연속 RX가 유효한지 기록한다(실 worker는 dual-channel streamer
+        정렬을 위해 now+200 ms에 시작한다). 상위 readiness가 "켜져 있다"가 아니라 "예약 시각이 시작
+        이후"를 확인할 수 있어야 한다.
+        """
 
         self.rx_continuous = True
+        self.rx_continuous_since = (int(start_hardware_time_ns)
+                                    if start_hardware_time_ns is not None
+                                    else int(self.hardware_time_ns()) + 200_000_000)
+        return True
+
+    def rx_continuous_since_ns(self):
+        return self.rx_continuous_since if self.rx_continuous else None
+
+    def stop_rx_continuous(self):
+        self.rx_continuous = False
+        self.rx_continuous_since = None
+        #: lane별 마지막 창 합성 결과(§7.1 모델 증거). 시험이 겹침·clip을 확인한다.
+        self.last_rx_composite = {0: None, 1: None}
         return True
 
     def hardware_time_ns(self):
@@ -233,6 +281,77 @@ class Stage7FakeMediumWorker:
 
     def retune_tx_lo(self, target_hz, command_time_ns):
         self.tx_lo_hz = target_hz
+
+    # --- manual RX tuning model (실 worker와 같은 surface) -----------------------
+    #
+    # echo가 아니라 **장치 모델**이다: analog bandwidth는 장치가 고를 수 있는 격자로 양자화되고,
+    # lane별 실효 중심은 승인된 규약 effective = rf_lo - dsp로 계산된다. 따라서 계획과 다른 값이
+    # 실제로 나올 수 있고 readback 불일치가 시험에서 재현된다(무조건 통과하는 echo 금지).
+
+    #: B210 analog filter가 고르는 최소 격자(모델). 요청보다 좁아지지 않도록 **올림**한다.
+    TUNING_BANDWIDTH_STEP_HZ = 100_000
+
+    def _quantize_bandwidth(self, requested_hz):
+        step = self.TUNING_BANDWIDTH_STEP_HZ
+        return ((int(requested_hz) + step - 1) // step) * step
+
+    def read_tuning(self):
+        return {
+            "lane_center_hz": dict(self.lane_rx_center_hz),
+            "analog_bandwidth_hz": self.analog_bandwidth_hz,
+            **({"rx_lo_hz": self.rx_rf_lo_hz,
+                "lane_dsp_hz": dict(self.lane_dsp_hz)}
+               if self.rx_rf_lo_hz is not None else {}),
+        }
+
+    def apply_manual_tuning(self, rx_lo_hz, lane_dsp_hz, analog_bandwidth_hz):
+        if self.tuning_fault is not None:
+            raise RuntimeError(self.tuning_fault)
+        previous = self.read_tuning()
+        offsets = {int(lane): int(value) for lane, value in dict(lane_dsp_hz).items()}
+        if set(offsets) != {0, 1}:
+            raise ValueError(f"lane DSP offset은 lane 0·1 모두 필요합니다: {sorted(offsets)}")
+        bandwidth = self._quantize_bandwidth(analog_bandwidth_hz)
+        if self.tuning_bandwidth_cap_hz is not None:
+            bandwidth = min(bandwidth, int(self.tuning_bandwidth_cap_hz))
+        self.rx_rf_lo_hz = int(rx_lo_hz) + int(self.tuning_lo_error_hz)
+        self.lane_dsp_hz = dict(offsets)
+        self.analog_bandwidth_hz = bandwidth
+        # 승인된 규약: effective = rf_lo - dsp (WSM-G1 실측).
+        self.lane_rx_center_hz = {lane: self.rx_rf_lo_hz - offsets[lane] for lane in (0, 1)}
+        # 단일 값만 읽는 기존 소비자에게는 lane 0(lower) 실효 중심을 보인다.
+        self.rx_lo_hz = self.lane_rx_center_hz[0]
+        return {
+            "rx_lo_hz": self.rx_rf_lo_hz,
+            "lane_dsp_hz": dict(self.lane_dsp_hz),
+            "analog_bandwidth_hz": self.analog_bandwidth_hz,
+            "lane_rf_lo_hz": {lane: self.rx_rf_lo_hz for lane in (0, 1)},
+            "lane_center_hz": dict(self.lane_rx_center_hz),
+            "previous": previous,
+        }
+
+    def restore_tuning(self, snapshot):
+        if self.restore_fault is not None:
+            raise RuntimeError(self.restore_fault)
+        lane_dsp = snapshot.get("lane_dsp_hz")
+        rx_lo = snapshot.get("rx_lo_hz")
+        bandwidth = snapshot.get("analog_bandwidth_hz")
+        if lane_dsp is not None and rx_lo is not None and bandwidth is not None:
+            saved = self.tuning_lo_error_hz
+            self.tuning_lo_error_hz = 0          # 복구는 기록된 실측값 그대로 되돌린다
+            try:
+                return self.apply_manual_tuning(rx_lo, lane_dsp, bandwidth)
+            finally:
+                self.tuning_lo_error_hz = saved
+        centers = snapshot.get("lane_center_hz") or {}
+        self.rx_rf_lo_hz = None
+        self.lane_dsp_hz = {}
+        if bandwidth is not None:
+            self.analog_bandwidth_hz = int(bandwidth)
+        self.lane_rx_center_hz = {int(lane): value for lane, value in centers.items()
+                                  if value is not None}
+        self.rx_lo_hz = self.lane_rx_center_hz.get(0)
+        return self.read_tuning()
 
     def set_rx_gain(self, lane, gain_db):
         return float(gain_db)
@@ -290,21 +409,52 @@ class Stage7FakeMediumWorker:
             if now < end_ns + 20_000_000:
                 return None
             window["consumed"] = True
-            data = None
-            tolerance = 1_000_000_000 // DEVICE_RATE  # 한 sample 이내 정렬
-            for burst in self.pending_bursts[lane]:
-                if abs(burst["hardware_time_ns"] - window["start_ns"]) <= tolerance:
-                    if len(burst["data"]) == window["count"] * 8:
-                        data = burst["data"]
-                        break
-            if data is None:
-                data = b"\x00" * (window["count"] * 8)
+            # P12: 이 창에 도달한 **모든** 입력을 수신기 좌표로 정렬해 한 번 합성한다(§7.1).
+            # 이전에는 정렬이 맞는 **첫** burst 하나만 쓰고 나머지를 조용히 버려, 겹침이 있어도
+            # 충돌이 재현되지 않았고 정상 TX와 PoC TX가 합성 입력에서 빠졌다.
+            composite = self._compose_window(lane, window)
+            self.last_rx_composite[lane] = composite
             return {
-                "segments": ((data, window["start_ns"], False),),
+                "segments": ((composite.data, window["start_ns"], False),),
                 "overflow_samples": 0,
                 "trailing_gap": False,
             }
         return None
+
+    def _tuned_center_hz(self, lane):
+        """이 lane이 실제로 듣고 있는 실효 중심. manual common-LO면 lane마다 다르다."""
+        if getattr(self, "rx_rf_lo_hz", None) is not None:
+            return (self.lane_rx_center_hz or {}).get(lane)
+        return self.rx_lo_hz
+
+    def _compose_window(self, lane, window):
+        """창 하나의 합성 입력을 만든다 — 권위 합성기(§7.1)를 그대로 쓴다."""
+        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.stage8.shared_medium.rx_boundary import RxArrival, compose_rx_window
+
+        # 합성기에 넘기는 channel은 **묶음 표식**이다(측정값이 아니다). 실제 채널 구분은 아래
+        # `tuned_center_hz` 일치 검사가 한다. 이 토폴로지에서 lane 0/1은 lower/upper에 고정이다.
+        channel = PhysicalChannel.LOWER if lane == 0 else PhysicalChannel.UPPER
+
+        span_ns = (window["count"] * 1_000_000_000 + DEVICE_RATE - 1) // DEVICE_RATE
+        start, end = window["start_ns"], window["start_ns"] + span_ns
+        arrivals, remaining = [], []
+        for burst in self.pending_bursts[lane]:
+            burst_span = (len(burst["data"]) // 8 * 1_000_000_000 + DEVICE_RATE - 1) // DEVICE_RATE
+            if burst["hardware_time_ns"] + burst_span <= start or burst["hardware_time_ns"] >= end:
+                remaining.append(burst)       # 이 창과 무관 — 다음 창을 위해 남긴다
+                continue
+            arrivals.append(RxArrival(
+                arrival_id=burst.get("arrival_id") or f"{burst['path_id']}-{burst['hardware_time_ns']}",
+                receiver_hw_ns=int(burst["hardware_time_ns"]),
+                effective_center_hz=int(burst.get("tx_lo_hz") or 0),
+                data=burst["data"], source=burst.get("path_id")))
+        # 소비한 도달은 제거한다 — 같은 입력이 다음 창에서 다시 합산되지 않게(중복 합산 금지).
+        self.pending_bursts[lane] = remaining
+        return compose_rx_window(
+            arrivals=arrivals, window_start_ns=start, sample_count=window["count"],
+            sample_rate_hz=DEVICE_RATE, tuned_center_hz=self._tuned_center_hz(lane),
+            channel=channel)
 
     def poll_async(self):
         now = self.hardware_time_ns()

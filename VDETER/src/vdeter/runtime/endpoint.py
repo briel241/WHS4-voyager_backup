@@ -744,6 +744,11 @@ class VdeTerEndpoint:
             delivered = self._deliver_presentation_bytes(
                 mac_action.route, mac_action.presentation_data, decoded.value.received_at
             )
+            # Opt-in diagnostic receipt: after the actual application sink has
+            # accepted, never inferred from PHY decode or transmission success.
+            receipt = getattr(stage4, "note_application_delivery", None)
+            if delivered.is_ok and callable(receipt):
+                receipt(decoded.value.packet_id)
             if stage4 is None:
                 if delivered.is_err:
                     self._report_internal_error(delivered.error)

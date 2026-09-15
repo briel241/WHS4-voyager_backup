@@ -102,6 +102,7 @@ class Stage7PhyDiagnosticSink:
         "_current_t0_ns",
         "_attempt_counters",
         "configured",
+        "_recent_windows",
     )
 
     def __init__(self, *, lane_index: int, lane_generation: int) -> None:
@@ -113,6 +114,7 @@ class Stage7PhyDiagnosticSink:
         self._current_t0_ns = None
         self._attempt_counters = {}
         self.configured = True
+        self._recent_windows = None
 
     def begin_window(self, rx_window_key: tuple, stream_epoch_id: int, stream_t0_hardware_ns: int) -> None:
         self._current_window_key = rx_window_key
@@ -142,6 +144,16 @@ class Stage7PhyDiagnosticSink:
             record.phy_attempt_index,
         )
         self._records[key] = record
+        if self._recent_windows is not None:
+            self._recent_windows.setdefault(record.rx_window_key, {})[key] = record
+            while len(self._recent_windows) > 128:
+                self._recent_windows.pop(next(iter(self._recent_windows)))
+
+    def capture_recent_windows(self, enabled):
+        self._recent_windows = {} if enabled else None
+
+    def recent_records_for_window(self, key):
+        return tuple((self._recent_windows or {}).get(key, {}).values())
 
     def records(self) -> tuple:
         return tuple(self._records.values())
@@ -214,7 +226,8 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
                     "encode 결과의 Packet ID가 요청과 다릅니다",
                 )
             bound = self._route_sidecar.bind_burst(
-                request.packet_id.value, burst.burst_id.value
+                request.packet_id.value, burst.burst_id.value,
+                wire_packet_digest=hashlib.sha256(request.packet).hexdigest(),
             )
             if bound.is_err:
                 return bound
