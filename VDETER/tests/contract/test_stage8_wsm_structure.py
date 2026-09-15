@@ -14,8 +14,6 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
 _POC_PKG = os.path.join(_SRC, "vdeter", "poc")
-#: (호환) 옛 공개 경로 shim — 구현이 아니라 alias만 담는다.
-_COMPAT_SHIM = os.path.join(_SRC, "vdeter", "stage8")
 _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 
 # Stage 6 RF-off 통합에서 명시 승인된 shared-medium adapter: PoC provider seam을 실 Stage 7 객체에
@@ -112,10 +110,8 @@ class ImportBoundaryTest(unittest.TestCase):
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
-                if os.path.normpath(dirpath).startswith(
-                        (os.path.normpath(_POC_PKG), os.path.normpath(_COMPAT_SHIM))
-                ):
-                    continue  # poc 본체와 호환 shim 자체는 제외(내부 참조는 허용)
+                if os.path.normpath(dirpath).startswith(os.path.normpath(_POC_PKG)):
+                    continue  # poc 본체 자체는 제외(내부 참조는 허용)
                 for name in files:
                     if not name.endswith(".py"):
                         continue

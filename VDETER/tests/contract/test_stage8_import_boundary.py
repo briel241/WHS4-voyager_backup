@@ -14,8 +14,6 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
 _POC_PKG = os.path.join(_SRC, "vdeter", "poc")
-#: (호환) 옛 공개 경로 shim. 구현이 아니라 새 경로를 가리키는 alias만 담는다.
-_COMPAT_SHIM = os.path.join(_SRC, "vdeter", "stage8")
 # 기존 production 소스 트리(poc 본체·호환 shim·tests 제외)에서 poc를 참조하지 않아야 한다.
 _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 
@@ -55,16 +53,8 @@ _SANCTIONED_LAUNCHER_SEAMS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "mass_roc_workload_controller.py")),
 })
 
-# (호환) 옛 공개 경로 shim. 구현이 아니라 `vdeter.poc.api`의 같은 객체를 옛 이름으로
-# 노출하는 alias 파일이다. 새 경로를 참조하므로 아래 정적 검사에 잡히지만, 공개 계약
-# 보존을 위한 **명시 승인 파일**이다(디렉터리 통째가 아니라 파일 단위).
-_SANCTIONED_COMPAT_SHIM = frozenset({
-    os.path.normpath(os.path.join(_SRC, "vdeter", "stage8", "__init__.py")),
-    os.path.normpath(os.path.join(_SRC, "vdeter", "stage8", "poc_api", "__init__.py")),
-})
-
 _POC_ADAPTERS = (_SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
-                    | _SANCTIONED_LAUNCHER_SEAMS | _SANCTIONED_COMPAT_SHIM)
+                    | _SANCTIONED_LAUNCHER_SEAMS)
 
 
 def _run_py(code: str) -> subprocess.CompletedProcess:
@@ -247,10 +237,8 @@ class ImportBoundaryTest(unittest.TestCase):
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
-                if os.path.normpath(dirpath).startswith(
-                        (os.path.normpath(_POC_PKG), os.path.normpath(_COMPAT_SHIM))
-                ):
-                    continue  # poc 본체와 호환 shim 자체는 제외
+                if os.path.normpath(dirpath).startswith(os.path.normpath(_POC_PKG)):
+                    continue  # poc 본체 자체는 제외
                 for name in files:
                     if not name.endswith(".py"):
                         continue
@@ -428,75 +416,63 @@ class ImportBoundaryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-class PublicApiCompatAliasTest(unittest.TestCase):
-    """공개 SDK 옛 경로 호환 — 같은 객체여야 하고, 비공개 내부는 열리면 안 된다."""
+class OldPublicPathRemovedTest(unittest.TestCase):
+    """옛 공개 경로 `vdeter.stage8` 은 **제거**됐다 (2026-09-16 사용자 결정).
 
-    def test_old_public_path_exposes_the_same_objects(self):
-        """옛 경로와 새 경로가 **같은** module·class·enum 객체를 준다(중복 적재 금지).
+    2-3 구조 정리에서 공개 surface 를 `vdeter.poc.api` 로 옮기면서 옛 경로를 같은
+    객체로 가리키는 최소 호환 shim 을 두었으나, 사용자가 호환을 포기하기로 결정해
+    제거했다. 따라서 옛 경로는 공개·비공개를 가리지 않고 **전부 열리지 않아야** 한다.
+    """
 
-        서로 다른 module 객체로 두 번 적재되면 `isinstance`와 enum 동일성이 깨져
-        호환이 이름만 같고 의미가 다른 상태가 된다.
-        """
-        result = _run_py(
-            "import sys\n"
-            "import vdeter.poc.api as new\n"
-            "import vdeter.stage8.poc_api as old\n"
-            "assert old.PocErrorCode is new.PocErrorCode, 'enum 객체가 다르다'\n"
-            "assert old.SdkEngine is new.SdkEngine, 'class 객체가 다르다'\n"
-            "assert old.encode_wire_packet is new.encode_wire_packet, 'function 객체가 다르다'\n"
-            "import vdeter.stage8.poc_api.codec as oc\n"
-            "import vdeter.poc.api.codec as nc\n"
-            "assert oc is nc, 'module 객체가 다르다'\n"
-            "assert sys.modules['vdeter.stage8.poc_api.codec'] is "
-            "sys.modules['vdeter.poc.api.codec']\n"
-            "assert tuple(old.__all__) == tuple(new.__all__), '__all__ 불일치'\n"
-            "sys.exit(0)\n"
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_old_public_path_is_gone(self):
+        """옛 공개 경로가 더는 import 되지 않는다."""
+        for module in ("vdeter.stage8", "vdeter.stage8.poc_api",
+                       "vdeter.stage8.poc_api.sdk", "vdeter.stage8.poc_api.codec"):
+            result = _run_py("import %s\n" % module)
+            self.assertNotEqual(
+                result.returncode, 0,
+                "%s 이 아직 열린다 — 호환 제거 결정과 어긋난다" % module)
 
-    def test_every_public_submodule_is_aliased(self):
-        """공개 surface의 하위 module 전부가 옛 경로로도 같은 객체다."""
-        result = _run_py(
-            "import sys, importlib\n"
-            "names = ('codec','errors','limits','messages','negotiation',\n"
-            "         'protocol','sdk','seams','transport','types')\n"
-            "for n in names:\n"
-            "    o = importlib.import_module('vdeter.stage8.poc_api.' + n)\n"
-            "    m = importlib.import_module('vdeter.poc.api.' + n)\n"
-            "    assert o is m, n\n"
-            "sys.exit(0)\n"
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_compat_does_not_expose_private_internals(self):
-        """비공개 내부는 옛 경로로 열리지 않는다(포괄 호환 package 금지)."""
+    def test_old_private_paths_are_gone(self):
+        """비공개 내부도 옛 경로로 열리지 않는다(원래부터 비공개였다)."""
         for module in ("vdeter.stage8._supervisor", "vdeter.stage8.execution",
                        "vdeter.stage8.integration", "vdeter.stage8.shared_medium",
                        "vdeter.stage8.testing"):
             result = _run_py("import %s\n" % module)
-            self.assertNotEqual(
-                result.returncode, 0,
-                "%s 이 호환 경로로 열렸다 — 공개/비공개 경계가 무너진다" % module)
+            self.assertNotEqual(result.returncode, 0,
+                                "%s 이 옛 경로로 열렸다" % module)
 
-    def test_bare_compat_package_loads_no_submodules(self):
-        """옛 경로 package import만으로는 아무 하위 module도 적재되지 않는다."""
+    def test_new_public_path_still_works(self):
+        """새 공식 경로는 정상이다 — 제거가 공개 surface 자체를 깨지 않았다."""
         result = _run_py(
-            "import sys, vdeter.stage8\n"
-            "subs=[m for m in sys.modules if m.startswith('vdeter.stage8.')]\n"
-            "print('SUBS', subs)\n"
-            "sys.exit(0 if not subs else 3)\n"
+            "import importlib, sys\n"
+            "import vdeter.poc.api as api\n"
+            "names = ('codec','errors','limits','messages','negotiation',\n"
+            "         'protocol','sdk','seams','transport','types')\n"
+            "for n in names:\n"
+            "    assert importlib.import_module('vdeter.poc.api.' + n) is getattr(api, n), n\n"
+            "assert api.PocErrorCode and api.SdkEngine and api.encode_wire_packet\n"
+            "sys.exit(0)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_shim_files_are_absent_from_the_source_tree(self):
+        """호환 shim 파일이 소스 트리에 남아 있지 않다."""
+        for relative in (("vdeter", "stage8", "__init__.py"),
+                         ("vdeter", "stage8", "poc_api", "__init__.py")):
+            path = os.path.join(_SRC, *relative)
+            self.assertFalse(os.path.exists(path), "호환 shim 이 남아 있다: %s" % path)
+        self.assertFalse(os.path.isdir(os.path.join(_SRC, "vdeter", "stage8")),
+                         "vdeter/stage8 디렉터리가 남아 있다")
+
     def test_production_sources_use_the_new_path_only(self):
-        """호환 shim·계약시험·저장 식별자·과거 기록 밖에서 옛 경로 문자열이 없다.
+        """저장 식별자·이 계약시험 밖에서 옛 경로 문자열이 없다.
 
         허용 범주는 파일 단위로 명시한다(디렉터리 통째 제외 금지). 저장되는 wire 값
         `vdeter.stage8.poc-api.*`·`vdeter.stage8.poc-manifest.*`는 모듈 경로가 아니라
         **값**이므로 계약상 보존 대상이다.
         """
-        allowed_files = {os.path.normpath(p) for p in _SANCTIONED_COMPAT_SHIM}
-        allowed_files.add(os.path.normpath(os.path.abspath(__file__)))
+        allowed_files = {os.path.normpath(os.path.abspath(__file__))}
         offenders = []
         for root in (_SRC, os.path.join(_PROJECT_ROOT, "apps"),
                      os.path.join(_PROJECT_ROOT, "VDETER", "apps"),
