@@ -19,11 +19,45 @@ import subprocess
 import tempfile
 import unittest
 
-import apps.stage7_coordinator_main as coordinator_main
+import apps.coordinator_main as coordinator_main
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
+COORDINATOR_REL = "VDETER/apps/coordinator_main.py"
+
+#: qualification 당시(419bfef) 경로 — **과거 기록이라 바뀌지 않는다**.
+#: git show 는 당시 경로로, 현재 파일 읽기는 위 현재 경로로 한다(둘을 구분한다).
+COORDINATOR_REL_AT_QUALIFIED_COMMIT = "VDETER/apps/stage7_coordinator_main.py"
+
+#: 2-3 구조 정리에서 **승인된 이름·경로 치환**만. 과거 원문을 현재 이름에 맞출 때만 쓰며,
+#: 이 표에 없는 차이는 그대로 불일치로 검출된다(모든 import/문자열 차이를 무시하는
+#: 광범위 정규화가 아니다).
+#:
+#: 근거: 직전 커밋(93bebbd) 원문에 이 표만 적용한 결과가 현재 파일과 byte-identical 임을
+#: 확인했다 — output/stage8-refactor-optimize/step2-3-impl-20260915/rename-only-proof.json.
+APPROVED_RENAMES = (
+    ("vdeter.stage7", "vdeter.b210_system"),
+    ("apps.stage7_trace", "apps.service_trace"),
+    ("stage7_trace.py", "service_trace.py"),
+    ("Stage7ServiceSession", "ServiceSession"),
+    ("stage7_endpoint_launcher.py", "endpoint_launcher.py"),
+    ("stage7_scenario_controller.py", "scenario_controller.py"),
+    ("stage7_mass_roc_controller.py", "mass_roc_workload_controller.py"),
+    ("Stage7ConfigurationLoader", "ConfigurationLoader"),
+    ("Stage7OperationalGainInput", "OperationalGainInput"),
+    ("Stage7SystemPlanLoader", "SystemPlanLoader"),
+    ("Stage7RuntimeCoordinator", "RuntimeCoordinator"),
+    ("Stage7BarrierFailure", "BarrierFailure"),
+)
+
+
+def _apply_approved_renames(source: str) -> str:
+    """과거 원문에 승인 대응표만 적용한다(ASCII 식별자 경계 기준)."""
+    import re as _re
+    for _old, _new in APPROVED_RENAMES:
+        source = _re.sub(r"(?<![A-Za-z0-9_])" + _re.escape(_old) + r"(?![A-Za-z0-9_])",
+                         _new, source)
+    return source
 
 #: Phase F qualification 시점 commit (reference의 qualified_source_commit).
 QUALIFIED_COMMIT = "419bfef529d4907f77bca54c6b3e4d484afb260f"
@@ -127,7 +161,13 @@ def _git_show(path_at_commit: str) -> str:
                           capture_output=True, text=True, encoding="utf-8",
                           timeout=60)
     if done.returncode != 0:
-        raise unittest.SkipTest(f"git show 실패: {path_at_commit}")
+        stderr = (done.stderr or "")
+        # 환경 문제(git 부재·저장소 접근 불가)만 skip 한다. 경로가 그 commit 에 없는
+        # 것은 결속이 깨졌다는 뜻이므로 조용히 넘기지 않는다.
+        if "not a git repository" in stderr or "cannot be used without a working tree" in stderr:
+            raise unittest.SkipTest(f"git 저장소 접근 불가: {stderr.strip()[:120]}")
+        raise AssertionError(
+            f"qualification 당시 경로를 읽지 못했다: {path_at_commit} — {stderr.strip()[:200]}")
     return done.stdout
 
 
@@ -137,7 +177,9 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old = _function_hashes(
-            _git_show(f"{QUALIFIED_COMMIT}:{COORDINATOR_REL}"))
+            _apply_approved_renames(
+            _git_show(f"{QUALIFIED_COMMIT}:"
+                      f"{COORDINATOR_REL_AT_QUALIFIED_COMMIT}")))
         with open(os.path.join(REPO, COORDINATOR_REL), encoding="utf-8") as handle:
             cls.new = _function_hashes(handle.read())
 
@@ -379,7 +421,9 @@ class TC_PHASE_DISPATCH(unittest.TestCase):
     """② 기존 phase dispatch 불변 + 신규 phase 인자 게이트."""
 
     def test_phase_choices_are_superset(self):
-        old_source = _git_show(f"{QUALIFIED_COMMIT}:{COORDINATOR_REL}")
+        old_source = _apply_approved_renames(
+            _git_show(f"{QUALIFIED_COMMIT}:"
+                      f"{COORDINATOR_REL_AT_QUALIFIED_COMMIT}"))
         old_choices = set()
         for node in ast.walk(ast.parse(old_source)):
             if (isinstance(node, ast.Call)

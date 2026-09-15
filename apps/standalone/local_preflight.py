@@ -34,7 +34,7 @@ from apps.standalone import state as state_module
 ROLE_SPEED_CLASS = dict(hardware_profiles.host_profiles.LEGACY_PI.speed_classes)
 
 #: host 계층과 같은 잔존 프로세스 패턴 (읽기 전용 재사용).
-from apps.stage7_service_layer import _COMPETING_PROCESS_PATTERN  # noqa: E402
+from apps.service_layer import _COMPETING_PROCESS_PATTERN  # noqa: E402
 
 
 class PreflightError(RuntimeError):

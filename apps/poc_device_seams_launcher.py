@@ -5,8 +5,8 @@
 프로세스)는 §16.2 TEST adapter op으로만 장치에 닿는다.
 
 핵심 설계: **검증된 seam 로직을 다시 쓰지 않는다.** `_RemoteWorker`가 실 worker와 같은 속성 표면을
-`poc_radio_state` 응답으로 채워 주므로, 이미 시험된 `Stage7HwTimeScheduler`(P03)·
-`Stage7WorkerArbiter`(P04)·`Stage7ReceiverReadiness`(P06)를 **그대로** 쓴다. 새로 만드는 것은 프로세스
+`poc_radio_state` 응답으로 채워 주므로, 이미 시험된 `HwTimeScheduler`(P03)·
+`WorkerArbiter`(P04)·`ReceiverReadiness`(P06)를 **그대로** 쓴다. 새로 만드는 것은 프로세스
 경계를 실제로 건너가는 두 가지 — 송신 sink와 TX 원장 terminal source — 뿐이다. 그 둘 안에서도 fan-out
 child 검증·논리 목적지 해석(`device_boundary`)·채널 이름 변환·원장 terminal 분류(`poc_device_seams_inprocess`)는
 RF-off sink와 **같은 함수**를 쓴다 — 두 경로가 다른 것은 경계를 건너는 방식(RPC vs 직접 호출)뿐이다.
@@ -22,7 +22,7 @@ import hashlib
 import time
 import uuid
 
-from vdeter.b210_system.control_plane.controller import PocDeviceCallError, Stage7ScenarioController
+from vdeter.b210_system.control_plane.controller import PocDeviceCallError, ScenarioController
 
 from vdeter.poc.integration.device_boundary import (
     logical_destination_station_id,
@@ -31,11 +31,11 @@ from vdeter.poc.integration.device_boundary import (
 
 from apps.poc_device_seams_inprocess import (
     Link11WaveformFactory,
-    Stage7HwTimeScheduler,
-    Stage7ReceiverReadiness,
-    Stage7WorkerArbiter,
+    HwTimeScheduler,
+    ReceiverReadiness,
+    WorkerArbiter,
     child_terminals_from_ledger,
-    stage7_channel_name,
+    channel_name,
 )
 
 #: 장치 상태 조회 캐시 수명(초). 한 번의 scheduler/arbiter/readiness 판정 안에서 같은 상태를 쓰되,
@@ -46,7 +46,7 @@ _STATE_TTL_S = 0.05
 class LauncherDeviceClient:
     """한 endpoint의 launcher PoC device op 창구. 판정하지 않고 사실만 나른다."""
 
-    def __init__(self, controller: Stage7ScenarioController, endpoint_id: str) -> None:
+    def __init__(self, controller: ScenarioController, endpoint_id: str) -> None:
         self._controller = controller
         self.endpoint_id = endpoint_id
         self._state = None
@@ -57,7 +57,7 @@ class LauncherDeviceClient:
         if command_name == "poc_schedule_group_tx" and self.collision_session_id is not None:
             body = dict(body, collision_session_id=self.collision_session_id)
         response = self._controller.poc_command(self.endpoint_id, command_name, body)
-        return Stage7ScenarioController.poc_result(response)
+        return ScenarioController.poc_result(response)
 
     def radio_state(self, *, fresh: bool = False) -> dict:
         now = time.monotonic()
@@ -143,7 +143,7 @@ class LauncherRadioSink:
     """
 
     def __init__(self, client: LauncherDeviceClient, *, station_id_by_endpoint: dict,
-                 channel_name_of=stage7_channel_name) -> None:
+                 channel_name_of=channel_name) -> None:
         self._client = client
         self._channel_name_of = channel_name_of
         self._station_id = dict(station_id_by_endpoint)
@@ -232,14 +232,14 @@ class LauncherLedgerTerminalSource:
             if snapshot is not None and snapshot.get("terminal"):
                 break
             time.sleep(self._interval)
-        # 분류 규칙은 in-process 원장 조회(`Stage7LedgerTerminalSource`)와 같다(wire lane 키는 str).
+        # 분류 규칙은 in-process 원장 조회(`LedgerTerminalSource`)와 같다(wire lane 키는 str).
         return child_terminals_from_ledger(snapshot, parent)
 
 
-class MacSlotScheduler(Stage7HwTimeScheduler):
+class MacSlotScheduler(HwTimeScheduler):
     """scheduler seam → **실 MAC slot map**이 송신을 허용한 slot만 고른다(P03).
 
-    기반 `Stage7HwTimeScheduler`가 실 hardware clock·권위 lead(100/200 ms)·반응형 인과성을
+    기반 `HwTimeScheduler`가 실 hardware clock·권위 lead(100/200 ms)·반응형 인과성을
     이미 담당한다. 이 subclass는 그 위에 한 가지를 더한다: 기반이 고른 device-grid 시각 이후로
     **MAC이 실제로 송신을 허용한 첫 slot**으로 옮긴다.
 
@@ -272,7 +272,7 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
         from vdeter.poc.api.types import TARGET_TO_PHYSICAL_CHANNEL
         from vdeter.poc.shared_medium.radiation import ScheduledSlot
 
-        target_channel = stage7_channel_name(TARGET_TO_PHYSICAL_CHANNEL[action.target])
+        target_channel = channel_name(TARGET_TO_PHYSICAL_CHANNEL[action.target])
         if self._fixed_channel_name is not None and self._fixed_channel_name != target_channel:
             raise PocError(PocErrorCode.POC_ACTION_SCHEMA_INVALID,
                            "MAC slot query channel differs from logical target")
@@ -351,7 +351,7 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
     sink = LauncherRadioSink(actor, station_id_by_endpoint=station_id_by_endpoint)
     # Always use the real MAC query (including heard reservations). The default
     # production path must not silently fall back to the device sample grid.
-    readiness = Stage7ReceiverReadiness(workers, center, source_worker=workers[actor_endpoint])
+    readiness = ReceiverReadiness(workers, center, source_worker=workers[actor_endpoint])
     scheduler = MacSlotScheduler(workers[actor_endpoint], actor,
                                  channel_name=mac_channel_name, rx_readiness=readiness)
     provider = SharedMediumActionProvider.for_production(
@@ -359,7 +359,7 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
         rx_readiness=readiness,
         scheduler=scheduler,
         waveform_factory=Link11WaveformFactory(),
-        arbiter=Stage7WorkerArbiter(workers[actor_endpoint]),
+        arbiter=WorkerArbiter(workers[actor_endpoint]),
         dual_channel_installed=dual_channel_installed,
     )
     terminal_source = LauncherLedgerTerminalSource(actor, sink, guard=guard)
@@ -372,5 +372,5 @@ __all__ = (
     "LauncherRadioSink",
     "LauncherLedgerTerminalSource",
     "assemble_launcher_provider",
-    "stage7_channel_name",
+    "channel_name",
 )

@@ -14,7 +14,7 @@ approved functions to the current interpreter's legacy representation in memory.
 It never takes expected hashes from a remote or mutated source under test.
 Statement/comment mutations, unknown methods and invalid pins must be rejected.
 
-Historical Phase-G reference files and `apps/stage7_service_layer.py` are not
+Historical Phase-G reference files and `apps/service_layer.py` are not
 modified. Their pre-existing cross-Python unparse mismatch for other functions
 remains a legacy environment limitation, not a reason to skip or relax gates.
 This fixture bridge neither qualifies an installation nor grants RF access.

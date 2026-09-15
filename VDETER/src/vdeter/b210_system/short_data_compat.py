@@ -12,7 +12,7 @@ PROMOTION_PRESENTATION_LIMIT = 3 * 215 - 4
 
 def wrap_short_data_submission(original):
     """Wrap the authoritative MAC method once, for launcher and RF-off harness."""
-    if getattr(original, '_stage7_d10_compatibility', False) is True:
+    if getattr(original, '_d10_compatibility', False) is True:
         return original
 
     @wraps(original)
@@ -36,5 +36,5 @@ def wrap_short_data_submission(original):
             pass
         return original(self_c, state, requirement, causation_event_id)
 
-    submit_short_or_session._stage7_d10_compatibility = True
+    submit_short_or_session._d10_compatibility = True
     return submit_short_or_session

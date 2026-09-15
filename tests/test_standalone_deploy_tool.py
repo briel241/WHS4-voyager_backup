@@ -72,7 +72,7 @@ def test_build_package_contents_and_exclusions():
         assert "requirements-standalone.lock" in names
         assert tool.BINDING_RELPATH in names
         assert tool.PACKAGE_MANIFEST_NAME in names
-        assert "VDETER/apps/stage7_coordinator_main.py" in names
+        assert "VDETER/apps/coordinator_main.py" in names
         assert not any(n.startswith(("results/", "VDETER/results/", "var/",
                                      "identity/", ".git/")) for n in names)
         assert "hardware.toml" not in names

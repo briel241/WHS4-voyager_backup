@@ -1,6 +1,6 @@
 """Stage 7 TEST-only Service API adapter (`stage7` §4.3, §16.2).
 
-`Stage7ServiceApiTestAdapter`는 Scenario Controller의 immutable 기능 input을
+`ServiceApiTestAdapter`는 Scenario Controller의 immutable 기능 input을
 process-local public `VdeService` 호출로 바꾸고 결과를 public
 `ServiceResult`/`ServiceEvent`만으로 판정한다. Presentation/Link/MAC/PHY/Radio
 port, repository, queue 또는 private Runtime method를 직접 호출·변조하지 않는다.
@@ -67,7 +67,7 @@ def _artifact_digest(dto) -> str:
     return sha256_hex(encode_canonical_json(_jsonable(to_reference_json(dto))))
 
 
-class Stage7ServiceApiTestAdapter:
+class ServiceApiTestAdapter:
     """endpoint composition root에 TEST run에서만 주입되는 adapter."""
 
     __slots__ = (
@@ -545,4 +545,4 @@ class Stage7ServiceApiTestAdapter:
         return self._response(message, "COMPLETED", body)
 
 
-__all__ = ("Stage7ServiceApiTestAdapter",)
+__all__ = ("ServiceApiTestAdapter",)

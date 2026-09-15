@@ -105,8 +105,8 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
 
     from vdeter.b210_system.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+        ConfigurationLoader,
+        OperationalGainInput,
     )
 
     gain_input_data = None
@@ -139,7 +139,7 @@ def main(argv=None) -> int:
     ) as handle:
         data_profile_text = handle.read()
 
-    loader = Stage7ConfigurationLoader()
+    loader = ConfigurationLoader()
     blockers = []
     written = []
     for endpoint in ENDPOINTS:
@@ -183,7 +183,7 @@ def main(argv=None) -> int:
             common = gain_input_data["endpoint_common_rx_gain_db"]
             endpoint_key = endpoint.upper()
             value = common[endpoint_key] if isinstance(common, dict) else common
-            operational_gain = Stage7OperationalGainInput(
+            operational_gain = OperationalGainInput(
                 endpoint_common_rx_gain_db=int(value),
                 source_gain_artifact_sha256=gain_input_data[
                     "source_gain_artifact_sha256"

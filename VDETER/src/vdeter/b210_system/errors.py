@@ -15,7 +15,7 @@ from enum import Enum
 from ..common.errors import ErrorCode
 
 
-class Stage7PrivateErrorCode(str, Enum):
+class PrivateErrorCode(str, Enum):
     ENVIRONMENT_UNAPPROVED = "ENVIRONMENT_UNAPPROVED"
     CFO_OUT_OF_FROZEN_PHY_RANGE = "CFO_OUT_OF_FROZEN_PHY_RANGE"
     RF_GAIN_CALIBRATION_FAILED = "RF_GAIN_CALIBRATION_FAILED"
@@ -39,37 +39,37 @@ class Stage7PrivateErrorCode(str, Enum):
 #: §15.2: 이미 수락된 Service work가 있을 때의 공개 투영에 쓰는 underlying
 #: frozen `ErrorCode`. `None`은 공개 투영이 없다는 뜻이다.
 UNDERLYING_ERROR_CODE = {
-    Stage7PrivateErrorCode.ENVIRONMENT_UNAPPROVED: None,
-    Stage7PrivateErrorCode.CFO_OUT_OF_FROZEN_PHY_RANGE: ErrorCode.RADIO_REFERENCE_LOST,
-    Stage7PrivateErrorCode.RF_GAIN_CALIBRATION_FAILED: None,
-    Stage7PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.TIME_BRIDGE_GENERATIONS_EXHAUSTED: ErrorCode.RADIO_REFERENCE_LOST,
-    Stage7PrivateErrorCode.LANE_ROUTE_CONTEXT_MISSING: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.LANE_ROUTE_AMBIGUOUS: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.LANE_ROUTE_INVALID: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED: ErrorCode.RADIO_REFERENCE_LOST,
-    Stage7PrivateErrorCode.HOST_AFFINE_BRIDGE_INVALID: ErrorCode.RADIO_REFERENCE_LOST,
-    Stage7PrivateErrorCode.HOST_AFFINE_BRIDGE_HORIZON_EXCEEDED: ErrorCode.RADIO_LATE_REQUEST,
-    Stage7PrivateErrorCode.STALE_TIME_BRIDGE_EVENT: None,
-    Stage7PrivateErrorCode.STALE_LANE_EVENT: None,
-    Stage7PrivateErrorCode.PARTIAL_RF_EMISSION: ErrorCode.RADIO_TX_OUTCOME_UNKNOWN,
-    Stage7PrivateErrorCode.CONTROL_PEER_INVALID: ErrorCode.RADIO_REFERENCE_LOST,
-    Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID: ErrorCode.INTERNAL_ERROR,
-    Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.ENVIRONMENT_UNAPPROVED: None,
+    PrivateErrorCode.CFO_OUT_OF_FROZEN_PHY_RANGE: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.RF_GAIN_CALIBRATION_FAILED: None,
+    PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.RX_LANE_CONTEXT_INVALID: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.TIME_BRIDGE_GENERATIONS_EXHAUSTED: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.LANE_ROUTE_CONTEXT_MISSING: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.LANE_ROUTE_AMBIGUOUS: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.LANE_ROUTE_INVALID: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.HOST_AFFINE_BRIDGE_INVALID: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.HOST_AFFINE_BRIDGE_HORIZON_EXCEEDED: ErrorCode.RADIO_LATE_REQUEST,
+    PrivateErrorCode.STALE_TIME_BRIDGE_EVENT: None,
+    PrivateErrorCode.STALE_LANE_EVENT: None,
+    PrivateErrorCode.PARTIAL_RF_EMISSION: ErrorCode.RADIO_TX_OUTCOME_UNKNOWN,
+    PrivateErrorCode.CONTROL_PEER_INVALID: ErrorCode.RADIO_REFERENCE_LOST,
+    PrivateErrorCode.CONTROL_MESSAGE_INVALID: ErrorCode.INTERNAL_ERROR,
+    PrivateErrorCode.CONTROL_BARRIER_FAILED: ErrorCode.RADIO_REFERENCE_LOST,
 }
 
 
-class Stage7ControlPlane(str, Enum):
+class ControlPlane(str, Enum):
     RUNTIME = "RUNTIME"
     TEST = "TEST"
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7PrivateFault:
+class PrivateFault:
     """§15.2 immutable private fault record. payload/IQ/certificate 원문은 담지 않는다."""
 
-    private_code: Stage7PrivateErrorCode
+    private_code: PrivateErrorCode
     phase: str
     endpoint_id: str
     run_id: str
@@ -81,7 +81,7 @@ class Stage7PrivateFault:
     first_hardware_timestamp_ns: int | None = None
     underlying_error_code: str | None = None
     artifact_reference: str | None = None
-    control_plane: Stage7ControlPlane | None = None
+    control_plane: ControlPlane | None = None
     command_id: str | None = None
     socket_path: str | None = None
     socket_mode: str | None = None
@@ -125,8 +125,8 @@ class Stage7PrivateFault:
 
 
 __all__ = (
-    "Stage7ControlPlane",
-    "Stage7PrivateErrorCode",
-    "Stage7PrivateFault",
+    "ControlPlane",
+    "PrivateErrorCode",
+    "PrivateFault",
     "UNDERLYING_ERROR_CODE",
 )

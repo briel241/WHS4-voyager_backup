@@ -36,7 +36,7 @@ ACTIVE_HORIZON_NS = 120_000_000_000
 MAX_BRIDGE_GENERATIONS = 3
 
 
-class Stage7TimeBridgeError(ValueError):
+class TimeBridgeError(ValueError):
     """수치 계약 위반 (§13)."""
 
 
@@ -44,7 +44,7 @@ def rne(numerator: int, denominator: int) -> int:
     """signed rational `p/q`의 nearest-even 반올림 (§13.2)."""
 
     if denominator == 0:
-        raise Stage7TimeBridgeError("분모가 0입니다")
+        raise TimeBridgeError("분모가 0입니다")
     if denominator < 0:
         numerator, denominator = -numerator, -denominator
     quotient, remainder = divmod(numerator, denominator)
@@ -66,13 +66,13 @@ def ceil_pos(value: Fraction) -> int:
     """양의 rational 올림 (§13.2)."""
 
     if value < 0:
-        raise Stage7TimeBridgeError("ceil_pos 입력은 음수가 아니어야 합니다")
+        raise TimeBridgeError("ceil_pos 입력은 음수가 아니어야 합니다")
     return -((-value.numerator) // value.denominator)
 
 
 def _reduced(numerator: int, denominator: int) -> tuple[int, int]:
     if denominator == 0:
-        raise Stage7TimeBridgeError("분모가 0입니다")
+        raise TimeBridgeError("분모가 0입니다")
     if denominator < 0:
         numerator, denominator = -numerator, -denominator
     common = gcd(abs(numerator), denominator)
@@ -92,7 +92,7 @@ class BracketObservation:
 
     def __post_init__(self) -> None:
         if self.m_after_ns < self.m_before_ns:
-            raise Stage7TimeBridgeError("bracket 순서가 역행합니다")
+            raise TimeBridgeError("bracket 순서가 역행합니다")
 
     @property
     def u_sample_ns(self) -> int:
@@ -179,20 +179,20 @@ class AffineFitResult:
 
 
 def fit_affine(observations) -> AffineFitResult:
-    """§13.2 정수 nanosecond OLS. 실패는 `Stage7TimeBridgeError`다."""
+    """§13.2 정수 nanosecond OLS. 실패는 `TimeBridgeError`다."""
 
     observations = tuple(observations)
     if len(observations) < MIN_OBSERVATIONS:
-        raise Stage7TimeBridgeError("최소 8 observation이 필요합니다")
+        raise TimeBridgeError("최소 8 observation이 필요합니다")
     for observation in observations:
         if observation.u_sample_ns > MAX_BRACKET_NS:
-            raise Stage7TimeBridgeError("bracket 폭이 2,000,000 ns를 넘습니다")
+            raise TimeBridgeError("bracket 폭이 2,000,000 ns를 넘습니다")
     hardware = [observation.hardware_ns for observation in observations]
     if any(b <= a for a, b in zip(hardware, hardware[1:])):
-        raise Stage7TimeBridgeError("hardware time이 단조 증가하지 않습니다")
+        raise TimeBridgeError("hardware time이 단조 증가하지 않습니다")
     span = observations[-1].m_sample_ns - observations[0].m_sample_ns
     if span < MIN_SPAN_NS:
-        raise Stage7TimeBridgeError("측정 span이 2초 미만입니다")
+        raise TimeBridgeError("측정 span이 2초 미만입니다")
 
     h0 = observations[0].hardware_ns
     m0 = observations[0].m_sample_ns
@@ -206,7 +206,7 @@ def fit_affine(observations) -> AffineFitResult:
     beta_num = count * sum_xy - sum_x * sum_y
     beta_den = count * sum_xx - sum_x * sum_x
     if beta_den <= 0 or beta_num <= 0:
-        raise Stage7TimeBridgeError("OLS 기울기가 양수가 아닙니다")
+        raise TimeBridgeError("OLS 기울기가 양수가 아닙니다")
     alpha_num = sum_y * beta_den - beta_num * sum_x
     alpha_den = count * beta_den
     beta_num, beta_den = _reduced(beta_num, beta_den)
@@ -237,13 +237,13 @@ def fit_affine(observations) -> AffineFitResult:
         residual = observation.m_sample_ns - predicted
         residuals.append(residual)
         if abs(residual) > observation.u_mid_ns:
-            raise Stage7TimeBridgeError(
+            raise TimeBridgeError(
                 "observation residual이 u_mid envelope를 벗어났습니다"
             )
     if u_beta_ppm > U_BETA_LIMIT_PPM:
-        raise Stage7TimeBridgeError("slope 불확도 u_beta가 1 ppm을 넘습니다")
+        raise TimeBridgeError("slope 불확도 u_beta가 1 ppm을 넘습니다")
     if abs(Fraction(d_ppm_num, d_ppm_den)) > ABSOLUTE_RATE_LIMIT_PPM:
-        raise Stage7TimeBridgeError("절대 비율 편차 |d|가 25 ppm을 넘습니다")
+        raise TimeBridgeError("절대 비율 편차 |d|가 25 ppm을 넘습니다")
 
     return AffineFitResult(
         coefficients=coefficients,
@@ -272,7 +272,7 @@ def verify_round_trip(
         hardware = coefficients.inverse_corrected(m_ns, c_num, c_den)
         back = coefficients.forward_corrected(hardware, c_num, c_den)
         if abs(back - m_ns) > ROUND_TRIP_LIMIT_NS:
-            raise Stage7TimeBridgeError(
+            raise TimeBridgeError(
                 f"round-trip 오차가 1 ns를 넘습니다 ({back - m_ns} ns)"
             )
 
@@ -298,17 +298,17 @@ def select_utc_anchor(brackets) -> HostUtcAnchor:
 
     brackets = tuple(brackets)
     if len(brackets) != 8:
-        raise Stage7TimeBridgeError("UTC anchor bracket은 정확히 8회 측정해야 합니다")
+        raise TimeBridgeError("UTC anchor bracket은 정확히 8회 측정해야 합니다")
     best = None
     for raw_before, utc_sample, raw_after in brackets:
         if raw_after < raw_before:
-            raise Stage7TimeBridgeError("UTC anchor bracket이 역행합니다")
+            raise TimeBridgeError("UTC anchor bracket이 역행합니다")
         width = raw_after - raw_before
         if best is None or width < best[0]:
             best = (width, raw_before, utc_sample, raw_after)
     width, raw_before, utc_sample, raw_after = best
     if width > UTC_ANCHOR_MAX_BRACKET_NS:
-        raise Stage7TimeBridgeError("UTC anchor bracket 폭이 2 ms를 넘습니다")
+        raise TimeBridgeError("UTC anchor bracket 폭이 2 ms를 넘습니다")
     return HostUtcAnchor(
         host_raw_anchor_ns=rne(raw_before + raw_after, 2),
         host_utc_anchor_ns=utc_sample,
@@ -324,7 +324,7 @@ def median_even_fraction(sorted_values) -> Fraction:
 
     values = tuple(sorted_values)
     if not values:
-        raise Stage7TimeBridgeError("빈 입력의 median은 정의되지 않습니다")
+        raise TimeBridgeError("빈 입력의 median은 정의되지 않습니다")
     count = len(values)
     if count % 2 == 1:
         return Fraction(values[count // 2])
@@ -340,7 +340,7 @@ def directed_path_median(d_values_ns) -> Fraction:
 
     values = sorted(d_values_ns)
     if len(values) not in (9, 10):
-        raise Stage7TimeBridgeError("D_ij에는 9 또는 10개 d_k가 필요합니다")
+        raise TimeBridgeError("D_ij에는 9 또는 10개 d_k가 필요합니다")
     count = len(values)
     if count % 2 == 1:
         return Fraction(values[count // 2])
@@ -353,7 +353,7 @@ def rf_drift_envelope_ppm(
     """`B_rf_ppm = ceil_pos((max-min+2*q_rx)*1e6/span)` (rational 반환 전 ceil)."""
 
     if scheduled_span_ns <= 0:
-        raise Stage7TimeBridgeError("scheduled span이 양수가 아닙니다")
+        raise TimeBridgeError("scheduled span이 양수가 아닙니다")
     q_rx = -((-500_000_000) // phy_sample_rate_hz)  # ceil
     spread = max(d_values_ns) - min(d_values_ns)
     return Fraction(
@@ -406,7 +406,7 @@ __all__ = (
     "PairwiseOffsets",
     "RF_SPREAD_LIMIT_NS",
     "RF_WARNING_NS",
-    "Stage7TimeBridgeError",
+    "TimeBridgeError",
     "TRIANGLE_CLOSURE_LIMIT_NS",
     "ceil_pos",
     "corrections_from_roc",

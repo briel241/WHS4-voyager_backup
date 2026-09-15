@@ -239,7 +239,7 @@ def test_endpoint_launcher_loads_standalone_identity():
     from apps.standalone import identity as identity_module
 
     launcher_path = (Path(_REPO) / "VDETER" / "apps"
-                     / "stage7_endpoint_launcher.py")
+                     / "endpoint_launcher.py")
     spec = importlib.util.spec_from_file_location(
         "stage7_endpoint_launcher_for_test", launcher_path)
     launcher = importlib.util.module_from_spec(spec)

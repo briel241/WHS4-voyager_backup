@@ -37,7 +37,7 @@ def test_closure_includes_runtime_package_init():
 
 def test_orchestration_layer_is_a_boundary_not_a_silent_drop():
     _, boundary = issue.strict_file_list()
-    assert "apps/stage7_trace.py" in boundary
+    assert "apps/service_trace.py" in boundary
     paths, _ = issue.strict_file_list()
     assert not [p for p in paths if p.startswith("apps/")], \
         "orchestration 계층은 결속하지 않는다"

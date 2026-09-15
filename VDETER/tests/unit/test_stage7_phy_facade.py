@@ -20,11 +20,11 @@ from vdeter.phy.burst.rrc import to_cf32le
 from vdeter.phy.multilink import MultiRatePhy
 from vdeter.profiles.link_phy import build_combined_phy_profile_registry
 from vdeter.b210_system.phy_facade import (
-    Stage7DiagnosticPhyFacade,
-    Stage7LaneRxIngress,
-    Stage7PhyDiagnosticSink,
+    DiagnosticPhyFacade,
+    LaneRxIngress,
+    PhyDiagnosticSink,
 )
-from vdeter.b210_system.routing import Stage7RouteSidecar
+from vdeter.b210_system.routing import RouteSidecar
 
 UPPER = PhysicalChannel("VDETER_UPPER_100_TEST")
 UTC = TimePoint(1_700_000_000, 0, ClockDomain.UTC, "stage7-facade-utc")
@@ -75,7 +75,7 @@ def _decode_request() -> PhyDecodeRequest:
 
 
 def _sink(lane_index=0):
-    sink = Stage7PhyDiagnosticSink(lane_index=lane_index, lane_generation=0)
+    sink = PhyDiagnosticSink(lane_index=lane_index, lane_generation=0)
     key = ("VDETER_UPPER_100_TEST", "clock", 0, 26_666_666)
     sink.begin_window(key, 1, 5_000_000_000)
     return sink
@@ -85,7 +85,7 @@ class TC_STAGE7_FACADE_EQUIVALENCE(unittest.TestCase):
     def test_frozen_and_facade_results_exact_equal(self):
         registry = _registry()
         frozen = MultiRatePhy(registry, _StaticTime(), DeterministicIdSource(0xF0))
-        facade = Stage7DiagnosticPhyFacade(
+        facade = DiagnosticPhyFacade(
             registry,
             _StaticTime(),
             DeterministicIdSource(0xF0),
@@ -111,8 +111,8 @@ class TC_STAGE7_FACADE_EQUIVALENCE(unittest.TestCase):
 
     def test_unbound_window_refuses_recovery(self):
         registry = _registry()
-        sink = Stage7PhyDiagnosticSink(lane_index=0, lane_generation=0)
-        facade = Stage7DiagnosticPhyFacade(
+        sink = PhyDiagnosticSink(lane_index=0, lane_generation=0)
+        facade = DiagnosticPhyFacade(
             registry, _StaticTime(), DeterministicIdSource(0xF1), diagnostic_sink=sink
         )
         result = facade.decode_samples(_decode_request())
@@ -122,10 +122,10 @@ class TC_STAGE7_FACADE_EQUIVALENCE(unittest.TestCase):
 
     def test_two_lane_interleave_isolated(self):
         registry = _registry()
-        lane0 = Stage7DiagnosticPhyFacade(
+        lane0 = DiagnosticPhyFacade(
             registry, _StaticTime(), DeterministicIdSource(0xA0), diagnostic_sink=_sink(0)
         )
-        lane1 = Stage7DiagnosticPhyFacade(
+        lane1 = DiagnosticPhyFacade(
             registry, _StaticTime(), DeterministicIdSource(0xA1), diagnostic_sink=_sink(1)
         )
         first = lane0.decode_samples(_decode_request())
@@ -144,7 +144,7 @@ class TC_STAGE7_FACADE_EQUIVALENCE(unittest.TestCase):
 
     def test_tx_encode_does_not_touch_rx_streams(self):
         registry = _registry()
-        facade = Stage7DiagnosticPhyFacade(
+        facade = DiagnosticPhyFacade(
             registry, _StaticTime(), DeterministicIdSource(0xB0), diagnostic_sink=_sink()
         )
         ids = DeterministicIdSource(0xB1)
@@ -163,8 +163,8 @@ class TC_STAGE7_FACADE_EQUIVALENCE(unittest.TestCase):
 
     def test_tx_route_lookup_enforced_with_sidecar(self):
         registry = _registry()
-        sidecar = Stage7RouteSidecar()
-        facade = Stage7DiagnosticPhyFacade(
+        sidecar = RouteSidecar()
+        facade = DiagnosticPhyFacade(
             registry,
             _StaticTime(),
             DeterministicIdSource(0xB2),
@@ -228,7 +228,7 @@ def _received(count, hw_point):
 
 
 def _ingress():
-    return Stage7LaneRxIngress(
+    return LaneRxIngress(
         run_id="run-1",
         endpoint_id="MASS-A",
         b210_serial="34D03DD",

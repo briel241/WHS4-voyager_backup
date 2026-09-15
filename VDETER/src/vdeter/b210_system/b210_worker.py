@@ -88,7 +88,7 @@ class _ServiceRxWindowAssembler(_RxWindowAssembler):
 LANE_COUNT = 2
 
 
-class Stage7DualLaneFlowgraphBackend:
+class DualLaneFlowgraphBackend:
     """한 B210의 device channel 0/1을 함께 소유하는 programmatic gr-uhd flowgraph.
 
     구조는 frozen `GrUhdFlowgraphBackend`와 같은 one-top-block 패턴이되
@@ -974,20 +974,20 @@ class Stage7DualLaneFlowgraphBackend:
         )
 
 
-class Stage7IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
+class IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
     """frozen process 격리 proxy의 additive dual-lane 확장.
 
     frozen `_rpc` 기반으로 lane-aware method만 추가한다. spawn된 child process가
-    `Stage7DualLaneFlowgraphBackend` 하나를 단독 소유한다.
+    `DualLaneFlowgraphBackend` 하나를 단독 소유한다.
     """
 
     def __init__(self, device_selector: str, cpu_format: str, otw_format: str, **kwargs) -> None:
-        kwargs.setdefault("_backend_type", Stage7DualLaneFlowgraphBackend)
+        kwargs.setdefault("_backend_type", DualLaneFlowgraphBackend)
         super().__init__(device_selector, cpu_format, otw_format, **kwargs)
 
     @staticmethod
     def discover(device_selector: str) -> tuple[str, ...]:
-        return Stage7DualLaneFlowgraphBackend.discover(device_selector)
+        return DualLaneFlowgraphBackend.discover(device_selector)
 
     def configure_dual(self, plan: dict) -> dict:
         return self._rpc(
@@ -1069,6 +1069,6 @@ class Stage7IsolatedDualLaneWorker(ProcessIsolatedGrUhdBackend):
 
 __all__ = (
     "LANE_COUNT",
-    "Stage7DualLaneFlowgraphBackend",
-    "Stage7IsolatedDualLaneWorker",
+    "DualLaneFlowgraphBackend",
+    "IsolatedDualLaneWorker",
 )

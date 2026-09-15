@@ -4,13 +4,13 @@ import unittest
 import uuid
 
 from vdeter.b210_system.coordinator import (
-    Stage7BarrierFailure,
-    Stage7ResolvedSystemPlan,
-    Stage7RuntimeCoordinator,
+    BarrierFailure,
+    ResolvedSystemPlan,
+    RuntimeCoordinator,
 )
 from vdeter.b210_system.ipc import ENDPOINT_IDS, body_sha256_of
-from vdeter.b210_system.records import Stage7TbbActiveRecord
-from vdeter.b210_system.runtime_client import Stage7EndpointRuntimeClient
+from vdeter.b210_system.records import TbbActiveRecord
+from vdeter.b210_system.runtime_client import EndpointRuntimeClient
 
 RUN_ID = "stage7-flow-run"
 
@@ -153,7 +153,7 @@ class _Channel:
 
 
 def _plan():
-    return Stage7ResolvedSystemPlan(
+    return ResolvedSystemPlan(
         profile="STAGE7_PI5_THREE_ENDPOINT_V1",
         socket_root="/run/user/<uid>/vdeter-stage7/runtime",
         member_count=3,
@@ -176,7 +176,7 @@ def _build_group(clock):
     channels = {}
     for endpoint_id in ENDPOINT_IDS:
         endpoint = _FakeGateEndpoint(endpoint_id)
-        client = Stage7EndpointRuntimeClient(
+        client = EndpointRuntimeClient(
             endpoint_id=endpoint_id,
             run_id=RUN_ID,
             plan_sha256="4" * 64,
@@ -191,7 +191,7 @@ def _build_group(clock):
         clients[endpoint_id] = client
         endpoints[endpoint_id] = endpoint
         channels[endpoint_id] = channel
-    coordinator = Stage7RuntimeCoordinator(
+    coordinator = RuntimeCoordinator(
         _plan(), channels, host_raw_clock=clock, run_id=RUN_ID, lifecycle_generation=1
     )
     coordinator_ref[0] = coordinator
@@ -253,7 +253,7 @@ class TC_STAGE7_COORDINATOR_FLOW(unittest.TestCase):
             self.assertEqual(clients[endpoint_id].state, "SERVICE_ADMISSION_READY")
         # intent events (모든 required member).
         self.assertFalse(coordinator.required_intents_complete())
-        with self.assertRaises(Stage7BarrierFailure):
+        with self.assertRaises(BarrierFailure):
             coordinator.commit_service_start()
         for endpoint_id, client in clients.items():
             digest = uuid.uuid5(uuid.NAMESPACE_URL, endpoint_id).hex + "0" * 32
@@ -281,7 +281,7 @@ class TC_STAGE7_COORDINATOR_FLOW(unittest.TestCase):
             self.assertTrue(endpoints[endpoint_id].staged)
         # TBB active events.
         for endpoint_id, client in clients.items():
-            record = Stage7TbbActiveRecord(
+            record = TbbActiveRecord(
                 endpoint_id=endpoint_id,
                 readiness_kind="ROC_BROADCAST_READY"
                 if endpoint_id == "ROC"
@@ -397,7 +397,7 @@ class TC_STAGE7_COORDINATOR_FLOW(unittest.TestCase):
             "p1_member_plan_relpath": None,
             "p1_member_plan_sha256": None,
         }
-        with self.assertRaises(Stage7BarrierFailure):
+        with self.assertRaises(BarrierFailure):
             coordinator.run_barrier(
                 "prepare", {m: dict(prepare_body) for m in ENDPOINT_IDS}
             )

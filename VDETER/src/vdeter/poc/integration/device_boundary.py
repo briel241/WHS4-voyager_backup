@@ -1,7 +1,7 @@
 """RF 장비 경계 adapter (production 연결 + RF-off software double).
 
 Stage 5 provider의 `RadioBurstSink` seam(§6.1: prepare_group -> commit_group의 atomic 2단계)을
-**실제 Stage 7 b210_worker의 group TX 계약**에 맞춘다. 실 worker interface(=`Stage7IsolatedDualLaneWorker`
+**실제 Stage 7 b210_worker의 group TX 계약**에 맞춘다. 실 worker interface(=`IsolatedDualLaneWorker`
 / `Stage7FakeMediumWorker`)는 다음이다:
 
     retune_tx_lo(target_hz, command_time_ns)     # 한 worker의 TX LO를 command time에 재조정

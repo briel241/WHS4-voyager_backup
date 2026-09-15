@@ -21,7 +21,7 @@ from vdeter.b210_system.cfo import (
     BLOCKS_PER_BURST,
     PROBE_AMPLITUDE,
     PROBE_SAMPLES,
-    Stage7CfoError,
+    CfoError,
     estimate_burst,
     fit_path,
     generate_probe_vector,
@@ -74,7 +74,7 @@ class TC_STAGE7_CFO_ESTIMATOR(unittest.TestCase):
         for block in range(11):
             offset = block * BLOCK_SAMPLES * 8
             struct.pack_into("<2f", burst, offset, 1.5, 0.0)
-        with self.assertRaises(Stage7CfoError):
+        with self.assertRaises(CfoError):
             estimate_burst(bytes(burst))
 
     def test_boundary_90_valid_blocks(self):
@@ -87,7 +87,7 @@ class TC_STAGE7_CFO_ESTIMATOR(unittest.TestCase):
 
     def test_low_amplitude_rms_gate(self):
         # RMS -36 dBFS 미만은 invalid → 전 block invalid → 실패.
-        with self.assertRaises(Stage7CfoError):
+        with self.assertRaises(CfoError):
             estimate_burst(_tone_burst(0.0, amplitude=0.001))
 
 
@@ -131,7 +131,7 @@ class TC_STAGE7_CFO_FIT(unittest.TestCase):
             BurstEstimate(f_k_hz=0.0, u_k_hz=10.0, valid_block_count=100, block_estimates=())
             for _ in t_values
         ]
-        with self.assertRaises(Stage7CfoError):
+        with self.assertRaises(CfoError):
             fit_path(estimates, t_values, 120.0)
 
 

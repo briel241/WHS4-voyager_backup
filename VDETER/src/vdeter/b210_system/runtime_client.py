@@ -14,11 +14,11 @@ from __future__ import annotations
 import uuid as _uuid
 
 from .canonical_json import encode_canonical_json, sha256_hex
-from .errors import Stage7PrivateErrorCode
+from .errors import PrivateErrorCode
 from .ipc import (
     ACTIVE_BRIDGE_COMMANDS,
     RUNTIME_PROTOCOL,
-    Stage7IpcError,
+    IpcError,
     body_sha256_of,
     validate_runtime_command,
 )
@@ -40,7 +40,7 @@ _COMMIT_TRANSITIONS = {
 }
 
 
-class Stage7EndpointRuntimeClient:
+class EndpointRuntimeClient:
     """한 endpoint process의 Runtime IPC handler."""
 
     __slots__ = (
@@ -108,7 +108,7 @@ class Stage7EndpointRuntimeClient:
         message["body_sha256"] = body_sha256_of(body)
         return message
 
-    def _reject(self, command, *, private_code=Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID):
+    def _reject(self, command, *, private_code=PrivateErrorCode.CONTROL_MESSAGE_INVALID):
         return self._response(command, "REJECTED", private_code=private_code)
 
     def stale_rejections(self) -> tuple:
@@ -173,7 +173,7 @@ class Stage7EndpointRuntimeClient:
         # 1. JSON/schema.
         try:
             validate_runtime_command(message)
-        except Stage7IpcError:
+        except IpcError:
             return self._reject_shell(message)
         # 2. run/plan/current generation.
         if (
@@ -212,7 +212,7 @@ class Stage7EndpointRuntimeClient:
             return response
         if self._inhibited and message["command_name"] not in ("status", "emergency_inhibit", "stop"):
             response = self._reject(
-                message, private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED
+                message, private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED
             )
             self._replay[command_id] = (exact, response)
             return response
@@ -238,7 +238,7 @@ class Stage7EndpointRuntimeClient:
                 except Exception:  # noqa: BLE001
                     pass
                 response = self._reject(
-                    message, private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED
+                    message, private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED
                 )
         self._replay[command_id] = (exact, response)
         self._record_outcome(message, response)
@@ -273,7 +273,7 @@ class Stage7EndpointRuntimeClient:
             "endpoint_state": self.state,
             "lifecycle_generation": self.lifecycle_generation,
             "bridge_generation": self.bridge_generation,
-            "private_code": Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID.value,
+            "private_code": PrivateErrorCode.CONTROL_MESSAGE_INVALID.value,
             "result_sha256": None,
             "result": None,
         }
@@ -393,7 +393,7 @@ class Stage7EndpointRuntimeClient:
                 self.state = "TX_INHIBITED"
                 return self._reject(
                     message,
-                    private_code=Stage7PrivateErrorCode.RF_GAIN_CALIBRATION_FAILED,
+                    private_code=PrivateErrorCode.RF_GAIN_CALIBRATION_FAILED,
                 )
             self.state = (
                 "RF_GAIN_SEALED" if searching else "RF_GAIN_REVALIDATED"
@@ -608,4 +608,4 @@ class Stage7EndpointRuntimeClient:
         return self._response(message, "COMPLETED")
 
 
-__all__ = ("Stage7EndpointRuntimeClient",)
+__all__ = ("EndpointRuntimeClient",)

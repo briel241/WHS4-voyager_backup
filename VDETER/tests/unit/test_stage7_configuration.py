@@ -10,8 +10,8 @@ import unittest
 from vdeter.common.errors import ErrorCode
 from vdeter.config.loader import load_configuration
 from vdeter.b210_system.configuration import (
-    Stage7ConfigurationLoader,
-    Stage7OperationalGainInput,
+    ConfigurationLoader,
+    OperationalGainInput,
     load_data_profile,
 )
 
@@ -235,7 +235,7 @@ class TC_STAGE7_DATA_PROFILE(unittest.TestCase):
 
 class TC_STAGE7_LOADER_POSITIVE(unittest.TestCase):
     def setUp(self):
-        self.loader = Stage7ConfigurationLoader()
+        self.loader = ConfigurationLoader()
 
     def _load(self, text, data_profile=DATA_PROFILE_17, **kwargs):
         return self.loader.load_endpoint_configuration(
@@ -289,7 +289,7 @@ class TC_STAGE7_LOADER_POSITIVE(unittest.TestCase):
         self.assertEqual(result.value.b210_serial, "3515425")
 
     def test_operational_binds_gain_artifact(self):
-        gain = Stage7OperationalGainInput(
+        gain = OperationalGainInput(
             endpoint_common_rx_gain_db=9,
             source_gain_artifact_sha256=TEST_MANIFEST_SHA,
         )
@@ -431,7 +431,7 @@ trust_store_ref = "configs/stage7/trust/tbb_trust_store.pem"
 
 class TC_STAGE7_LOADER_NEGATIVE(unittest.TestCase):
     def setUp(self):
-        self.loader = Stage7ConfigurationLoader()
+        self.loader = ConfigurationLoader()
 
     def _expect_error(self, text, *codes, data_profile=DATA_PROFILE_17, **kwargs):
         result = self.loader.load_endpoint_configuration(
@@ -518,7 +518,7 @@ class TC_STAGE7_LOADER_NEGATIVE(unittest.TestCase):
         )
 
     def test_rf_off_with_gain_artifact_rejected(self):
-        gain = Stage7OperationalGainInput(
+        gain = OperationalGainInput(
             endpoint_common_rx_gain_db=3,
             source_gain_artifact_sha256=TEST_MANIFEST_SHA,
         )
@@ -641,7 +641,7 @@ class TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB(unittest.TestCase):
     endpoint. Both rule sets come from vdeter.b210_system.host_profiles."""
 
     def setUp(self):
-        self.loader = Stage7ConfigurationLoader()
+        self.loader = ConfigurationLoader()
 
     def _load(self, text):
         return self.loader.load_endpoint_configuration(
@@ -655,9 +655,9 @@ class TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB(unittest.TestCase):
 
     def test_profiles_and_transports_come_from_single_definition(self):
         from vdeter.b210_system import configuration, host_profiles
-        self.assertEqual(configuration.STAGE7_HOST_PROFILES, host_profiles.HOST_PROFILES)
-        self.assertEqual(configuration.STAGE7_HOST_PROFILE, host_profiles.LEGACY_PI_PROFILE)
-        self.assertEqual(configuration.STAGE7_HOST_PROFILE_PI_POWERED_HUB,
+        self.assertEqual(configuration.HOST_PROFILE_TABLE, host_profiles.HOST_PROFILES)
+        self.assertEqual(configuration.HOST_PROFILE, host_profiles.LEGACY_PI_PROFILE)
+        self.assertEqual(configuration.HOST_PROFILE_PI_POWERED_HUB,
                          host_profiles.PI_POWERED_HUB_PROFILE)
         self.assertEqual(configuration.USB_TRANSPORTS, host_profiles.USB_TRANSPORTS)
         self.assertEqual(configuration.USB_TRANSPORTS[:2],

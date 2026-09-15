@@ -28,9 +28,9 @@ from common.textout import ensure_utf8_output
 ensure_utf8_output()
 
 import apps.scenario_runner as runner
-import apps.stage7_profile as stage7_profile
-import apps.stage7_run as stage7_run
-import apps.stage7_service_layer as service_layer
+import apps.run_profile as run_profile
+import apps.service_run as service_run
+import apps.service_layer as service_layer
 from stage7_binding_fixtures import legacy_phase_i_pins
 
 #: Phase G reference의 **tracked fixture** (phase-g-formal-20260902b 사본 —
@@ -76,11 +76,11 @@ def _load_profile_copy(tmp: str, *, mutate=None) -> str:
 # ---------------------------------------------------------------- profile 검증
 
 def test_profile_and_reference_load():
-    profile = stage7_profile.load_profile(_profile_path())
-    checks = stage7_profile.validate_local_bindings(profile)
+    profile = run_profile.load_profile(_profile_path())
+    checks = run_profile.validate_local_bindings(profile)
     assert checks["reference_sha256"]["pass"]
     assert profile["_reference"]["qualification"]["run_id"]
-    lines = stage7_profile.summary_lines(profile)
+    lines = run_profile.summary_lines(profile)
     assert any("qualification run" in line for line in lines)
     # 비밀정보가 요약에 새지 않는다.
     joined = "\n".join(lines)
@@ -96,9 +96,9 @@ def test_tampered_reference_rejected_before_device_access():
             return profile, json.dumps(data).encode("utf-8"), sidecar
         path = _load_profile_copy(tmp, mutate=mutate)
         try:
-            stage7_profile.load_profile(path)
+            run_profile.load_profile(path)
             raise AssertionError("변조된 reference가 통과했다")
-        except stage7_profile.ProfileError as exc:
+        except run_profile.ProfileError as exc:
             assert "sidecar" in str(exc) or "SHA" in str(exc)
 
 
@@ -108,9 +108,9 @@ def test_tampered_sidecar_rejected():
             return profile, reference_raw, "0" * 64 + "  qualification-reference.json\n"
         path = _load_profile_copy(tmp, mutate=mutate)
         try:
-            stage7_profile.load_profile(path)
+            run_profile.load_profile(path)
             raise AssertionError("변조된 sidecar가 통과했다")
-        except stage7_profile.ProfileError:
+        except run_profile.ProfileError:
             pass
 
 
@@ -121,9 +121,9 @@ def test_profile_reference_sha_mismatch_rejected():
             return profile, reference_raw, sidecar
         path = _load_profile_copy(tmp, mutate=mutate)
         try:
-            stage7_profile.load_profile(path)
+            run_profile.load_profile(path)
             raise AssertionError("profile↔reference SHA 불일치가 통과했다")
-        except stage7_profile.ProfileError as exc:
+        except run_profile.ProfileError as exc:
             assert "reference SHA" in str(exc)
 
 
@@ -137,11 +137,11 @@ def test_gain_artifact_mismatch_rejected():
             profile["gain"]["artifact_path"] = fake_gain
             return profile, reference_raw, sidecar
         path = _load_profile_copy(tmp, mutate=mutate)
-        profile = stage7_profile.load_profile(path)
+        profile = run_profile.load_profile(path)
         try:
-            stage7_profile.validate_local_bindings(profile)
+            run_profile.validate_local_bindings(profile)
             raise AssertionError("gain artifact 불일치가 통과했다")
-        except stage7_profile.ProfileError as exc:
+        except run_profile.ProfileError as exc:
             assert "gain artifact" in str(exc)
 
 
@@ -150,11 +150,11 @@ def test_missing_gain_artifact_rejected():
         def mutate(profile, reference_raw, sidecar):
             profile["gain"]["artifact_path"] = os.path.join(tmp, "없음.json")
             return profile, reference_raw, sidecar
-        profile = stage7_profile.load_profile(_load_profile_copy(tmp, mutate=mutate))
+        profile = run_profile.load_profile(_load_profile_copy(tmp, mutate=mutate))
         try:
-            stage7_profile.validate_local_bindings(profile)
+            run_profile.validate_local_bindings(profile)
             raise AssertionError("없는 gain artifact가 통과했다")
-        except stage7_profile.ProfileError as exc:
+        except run_profile.ProfileError as exc:
             assert "missing" in str(exc)
 
 
@@ -165,9 +165,9 @@ def test_profile_rejects_secret_markers():
             return profile, reference_raw, sidecar
         path = _load_profile_copy(tmp, mutate=mutate)
         try:
-            stage7_profile.load_profile(path)
+            run_profile.load_profile(path)
             raise AssertionError("개인키 해시 필드가 통과했다")
-        except stage7_profile.ProfileError as exc:
+        except run_profile.ProfileError as exc:
             assert "secret marker" in str(exc)
 
 
@@ -181,7 +181,7 @@ class _FakeCompleted:
 
 
 def test_critical_mismatch_blocks_before_device_access():
-    profile = stage7_profile.load_profile(_profile_path())
+    profile = run_profile.load_profile(_profile_path())
     calls = []
 
     def fake_runner(command, **kwargs):
@@ -203,7 +203,7 @@ def test_critical_mismatch_blocks_before_device_access():
 
 
 def test_topology_and_trust_gates():
-    profile = stage7_profile.load_profile(_profile_path())
+    profile = run_profile.load_profile(_profile_path())
     critical = profile["_reference"]["qualification_critical_manifest"]["strict_files"]
     bound_specs = (profile["_reference"]["qualification_critical_manifest"]
                    .get("function_bound_files") or {})
@@ -315,7 +315,7 @@ class _FakeSession:
 
     def run_workload(self, scenario_id, certificate_case="normal"):
         if self.status != "READY":
-            from apps.stage7_service_layer import ServiceSessionError
+            from apps.service_layer import ServiceSessionError
             raise ServiceSessionError(f"session이 READY가 아닙니다: {self.status}")
         self._counter += 1
         self.calls.append((scenario_id, certificate_case))
@@ -334,7 +334,7 @@ class _FakeSession:
         return result
 
     def close(self):
-        # 실제 Stage7ServiceSession.close()와 같은 계약: closed 결과로 상태를
+        # 실제 ServiceSession.close()와 같은 계약: closed 결과로 상태를
         # 갱신한다(quiescence 실패는 유지).
         self.close_count += 1
         self.closed = {"status": "PASS", "cleanup": {"pass": True}}
@@ -351,7 +351,7 @@ def _drive_menu(inputs, session, extra_args=()):
     """대화형 메뉴를 가짜 입력으로 구동한다. 실제 session 생성은 mock한다."""
     import builtins
 
-    import apps.stage7_run as run_module
+    import apps.service_run as run_module
 
     original_input = builtins.input
     original_open = run_module.open_service_session
@@ -475,9 +475,9 @@ def test_menu_verbose_and_diagnostics_flags_reach_session():
 
 def test_legacy_run_all_stage7_contract_unchanged():
     """기존 공유 session 경로는 그대로 남아 있고 계약이 바뀌지 않았다."""
-    assert callable(stage7_run.run_stage7)
+    assert callable(service_run.run_service_session)
     import inspect
-    parameters = inspect.signature(stage7_run.run_stage7).parameters
+    parameters = inspect.signature(service_run.run_service_session).parameters
     for name in ("scenario_id", "run_id", "configs_dir", "certificate_case",
                  "results_dir", "spawn", "timeout_s"):
         assert name in parameters, name
@@ -486,7 +486,7 @@ def test_legacy_run_all_stage7_contract_unchanged():
 
 
 def test_no_direct_or_software_fallback_in_service_layer():
-    source = open(os.path.join(_REPO, "apps", "stage7_service_layer.py"),
+    source = open(os.path.join(_REPO, "apps", "service_layer.py"),
                   encoding="utf-8").read()
     assert "DirectTransport" not in source
     assert "SoftwareRadioTransport" not in source
@@ -503,7 +503,7 @@ if __name__ == "__main__":
 
 def test_coordinator_script_does_not_conflict_with_workload_gate():
     """service phase 명령은 rr-p2 전용 --workload 게이트와 충돌하지 않는다."""
-    profile = stage7_profile.load_profile(_profile_path())
+    profile = run_profile.load_profile(_profile_path())
     script = service_layer.build_coordinator_script(
         profile, "svc-test", "SC-VDE-005", "normal")
     assert "--phase mass-roc-service" in script

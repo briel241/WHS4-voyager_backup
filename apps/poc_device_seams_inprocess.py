@@ -77,7 +77,7 @@ _TX_LEAD_NS = 100_000_000
 _RETUNE_LEAD_NS = 200_000_000
 
 
-def stage7_channel_name(stage8_channel) -> str:
+def channel_name(stage8_channel) -> str:
     """Stage 8 `PhysicalChannel`(lower/upper enum) → 권위 Stage 7 canonical 채널 **이름**.
 
     두 계층은 이름이 같지만 서로 다른 형식이다(Stage 8은 lower/upper enum, Stage 7은 canonical 채널
@@ -163,7 +163,7 @@ class Link11WaveformFactory:
                        cf32le_bytes=device_bytes)
 
 
-class Stage7HwTimeScheduler(NextSafeSlotScheduler):
+class HwTimeScheduler(NextSafeSlotScheduler):
     """scheduler seam → 실 device slot grid·실 hardware clock·권위 lead에 결속(P03).
 
     기반 `NextSafeSlotScheduler`는 스스로 "RF-off stub — hardware timestamp를 sample 좌표와 같은
@@ -241,7 +241,7 @@ class Stage7HwTimeScheduler(NextSafeSlotScheduler):
 def worker_tx_muted(worker) -> tuple:
     """실 worker의 TX lane mute 상태를 읽는다(P04).
 
-    권위 구현 `Stage7IsolatedDualLaneWorker`는 `_tx_muted`(lane별 list, `set_tx_mute`가 갱신)를 쓴다.
+    권위 구현 `IsolatedDualLaneWorker`는 `_tx_muted`(lane별 list, `set_tx_mute`가 갱신)를 쓴다.
     signature 호환 software double은 같은 의미의 `tx_muted`를 노출한다. 둘 다 없으면 상태를 **모른다**는
     뜻이므로 빈 tuple이 아니라 `None`을 돌려 호출자가 보수적으로 판단하게 한다(모름을 "해제"로 만들지 않음).
     """
@@ -257,7 +257,7 @@ def worker_tx_muted(worker) -> tuple:
     return None
 
 
-class Stage7WorkerArbiter:
+class WorkerArbiter:
     """arbiter seam → 실 TX 소유권 경계(정상 TX 우선·lane 겹침 거부)에 결속(P04).
 
     `reserve(resource_key, owner)`가 확인하는 것:
@@ -300,7 +300,7 @@ class Stage7WorkerArbiter:
         return frozenset(self._held)
 
 
-class Stage7ReceiverReadiness:
+class ReceiverReadiness:
     """rx_readiness seam → **실제 수신창 계획·수락 상태**에 근거한 readiness(P06).
 
     `window_ready(request) -> ReadinessDecision`. 이전 구현은 `rx_lo_hz` 일치만 봤다. 이제 실 수신기의
@@ -335,7 +335,7 @@ class Stage7ReceiverReadiness:
             return tuple(sorted(lane for lane, center in lane_centers.items()
                                 if abs(center - expected_center_hz) <= 1))
         center = getattr(worker, "rx_lo_hz", None)
-        # Same ±1 Hz readback contract as Stage7B210RadioAdapter configure.
+        # Same ±1 Hz readback contract as LaneB210RadioAdapter configure.
         if center is not None and expected_center_hz is not None and abs(center - expected_center_hz) <= 1:
             return (0, 1)
         return ()
@@ -433,7 +433,7 @@ _TX_OUTCOME_TERMINAL = {
 }
 
 
-class Stage7TxTerminalSource:
+class TxTerminalSource:
     """terminal_source → **실 async TX 상태**로 child terminal 확정(P10).
 
     이전 구현은 fake 매질 `delivery_log`에 cable 기록이 있으면 COMPLETED로 봤다. 그것은 매질 도달
@@ -442,7 +442,7 @@ class Stage7TxTerminalSource:
     이제 실 worker의 비동기 TX 통지(`poll_async()` → `{"outcome", "hardware_time_ns", "channel"}`)를
     수집해 parent의 **예약 hardware 시각**과 child의 **lane**에 결속한다.
 
-    **현재 한계(P10 미완, 정직 표기):** 이 통지의 권위 소유자는 `Stage7B210RadioAdapter`다. adapter가
+    **현재 한계(P10 미완, 정직 표기):** 이 통지의 권위 소유자는 `LaneB210RadioAdapter`다. adapter가
     `poll_once()`에서 `worker.poll_async()`를 드레인해 자신의 TX 원장(`_tx_parents`)을 갱신한다. PoC
     group TX는 adapter의 `schedule_tx`를 거치지 않고 worker에 직접 제출되므로, 그 BURST_ACK은 adapter가
     소비하되 대응하는 원장 항목이 없어 버려진다. 따라서 PoC TX terminal은 **UNKNOWN으로 남는다**.
@@ -523,7 +523,7 @@ class Stage7TxTerminalSource:
         return {cid: (value or ChildTerminal.UNKNOWN).value for cid, value in resolved.items()}
 
 
-class Stage7LedgerTerminalSource:
+class LedgerTerminalSource:
     """terminal_source → **권위 TX 원장**(`radio_adapter.tx_burst_state`)에서 terminal 확정(P10).
 
     권위 adapter가 worker 비동기 통지(BURST_ACK/UNDERFLOW/…)를 소비해 per-lane state를
@@ -562,7 +562,7 @@ class Stage7LedgerTerminalSource:
         return child_terminals_from_ledger(snapshot, parent)
 
 
-def stage7_target_response(members, *, station_to_endpoint=None):
+def target_response(members, *, station_to_endpoint=None):
     """target_response → **대상 endpoint의 실제 application 관측**으로 target effect 판정(P09).
 
     이전 구현은 매질 `delivery_log`에 cable 기록이 있으면 `EFFECT_OBSERVED`로 봤다. 그러나 물리 도달은
@@ -609,7 +609,7 @@ def stage7_target_response(members, *, station_to_endpoint=None):
     return response
 
 
-class Stage7AuthoritativeRadioSink:
+class AuthoritativeRadioSink:
     """radio_sink seam → **권위 `radio_adapter.schedule_tx` 경로**로 방사한다(P02/P03/P04/P08/P10).
 
     이전 sink(`GroupTxRadioSink`)는 worker에 직접 `submit_tx_group`을 걸어 권위 adapter를
@@ -671,7 +671,7 @@ class Stage7AuthoritativeRadioSink:
         # 한 slot이어야 한다. 모델 시각을 장치에 바로 밀어넣지 않는다.
         request, _utc_ns = build_poc_tx_request(
             bridge=getattr(self._adapter, "bridge", None), burst_id=burst_id,
-            channel_name=stage7_channel_name(children[0].channel),
+            channel_name=channel_name(children[0].channel),
             transmit_at_hw_ns=int(children[0].scheduled_hw_timestamp_ns), samples=data)
         result = self._adapter.schedule_tx(request)     # 권위 경로(lead·retune·충돌·원장)
         if getattr(result, "is_err", False):
@@ -685,7 +685,7 @@ class Stage7AuthoritativeRadioSink:
                 f"권위 schedule_tx 거부: {getattr(result, 'error', result)}")
 
 
-def stage7_device_seams(members, *, channel_center_hz=None):
+def device_seams(members, *, channel_center_hz=None):
     """실행 중 software group의 실 MASS-B endpoint 객체로 `DeviceSeams`를 만든다(no stub).
 
     `assemble_provider(DeviceSeams)` 경로(poc_run→prepare_poc_workload)가 그대로 실 seam으로 provider를
@@ -699,9 +699,9 @@ def stage7_device_seams(members, *, channel_center_hz=None):
     workers = {ep: members[ep].endpoint.dependencies.radio.lease.worker for ep in members}
     return DeviceSeams(
         group_tx=mass_b,                                      # 실 group-TX worker(하드웨어 경계 double)
-        arbiter=Stage7WorkerArbiter(mass_b),                  # 실 worker lane 점유
-        scheduler=Stage7HwTimeScheduler(mass_b),              # 실 hardware clock slot
-        rx_readiness=Stage7ReceiverReadiness(workers, center),  # 실 수신기 RX 준비
+        arbiter=WorkerArbiter(mass_b),                  # 실 worker lane 점유
+        scheduler=HwTimeScheduler(mass_b),              # 실 hardware clock slot
+        rx_readiness=ReceiverReadiness(workers, center),  # 실 수신기 RX 준비
         waveform_factory=Link11WaveformFactory(),             # 실 frozen PHY
     )
 
@@ -710,9 +710,9 @@ def assemble_authoritative_provider(members, *, station_id_by_endpoint,
                                     channel_center_hz=None, dual_channel_installed: bool = False):
     """**권위 `schedule_tx` 경로**로 방사하는 production provider를 조립한다(P02/P03/P04/P08/P10).
 
-    `stage7_device_seams`(worker 직접 제출)와 달리 radio_sink가 `Stage7AuthoritativeRadioSink`다:
+    `device_seams`(worker 직접 제출)와 달리 radio_sink가 `AuthoritativeRadioSink`다:
     sidecar 공유매체 예약 → `schedule_tx`(lead·retune·lane 겹침·정상 TX 우선) → 한 번의 group TX →
-    TX 원장 등록. terminal은 그 원장에서 읽는다(`Stage7LedgerTerminalSource`).
+    TX 원장 등록. terminal은 그 원장에서 읽는다(`LedgerTerminalSource`).
 
     반환 ``(provider, bindings)``. bindings에 sink·adapter가 있어 terminal source를 만들 수 있다.
     """
@@ -726,22 +726,22 @@ def assemble_authoritative_provider(members, *, station_id_by_endpoint,
     sidecar = getattr(adapter, "_sidecar", None)
     if sidecar is None:
         raise RuntimeError("radio adapter에 route sidecar가 없습니다(권위 예약 경로 불가)")
-    sink = Stage7AuthoritativeRadioSink(
+    sink = AuthoritativeRadioSink(
         adapter, sidecar=sidecar,
         source_station_id=station_id_by_endpoint["MASS-B"],
         station_id_by_endpoint=station_id_by_endpoint)
     provider = SharedMediumActionProvider.for_production(
         radio_sink=sink,
-        rx_readiness=Stage7ReceiverReadiness(workers, center),
-        scheduler=Stage7HwTimeScheduler(worker),
+        rx_readiness=ReceiverReadiness(workers, center),
+        scheduler=HwTimeScheduler(worker),
         waveform_factory=Link11WaveformFactory(),
-        arbiter=Stage7WorkerArbiter(worker),
+        arbiter=WorkerArbiter(worker),
         dual_channel_installed=dual_channel_installed,
     )
     return provider, {"sink": sink, "adapter": adapter, "worker": worker, "members": members}
 
 
-def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_installed: bool = False):
+def assemble_inprocess_provider(members, *, channel_center_hz=None, dual_channel_installed: bool = False):
     """실행 중 software group의 **실 MASS-B endpoint 객체**로 production provider를 조립한다(no stub).
 
     반환 ``(provider, bindings)``. bindings는 실 worker·medium 참조(terminal/target source 조립용).
@@ -753,21 +753,21 @@ def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_in
     provider = SharedMediumActionProvider.for_production(
         radio_sink=GroupTxRadioSink(group_tx=mass_b),      # 실 group-TX worker
         waveform_factory=Link11WaveformFactory(),                # 실 frozen PHY
-        scheduler=Stage7HwTimeScheduler(mass_b),                 # 실 hardware clock slot
-        arbiter=Stage7WorkerArbiter(mass_b),                     # 실 worker lane 점유
-        rx_readiness=Stage7ReceiverReadiness(workers, center),   # 실 수신기 RX 준비
+        scheduler=HwTimeScheduler(mass_b),                 # 실 hardware clock slot
+        arbiter=WorkerArbiter(mass_b),                     # 실 worker lane 점유
+        rx_readiness=ReceiverReadiness(workers, center),   # 실 수신기 RX 준비
         dual_channel_installed=dual_channel_installed,
     )
     return provider, {"mass_b_worker": mass_b, "workers": workers}
 
 
 __all__ = (
-    "Link11WaveformFactory", "Stage7HwTimeScheduler", "Stage7WorkerArbiter",
-    "Stage7ReceiverReadiness", "Stage7TxTerminalSource", "stage7_target_response",
-    "stage7_device_seams", "assemble_stage7_provider",
-    "Stage7AuthoritativeRadioSink", "Stage7LedgerTerminalSource",
+    "Link11WaveformFactory", "HwTimeScheduler", "WorkerArbiter",
+    "ReceiverReadiness", "TxTerminalSource", "target_response",
+    "device_seams", "assemble_inprocess_provider",
+    "AuthoritativeRadioSink", "LedgerTerminalSource",
     "assemble_authoritative_provider",
-    "stage7_channel_name", "child_terminals_from_ledger",
+    "channel_name", "child_terminals_from_ledger",
 )
 
 

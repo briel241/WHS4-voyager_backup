@@ -1,12 +1,12 @@
 """Stage 7 TEST plan loader (`stage7` §15).
 
-`Stage7TestPlanLoader`는 TEST-only `orchestration.toml` sidecar, immutable
-scenario plan과 세 endpoint resolved identity 및 `Stage7ResolvedSystemPlan`
-digest를 결속해 `Stage7ResolvedTestPlan`을 만든다. full plan은 Scenario
+`TestPlanLoader`는 TEST-only `orchestration.toml` sidecar, immutable
+scenario plan과 세 endpoint resolved identity 및 `ResolvedSystemPlan`
+digest를 결속해 `ResolvedTestPlan`을 만든다. full plan은 Scenario
 Controller와 test adapter만 소비한다.
 
 P1에서만 closed record와 system-plan digest를 결속한 최소 immutable
-`Stage7P1QualificationMemberPlan` exact bytes/hash를 별도 산출한다.
+`P1QualificationMemberPlan` exact bytes/hash를 별도 산출한다.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ def _error(code, message, **details):
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7P1QualificationMemberPlan:
+class P1QualificationMemberPlan:
     """P1 최소 immutable projection (§15). scenario payload/fault/판정은 없다."""
 
     step_id: str
@@ -110,7 +110,7 @@ class Stage7P1QualificationMemberPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7ResolvedTestPlan:
+class ResolvedTestPlan:
     """TEST-only resolved plan. Runtime/endpoint에는 전달하지 않는다."""
 
     run_id: str
@@ -122,11 +122,11 @@ class Stage7ResolvedTestPlan:
     system_plan_sha256: str
     endpoint_config_sha256s: tuple
     scenario_plan_sha256: str
-    p1_member_plan: Stage7P1QualificationMemberPlan | None
+    p1_member_plan: P1QualificationMemberPlan | None
     resolved_sha256: str
 
 
-class Stage7TestPlanLoader:
+class TestPlanLoader:
     """orchestration sidecar와 scenario plan을 resolved test plan으로 만든다."""
 
     __slots__ = ()
@@ -195,7 +195,7 @@ class Stage7TestPlanLoader:
                 return _error(
                     ErrorCode.CONFIG_SEMANTIC_INVALID, "P1 member 합집합 위반"
                 )
-            p1_plan = Stage7P1QualificationMemberPlan(
+            p1_plan = P1QualificationMemberPlan(
                 step_id=p1_step_id or f"p1-{p1_test_case_id.lower()}",
                 test_case_id=p1_test_case_id,
                 qualification_profile="PAIRWISE_EDGE_QUALIFICATION_V1",
@@ -224,7 +224,7 @@ class Stage7TestPlanLoader:
             "p1_member_plan_sha256": None if p1_plan is None else p1_plan.sha256(),
         }
         return Ok(
-            Stage7ResolvedTestPlan(
+            ResolvedTestPlan(
                 run_id=run_id,
                 data_link_id=data_link_id,
                 controller_protocol=TEST_PROTOCOL,
@@ -242,7 +242,7 @@ class Stage7TestPlanLoader:
 
 __all__ = (
     "P1_MEMBER_PLAN_TABLE",
-    "Stage7P1QualificationMemberPlan",
-    "Stage7ResolvedTestPlan",
-    "Stage7TestPlanLoader",
+    "P1QualificationMemberPlan",
+    "ResolvedTestPlan",
+    "TestPlanLoader",
 )

@@ -54,11 +54,11 @@ NONBINDING_DOMAINS = (TEST_DOC,)
 #: RF 거동을 만드는 명시 실행 파일(상위 apps 중). launcher·coordinator는 rf
 #: 전용, scenario controller는 rf+operation(교차영향).
 _RF_ONLY_FILES = frozenset({
-    "VDETER/apps/stage7_coordinator_main.py",
-    "VDETER/apps/stage7_endpoint_launcher.py",
+    "VDETER/apps/coordinator_main.py",
+    "VDETER/apps/endpoint_launcher.py",
 })
 _RF_AND_OPERATION_FILES = frozenset({
-    "VDETER/apps/stage7_scenario_controller.py",   # scenario controller
+    "VDETER/apps/scenario_controller.py",   # scenario controller
     "apps/standalone/local_config.py",              # RF config 생성에 관여
     "apps/standalone/hardware_profiles.py",         # host profile→template·provisioning 입력
 })
@@ -73,7 +73,7 @@ _TOOLING_ONLY_FILES = frozenset({
 _TOOLING_AND_OPERATION_FILES = frozenset({
     "apps/standalone/installation_manifest.py",   # setup 생성 + run 검증
     "apps/standalone/provenance.py",               # baseline pin·git 참고
-    "apps/stage7_profile.py",                      # reference 검증기(run·qualify)
+    "apps/run_profile.py",                      # reference 검증기(run·qualify)
     "requirements-standalone.lock",                # 환경 정의
     "bin/vdeter",                                  # 저장소 launcher
 })

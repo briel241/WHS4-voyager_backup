@@ -24,7 +24,7 @@ for path in (VDETER_ROOT, os.path.join(VDETER_ROOT, "src")):
 def _load_coordinator_app():
     spec = importlib.util.spec_from_file_location(
         "stage7_coordinator_main_for_test",
-        os.path.join(VDETER_ROOT, "apps", "stage7_coordinator_main.py"),
+        os.path.join(VDETER_ROOT, "apps", "coordinator_main.py"),
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -171,11 +171,11 @@ def _adaptive_path(deadline_ns=0):
 
 class AdaptiveGainTest(unittest.TestCase):
     def _run(self, script, deadline_ns=0):
-        from vdeter.b210_system.pi_runtime import Stage7PiOperations
+        from vdeter.b210_system.pi_runtime import PiOperations
 
         stub = _AdaptiveStub(script)
         path = _adaptive_path(deadline_ns=deadline_ns)
-        result = Stage7PiOperations._gain_rx_adaptive(
+        result = PiOperations._gain_rx_adaptive(
             stub, None, None, 0, path, "ADAPTIVE_SEARCH_AND_SEAL", "d" * 64
         )
         return stub, result

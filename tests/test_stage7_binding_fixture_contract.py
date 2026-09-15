@@ -11,7 +11,7 @@ from stage7_binding_fixtures import legacy_phase_i_pins
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "VDETER/apps/stage7_coordinator_main.py"
+SOURCE = ROOT / "VDETER/apps/coordinator_main.py"
 FIXTURE = ROOT / "tests/fixtures/stage7_phase_i_function_bindings.json"
 
 

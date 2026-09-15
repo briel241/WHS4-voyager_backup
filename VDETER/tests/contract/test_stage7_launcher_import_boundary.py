@@ -1,6 +1,6 @@
 """Stage 7 launcher production 경로의 시험 package 의존 0 (STR-07, 묶음 1-3).
 
-`VDETER/apps/stage7_endpoint_launcher.py`는 실장비 endpoint 프로세스다. 1-3 이전에는 `main()` 안에서
+`VDETER/apps/endpoint_launcher.py`는 실장비 endpoint 프로세스다. 1-3 이전에는 `main()` 안에서
 `tests.support.stage4`(시험 fixture)를 import해 배치 profile을 얻었다. 이제 배치 값·계산은 production module
 `vdeter.b210_system.deployment`가 소유하며, launcher와 그 module의 전이 import 폐포 어디에도 `tests`·`apps`
 package가 없어야 한다. 정적(AST; 함수 안 lazy import 포함) + 실행(subprocess, `tests`가 import 불가능한
@@ -21,7 +21,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _VDETER = os.path.normpath(os.path.join(_HERE, "..", ".."))
 _PROJECT_ROOT = os.path.normpath(os.path.join(_VDETER, ".."))
 _SRC = os.path.join(_VDETER, "src")
-_LAUNCHER = os.path.join(_VDETER, "apps", "stage7_endpoint_launcher.py")
+_LAUNCHER = os.path.join(_VDETER, "apps", "endpoint_launcher.py")
 _DEPLOYMENT_MODULE = "vdeter.b210_system.deployment"
 #: production이 import하면 안 되는 최상위 package(시험 support·시험 fixture).
 _TEST_PACKAGES = ("tests",)
@@ -151,7 +151,7 @@ class LauncherImportBoundaryTest(unittest.TestCase):
         """launcher module import(main 미실행)로 `tests` package가 적재되지 않는다."""
         result = _run_py(
             "import sys, importlib\n"
-            "importlib.import_module('apps.stage7_endpoint_launcher')\n"
+            "importlib.import_module('apps.endpoint_launcher')\n"
             "bad = sorted(k for k in sys.modules if k.split('.')[0] == 'tests')\n"
             "print('BAD', bad)\n"
             "sys.exit(0 if not bad else 4)\n",

@@ -11,10 +11,10 @@ endpoint launcher·scenario controller·workload controller가 실행 중에 imp
 "시험 전용"이라는 뜻이 실제와 어긋났다. 시험 계획·evidence 자료는 `..testing`에 남아 있다.
 """
 
-from .adapter import Stage7ServiceApiTestAdapter
-from .controller import Stage7ScenarioController
+from .adapter import ServiceApiTestAdapter
+from .controller import ScenarioController
 
 __all__ = (
-    "Stage7ScenarioController",
-    "Stage7ServiceApiTestAdapter",
+    "ScenarioController",
+    "ServiceApiTestAdapter",
 )

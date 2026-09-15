@@ -52,12 +52,12 @@ class ServiceSessionConstantsUnchangedTest(unittest.TestCase):
     def _find_apps(self):
         here = os.path.dirname(os.path.abspath(__file__))
         root = os.path.normpath(os.path.join(here, "..", "..", ".."))
-        return os.path.join(root, "apps", "stage7_session.py")
+        return os.path.join(root, "apps", "service_session.py")
 
     def test_apps_service_session_constants_match_mirror(self):
         path = self._find_apps()
         if not os.path.isfile(path):
-            self.skipTest("apps/stage7_session.py not found in this checkout")
+            self.skipTest("apps/service_session.py not found in this checkout")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         pairs = {
@@ -69,7 +69,7 @@ class ServiceSessionConstantsUnchangedTest(unittest.TestCase):
             m = re.search(rf"^{name}\s*=\s*([0-9.]+)", text, re.M)
             self.assertIsNotNone(m, f"{name} not found")
             self.assertEqual(float(m.group(1)), expected,
-                             f"{name} changed in apps/stage7_session.py")
+                             f"{name} changed in apps/service_session.py")
 
 
 class SessionAbsoluteDeadlineTest(unittest.TestCase):

@@ -1,11 +1,11 @@
 """Stage 7 lane별 진단 PHY facade와 RX ingress context (`stage7` §9.3, §15.1.2).
 
 frozen `RecoveredPacket`/`RecoveredPacketSet`에는 CFO field를 추가하지 않고 frozen
-PHY 파일도 수정하지 않는다. additive `Stage7DiagnosticPhyFacade`를 **endpoint의
+PHY 파일도 수정하지 않는다. additive `DiagnosticPhyFacade`를 **endpoint의
 RX lane마다 하나씩** 사용한다. 각 facade는 frozen `MultiRatePhy`를 상속해 같은
 receiver core와 lane-local state를 사용하고, `_build_recovered_set` 경계에서 이미
 생성된 `ReceiverCoreResult`의 `cfo_hz`와 timestamp 입력을 Runtime-private
-`Stage7PhyDiagnosticSink`에 먼저 기록한 뒤 frozen `super()._build_recovered_set()`
+`PhyDiagnosticSink`에 먼저 기록한 뒤 frozen `super()._build_recovered_set()`
 으로 lane-local public-shaped result를 만든다. samples, receiver result, buffer
 consumption, Packet 순서나 error를 변경하거나 decode를 두 번 수행하지 않는다.
 """
@@ -21,13 +21,13 @@ from ..common.results import Ok, internal_error
 from ..common.time import ClockDomain
 from ..phy import resampling, wideband
 from ..phy.multilink import MultiRatePhy
-from .errors import Stage7PrivateErrorCode
+from .errors import PrivateErrorCode
 
 LINK11_RAMP_SAMPLES = 32.0
 WIDEBAND_RAMP_SAMPLES = float(wideband.RAMP_SAMPLES)
 
 
-def _private_error(private_code: Stage7PrivateErrorCode, message: str, **details):
+def _private_error(private_code: PrivateErrorCode, message: str, **details):
     return internal_error(
         Layer.RUNTIME,
         ErrorCode.INTERNAL_ERROR,
@@ -56,7 +56,7 @@ def half_away_from_zero_ns(numerator: int, denominator: int) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7RxSegment:
+class RxSegment:
     """completed-window append-only segment (§15.1.2)."""
 
     rx_window_key: tuple
@@ -70,7 +70,7 @@ class Stage7RxSegment:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7PhyAttemptRecord:
+class PhyAttemptRecord:
     """diagnostic key `(lane_generation,rx_window_key,lane_index,phy_attempt_index)`의 값."""
 
     lane_generation: int
@@ -90,7 +90,7 @@ class Stage7PhyAttemptRecord:
     estimator_status: str
 
 
-class Stage7PhyDiagnosticSink:
+class PhyDiagnosticSink:
     """lane-scoped diagnostic sink (§9.3). 다른 lane과 상태를 공유하지 않는다."""
 
     __slots__ = (
@@ -136,7 +136,7 @@ class Stage7PhyDiagnosticSink:
         self._attempt_counters[key] = index + 1
         return index
 
-    def record(self, record: Stage7PhyAttemptRecord) -> None:
+    def record(self, record: PhyAttemptRecord) -> None:
         key = (
             record.lane_generation,
             record.rx_window_key,
@@ -178,7 +178,7 @@ class Stage7PhyDiagnosticSink:
         return self._current_t0_ns
 
 
-class Stage7DiagnosticPhyFacade(MultiRatePhy):
+class DiagnosticPhyFacade(MultiRatePhy):
     """frozen `MultiRatePhy`를 상속한 lane-local 진단 facade (§9.3).
 
     한 인스턴스에는 RF-A 또는 RF-B 중 정확히 한 lane의 sample만 들어간다.
@@ -195,7 +195,7 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
         time_source,
         id_source,
         *,
-        diagnostic_sink: Stage7PhyDiagnosticSink,
+        diagnostic_sink: PhyDiagnosticSink,
         route_sidecar=None,
         tx_only: bool = False,
     ) -> None:
@@ -205,7 +205,7 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
         self._tx_only = tx_only
 
     @property
-    def diagnostic_sink(self) -> Stage7PhyDiagnosticSink:
+    def diagnostic_sink(self) -> PhyDiagnosticSink:
         return self._diagnostic_sink
 
     # --- TX: Packet→Burst route 결속 (§15) ------------------------------------
@@ -222,7 +222,7 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
             burst = result.value
             if burst.packet_id != request.packet_id:
                 return _private_error(
-                    Stage7PrivateErrorCode.LANE_ROUTE_INVALID,
+                    PrivateErrorCode.LANE_ROUTE_INVALID,
                     "encode 결과의 Packet ID가 요청과 다릅니다",
                 )
             bound = self._route_sidecar.bind_burst(
@@ -239,13 +239,13 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
         sink = self._diagnostic_sink
         if sink is None or not sink.configured:
             return _private_error(
-                Stage7PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE,
+                PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE,
                 "diagnostic sink가 configure되지 않았습니다",
             )
         if not sink.has_window:
             # 정상 recovered PHY attempt와 diagnostic의 1:1 결속이 깨졌다 (§9.3).
             return _private_error(
-                Stage7PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE,
+                PrivateErrorCode.PHY_DIAGNOSTIC_UNAVAILABLE,
                 "recovered attempt가 lane window context에 결속되지 않았습니다",
             )
         if True:
@@ -263,7 +263,7 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
                 sample0_ns = (t0_ns if t0_ns is not None else 0) + delta_ns
                 packet_digest = hashlib.sha256(result.packet).hexdigest()
                 sink.record(
-                    Stage7PhyAttemptRecord(
+                    PhyAttemptRecord(
                         lane_generation=sink.lane_generation,
                         rx_window_key=sink.current_window_key,
                         lane_index=sink.lane_index,
@@ -284,7 +284,7 @@ class Stage7DiagnosticPhyFacade(MultiRatePhy):
         return super()._build_recovered_set(request, state, rate, recovered)
 
 
-class Stage7LaneRxIngress:
+class LaneRxIngress:
     """child window의 immutable private context와 append-only segment map (§15.1.2)."""
 
     __slots__ = (
@@ -371,7 +371,7 @@ class Stage7LaneRxIngress:
 
     def _context_invalid(self, message: str, **details):
         return _private_error(
-            Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID, message, **details
+            PrivateErrorCode.RX_LANE_CONTEXT_INVALID, message, **details
         )
 
     # --- raw block ingest ----------------------------------------------------
@@ -485,7 +485,7 @@ class Stage7LaneRxIngress:
             phy_offset = device_offset
             phy_count = resampling.DEVICE_SLOT_SAMPLES
             phy_rate = resampling.DEVICE_SAMPLE_RATE_HZ
-        segment = Stage7RxSegment(
+        segment = RxSegment(
             rx_window_key=rx_window_key,
             device_stream_offset=device_offset,
             device_sample_count=resampling.DEVICE_SLOT_SAMPLES,
@@ -522,10 +522,10 @@ class Stage7LaneRxIngress:
 
 
 __all__ = (
-    "Stage7DiagnosticPhyFacade",
-    "Stage7LaneRxIngress",
-    "Stage7PhyAttemptRecord",
-    "Stage7PhyDiagnosticSink",
-    "Stage7RxSegment",
+    "DiagnosticPhyFacade",
+    "LaneRxIngress",
+    "PhyAttemptRecord",
+    "PhyDiagnosticSink",
+    "RxSegment",
     "half_away_from_zero_ns",
 )

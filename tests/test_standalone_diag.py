@@ -388,11 +388,11 @@ def test_authorize_binds_candidate_digest_and_source_gain():
         assert qualification_state(paths) == (False, [])
         assert not (paths.qualification_candidate / qualify_cmd.REFERENCE_BASENAME).exists()
         # 정상 검증기는 이 파일을 거부한다 (artifact_type).
-        from apps import stage7_profile
+        from apps import run_profile
         try:
-            stage7_profile.load_reference(str(paths.diagnostic_authorization))
+            run_profile.load_reference(str(paths.diagnostic_authorization))
             raise AssertionError("diagnostic authorization accepted as a reference")
-        except stage7_profile.ProfileError:
+        except run_profile.ProfileError:
             pass
 
 

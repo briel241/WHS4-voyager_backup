@@ -2,7 +2,7 @@
 
 역할: 사전 검증 → run 디렉터리 준비 → Stage 7 coordinator(mass-roc workload)
 spawn → 대기 → evidence 수집 → cleanup. 시나리오 업무 자체는 coordinator가
-spawn하는 `apps/stage7_mass_roc_controller.py`가 수행한다.
+spawn하는 `apps/mass_roc_workload_controller.py`가 수행한다.
 
 원칙 (지시서 §3·§8)
     - stage7 조립·연결 실패는 **명시적 FAIL**이다. direct/software로 절대
@@ -47,7 +47,7 @@ _ALLOWED_PHASES = ("rr-p2-17", "rr-p2-19")
 DEFAULT_COORDINATOR_TIMEOUT_S = 3 * 3600.0
 
 
-class Stage7RequestError(ValueError):
+class ServiceRequestError(ValueError):
     """stage7 실행 요청이 사전 검증에서 거부됐다 (endpoint 시작 전)."""
 
 
@@ -56,11 +56,11 @@ class Stage7RequestError(ValueError):
 #
 # 정식 진입점은 `scenario_runner.py menu --transport stage7 --profile ...`이며
 # 그 아래에서 이 모듈이 독립 service session을 조율한다. 복잡한 내부 로직은
-# `apps/stage7_service_layer.py`에 두고(별도 CLI 아님) 여기서 재노출한다.
-# 아래 기존 `run_stage7()` 계약(= `run all --transport stage7`)은 불변이다.
+# `apps/service_layer.py`에 두고(별도 CLI 아님) 여기서 재노출한다.
+# 아래 기존 `run_service_session()` 계약(= `run all --transport stage7`)은 불변이다.
 # --------------------------------------------------------------------------
 
-from apps.stage7_service_layer import (  # noqa: E402
+from apps.service_layer import (  # noqa: E402
     DEFAULT_BATCH_PLAN,
     ServiceSessionError,
     build_coordinator_script,
@@ -69,18 +69,18 @@ from apps.stage7_service_layer import (  # noqa: E402
     run_service_session,
     verify_remote_environment,
 )
-from apps.stage7_session import (  # noqa: E402
-    Stage7ServiceSession,
+from apps.service_session import (  # noqa: E402
+    ServiceSession,
     open_service_session,
 )
 
 __all__ = [
-    "Stage7RequestError", "ServiceSessionError", "run_stage7", "runs_root",
-    "validate_stage7_request", "run_service_session", "run_service_batch",
+    "ServiceRequestError", "ServiceSessionError", "run_service_session", "runs_root",
+    "validate_service_request", "run_service_session", "run_service_batch",
     "verify_remote_environment", "prepare_service_config",
     "build_coordinator_script", "DEFAULT_BATCH_PLAN",
     # Phase G 최종 모델 — bounded persistent session
-    "open_service_session", "Stage7ServiceSession",
+    "open_service_session", "ServiceSession",
 ]
 
 
@@ -88,49 +88,49 @@ def runs_root(results_dir: str | None = None) -> str:
     return os.path.join(results_dir or os.path.join(_ROOT, "results"), "runs")
 
 
-def validate_stage7_request(*, run_id: str, configs_dir: str,
+def validate_service_request(*, run_id: str, configs_dir: str,
                             results_dir: str | None = None) -> dict:
     """endpoint를 시작하기 전에 요청 전체를 검증한다. 통과 시 metadata 반환."""
 
     if not run_id or any(sep in run_id for sep in ("/", "\\", "..")):
-        raise Stage7RequestError(f"run-id 형식이 잘못됐습니다: {run_id!r}")
+        raise ServiceRequestError(f"run-id 형식이 잘못됐습니다: {run_id!r}")
 
     run_dir = os.path.join(runs_root(results_dir), run_id)
     if os.path.exists(run_dir):
-        raise Stage7RequestError(
+        raise ServiceRequestError(
             f"run-id {run_id!r}가 이미 결과 디렉터리에 존재합니다: {run_dir} — "
             "새 run-id를 쓰거나 기존 결과를 다른 곳으로 옮기십시오")
 
     if not configs_dir or not os.path.isdir(configs_dir):
-        raise Stage7RequestError(
+        raise ServiceRequestError(
             f"configs-dir이 존재하지 않습니다: {configs_dir!r}")
     for relpath in _REQUIRED_CONFIG_FILES:
         if not os.path.isfile(os.path.join(configs_dir, relpath)):
-            raise Stage7RequestError(
+            raise ServiceRequestError(
                 f"resolved config 구성물이 없습니다: {relpath} ({configs_dir})")
     fixtures_dir = os.path.join(configs_dir, "fixtures")
     for name in _REQUIRED_FIXTURES:
         if not os.path.isfile(os.path.join(fixtures_dir, name)):
-            raise Stage7RequestError(
+            raise ServiceRequestError(
                 f"START/STOP fixture가 없습니다: fixtures/{name} ({configs_dir})")
 
     with open(os.path.join(configs_dir, "git_state.json"), "rb") as handle:
         try:
             metadata = json.loads(handle.read().decode("utf-8"))
         except ValueError as exc:
-            raise Stage7RequestError(f"git_state.json 해석 실패: {exc}") from exc
+            raise ServiceRequestError(f"git_state.json 해석 실패: {exc}") from exc
 
     if metadata.get("run_id") != run_id:
-        raise Stage7RequestError(
+        raise ServiceRequestError(
             f"config metadata run-id {metadata.get('run_id')!r} != "
             f"요청 run-id {run_id!r} — 다른 run용 config입니다")
     phase = metadata.get("rr_phase")
     if phase not in _ALLOWED_PHASES:
-        raise Stage7RequestError(
+        raise ServiceRequestError(
             f"config가 mass-roc workload가 올라탈 phase로 결속되지 않았습니다 "
             f"(rr_phase={phase!r}, 허용: {_ALLOWED_PHASES})")
     if not metadata.get("baseline_sha256"):
-        raise Stage7RequestError(
+        raise ServiceRequestError(
             "config metadata에 baseline_sha256이 없습니다 (prepare 도구로 "
             "결속된 resolved config가 필요합니다)")
     return metadata
@@ -193,7 +193,7 @@ def _collect_endpoint_logs(run_dir: str) -> list[str]:
     return copied
 
 
-def run_stage7(*, scenario_id: str, run_id: str, configs_dir: str,
+def run_service_session(*, scenario_id: str, run_id: str, configs_dir: str,
                certificate_case: str = "normal", results_dir: str | None = None,
                spawn=subprocess.Popen,
                timeout_s: float = DEFAULT_COORDINATOR_TIMEOUT_S) -> int:
@@ -201,7 +201,7 @@ def run_stage7(*, scenario_id: str, run_id: str, configs_dir: str,
 
     조립·연결·실행 실패는 전부 명시적 FAIL이다 — direct/software fallback 없음.
     """
-    metadata = validate_stage7_request(
+    metadata = validate_service_request(
         run_id=run_id, configs_dir=configs_dir, results_dir=results_dir)
 
     run_dir = os.path.join(runs_root(results_dir), run_id)
@@ -222,7 +222,7 @@ def run_stage7(*, scenario_id: str, run_id: str, configs_dir: str,
 
     command = [
         sys.executable,
-        os.path.join(_ROOT, "VDETER", "apps", "stage7_coordinator_main.py"),
+        os.path.join(_ROOT, "VDETER", "apps", "coordinator_main.py"),
         "--run-id", run_id,
         "--phase", metadata["rr_phase"],
         "--run-root", run_dir,

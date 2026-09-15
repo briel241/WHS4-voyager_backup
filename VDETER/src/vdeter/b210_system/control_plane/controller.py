@@ -18,7 +18,7 @@ class PocDeviceCallError(RuntimeError):
     """launcher PoC device op이 거부·실패했다. 성공으로 위장하지 않는다."""
 
 
-class Stage7ScenarioController:
+class ScenarioController:
     """§16.2 test command 발행자. transport는 주입형이다.
 
     `adapter_channels`: {endpoint_id: channel} — channel.request(message)가
@@ -265,4 +265,4 @@ class Stage7ScenarioController:
         return data, hashlib.sha256(data).hexdigest()
 
 
-__all__ = ("Stage7ScenarioController", "PocDeviceCallError")
+__all__ = ("ScenarioController", "PocDeviceCallError")

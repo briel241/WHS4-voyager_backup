@@ -54,7 +54,7 @@ class PrehardwareSafetyTests(unittest.TestCase):
         self.assertEqual('SESSION_INHIBIT', caught.exception.severity.value)
 
     def test_all_poc_queries_have_bounded_send_and_response_budget(self):
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         class Client:
             def __init__(self):
                 self.budgets = []

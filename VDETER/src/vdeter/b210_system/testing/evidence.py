@@ -49,7 +49,7 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-class Stage7EvidenceBundle:
+class EvidenceBundle:
     """한 run bundle의 evidence/trace 구조를 소유한다."""
 
     def __init__(self, bundle_root: str, *, run_id: str, judgement_scope: str) -> None:
@@ -176,7 +176,7 @@ class Stage7EvidenceBundle:
 
 __all__ = (
     "ALL_TEST_CASES",
-    "Stage7EvidenceBundle",
+    "EvidenceBundle",
     "TRACEABILITY_MATRIX",
     "VALID_STATUSES",
     "sha256_file",

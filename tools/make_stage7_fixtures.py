@@ -46,7 +46,7 @@ from common.messages import certificate_report as certrep  # noqa: E402
 from common.messages import position_report as pos  # noqa: E402
 from common.messages import route_instruction as route  # noqa: E402
 
-#: Stage 7 endpoint의 station id (`stage7_scenario_controller.py`)
+#: Stage 7 endpoint의 station id (`scenario_controller.py`)
 STATION = {"MASS-A": 111_111_111, "MASS-B": 333_333_333, "ROC": 222_222_222}
 
 
@@ -190,7 +190,7 @@ def main(argv=None) -> int:
     print(f"생성 위치: {out_dir}")
     print()
     print("실장비 실행 시:")
-    print("  python apps/stage7_scenario_controller.py --fixtures-dir <이 폴더> ...")
+    print("  python apps/scenario_controller.py --fixtures-dir <이 폴더> ...")
     print()
     print("주의 — 이 fixture는 payload만 정의한다. start-*.json과 stop.json은")
     print("      링크 팀 prepare_stage7_run_configs.py가 만드는 것을 함께 쓴다.")

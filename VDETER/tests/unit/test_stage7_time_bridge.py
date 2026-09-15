@@ -5,7 +5,7 @@ from fractions import Fraction
 
 from vdeter.b210_system.time_bridge import (
     BracketObservation,
-    Stage7TimeBridgeError,
+    TimeBridgeError,
     ceil_pos,
     corrections_from_roc,
     directed_path_median,
@@ -40,7 +40,7 @@ class TC_STAGE7_RNE(unittest.TestCase):
         self.assertEqual(ceil_pos(Fraction(0)), 0)
         self.assertEqual(ceil_pos(Fraction(1, 3)), 1)
         self.assertEqual(ceil_pos(Fraction(6, 3)), 2)
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             ceil_pos(Fraction(-1, 3))
 
 
@@ -89,20 +89,20 @@ class TC_STAGE7_AFFINE_FIT(unittest.TestCase):
         )
 
     def test_too_few_observations(self):
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(_observations(count=7))
 
     def test_short_span_rejected(self):
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(_observations(count=8, period_ns=200_000_000))
 
     def test_wide_bracket_rejected(self):
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(_observations(width_ns=2_000_001))
 
     def test_excessive_drift_rejected(self):
         # v0.8.15: |d| 한계는 25 ppm이다.
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(_observations(beta=Fraction(1_000_026, 1_000_000)))
 
     def test_nonmonotonic_hardware_rejected(self):
@@ -113,12 +113,12 @@ class TC_STAGE7_AFFINE_FIT(unittest.TestCase):
             hardware_ns=broken[2].hardware_ns,
             m_after_ns=broken[3].m_after_ns,
         )
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(broken)
 
     def test_residual_envelope_enforced(self):
         # ±width/2보다 큰 jitter는 envelope 밖이다.
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             fit_affine(_observations(width_ns=100, jitter=(0, 30_000, -30_000)))
 
     def test_forward_inverse_formulas(self):
@@ -141,12 +141,12 @@ class TC_STAGE7_UTC_ANCHOR(unittest.TestCase):
         )
 
     def test_exactly_eight_required(self):
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             select_utc_anchor([(0, 0, 10)] * 7)
 
     def test_wide_anchor_rejected(self):
         brackets = [(0, 0, 3_000_000)] * 8
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             select_utc_anchor(brackets)
 
 
@@ -160,7 +160,7 @@ class TC_STAGE7_RF_RATIONALS(unittest.TestCase):
         self.assertEqual(directed_path_median(values), Fraction(29, 2))
         # v0.9.5: 결손 ≤1 허용 — 9개 값은 홀수 median, 8개는 거부.
         self.assertEqual(directed_path_median(values[:9]), Fraction(14))
-        with self.assertRaises(Stage7TimeBridgeError):
+        with self.assertRaises(TimeBridgeError):
             directed_path_median(values[:8])
 
     def test_quarter_ns_offsets(self):

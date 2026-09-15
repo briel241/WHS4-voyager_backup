@@ -13,7 +13,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURE = _ROOT / "tests/fixtures/stage7_phase_i_function_bindings.json"
-_SOURCE = _ROOT / "VDETER/apps/stage7_coordinator_main.py"
+_SOURCE = _ROOT / "VDETER/apps/coordinator_main.py"
 
 
 def legacy_phase_i_pins(*, canonical_source=None, bindings=None):

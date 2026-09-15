@@ -3,7 +3,7 @@
 증명하는 것 (apps/standalone/README.md §4~§6·§8·§9)
   binding    : standalone-binding 스키마 검증 (head 40-hex·dirty=false 강제)
   선언       : hardware.toml 스키마·승인 게이트 (미승인 = 거부)
-  생성기     : 실제 template + 실제 Stage7ConfigurationLoader로 end-to-end
+  생성기     : 실제 template + 실제 ConfigurationLoader로 end-to-end
                생성·검증, git_state.json이 README §6 표·coordinator 결속
                계약(RR_PHASE_DEADLINE_S)과 일치, fixture는 host prepare와
                canonical JSON byte 동일
@@ -313,7 +313,7 @@ def test_phase_deadlines_match_coordinator_contract():
     """git_state에 결속하는 deadline이 coordinator 정본과 일치해야
     RR_BINDING_REJECTED가 나지 않는다 (README §6)."""
     coordinator_path = (Path(_REPO) / "VDETER" / "apps"
-                        / "stage7_coordinator_main.py")
+                        / "coordinator_main.py")
     spec = importlib.util.spec_from_file_location(
         "stage7_coordinator_main_for_test", coordinator_path)
     module = importlib.util.module_from_spec(spec)
@@ -371,12 +371,12 @@ def test_residual_processes_filters_and_unavailable():
         class Done:
             stdout = (f"{os.getpid()} self-should-be-filtered\n"
                       "777 pgrep -af pattern\n"
-                      "888 python stage7_endpoint_launcher.py\n")
+                      "888 python endpoint_launcher.py\n")
         return Done()
 
     lines = local_preflight.residual_processes(
         runner, which=lambda name: "/usr/bin/pgrep")
-    assert lines == ["888 python stage7_endpoint_launcher.py"]
+    assert lines == ["888 python endpoint_launcher.py"]
     assert local_preflight.residual_processes(
         runner, which=lambda name: None) is None
 

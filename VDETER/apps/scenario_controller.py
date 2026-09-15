@@ -120,7 +120,7 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
 
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
-    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+    from vdeter.b210_system.control_plane.controller import ScenarioController
     from vdeter.b210_system.transport import SeqPacketClient, runtime_socket_root
 
     fixtures = {}
@@ -147,7 +147,7 @@ def main(argv=None) -> int:
             print(f"[controller] {endpoint_id} test socket 연결 실패", flush=True)
             return 2
         channels[endpoint_id] = AdapterChannel(client)
-    controller = Stage7ScenarioController(
+    controller = ScenarioController(
         run_id=arguments.run_id,
         resolved_test_plan_sha256=arguments.test_plan_sha,
         adapter_channels=channels,

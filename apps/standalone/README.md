@@ -145,11 +145,11 @@ vdeter results     # 최근 run 목록·요약 재열람.
 
 ```
 vdeter run                       # 로컬 실행 계층 (이 패키지)
-└─ stage7_coordinator_main.py    # 무수정. 명시적 argv로 Popen (shell 문자열 금지)
+└─ coordinator_main.py    # 무수정. 명시적 argv로 Popen (shell 문자열 금지)
    ├─ MASS-A endpoint launcher   # coordinator가 spawn (기존 그대로)
    ├─ MASS-B endpoint launcher
    ├─ ROC endpoint launcher
-   └─ workload child (stage7_mass_roc_controller.py)
+   └─ workload child (mass_roc_workload_controller.py)
 ```
 
 로컬 실행 계층의 책임 (구현 계약):
@@ -181,7 +181,7 @@ PID를 쓰지 않는다(PID·run-id는 진단 기록만). flock은 프로세스 
 resolved = 배포 template(②, read-only)
          + hardware.toml(①)의 provisioning 필드 치환   # REQUIRED_UNSET 계열만
          + 자격 산물(③)의 주입                        # gain, 결속 SHA들
-→ 기존 Stage7ConfigurationLoader로 검증 (무수정 재사용) → 실패 시 RF 전 중단
+→ 기존 ConfigurationLoader로 검증 (무수정 재사용) → 실패 시 RF 전 중단
 ```
 
 hardware.toml은 **사용자가 승인한 환경 의도만** 담는다. USB 포트 경로·실측
@@ -372,7 +372,7 @@ HARDWARE_BLOCKED를 거부해 TC 파일이 기록되지 않는다 — 해당 경
 **reference 발급 (승인 조건 2)**: `stage7_issue_qualification_reference.py`
 CLI는 SSH·Git 결합이라 직접 호출하지 않는다. 재사용하는 것 — import 폐포
 계산·critical manifest 조립 규칙·reference 스키마(`STAGE7_QUALIFICATION_
-REFERENCE` schema 1)·atomic publish 패턴·발급 직후 `stage7_profile` 재검증.
+REFERENCE` schema 1)·atomic publish 패턴·발급 직후 `run_profile` 재검증.
 대체하는 것 — 3중 대조(Phase F 기록/Pi 실측/로컬)를 **로컬 배포 tree 실측
 단일 기준 + deploy manifest 검증**으로, `require_clean_worktree`를 binding
 `source_worktree_dirty=false` + 배포 무결 검증으로. `qualified_source_commit`

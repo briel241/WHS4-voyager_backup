@@ -20,7 +20,7 @@ import types
 import unittest
 from fractions import Fraction
 
-from vdeter.b210_system.pi_runtime import Stage7PiOperations
+from vdeter.b210_system.pi_runtime import PiOperations
 from vdeter.b210_system.rf_time import PATH_ENDPOINTS
 from vdeter.b210_system.time_bridge import AffineCoefficients
 
@@ -57,11 +57,11 @@ def _rt(fit, correction):
     stub = types.SimpleNamespace()
     stub.provisional_fit = types.SimpleNamespace(coefficients=fit)
     stub.active_correction = correction
-    stub._CORRECTED_TIME_PHASES = Stage7PiOperations._CORRECTED_TIME_PHASES
+    stub._CORRECTED_TIME_PHASES = PiOperations._CORRECTED_TIME_PHASES
     for name in ("_rf_time_correction", "_host_raw_to_hardware",
                  "_plan_times_to_hardware"):
         setattr(stub, name,
-                types.MethodType(getattr(Stage7PiOperations, name), stub))
+                types.MethodType(getattr(PiOperations, name), stub))
     return stub
 
 def _corr(stub, phase):

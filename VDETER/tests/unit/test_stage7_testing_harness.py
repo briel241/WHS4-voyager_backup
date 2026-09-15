@@ -6,16 +6,16 @@ import tempfile
 import unittest
 
 from vdeter.common.results import Ok
-from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
-from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.adapter import ServiceApiTestAdapter
+from vdeter.b210_system.control_plane.controller import ScenarioController
 from vdeter.b210_system.testing.evidence import (
     ALL_TEST_CASES,
-    Stage7EvidenceBundle,
+    EvidenceBundle,
     TRACEABILITY_MATRIX,
 )
 from vdeter.b210_system.testing.plan import (
     P1_MEMBER_PLAN_TABLE,
-    Stage7TestPlanLoader,
+    TestPlanLoader,
 )
 
 ORCHESTRATION = (
@@ -35,7 +35,7 @@ CONFIG_SHAS = {
 
 class TC_STAGE7_TEST_PLAN(unittest.TestCase):
     def test_link17_and_link19_are_separate_runs(self):
-        loader = Stage7TestPlanLoader()
+        loader = TestPlanLoader()
         first = loader.load(
             ORCHESTRATION,
             run_id="stage7-l17",
@@ -56,7 +56,7 @@ class TC_STAGE7_TEST_PLAN(unittest.TestCase):
         self.assertNotEqual(first.value.resolved_sha256, second.value.resolved_sha256)
 
     def test_link11_data_profile_rejected(self):
-        loader = Stage7TestPlanLoader()
+        loader = TestPlanLoader()
         result = loader.load(
             ORCHESTRATION,
             run_id="stage7-bad",
@@ -68,7 +68,7 @@ class TC_STAGE7_TEST_PLAN(unittest.TestCase):
         self.assertTrue(result.is_err)
 
     def test_p1_member_plan_canonical_table(self):
-        loader = Stage7TestPlanLoader()
+        loader = TestPlanLoader()
         for test_case, expected in P1_MEMBER_PLAN_TABLE.items():
             result = loader.load(
                 ORCHESTRATION,
@@ -89,7 +89,7 @@ class TC_STAGE7_TEST_PLAN(unittest.TestCase):
             self.assertEqual(len(plan.sha256()), 64)
 
     def test_unknown_controller_key_rejected(self):
-        loader = Stage7TestPlanLoader()
+        loader = TestPlanLoader()
         result = loader.load(
             ORCHESTRATION + 'extra = 1\n',
             run_id="stage7-x",
@@ -141,7 +141,7 @@ class _FakeService:
 
 class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
     def _adapter(self, service=None):
-        return Stage7ServiceApiTestAdapter(
+        return ServiceApiTestAdapter(
             endpoint_id="MASS-A",
             service=service or _FakeService(),
             resolved_test_plan_sha256="e" * 64,
@@ -153,7 +153,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
             def request(self, message):
                 return adapter.handle_command(message, (4242, 1000))
 
-        return Stage7ScenarioController(
+        return ScenarioController(
             run_id="stage7-test",
             resolved_test_plan_sha256="e" * 64,
             adapter_channels={"MASS-A": _Channel()},
@@ -164,7 +164,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
         service = _FakeService()
         adapter = self._adapter(service)
         controller = self._controller(adapter)
-        fixture, digest = Stage7ScenarioController.fixture_bytes({"reason": "test"})
+        fixture, digest = ScenarioController.fixture_bytes({"reason": "test"})
         adapter.register_fixture("fixtures/stop.json", fixture)
         response = controller.invoke_service_fixture(
             "MASS-A",
@@ -182,7 +182,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
     def test_wrong_peer_rejected_without_call(self):
         service = _FakeService()
         adapter = self._adapter(service)
-        fixture, digest = Stage7ScenarioController.fixture_bytes({"reason": "test"})
+        fixture, digest = ScenarioController.fixture_bytes({"reason": "test"})
         adapter.register_fixture("fixtures/stop.json", fixture)
         message = {
             "protocol": "vdeter.b210_system.scenario-controller.v1",
@@ -215,7 +215,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
         service = _FakeService()
         adapter = self._adapter(service)
         controller = self._controller(adapter)
-        fixture, _digest = Stage7ScenarioController.fixture_bytes({"reason": "test"})
+        fixture, _digest = ScenarioController.fixture_bytes({"reason": "test"})
         adapter.register_fixture("fixtures/stop.json", fixture)
         response = controller.invoke_service_fixture(
             "MASS-A",
@@ -232,7 +232,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
     def test_replay_returns_first_response_without_second_call(self):
         service = _FakeService()
         adapter = self._adapter(service)
-        fixture, digest = Stage7ScenarioController.fixture_bytes({"reason": "test"})
+        fixture, digest = ScenarioController.fixture_bytes({"reason": "test"})
         adapter.register_fixture("fixtures/stop.json", fixture)
         controller = self._controller(adapter)
         first = controller.invoke_service_fixture(
@@ -258,7 +258,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
             called.append(body["fault_fixture_id"])
             return {"suppressed": True}
 
-        adapter = Stage7ServiceApiTestAdapter(
+        adapter = ServiceApiTestAdapter(
             endpoint_id="MASS-A",
             service=_FakeService(),
             resolved_test_plan_sha256="e" * 64,
@@ -295,7 +295,7 @@ class TC_STAGE7_EVIDENCE(unittest.TestCase):
 
     def test_bundle_trace_and_index(self):
         with tempfile.TemporaryDirectory() as root:
-            bundle = Stage7EvidenceBundle(root, run_id="stage7-ev", judgement_scope="SOFTWARE_ONLY")
+            bundle = EvidenceBundle(root, run_id="stage7-ev", judgement_scope="SOFTWARE_ONLY")
             artifact = bundle.write_artifact("artifacts/example.json", {"value": 1})
             self.assertEqual(len(artifact["sha256"]), 64)
             bundle.write_trace(
@@ -321,7 +321,7 @@ class TC_STAGE7_EVIDENCE(unittest.TestCase):
 
     def test_invalid_status_rejected(self):
         with tempfile.TemporaryDirectory() as root:
-            bundle = Stage7EvidenceBundle(root, run_id="x", judgement_scope="SOFTWARE_ONLY")
+            bundle = EvidenceBundle(root, run_id="x", judgement_scope="SOFTWARE_ONLY")
             with self.assertRaises(ValueError):
                 bundle.write_trace(
                     "TC-STAGE7-001",

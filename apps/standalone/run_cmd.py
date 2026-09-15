@@ -54,7 +54,7 @@ from apps.standalone.state import (
 )
 
 # 배치 계획은 host 계층과 단일 출처 (읽기 전용 재사용).
-from apps.stage7_service_layer import DEFAULT_BATCH_PLAN  # noqa: E402
+from apps.service_layer import DEFAULT_BATCH_PLAN  # noqa: E402
 
 EXIT_PASS = 0
 EXIT_FAIL = 1

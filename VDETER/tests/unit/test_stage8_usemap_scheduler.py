@@ -7,7 +7,7 @@ from vdeter.mac.models import LcAllocation, LcState
 from vdeter.mac.tbb import build_wideband_canonical_tbb_profile
 from vdeter.mac.tdma import EPOCH_2000_UTC_NANOSECONDS
 from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME
-from vdeter.b210_system.control_plane.poc_device import Stage7PocDeviceSeam
+from vdeter.b210_system.control_plane.poc_device import PocDeviceSeam
 
 
 class UseMapSchedulerTests(unittest.TestCase):
@@ -60,7 +60,7 @@ class UseMapSchedulerTests(unittest.TestCase):
                                  utc_label_to_hardware_ns=lambda n: n)
         endpoint = SimpleNamespace(stage4=SimpleNamespace(mac=mac),
                                    dependencies=SimpleNamespace(radio=SimpleNamespace(bridge=bridge)))
-        seam = Stage7PocDeviceSeam(endpoint_id="MASS-B", endpoint=endpoint,
+        seam = PocDeviceSeam(endpoint_id="MASS-B", endpoint=endpoint,
                                    station_id_by_endpoint={})
         query = dict(channel_name=LOWER_CHANNEL_NAME,
                      from_hw_ns=EPOCH_2000_UTC_NANOSECONDS + 10_000_000_000, limit=128)

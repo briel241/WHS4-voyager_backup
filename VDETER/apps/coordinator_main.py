@@ -30,7 +30,7 @@ ENDPOINT_IDS = ("MASS-A", "MASS-B", "ROC")
 
 
 class SocketChannel:
-    """`Stage7RuntimeCoordinator` channel: 단일 SEQPACKET 연결 위에서 response와
+    """`RuntimeCoordinator` channel: 단일 SEQPACKET 연결 위에서 response와
     event를 kind로 분리한다.
 
     v0.9.1 E항: guard가 부착되면 recv loop가 짧은 주기로 phase deadline과
@@ -99,10 +99,10 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
     """세 resolved config와 system plan을 적재한다."""
 
     from vdeter.b210_system.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+        ConfigurationLoader,
+        OperationalGainInput,
     )
-    from vdeter.b210_system.coordinator import Stage7SystemPlanLoader
+    from vdeter.b210_system.coordinator import SystemPlanLoader
 
     gain_input_data = None
     if gain_artifact_path is not None:
@@ -111,7 +111,7 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
     data_profile_path = os.path.join(configs_dir, "profiles", "data-profile.toml")
     with open(data_profile_path, "r", encoding="utf-8") as handle:
         data_profile_text = handle.read()
-    loader = Stage7ConfigurationLoader()
+    loader = ConfigurationLoader()
     resolved = {}
     for endpoint_id in ENDPOINT_IDS:
         operational_gain = None
@@ -119,7 +119,7 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
             common = gain_input_data["endpoint_common_rx_gain_db"]
             # 세 endpoint 공통 gain은 endpoint별로 다르다 (§9.2 artifact).
             value = common[endpoint_id] if isinstance(common, dict) else common
-            operational_gain = Stage7OperationalGainInput(
+            operational_gain = OperationalGainInput(
                 endpoint_common_rx_gain_db=int(value),
                 source_gain_artifact_sha256=gain_input_data[
                     "source_gain_artifact_sha256"
@@ -143,7 +143,7 @@ def load_group(run_id: str, configs_dir: str, gain_artifact_path):
 
     with open(os.path.join(configs_dir, "system.toml"), "r", encoding="utf-8") as handle:
         system_text = handle.read()
-    plan = Stage7SystemPlanLoader().load(
+    plan = SystemPlanLoader().load(
         system_text,
         resolved,
         data_profile_sha256=resolved["ROC"].data_profile_sha256,
@@ -165,7 +165,7 @@ def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_a
     for endpoint_id in ENDPOINT_IDS:
         command = [
             sys.executable,
-            os.path.join(APP_ROOT, "apps", "stage7_endpoint_launcher.py"),
+            os.path.join(APP_ROOT, "apps", "endpoint_launcher.py"),
             "--run-id", run_id,
             "--endpoint-id", endpoint_id,
             "--config", os.path.join(configs_dir, "endpoints", f"{endpoint_id.lower()}.toml"),
@@ -897,7 +897,7 @@ def _spawn_controller(run_id, run_root, configs_dir, test_plan_sha, mode,
     )
     command = [
         sys.executable,
-        os.path.join(APP_ROOT, "apps", "stage7_scenario_controller.py"),
+        os.path.join(APP_ROOT, "apps", "scenario_controller.py"),
         "--run-id", run_id,
         "--run-root", run_root,
         "--test-plan-sha", test_plan_sha,
@@ -914,7 +914,7 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
     """MASS/ROC 업무 시나리오 controller를 spawn한다 (RR controller와 별개).
 
     기존 RR scenario controller는 그대로 보존한다 — MASS/ROC workload는
-    repo-root `apps/stage7_mass_roc_controller.py`가 실제 RocAgent/MassAgent/
+    repo-root `apps/mass_roc_workload_controller.py`가 실제 RocAgent/MassAgent/
     cert_flow 흐름을 수행하고 결과를 `<run_root>/mass-roc-events/`에 남긴다.
     """
     logs_dir = os.path.join(run_root, "logs")
@@ -925,7 +925,7 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
     command = [
         sys.executable,
         os.path.join(os.path.dirname(APP_ROOT), "apps",
-                     "stage7_mass_roc_controller.py"),
+                     "mass_roc_workload_controller.py"),
         "--run-id", run_id,
         "--run-root", run_root,
         "--test-plan-sha", test_plan_sha,
@@ -939,7 +939,7 @@ def _spawn_mass_roc_controller(run_id, run_root, configs_dir, test_plan_sha,
 def _open_session_trace(run_root, run_id):
     """session phase용 JSONL 계측기. 실패해도 세션을 막지 않는다.
 
-    repo-root `apps/stage7_trace.py`를 재사용해 session/workload 결속·비밀
+    repo-root `apps/service_trace.py`를 재사용해 session/workload 결속·비밀
     마스킹 형식을 CLI 계층과 통일한다. import가 안 되면 무계측으로 진행한다
     (계측 부재가 판정을 바꾸면 안 되므로 fail-open이 맞다).
     """
@@ -948,7 +948,7 @@ def _open_session_trace(run_root, run_id):
         repo_root = os.path.dirname(APP_ROOT)
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
-        from apps.stage7_trace import TraceWriter
+        from apps.service_trace import TraceWriter
 
         return TraceWriter(path, session_id=run_id, diagnostics=True)
     except Exception as exc:  # noqa: BLE001
@@ -983,7 +983,7 @@ def _spawn_session_lifecycle(lifecycle, run_id, run_root, configs_dir,
     command = [
         sys.executable,
         os.path.join(os.path.dirname(APP_ROOT), "apps",
-                     "stage7_mass_roc_controller.py"),
+                     "mass_roc_workload_controller.py"),
         "--run-id", run_id,
         "--run-root", os.path.join(run_root, "lifecycle", lifecycle),
         "--test-plan-sha", test_plan_sha,
@@ -1593,7 +1593,7 @@ SESSION_IDLE_TIMEOUT_S = 45 * 60
 #: workload에 16분밖에 남지 않는다 — 두 개념을 분리한다.
 SESSION_DEADLINE_S = 2 * 60 * 60
 
-#: application workload child 상한. 로컬 ``Stage7ServiceSession``의 900초
+#: application workload child 상한. 로컬 ``ServiceSession``의 900초
 #: 계약과 같은 값으로 coordinator도 직접 강제한다. 한쪽만 timeout이면 원격
 #: child가 살아 남아 B210 cleanup을 막을 수 있다.
 SESSION_WORKLOAD_TIMEOUT_S = 900.0
@@ -2078,7 +2078,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             command = [
                 sys.executable,
                 os.path.join(os.path.dirname(APP_ROOT), "apps",
-                             "stage7_mass_roc_controller.py"),
+                             "mass_roc_workload_controller.py"),
                 "--run-id", run_id,
                 "--run-root", child_root,
                 "--test-plan-sha", test_plan_sha,
@@ -2558,7 +2558,7 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
         try:
             saved = coordinator._lifecycle_generation
             coordinator._lifecycle_generation = saved + 99
-            from vdeter.b210_system.coordinator import Stage7BarrierFailure
+            from vdeter.b210_system.coordinator import BarrierFailure
 
             rejected = False
             try:
@@ -2569,7 +2569,7 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
                          "stop_deadline_host_raw_ns": now2 + 30_000_000_000}
                      for m in ENDPOINT_IDS},
                 )
-            except Stage7BarrierFailure:
+            except BarrierFailure:
                 rejected = True
             finally:
                 coordinator._lifecycle_generation = saved
@@ -3339,7 +3339,7 @@ def main(argv=None) -> int:
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
     validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
 
-    from vdeter.b210_system.coordinator import Stage7RuntimeCoordinator
+    from vdeter.b210_system.coordinator import RuntimeCoordinator
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     os.makedirs(os.path.join(arguments.run_root, "evidence"), exist_ok=True)
@@ -3365,7 +3365,7 @@ def main(argv=None) -> int:
         arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
         arguments.gain_artifact, test_plan_sha=test_plan_sha,
     )
-    coordinator = Stage7RuntimeCoordinator(
+    coordinator = RuntimeCoordinator(
         plan,
         channels,
         host_raw_clock=read_monotonic_raw_ns,

@@ -373,8 +373,8 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     _ensure_vdeter_importable(repo_root)
     from vdeter.b210_system.canonical_json import encode_canonical_json
     from vdeter.b210_system.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+        ConfigurationLoader,
+        OperationalGainInput,
     )
 
     template_dir = repo_root / "VDETER" / "configs" / "stage7"
@@ -417,7 +417,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         data_profile_text, encoding="utf-8", newline="\n")
 
     endpoints_decl = hardware.get("endpoints") or {}
-    loader = Stage7ConfigurationLoader()
+    loader = ConfigurationLoader()
     resolved_sha = {}
     for endpoint in ENDPOINTS:
         text = (endpoint_template_dir
@@ -466,7 +466,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
             common = gain_input["endpoint_common_rx_gain_db"]
             key = endpoint.upper()
             value = common[key] if isinstance(common, dict) else common
-            operational_gain = Stage7OperationalGainInput(
+            operational_gain = OperationalGainInput(
                 endpoint_common_rx_gain_db=int(value),
                 source_gain_artifact_sha256=gain_input[
                     "source_gain_artifact_sha256"],

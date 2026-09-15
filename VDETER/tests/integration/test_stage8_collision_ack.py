@@ -18,7 +18,7 @@ class CollisionAckTests(unittest.TestCase):
     setUp = _Harness.setUp
 
     def test_normal_ack_completes_with_collision_hold_active(self):
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
 

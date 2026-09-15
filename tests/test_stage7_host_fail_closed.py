@@ -14,8 +14,8 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from apps import stage7_service_layer, stage7_session
-from apps.stage7_trace import NullTrace
+from apps import service_layer, service_session
+from apps.service_trace import NullTrace
 from stage7_binding_fixtures import legacy_phase_i_pins
 
 
@@ -77,10 +77,10 @@ def _source_runner(command, **_kwargs):
 def test_function_bound_rejects_remote_phase_g_file_mismatch():
     profile = _bound_profile(phase_g_file_sha256="0" * 64)
     try:
-        stage7_service_layer._verify_function_bound(
+        service_layer._verify_function_bound(
             profile, "$HOME/deploy", _source_runner)
         raise AssertionError("원격 coordinator 전체 파일 불일치가 통과했다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         assert "전체 파일" in str(exc)
 
 
@@ -88,10 +88,10 @@ def test_function_bound_rejects_dispatch_mismatch():
     profile = _bound_profile(
         rr_phase_dispatch={"rr-p1": ["run_unqualified_path"]})
     try:
-        stage7_service_layer._verify_function_bound(
+        service_layer._verify_function_bound(
             profile, "$HOME/deploy", _source_runner)
         raise AssertionError("RR dispatch 불일치가 통과했다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         assert "dispatch_mismatch" in str(exc)
 
 
@@ -101,15 +101,15 @@ def test_function_bound_requires_all_binding_fields():
             ["function_bound_files"]["VDETER/apps/coordinator.py"])
     del spec["phase_g_file_sha256"]
     try:
-        stage7_service_layer._verify_function_bound(
+        service_layer._verify_function_bound(
             profile, "$HOME/deploy", _source_runner)
         raise AssertionError("누락된 전체 파일 결속이 통과했다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         assert "phase_g_file_sha256" in str(exc)
 
 
 def test_function_bound_accepts_complete_matching_reference():
-    report = stage7_service_layer._verify_function_bound(
+    report = service_layer._verify_function_bound(
         _bound_profile(), "$HOME/deploy", _source_runner)
     item = report["VDETER/apps/coordinator.py"]
     assert item["pass"] is True
@@ -124,7 +124,7 @@ def test_function_bound_accepts_complete_matching_reference():
 #         qualification 함수 변조·run_rr_p3_fault 추가 변경은 다시 거부된다.
 # ---------------------------------------------------------------------------
 
-_COORDINATOR_REL = "VDETER/apps/stage7_coordinator_main.py"
+_COORDINATOR_REL = "VDETER/apps/coordinator_main.py"
 
 
 def _phase_g_profile_copy():
@@ -132,12 +132,12 @@ def _phase_g_profile_copy():
     in-memory 사본 (파일 무수정). 로컬 evidence에 의존하지 않는다."""
     import copy
 
-    from apps import stage7_profile
+    from apps import run_profile
     path = os.path.join(_REPO, "tests", "fixtures", "phase-g-reference",
                         "stage7-profile.json")
     if not os.path.isfile(path):
         raise AssertionError("phase-g reference fixture가 없다: " + path)
-    return copy.deepcopy(stage7_profile.load_profile(path))
+    return copy.deepcopy(run_profile.load_profile(path))
 
 
 def _current_coordinator_source() -> str:
@@ -186,10 +186,10 @@ def test_real_phase_g_binding_rejects_current_coordinator():
     profile = _phase_g_profile_copy()
     source = _current_coordinator_source()
     try:
-        stage7_service_layer._verify_function_bound(
+        service_layer._verify_function_bound(
             profile, "$HOME/deploy", _serving_runner(source))
         raise AssertionError("실제 Phase G 결속이 변경된 coordinator를 통과시켰다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         text = str(exc)
         assert "run_rr_p3_fault" in text or "전체 파일" in text, text
 
@@ -205,11 +205,11 @@ def test_real_phase_g_function_hashes_reject_run_rr_p3_fault_change():
                                   _current_coordinator_source(),
                                   pin_run_rr_p3_fault=False)
     try:
-        stage7_service_layer._verify_function_bound(
+        service_layer._verify_function_bound(
             profile, "$HOME/deploy",
             _serving_runner(_current_coordinator_source()))
         raise AssertionError("함수 해시 불일치가 거부되지 않았다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         text = str(exc)
         assert "run_rr_p3_fault" in text, text
         # 승인 목록과 **정확히** 일치해야 한다(승인 밖 함수가 하나라도 끼면 실패).
@@ -225,7 +225,7 @@ def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():
     함수 변조(run_rr_p1)나 run_rr_p3_fault 추가 변경은 다시 거부된다."""
     source = _current_coordinator_source()
     profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
-    report = stage7_service_layer._verify_function_bound(
+    report = service_layer._verify_function_bound(
         profile, "$HOME/deploy", _serving_runner(source))
     item = report[_COORDINATOR_REL]
     assert item["pass"] is True and item["changed"] == []
@@ -236,10 +236,10 @@ def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():
         # 함수 단위 가드가 변조를 잡아야 한다.
         profile2 = _rebind_for_phase_i(_phase_g_profile_copy(), mutated)
         try:
-            stage7_service_layer._verify_function_bound(
+            service_layer._verify_function_bound(
                 profile2, "$HOME/deploy", _serving_runner(mutated))
             raise AssertionError(f"{target} 변조가 거부되지 않았다")
-        except stage7_service_layer.ServiceSessionError as exc:
+        except service_layer.ServiceSessionError as exc:
             assert f"changed=['{target}']" in str(exc), str(exc)
 
 
@@ -285,21 +285,21 @@ def _process_runner(process_line, scripts):
 def _assert_process_is_rejected(process_line):
     scripts = []
     try:
-        stage7_service_layer.verify_remote_environment(
+        service_layer.verify_remote_environment(
             _preflight_profile(),
             runner=_process_runner(process_line, scripts))
         raise AssertionError("경쟁 process가 통과했다")
-    except stage7_service_layer.ServiceSessionError as exc:
+    except service_layer.ServiceSessionError as exc:
         assert "프로세스" in str(exc)
     process_script = next(script for script in scripts if "##PROC" in script)
-    assert "stage7_mass_roc_controller" in process_script
+    assert "mass_roc_workload_controller" in process_script
     assert "multiprocessing\\.spawn" in process_script
     assert "spawn_main" in process_script
 
 
 def test_preflight_rejects_mass_roc_controller_process():
     _assert_process_is_rejected(
-        "101 python3 apps/stage7_mass_roc_controller.py --run-id stale")
+        "101 python3 apps/mass_roc_workload_controller.py --run-id stale")
 
 
 def test_preflight_rejects_spawned_b210_worker_process():
@@ -342,7 +342,7 @@ class _CloseRunner:
 
 
 def _new_session(tmp, runner):
-    session = stage7_session.Stage7ServiceSession(
+    session = service_session.ServiceSession(
         _session_profile(), session_id="session-test", session_dir=tmp,
         runner=runner, trace=NullTrace())
     session.status = "READY"
@@ -357,7 +357,7 @@ def test_collect_evidence_rejects_scp_failure():
         try:
             session.collect_evidence()
             raise AssertionError("scp 실패가 성공으로 처리됐다")
-        except stage7_service_layer.ServiceSessionError as exc:
+        except service_layer.ServiceSessionError as exc:
             assert "scp 실패" in str(exc) and "rc=7" in str(exc)
 
 
@@ -369,7 +369,7 @@ def test_collect_evidence_revalidates_existing_target():
         try:
             session.collect_evidence()
             raise AssertionError("빈 기존 evidence target이 재사용됐다")
-        except stage7_service_layer.ServiceSessionError as exc:
+        except service_layer.ServiceSessionError as exc:
             assert "비어" in str(exc)
 
         session.ready = {"run_id": session.session_id}
@@ -445,12 +445,12 @@ def test_close_unconfirmed_launch_attempt_is_treated_as_maybe_running():
     with tempfile.TemporaryDirectory() as tmp:
         session = _new_session(tmp, _CloseRunner(exited=False, scp_rc=8))
         session._coordinator_spawned = False
-        previous = stage7_session.SESSION_CLOSE_TIMEOUT_S
-        stage7_session.SESSION_CLOSE_TIMEOUT_S = 0.0
+        previous = service_session.SESSION_CLOSE_TIMEOUT_S
+        service_session.SESSION_CLOSE_TIMEOUT_S = 0.0
         try:
             result = session.close()
         finally:
-            stage7_session.SESSION_CLOSE_TIMEOUT_S = previous
+            service_session.SESSION_CLOSE_TIMEOUT_S = previous
         assert result["status"] == "FAIL"
         assert result["bounded_close"]["launch_attempted"] is True
         assert result["bounded_close"]["spawn_confirmed"] is False
@@ -460,12 +460,12 @@ def test_close_unconfirmed_launch_attempt_is_treated_as_maybe_running():
 def test_close_timeout_reports_coordinator_may_still_run():
     with tempfile.TemporaryDirectory() as tmp:
         session = _new_session(tmp, _CloseRunner(exited=False))
-        previous = stage7_session.SESSION_CLOSE_TIMEOUT_S
-        stage7_session.SESSION_CLOSE_TIMEOUT_S = 0.0
+        previous = service_session.SESSION_CLOSE_TIMEOUT_S
+        service_session.SESSION_CLOSE_TIMEOUT_S = 0.0
         try:
             result = session.close()
         finally:
-            stage7_session.SESSION_CLOSE_TIMEOUT_S = previous
+            service_session.SESSION_CLOSE_TIMEOUT_S = previous
         assert result["status"] == "FAIL"
         assert result["bounded_close"]["pass"] is False
         assert result["bounded_close"]["coordinator_exited"] is False

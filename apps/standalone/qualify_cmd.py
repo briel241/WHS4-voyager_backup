@@ -21,7 +21,7 @@ soak(RR-008)·**Link 19(RR-006)** 는 범위 제외. Link 19는 현재 프로젝
 발급 원칙 (승인 조건 2·3 → clone-bootstrap v2)
     - `stage7_issue_qualification_reference.py` CLI는 호출하지 않는다 (SSH·
       Git 결합). reference **스키마 v2**(installation/domain digest 결속)로
-      로컬 발급하고, 발급 직후 검증기(`apps.stage7_profile.load_reference`)로
+      로컬 발급하고, 발급 직후 검증기(`apps.run_profile.load_reference`)로
       재검증한다. Git commit·branch·dirty·baseline Markdown SHA는 판정값이
       아니라 optional provenance다.
     - final builder는 `build(..., head_provider=...)`로 호출하고 provider는
@@ -692,8 +692,8 @@ def write_reference(directory: Path, reference: dict) -> dict:
     from apps.standalone.state import fsync_dir
     fsync_dir(directory)
 
-    from apps import stage7_profile
-    validated = stage7_profile.load_reference(str(path), expected_sha256=sha)
+    from apps import run_profile
+    validated = run_profile.load_reference(str(path), expected_sha256=sha)
     return {"path": path, "sha256": sha,
             "validated_run_id": validated["qualification"]["run_id"]}
 
@@ -741,11 +741,11 @@ def load_active_reference(paths: StatePaths):
     path = directory / REFERENCE_BASENAME
     if not path.is_file():
         return None
-    from apps import stage7_profile
+    from apps import run_profile
     try:
-        return stage7_profile.load_reference(
+        return run_profile.load_reference(
             str(path), expected_sha256=pointer["reference_sha256"])
-    except stage7_profile.ProfileError:
+    except run_profile.ProfileError:
         return None
 
 
@@ -801,7 +801,7 @@ def default_phase_runner(context: dict) -> dict:
     repo_root = Path(context["repo_root"])
     argv = [
         sys.executable,
-        str(repo_root / "VDETER" / "apps" / "stage7_coordinator_main.py"),
+        str(repo_root / "VDETER" / "apps" / "coordinator_main.py"),
         "--run-id", context["run_id"],
         "--phase", context["phase"],
         "--run-root", str(context["run_root"]),
@@ -1272,7 +1272,7 @@ def _rf_resolved_config_bound_to(prior_ladder_id: str, paths: StatePaths,
 def load_release_reference(paths: StatePaths, release_id: str) -> dict:
     """releases/<id>/의 reference를 검증기로 적재 (sidecar 대조). v1·v2 모두
     읽히지만 evidence 재사용 원천은 v2만 허용한다."""
-    from apps import stage7_profile
+    from apps import run_profile
     if (not isinstance(release_id, str) or not release_id
             or any(sep in release_id for sep in ("/", "\\", ".."))):
         raise QualifyError(f"malformed release id: {release_id!r}")
@@ -1280,8 +1280,8 @@ def load_release_reference(paths: StatePaths, release_id: str) -> dict:
     if not path.is_file():
         raise QualifyError(f"release reference missing: {path}")
     try:
-        return stage7_profile.load_reference(str(path))
-    except stage7_profile.ProfileError as exc:
+        return run_profile.load_reference(str(path))
+    except run_profile.ProfileError as exc:
         raise QualifyError(f"release reference validation failed: {exc}") from exc
 
 

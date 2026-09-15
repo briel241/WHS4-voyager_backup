@@ -3,7 +3,7 @@
 import inspect
 import subprocess
 
-from apps import stage7_coordinator_main as coordinator_main
+from apps import coordinator_main as coordinator_main
 
 
 class _FakeProcess:

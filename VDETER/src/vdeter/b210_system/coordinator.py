@@ -1,6 +1,6 @@
 """Stage 7 Runtime Coordinator (`stage7` §6, §14, §16, §16.1).
 
-`Stage7RuntimeCoordinator`는 system plan에 결속된 세 공통 endpoint launcher를
+`RuntimeCoordinator`는 system plan에 결속된 세 공통 endpoint launcher를
 child로 시작하고 group preflight·lifecycle, host/RF time candidate와 atomic
 barrier, coordinated inhibit만 소유한다. public VDE-TER API나 상위 MASS/ROC
 application이 아니며 Service scenario·payload·업무 판단을 소유하지 않는다.
@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from ..common.errors import Details, ErrorCategory, ErrorCode, Layer
 from ..common.results import Ok, internal_error
 from .canonical_json import canonical_sha256, encode_canonical_json, sha256_hex
-from .configuration import Stage7ConfigurationLoader, Stage7OperationalGainInput
-from .errors import Stage7ControlPlane, Stage7PrivateErrorCode, Stage7PrivateFault
+from .configuration import ConfigurationLoader, OperationalGainInput
+from .errors import ControlPlane, PrivateErrorCode, PrivateFault
 from .ipc import (
     ACTIVE_BRIDGE_COMMANDS,
     COMMAND_TIMEOUTS_S,
@@ -27,7 +27,7 @@ from .ipc import (
     RUNTIME_PROTOCOL,
     SERVICE_START_INTENT_TIMEOUT_NS,
     SERVICE_START_TBB_PUBLISH_TIMEOUT_NS,
-    Stage7IpcError,
+    IpcError,
     body_set_sha256,
     body_sha256_of,
     build_barrier_manifest,
@@ -70,7 +70,7 @@ def _error(code, message, **details):
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7ResolvedSystemPlan:
+class ResolvedSystemPlan:
     """immutable system plan (§15). Runtime Coordinator만 전체를 소비한다."""
 
     profile: str
@@ -93,7 +93,7 @@ class Stage7ResolvedSystemPlan:
         raise KeyError(endpoint_id)
 
 
-class Stage7SystemPlanLoader:
+class SystemPlanLoader:
     """`system.toml`과 세 endpoint resolved config를 exact 검증해 system plan을 만든다."""
 
     __slots__ = ()
@@ -216,7 +216,7 @@ class Stage7SystemPlanLoader:
             "registry_fingerprint": first.registry_fingerprint,
         }
         return Ok(
-            Stage7ResolvedSystemPlan(
+            ResolvedSystemPlan(
                 profile=SYSTEM_PROFILE,
                 socket_root=socket_root,
                 member_count=3,
@@ -233,13 +233,13 @@ class Stage7SystemPlanLoader:
         )
 
 
-class Stage7BarrierFailure(RuntimeError):
-    def __init__(self, message: str, *, private_code: Stage7PrivateErrorCode):
+class BarrierFailure(RuntimeError):
+    def __init__(self, message: str, *, private_code: PrivateErrorCode):
         super().__init__(message)
         self.private_code = private_code
 
 
-class Stage7RuntimeCoordinator:
+class RuntimeCoordinator:
     """§16.1 barrier/ledger 로직. transport와 process spawn은 주입형이다.
 
     `channels`: {endpoint_id: channel}. channel은 `request(message_dict) ->
@@ -266,7 +266,7 @@ class Stage7RuntimeCoordinator:
 
     def __init__(
         self,
-        plan: Stage7ResolvedSystemPlan,
+        plan: ResolvedSystemPlan,
         channels: dict,
         *,
         host_raw_clock,
@@ -324,14 +324,14 @@ class Stage7RuntimeCoordinator:
     def _now(self) -> int:
         return int(self._host_raw_clock())
 
-    def _fault(self, private_code: Stage7PrivateErrorCode, message: str, **fields):
+    def _fault(self, private_code: PrivateErrorCode, message: str, **fields):
         self._faults.append(
-            Stage7PrivateFault(
+            PrivateFault(
                 private_code=private_code,
                 phase=fields.pop("phase", "runtime"),
                 endpoint_id=fields.pop("endpoint_id", "-"),
                 run_id=self._run_id,
-                control_plane=Stage7ControlPlane.RUNTIME,
+                control_plane=ControlPlane.RUNTIME,
                 details={"message": message, **fields},
             )
         )
@@ -425,15 +425,15 @@ class Stage7RuntimeCoordinator:
     ):
         """PREPARE→COMMIT (실패 시 ABORT/emergency)를 §16 규칙으로 실행한다.
 
-        반환: {endpoint_id: commit_response}. 실패는 `Stage7BarrierFailure`다.
+        반환: {endpoint_id: commit_response}. 실패는 `BarrierFailure`다.
         `concurrent_commit=True`는 공통 plan 시각의 TX/RX가 동시에 실행돼야
         하는 RF 측정 barrier에서 COMMIT을 병렬 전송한다.
         """
 
         if self._inhibited:
-            raise Stage7BarrierFailure(
+            raise BarrierFailure(
                 "TX-inhibited group에는 새 barrier를 열 수 없습니다",
-                private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
             )
         members = tuple(members if members is not None else self._present_members)
         barrier_id = str(_uuid.uuid4())
@@ -481,13 +481,13 @@ class Stage7RuntimeCoordinator:
                     commit_at,
                 )
                 self._fault(
-                    Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                    PrivateErrorCode.CONTROL_BARRIER_FAILED,
                     f"PREPARE peer 손실: {type(error).__name__}",
                     endpoint_id=endpoint_id,
                 )
-                raise Stage7BarrierFailure(
+                raise BarrierFailure(
                     "PREPARE peer 손실",
-                    private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                    private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                 ) from error
             if response["body"]["status"] != "PREPARED":
                 self._abort_barrier(
@@ -498,9 +498,9 @@ class Stage7RuntimeCoordinator:
                     manifest,
                     commit_at,
                 )
-                raise Stage7BarrierFailure(
+                raise BarrierFailure(
                     f"{endpoint_id} PREPARE {response['body']['status']}",
-                    private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                    private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                 )
             prepared.append(endpoint_id)
 
@@ -545,20 +545,20 @@ class Stage7RuntimeCoordinator:
                 kind, value = outcomes.get(endpoint_id, ("error", RuntimeError("no outcome")))
                 if kind == "error":
                     self.emergency_inhibit(
-                        Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
+                        PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
                     )
-                    raise Stage7BarrierFailure(
+                    raise BarrierFailure(
                         "COMMIT peer 손실",
-                        private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                        private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                     ) from value
                 status = value["body"]["status"]
                 if status in ("REJECTED", "TIMED_OUT"):
                     self.emergency_inhibit(
-                        Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
+                        PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
                     )
-                    raise Stage7BarrierFailure(
+                    raise BarrierFailure(
                         f"{endpoint_id} COMMIT {status}",
-                        private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                        private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                     )
                 commits[endpoint_id] = value
             return commits
@@ -568,20 +568,20 @@ class Stage7RuntimeCoordinator:
                 response = self._request(endpoint_id, message)
             except Exception as error:  # noqa: BLE001
                 self.emergency_inhibit(
-                    Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
+                    PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
                 )
-                raise Stage7BarrierFailure(
+                raise BarrierFailure(
                     "COMMIT peer 손실",
-                    private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                    private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                 ) from error
             status = response["body"]["status"]
             if status in ("REJECTED", "TIMED_OUT"):
                 self.emergency_inhibit(
-                    Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
+                    PrivateErrorCode.CONTROL_BARRIER_FAILED.value, barrier_id
                 )
-                raise Stage7BarrierFailure(
+                raise BarrierFailure(
                     f"{endpoint_id} COMMIT {status}",
-                    private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                    private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
                 )
             commits[endpoint_id] = response
         return commits
@@ -656,24 +656,24 @@ class Stage7RuntimeCoordinator:
 
         try:
             validate_runtime_event(event)
-        except Stage7IpcError as error:
+        except IpcError as error:
             self._fault(
-                Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID,
+                PrivateErrorCode.CONTROL_MESSAGE_INVALID,
                 str(error),
                 endpoint_id=endpoint_id,
             )
             self.emergency_inhibit(
-                Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
+                PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
             )
             return _error(ErrorCode.INTERNAL_ERROR, "CONTROL_MESSAGE_INVALID")
         if event["endpoint_id"] != endpoint_id:
             self._fault(
-                Stage7PrivateErrorCode.CONTROL_PEER_INVALID,
+                PrivateErrorCode.CONTROL_PEER_INVALID,
                 "socket peer와 endpoint_id 불일치",
                 endpoint_id=endpoint_id,
             )
             self.emergency_inhibit(
-                Stage7PrivateErrorCode.CONTROL_PEER_INVALID.value, str(_uuid.uuid4())
+                PrivateErrorCode.CONTROL_PEER_INVALID.value, str(_uuid.uuid4())
             )
             return _error(ErrorCode.INTERNAL_ERROR, "CONTROL_PEER_INVALID")
         if (
@@ -681,12 +681,12 @@ class Stage7RuntimeCoordinator:
             or event["resolved_system_plan_sha256"] != self._plan.resolved_sha256
         ):
             self._fault(
-                Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID,
+                PrivateErrorCode.CONTROL_MESSAGE_INVALID,
                 "run/plan 불일치 event",
                 endpoint_id=endpoint_id,
             )
             self.emergency_inhibit(
-                Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
+                PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
             )
             return _error(ErrorCode.INTERNAL_ERROR, "CONTROL_MESSAGE_INVALID")
         self._events.append((endpoint_id, event))
@@ -746,12 +746,12 @@ class Stage7RuntimeCoordinator:
 
     def _invalid_event(self, endpoint_id: str, reason: str):
         self._fault(
-            Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID,
+            PrivateErrorCode.CONTROL_MESSAGE_INVALID,
             reason,
             endpoint_id=endpoint_id,
         )
         self.emergency_inhibit(
-            Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
+            PrivateErrorCode.CONTROL_MESSAGE_INVALID.value, str(_uuid.uuid4())
         )
         return _error(ErrorCode.INTERNAL_ERROR, reason)
 
@@ -794,15 +794,15 @@ class Stage7RuntimeCoordinator:
 
         admission = self._admission
         if admission is None or not self.required_intents_complete():
-            raise Stage7BarrierFailure(
+            raise BarrierFailure(
                 "required intent가 닫히지 않았습니다",
-                private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
             )
         now = self._now()
         if now >= admission["service_start_deadline_host_raw_ns"]:
-            raise Stage7BarrierFailure(
+            raise BarrierFailure(
                 "intent cutoff이 지났습니다",
-                private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
             )
         intent_set = self.intent_set()
         body = {
@@ -859,16 +859,16 @@ class Stage7RuntimeCoordinator:
 
     def publish_service_start(self, start_result_set, *, bridge_generation, publish_at=None):
         if not self.required_tbb_complete(bridge_generation):
-            raise Stage7BarrierFailure(
+            raise BarrierFailure(
                 "required TBB-active set이 닫히지 않았습니다",
-                private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
             )
         admission = self._admission
         publish_at = publish_at if publish_at is not None else self._now() + 1_000_000_000
         if admission is not None and publish_at > admission["tbb_publish_deadline_host_raw_ns"]:
-            raise Stage7BarrierFailure(
+            raise BarrierFailure(
                 "publish가 TBB publish deadline을 넘습니다",
-                private_code=Stage7PrivateErrorCode.CONTROL_BARRIER_FAILED,
+                private_code=PrivateErrorCode.CONTROL_BARRIER_FAILED,
             )
         tbb_set = self.tbb_active_set(bridge_generation)
         body = {
@@ -888,8 +888,8 @@ class Stage7RuntimeCoordinator:
 
 __all__ = (
     "CANONICAL_SOCKET_ROOT",
-    "Stage7BarrierFailure",
-    "Stage7ResolvedSystemPlan",
-    "Stage7RuntimeCoordinator",
-    "Stage7SystemPlanLoader",
+    "BarrierFailure",
+    "ResolvedSystemPlan",
+    "RuntimeCoordinator",
+    "SystemPlanLoader",
 )

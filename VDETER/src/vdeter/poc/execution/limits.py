@@ -4,7 +4,7 @@
 
 1. **Stage 8 신규 정책 상한** — 기존 서비스 세션 코드에 없던 상한. 이 module이 유일한 정의
    위치이며 resident session이 신규 상수로 강제한다.
-2. **기존 서비스 세션 코드 상한** — `apps/stage7_session.py`의 `SESSION_BRINGUP_TIMEOUT_S`·
+2. **기존 서비스 세션 코드 상한** — `apps/service_session.py`의 `SESSION_BRINGUP_TIMEOUT_S`·
    `WORKLOAD_TIMEOUT_S`·`SESSION_CLOSE_TIMEOUT_S`가 authoritative 정의다. Stage 4는 그
    값을 **바꾸지 않으며**, RF-off resident-session 모델에 주입할 기본값으로만 mirror한다
    (Stage 6 통합 시 실제 서비스 세션 상수로 주입). 여기서 재선언하는 것은 새 권위가 아니라
@@ -26,13 +26,13 @@ SESSION_ABSOLUTE_DEADLINE_S = 7200.0  # 2시간
 READY_IDLE_TIMEOUT_S = 2700.0  # 45분 (bring-up timeout과 값은 같지만 별개 상한)
 
 
-# --- 기존 서비스 세션 코드 상한 (mirror 기본값; authoritative 정의는 apps/stage7_session.py) --
+# --- 기존 서비스 세션 코드 상한 (mirror 기본값; authoritative 정의는 apps/service_session.py) --
 
-#: `apps/stage7_session.py:SESSION_BRINGUP_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
+#: `apps/service_session.py:SESSION_BRINGUP_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
 SERVICE_BRINGUP_TIMEOUT_S = 2700.0
-#: `apps/stage7_session.py:WORKLOAD_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
+#: `apps/service_session.py:WORKLOAD_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
 SERVICE_WORKLOAD_TIMEOUT_S = 900.0
-#: `apps/stage7_session.py:SESSION_CLOSE_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
+#: `apps/service_session.py:SESSION_CLOSE_TIMEOUT_S`와 동일해야 하는 mirror 기본값.
 SERVICE_CLOSE_TIMEOUT_S = 600.0
 
 

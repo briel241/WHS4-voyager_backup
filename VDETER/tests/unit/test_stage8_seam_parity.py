@@ -1,7 +1,7 @@
 """양 경로 provider seam parity 계약시험(2-2, RF-off·pure).
 
-launcher 경로(controller `LauncherRadioSink` → §16.2 RPC → launcher `Stage7PocDeviceSeam.schedule_group_tx`)와
-RF-off/direct 경로(`Stage7AuthoritativeRadioSink` → adapter 직접 호출)가 **같은** 검증·요청 변환·결과 분류를
+launcher 경로(controller `LauncherRadioSink` → §16.2 RPC → launcher `PocDeviceSeam.schedule_group_tx`)와
+RF-off/direct 경로(`AuthoritativeRadioSink` → adapter 직접 호출)가 **같은** 검증·요청 변환·결과 분류를
 내는지 실제 두 경로의 sink/adapter로 비교한다. 의도적으로 다른 계약(route 결속 시점·거부 신호의 형태·
 폴링 방식)은 그 차이 자체를 단언한다. 프로세스 경계는 in-process로 잇는다: `client.call` → seam op, op 예외는
 실 TEST adapter 봉투처럼 `PocDeviceCallError`. 공통 helper만 시험하지 않고 두 production sink를 통해 검증한다.
@@ -18,10 +18,10 @@ from types import SimpleNamespace as NS
 from apps.poc_device_seams_launcher import LauncherLedgerTerminalSource, LauncherRadioSink
 from apps.poc_device_seams_inprocess import (
     Link11WaveformFactory,
-    Stage7AuthoritativeRadioSink,
-    Stage7LedgerTerminalSource,
+    AuthoritativeRadioSink,
+    LedgerTerminalSource,
     child_terminals_from_ledger,
-    stage7_channel_name,
+    channel_name,
 )
 from vdeter.common.errors import Details
 from vdeter.common.identifiers import BurstId
@@ -29,7 +29,7 @@ from vdeter.common.identifiers import PhysicalChannel as Stage7Channel
 from vdeter.common.results import Err, Ok
 from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
 from vdeter.b210_system.control_plane.controller import PocDeviceCallError
-from vdeter.b210_system.control_plane.poc_device import PocDeviceUnavailable, Stage7PocDeviceSeam
+from vdeter.b210_system.control_plane.poc_device import PocDeviceUnavailable, PocDeviceSeam
 from vdeter.poc.integration.device_boundary import (
     SoftwareGroupTx,
     GroupTxRadioSink,
@@ -211,7 +211,7 @@ def _children(target, *, hw_ns=_HW_NS, same_lane=False):
 def _rf_off_path(*, mode="accept", locked=True, route_refuse=False):
     sidecar = _Sidecar(refuse=route_refuse)
     adapter = _Adapter(_Bridge(locked=locked), sidecar, mode=mode)
-    sink = Stage7AuthoritativeRadioSink(adapter, sidecar=sidecar,
+    sink = AuthoritativeRadioSink(adapter, sidecar=sidecar,
                                         source_station_id=STATIONS["MASS-B"],
                                         station_id_by_endpoint=STATIONS)
     return NS(sink=sink, adapter=adapter, sidecar=sidecar, client=None)
@@ -221,7 +221,7 @@ def _launcher_path(*, mode="accept", locked=True, route_refuse=False, interrupt_
     sidecar = _Sidecar(refuse=route_refuse)
     adapter = _Adapter(_Bridge(locked=locked), sidecar, mode=mode)
     endpoint = NS(dependencies=NS(radio=adapter), stage4=NS(collision_gate=None))
-    seam = Stage7PocDeviceSeam(endpoint_id="MASS-B", endpoint=endpoint,
+    seam = PocDeviceSeam(endpoint_id="MASS-B", endpoint=endpoint,
                                station_id_by_endpoint=STATIONS)
     client = _InProcessLauncherClient(seam, interrupt_on=interrupt_on)
     sink = LauncherRadioSink(client, station_id_by_endpoint=STATIONS)
@@ -295,7 +295,7 @@ class RequestConversionParityTest(unittest.TestCase):
                 self.assertEqual(_request_fields(a), _request_fields(b))       # 경로 간 동등
                 # 독립 단언(계약상 올바른 값): 채널 이름·UTC label·clock id·표본 계약.
                 self.assertEqual(a.channel, Stage7Channel(EXPECTED_CHANNEL_NAME[target]))
-                self.assertEqual(stage7_channel_name(children[0].channel), EXPECTED_CHANNEL_NAME[target])
+                self.assertEqual(channel_name(children[0].channel), EXPECTED_CHANNEL_NAME[target])
                 utc = _HW_NS + _UTC_OFFSET_NS
                 self.assertEqual((a.transmit_at.seconds, a.transmit_at.nanoseconds),
                                  (utc // 1_000_000_000, utc % 1_000_000_000))
@@ -448,7 +448,7 @@ class ProviderSeverityParityTest(unittest.TestCase):
                 path.adapter.ledger[burst_id] = {"terminal": True,
                                                  "children": {0: "COMPLETED", 1: "COMPLETED"}}
                 if path.client is None:
-                    source = Stage7LedgerTerminalSource(path.adapter, path.sink)
+                    source = LedgerTerminalSource(path.adapter, path.sink)
                 else:
                     source = LauncherLedgerTerminalSource(path.client, path.sink, max_polls=1,
                                                           poll_interval_s=0.0)
@@ -544,7 +544,7 @@ class LedgerTerminalParityTest(unittest.TestCase):
                 snapshot = {"terminal": bool(ledger_children), "children": dict(ledger_children)}
                 rf_off.adapter.ledger[rf_off.sink.burst_by_group["p"]] = snapshot
                 launcher.adapter.ledger[launcher.sink.burst_by_group["p"]] = snapshot
-                a = Stage7LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent)
+                a = LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent)
                 b = LauncherLedgerTerminalSource(launcher.client, launcher.sink, max_polls=1,
                                                  poll_interval_s=0.0)({}, {}, parent)
                 want = {children[0].child_id: expected[0], children[1].child_id: expected[1]}
@@ -561,14 +561,14 @@ class LedgerTerminalParityTest(unittest.TestCase):
         children = _children("ROC")
         parent = NS(parent_id="never-committed", children=children)
         want = {c.child_id: ChildTerminal.UNKNOWN.value for c in children}
-        self.assertEqual(Stage7LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent), want)
+        self.assertEqual(LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent), want)
         self.assertEqual(LauncherLedgerTerminalSource(launcher.client, launcher.sink, max_polls=1,
                                                       poll_interval_s=0.0)({}, {}, parent), want)
         self.assertEqual(launcher.client.calls, [])          # burst를 모르면 장치에 묻지 않는다
         _commit(rf_off, children)
         _commit(launcher, children)
         parent = NS(parent_id="p", children=children)        # 원장에 아직 없음(None snapshot)
-        self.assertEqual(Stage7LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent), want)
+        self.assertEqual(LedgerTerminalSource(rf_off.adapter, rf_off.sink)({}, {}, parent), want)
         self.assertEqual(LauncherLedgerTerminalSource(launcher.client, launcher.sink, max_polls=1,
                                                       poll_interval_s=0.0)({}, {}, parent), want)
 

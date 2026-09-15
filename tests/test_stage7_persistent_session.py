@@ -29,13 +29,13 @@ from common.textout import ensure_utf8_output
 ensure_utf8_output()
 
 import apps.scenario_runner as runner
-import apps.stage7_profile as stage7_profile
-import apps.stage7_run as stage7_run
-import apps.stage7_session as stage7_session
-import apps.stage7_trace as stage7_trace
+import apps.run_profile as run_profile
+import apps.service_run as service_run
+import apps.service_session as service_session
+import apps.service_trace as service_trace
 
-COORDINATOR = os.path.join(_REPO, "VDETER", "apps", "stage7_coordinator_main.py")
-CONTROLLER = os.path.join(_REPO, "apps", "stage7_mass_roc_controller.py")
+COORDINATOR = os.path.join(_REPO, "VDETER", "apps", "coordinator_main.py")
+CONTROLLER = os.path.join(_REPO, "apps", "mass_roc_workload_controller.py")
 #: Phase G reference의 tracked fixture (tests/fixtures/phase-g-reference —
 #: phase-g-formal-20260902b 사본, reference byte-identical, profile 익명화).
 #: 로컬 evidence(VDETER/results/phase-g)에 의존하지 않는다.
@@ -54,12 +54,12 @@ def _profile_path() -> str:
 def test_trace_binds_ids_and_buffers():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "t.jsonl")
-        trace = stage7_trace.TraceWriter(path, session_id="s1", workload_id="w1")
+        trace = service_trace.TraceWriter(path, session_id="s1", workload_id="w1")
         trace.state("NEW")
         trace.emit("submit", transfer_id="abc")
         assert not os.path.exists(path), "flush 전에 파일을 쓰면 안 된다"
         trace.flush()
-        records = stage7_trace.read_trace(path)
+        records = service_trace.read_trace(path)
         assert [r["event"] for r in records] == ["state", "submit"]
         for record in records:
             assert record["session_id"] == "s1" and record["workload_id"] == "w1"
@@ -70,7 +70,7 @@ def test_trace_binds_ids_and_buffers():
 def test_trace_scrubs_secrets():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "t.jsonl")
-        trace = stage7_trace.TraceWriter(path, session_id="s1")
+        trace = service_trace.TraceWriter(path, session_id="s1")
         trace.emit("x", private_key_sha256="a" * 64, token="t",
                    pem="-----BEGIN EC PRIVATE KEY-----\nabc\n",
                    nested={"password": "p", "ok": 1})
@@ -79,26 +79,26 @@ def test_trace_scrubs_secrets():
         assert "BEGIN EC PRIVATE KEY" not in text
         assert "a" * 64 not in text
         assert "<redacted>" in text
-        record = stage7_trace.read_trace(path)[0]
+        record = service_trace.read_trace(path)[0]
         assert record["nested"]["ok"] == 1
 
 
 def test_trace_diagnostic_level_gated():
     with tempfile.TemporaryDirectory() as tmp:
-        quiet = stage7_trace.TraceWriter(os.path.join(tmp, "q.jsonl"),
+        quiet = service_trace.TraceWriter(os.path.join(tmp, "q.jsonl"),
                                          session_id="s", diagnostics=False)
-        loud = stage7_trace.TraceWriter(os.path.join(tmp, "l.jsonl"),
+        loud = service_trace.TraceWriter(os.path.join(tmp, "l.jsonl"),
                                         session_id="s", diagnostics=True)
         for trace in (quiet, loud):
             trace.emit("normal")
             trace.emit("deep", detail_level="diagnostic")
             trace.flush()
-        assert len(stage7_trace.read_trace(os.path.join(tmp, "q.jsonl"))) == 1
-        assert len(stage7_trace.read_trace(os.path.join(tmp, "l.jsonl"))) == 2
+        assert len(service_trace.read_trace(os.path.join(tmp, "q.jsonl"))) == 1
+        assert len(service_trace.read_trace(os.path.join(tmp, "l.jsonl"))) == 2
 
 
 def test_null_trace_is_inert():
-    trace = stage7_trace.NullTrace()
+    trace = service_trace.NullTrace()
     trace.state("NEW")
     trace.emit("x", a=1)
     trace.flush()
@@ -202,7 +202,7 @@ class _FakePi:
 
 
 def _profile_with_stubs(monkey_dir):
-    profile = stage7_profile.load_profile(_profile_path())
+    profile = run_profile.load_profile(_profile_path())
     profile["evidence_root"] = os.path.relpath(monkey_dir, _REPO)
     return profile
 
@@ -210,7 +210,7 @@ def _profile_with_stubs(monkey_dir):
 def _session(tmp, pi, **kwargs):
     profile = _profile_with_stubs(tmp)
     # preflight/config 준비는 별도 시험이 담당한다 — 여기서는 lifecycle만 본다.
-    import apps.stage7_service_layer as layer
+    import apps.service_layer as layer
     original_verify = layer.verify_remote_environment
     original_prepare = layer.prepare_service_config
     layer.verify_remote_environment = lambda p, runner=None: {
@@ -224,7 +224,7 @@ def _session(tmp, pi, **kwargs):
         kwargs.setdefault("sleeper", lambda _seconds: None)
         # 시험은 진행 출력을 끈다 — 판정만 본다.
         kwargs.setdefault("live", False)
-        return stage7_session.open_service_session(
+        return service_session.open_service_session(
             profile, runner=pi, evidence_root=os.path.relpath(tmp, _REPO),
             **kwargs)
     finally:
@@ -279,10 +279,10 @@ def test_settle_waits_only_after_the_scenario_that_causes_backpressure():
 
         # 직전이 001 — 배압이 나는 유일한 구간이라 정착을 기다린다.
         session.run_workload("SC-VDE-001", "forged")
-        assert slept == [stage7_session.WORKLOAD_SETTLE_SECONDS]
+        assert slept == [service_session.WORKLOAD_SETTLE_SECONDS]
 
         # 이미 정착 시간이 지났으면 추가로 기다리지 않는다.
-        now[0] += stage7_session.WORKLOAD_SETTLE_SECONDS + 5.0
+        now[0] += service_session.WORKLOAD_SETTLE_SECONDS + 5.0
         session.run_workload("SC-VDE-005", "normal")
         assert len(slept) == 1, "이미 정착했으면 추가 대기 없음"
 
@@ -294,7 +294,7 @@ def test_trace_events_render_for_the_operator():
     렌더에 실패해도 세션 판정에 영향이 없어야 한다.
     """
 
-    render = stage7_session._render_trace_event
+    render = service_session._render_trace_event
     line = render({"event": "submit", "sender": "ROC", "receiver": "MASS-A",
                    "payload_format": "x509.certificate_report",
                    "payload_len": 413, "step": "001-certificate"})
@@ -342,7 +342,7 @@ def test_quiescence_failure_blocks_next_workload_and_closes():
         try:
             session.run_workload("SC-VDE-006", "normal")
             raise AssertionError("quiescence 실패 후 workload가 실행됐다")
-        except stage7_run.ServiceSessionError as exc:
+        except service_run.ServiceSessionError as exc:
             assert "READY" in str(exc)
         session.close()
         assert pi.stop_count == 1, "cleanup이 수행되지 않았다"
@@ -354,7 +354,7 @@ def test_session_trace_records_state_transitions():
         session = _session(tmp, pi)
         session.run_workload("SC-VDE-005", "normal")
         session.close()
-        records = stage7_trace.read_trace(session.trace.path)
+        records = service_trace.read_trace(session.trace.path)
         states = [r.get("state") for r in records if r["event"] == "state"]
         for expected in ("NEW", "VALIDATING", "STARTING", "TIME_LOCKING",
                          "SERVICE_ADMISSION", "READY", "WORKLOAD_RUNNING",
@@ -371,16 +371,16 @@ def test_bringup_failure_still_cleans_up_and_records():
     with tempfile.TemporaryDirectory(dir=_REPO) as tmp:
         pi = _FakePi(ready=False)
         # bring-up이 끝나지 않도록 timeout을 짧게 만든다.
-        original = stage7_session.SESSION_BRINGUP_TIMEOUT_S
-        stage7_session.SESSION_BRINGUP_TIMEOUT_S = 0.2
+        original = service_session.SESSION_BRINGUP_TIMEOUT_S
+        service_session.SESSION_BRINGUP_TIMEOUT_S = 0.2
         try:
             try:
                 _session(tmp, pi)
                 raise AssertionError("bring-up 실패가 통과했다")
-            except stage7_run.ServiceSessionError as exc:
+            except service_run.ServiceSessionError as exc:
                 assert "bring-up" in str(exc)
         finally:
-            stage7_session.SESSION_BRINGUP_TIMEOUT_S = original
+            service_session.SESSION_BRINGUP_TIMEOUT_S = original
         # 실패 경로에서도 shutdown(=cleanup)이 요청됐다.
         assert pi.stop_count == 1
 
@@ -399,7 +399,7 @@ def test_workload_namespaces_step_and_scenario_ids():
 
 
 def test_event_log_supports_baseline_isolation():
-    from apps.stage7_mass_roc_controller import EventLog
+    from apps.mass_roc_workload_controller import EventLog
     with tempfile.TemporaryDirectory() as tmp:
         events_dir = os.path.join(tmp, "service_events")
         os.makedirs(events_dir)
@@ -505,8 +505,8 @@ def test_menu_parser_has_verbose_and_diagnostics():
 
 def _lifecycle_step(lifecycle, outcomes, gate=True):
     """`_run_session_lifecycle_step`을 실제 어댑터 없이 구동한다."""
-    import apps.stage7_mass_roc_controller as controller_module
-    from apps.stage7_trace import NullTrace
+    import apps.mass_roc_workload_controller as controller_module
+    from apps.service_trace import NullTrace
 
     calls = []
 
@@ -551,7 +551,7 @@ def test_session_start_proxy_fails_closed_on_partial_start():
 def test_session_lifecycle_proxy_runs_no_scenario():
     """대행은 시나리오를 실행하지 않는다 — application state를 만들지 않는다."""
     source = io.open(os.path.join(_REPO, "apps",
-                                  "stage7_mass_roc_controller.py"),
+                                  "mass_roc_workload_controller.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -564,7 +564,7 @@ def test_session_lifecycle_proxy_runs_no_scenario():
 def test_session_phase_spawns_start_proxy_before_admission():
     """coordinator session phase가 START 대행을 admission 전에 띄우는지."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_coordinator_main.py"),
+                                  "coordinator_main.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -588,7 +588,7 @@ def test_session_lifecycle_proxy_watches_session_gate_dir():
     (phase-g-service-20260831-042934 실측).
     """
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_coordinator_main.py"),
+                                  "coordinator_main.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -602,10 +602,10 @@ def test_session_lifecycle_proxy_watches_session_gate_dir():
 
 def test_controller_gate_dir_override_is_honoured():
     """--gate-dir가 주어지면 run-root 기준 기본값을 덮어쓴다."""
-    import apps.stage7_mass_roc_controller as controller_module
+    import apps.mass_roc_workload_controller as controller_module
 
     source = io.open(os.path.join(_REPO, "apps",
-                                  "stage7_mass_roc_controller.py"),
+                                  "mass_roc_workload_controller.py"),
                      encoding="utf-8").read()
     assert "arguments.gate_dir or os.path.join" in source
     parser_source = ast.parse(source)
@@ -617,7 +617,7 @@ def test_controller_gate_dir_override_is_honoured():
 
 def _session_phase_source():
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_coordinator_main.py"),
+                                  "coordinator_main.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -667,15 +667,15 @@ def test_instrumentation_never_fails_the_session():
 def test_instrumentation_absent_from_frozen_layers():
     """RF·PHY·timing 계층에는 계측을 넣지 않는다."""
     forbidden = [
-        os.path.join(_REPO, "VDETER", "apps", "stage7_endpoint_launcher.py"),
-        os.path.join(_REPO, "VDETER", "src", "vdeter", "stage7", "rf_time.py"),
+        os.path.join(_REPO, "VDETER", "apps", "endpoint_launcher.py"),
+        os.path.join(_REPO, "VDETER", "src", "vdeter", "b210_system", "rf_time.py"),
     ]
     for path in forbidden:
         text = io.open(path, encoding="utf-8").read()
-        assert "stage7_trace" not in text and "TraceWriter" not in text, path
+        assert "service_trace" not in text and "TraceWriter" not in text, path
     # _run_rf_qualification 본문에도 계측이 없어야 한다.
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_coordinator_main.py"),
+                                  "coordinator_main.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -693,7 +693,7 @@ def test_session_deadline_covers_bringup_plus_workloads():
 
     spec = importlib.util.spec_from_file_location(
         "_coord_for_test",
-        os.path.join(_REPO, "VDETER", "apps", "stage7_coordinator_main.py"))
+        os.path.join(_REPO, "VDETER", "apps", "coordinator_main.py"))
     source = io.open(spec.origin, encoding="utf-8").read()
     tree = ast.parse(source)
     constants = {}
@@ -718,7 +718,7 @@ def test_session_deadline_covers_bringup_plus_workloads():
 
 def test_workload_timeout_unchanged():
     """workload 하나당 시한은 승인대로 900초를 유지한다."""
-    from apps.stage7_session import WORKLOAD_TIMEOUT_S
+    from apps.service_session import WORKLOAD_TIMEOUT_S
 
     assert WORKLOAD_TIMEOUT_S == 900.0
 
@@ -733,7 +733,7 @@ def test_pump_gate_covers_every_service_state():
     한다 — 그게 c063d0d가 막은 rr-p1 회귀다.
     """
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_endpoint_launcher.py"),
+                                  "endpoint_launcher.py"),
                      encoding="utf-8").read()
     marker = "_PUMP_ACTIVE_STATES = ("
     body = source[source.index(marker):]
@@ -751,7 +751,7 @@ def test_pump_gate_covers_every_service_state():
 def test_session_cleanup_measured_after_launcher_teardown():
     """cleanup 계측은 launcher를 내린 뒤여야 한다 (worker 3 오보고 회귀 방지)."""
     source = io.open(os.path.join(_REPO, "VDETER", "apps",
-                                  "stage7_coordinator_main.py"),
+                                  "coordinator_main.py"),
                      encoding="utf-8").read()
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
@@ -771,7 +771,7 @@ def test_remote_calls_never_inherit_stdin():
     input()에서 EOF를 만나 workload를 하나도 못 돌린 적이 있다
     (phase-g-service-20260831-111702).
     """
-    for relpath in ("apps/stage7_service_layer.py", "apps/stage7_session.py"):
+    for relpath in ("apps/service_layer.py", "apps/service_session.py"):
         source = io.open(os.path.join(_REPO, relpath), encoding="utf-8").read()
         tree = ast.parse(source)
         for node in ast.walk(tree):
@@ -786,7 +786,7 @@ def test_remote_calls_never_inherit_stdin():
                 "대화형 입력을 삼킬 수 있다")
 
     # ssh에는 -n도 함께 건다 (이중 안전장치).
-    layer = io.open(os.path.join(_REPO, "apps", "stage7_service_layer.py"),
+    layer = io.open(os.path.join(_REPO, "apps", "service_layer.py"),
                     encoding="utf-8").read()
     block = layer[layer.index("def _ssh("):]
     block = block[:block.index("def remote_deploy_root")]
@@ -801,7 +801,7 @@ def test_legacy_paths_unchanged():
     assert runner.main(["run", "SC-VDE-005", "--no-save",
                         "--now", "1760000000"]) == 0
     assert runner.main(["run", "all", "--transport", "stage7"]) == 2
-    assert callable(stage7_run.run_stage7)
+    assert callable(service_run.run_service_session)
 
 
 if __name__ == "__main__":

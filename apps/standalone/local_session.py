@@ -1,6 +1,6 @@
 """로컬 coordinator 세션 계층 — SSH 없는 Stage 7 세션 구동 (Phase I W2).
 
-host측 `apps/stage7_session.py`의 로컬 대응물. coordinator·launcher와
+host측 `apps/service_session.py`의 로컬 대응물. coordinator·launcher와
 세션 디렉터리 파일 IPC 계약(`session/requests|results|shutdown`·`ready.json`·
 `closed.json`·`done.rc`)은 **무수정**으로 쓴다 (README §3·§10, 결정 6·17).
 
@@ -32,8 +32,8 @@ from pathlib import Path
 # 파일 IPC·정착 계약 — host 세션 계층과 단일 출처 공유 (읽기 전용 재사용).
 # SETTLE 계약: SC-VDE-001 직후에는 RX 파이프라인 배수 30초를 기다려야
 # 다음 workload가 배압 꼬리에 착지하지 않는다 (host 실측 근거는
-# apps/stage7_session.py의 상수 주석 참조 — standalone도 동일 적용).
-from apps.stage7_session import (  # noqa: F401
+# apps/service_session.py의 상수 주석 참조 — standalone도 동일 적용).
+from apps.service_session import (  # noqa: F401
     SESSION_CLOSED,
     SESSION_DIR_NAME,
     SESSION_READY,
@@ -200,7 +200,7 @@ class LocalCoordinatorSession:
     def build_argv(self) -> list:
         if self.rf_off_software:
             # Stage 8 RF-off software 세션은 **검증 전용**이므로 자격 결속된
-            # `stage7_coordinator_main.main()`을 거치지 않고 자체 entry point로 띄운다.
+            # `coordinator_main.main()`을 거치지 않고 자체 entry point로 띄운다.
             # (그 함수에 분기를 넣으면 Phase-I function binding이 바뀌어 RF 접근이 거부된다 —
             #  자격 경로는 byte-identical로 보존한다.) B210 launcher는 spawn하지 않는다.
             return [
@@ -212,7 +212,7 @@ class LocalCoordinatorSession:
         return [
             self.python_executable,
             str(self.repo_root / "VDETER" / "apps"
-                / "stage7_coordinator_main.py"),
+                / "coordinator_main.py"),
             "--run-id", self.run_id,
             "--phase", self.phase,
             "--run-root", str(self.run_root),
@@ -464,7 +464,7 @@ class LocalCoordinatorSession:
         import shutil as _shutil
         if _shutil.which("pgrep") is None:
             return None
-        from apps.stage7_service_layer import _COMPETING_PROCESS_PATTERN
+        from apps.service_layer import _COMPETING_PROCESS_PATTERN
         done = subprocess.run(
             ["pgrep", "-af", _COMPETING_PROCESS_PATTERN],
             capture_output=True, text=True, timeout=30)

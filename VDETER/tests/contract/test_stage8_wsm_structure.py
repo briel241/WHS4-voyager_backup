@@ -32,7 +32,7 @@ _SANCTIONED_SHARED_MEDIUM_ADAPTERS = frozenset({
     # workload controller child(= PoC supervisor 호스트): 관측의 physical channel을 권위 role 표
     # (`shared_medium.topology`)에서 유도한다. 참조는 전부 method 안 lazy import이며
     # `--poc-request` 없이는 실행되지 않는다(import 경계 시험이 실제 실행으로 증명한다).
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage7_mass_roc_controller.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "mass_roc_workload_controller.py")),
 })
 
 

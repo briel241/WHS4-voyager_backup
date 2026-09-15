@@ -41,7 +41,7 @@ RESULT_READY = "ready"
 
 
 class _GateHost:
-    """`Stage7LaneRxDispatcher._energy_gate`가 요구하는 유일한 상태의 그릇.
+    """`LaneRxDispatcher._energy_gate`가 요구하는 유일한 상태의 그릇.
 
     게이트는 `self._gate_state` 외의 self를 쓰지 않는다(support.py 실측).
     로직을 복제하면 펌프와 워커의 게이트 동작이 갈릴 수 있으므로 원본 함수를
@@ -67,10 +67,10 @@ class LaneDecoder:
         from vdeter.profiles.link_phy import build_combined_phy_profile_registry
         from vdeter.runtime.phy_bridge import RuntimePhyRadioBridge
         from vdeter.b210_system.phy_facade import (
-            Stage7DiagnosticPhyFacade,
-            Stage7PhyDiagnosticSink,
+            DiagnosticPhyFacade,
+            PhyDiagnosticSink,
         )
-        from vdeter.b210_system.support import Stage7LaneRxDispatcher
+        from vdeter.b210_system.support import LaneRxDispatcher
 
         if id_source_kind != "UUID4":
             # DETERMINISTIC은 단일 계열을 전제로 하므로 lane별 워커로 나누면
@@ -88,12 +88,12 @@ class LaneDecoder:
 
         self.lane_index = lane_index
         self.lane_generation = lane_generation
-        sink = Stage7PhyDiagnosticSink(
+        sink = PhyDiagnosticSink(
             lane_index=lane_index, lane_generation=lane_generation
         )
         # route_sidecar는 TX(Packet->Burst 결속) 전용이라 RX 계산에 쓰이지
         # 않는다 — 워커는 RX만 수행하므로 두지 않는다.
-        self._facade = Stage7DiagnosticPhyFacade(
+        self._facade = DiagnosticPhyFacade(
             registry, SystemTimeSource(), Uuid4IdSource(),
             diagnostic_sink=sink, route_sidecar=None,
         )
@@ -102,7 +102,7 @@ class LaneDecoder:
         # 펌프측 bridge가 소유한다.
         self._bridge = RuntimePhyRadioBridge(self._facade)
         self._gate_host = _GateHost()
-        self._energy_gate = Stage7LaneRxDispatcher._energy_gate
+        self._energy_gate = LaneRxDispatcher._energy_gate
 
     @property
     def diagnostic_sink(self):

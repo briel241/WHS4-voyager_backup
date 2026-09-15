@@ -44,7 +44,7 @@ class RealStage7SeamsTest(unittest.TestCase):
             members, station_id_by_endpoint=STATION_BY_ENDPOINT)
 
     def test_poc_action_flows_through_real_mac_phy_group_tx_and_receive(self):
-        from apps.poc_device_seams_inprocess import stage7_target_response, Stage7TxTerminalSource
+        from apps.poc_device_seams_inprocess import target_response, TxTerminalSource
         from tests.support.stage7 import drive_stage7_group
         from vdeter.phy.transmitter import Phy11Transmitter
         from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
@@ -91,13 +91,13 @@ class RealStage7SeamsTest(unittest.TestCase):
         # 3) TX terminal은 **권위 원장**에서 와야 한다. PoC group TX는 radio adapter의 schedule_tx를
         #    거치지 않으므로 adapter가 BURST_ACK을 드레인해도 대응 원장이 없다 → terminal 미확정.
         #    매질 delivery 기록으로 COMPLETED를 만들지 않는다(P10: 과거/우회 로그로 성공 추정 금지).
-        from apps.poc_device_seams_inprocess import Stage7LedgerTerminalSource
+        from apps.poc_device_seams_inprocess import LedgerTerminalSource
         # 접수 직후에는 원장이 SUBMITTED(진행 중)여야 한다 — 즉시 완료로 확정하지 않는다.
         burst = bindings["sink"].burst_by_group[parent.parent_id]
         immediate = bindings["adapter"].tx_burst_state(burst)
         self.assertFalse(immediate["terminal"], immediate)
         self.assertTrue(all(v == "SUBMITTED" for v in immediate["children"].values()), immediate)
-        terminals = Stage7LedgerTerminalSource(
+        terminals = LedgerTerminalSource(
             bindings["adapter"], bindings["sink"],
             pump=lambda: drive_stage7_group(clock, members, 4))(action, {}, parent)
         self.assertTrue(all(v == "COMPLETED" for v in terminals.values()), terminals)
@@ -106,19 +106,19 @@ class RealStage7SeamsTest(unittest.TestCase):
 
         # 4) target effect는 **application 수신 증거**로만 판정한다. 물리 도달은 효과가 아니다.
         #    합성 packet은 정상 복호·주소 수락을 통과하지 못하므로 INDETERMINATE가 정직한 결과다.
-        effect, reason = stage7_target_response(members)(action, {}, parent)
+        effect, reason = target_response(members)(action, {}, parent)
         self.assertEqual(effect, TargetEffect.INDETERMINATE, reason)
 
     def test_real_readiness_fail_closed_without_common_lo(self):
         # 수신기 RX LO가 송신 채널에 정합하지 않으면 실 rx_readiness가 RF 전 fail-closed(방사 0).
         from vdeter.poc.api.errors import PocError
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
-        from apps.poc_device_seams_inprocess import assemble_stage7_provider
+        from apps.poc_device_seams_inprocess import assemble_inprocess_provider
 
         clock, medium, members = self._group()
         # required 수신기(ROC)의 RX LO를 채널 center와 다른 값으로 강제(common-LO 미정합).
         members["ROC"].endpoint.dependencies.radio.lease.worker.rx_lo_hz = 1  # 명백한 미정합
-        provider, _ = assemble_stage7_provider(members)
+        provider, _ = assemble_inprocess_provider(members)
         action = ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
                                   payload={"packet_hex": bytes(range(54)).hex()})
         with self.assertRaises(PocError):  # RX_LO_NOT_COMMON → BroadcastNotReady → PocError
@@ -199,14 +199,14 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
         from vdeter.poc.testing.execution_fakes import write_poc_package
         from vdeter.poc.testing.fakes import make_observation
         from apps.poc_device_seams_inprocess import (
-            assemble_stage7_provider, stage7_target_response, Stage7TxTerminalSource)
+            assemble_inprocess_provider, target_response, TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
         center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
         for ep in ("ROC", "MASS-A"):
             members[ep].endpoint.dependencies.radio.lease.worker.rx_lo_hz = center
-        provider, _b = assemble_stage7_provider(members)  # 실 Stage 7 seams
+        provider, _b = assemble_inprocess_provider(members)  # 실 Stage 7 seams
 
         write_poc_package(self.poc, "rs", poc_id="rs", script=self._REACTIVE)
         snap = create_snapshot(self.poc, "rs", dest_dir=os.path.join(self.snap_root, "w1"),
@@ -227,9 +227,9 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
             server_config=ServerCapabilityConfig(), clock=RealMonotonicClock(),
             socket_root=os.path.join(self.sock_root, "w1"))
         # tx terminal·target을 **실 conducted 매질 delivery**에서 공급(합성 아님).
-        terminal_source = Stage7TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+        terminal_source = TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
                                    pump=lambda: drive_stage7_group(clock, members, 4))
-        target_response = stage7_target_response(members)
+        target_response = target_response(members)
         runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w1",
                                 scenario_id="SC-VDE-006", snapshot=snap,
                                 tx_executor=ProductionTxExecutor(
@@ -306,8 +306,8 @@ class RealScenarioObservationTest(unittest.TestCase):
         from vdeter.poc.api.types import ObservationRecord, PhysicalChannel, TuningState
         from vdeter.poc.shared_medium import constants
         from vdeter.poc.testing.execution_fakes import write_poc_package
-        from apps.poc_device_seams_inprocess import (assemble_stage7_provider, stage7_target_response,
-                                              Stage7TxTerminalSource)
+        from apps.poc_device_seams_inprocess import (assemble_inprocess_provider, target_response,
+                                              TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
@@ -328,7 +328,7 @@ class RealScenarioObservationTest(unittest.TestCase):
         center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
         for ep in ("ROC", "MASS-A"):
             members[ep].endpoint.dependencies.radio.lease.worker.rx_lo_hz = center
-        provider, _b = assemble_stage7_provider(members)
+        provider, _b = assemble_inprocess_provider(members)
 
         write_poc_package(self.poc, "so", poc_id="so", script=self._REACTIVE)
         snap = create_snapshot(self.poc, "so", dest_dir=os.path.join(self.snap_root, "w1"),
@@ -352,9 +352,9 @@ class RealScenarioObservationTest(unittest.TestCase):
                                 scenario_id="SC-VDE-006", snapshot=snap,
                                 tx_executor=ProductionTxExecutor(
                                     provider,
-                                    terminal_source=Stage7TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+                                    terminal_source=TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
                                    pump=lambda: drive_stage7_group(clock, members, 4)),
-                                    target_response=stage7_target_response(members)))
+                                    target_response=target_response(members)))
         observation = ObservationRecord(
             physical_channel=PhysicalChannel.UPPER, tuning_state=TuningState.TUNED_OBSERVER,
             observation_id="obs-real-c3", source_station="ROC", destination_station="MASS-A",
@@ -383,9 +383,9 @@ class RealUnitsAndConversionTest(unittest.TestCase):
 
     def _scheduler(self, now_ns, *, tx_lo_hz=None):
         from types import SimpleNamespace
-        from apps.poc_device_seams_inprocess import Stage7HwTimeScheduler
+        from apps.poc_device_seams_inprocess import HwTimeScheduler
         worker = SimpleNamespace(hardware_time_ns=lambda: now_ns, tx_lo_hz=tx_lo_hz)
-        return Stage7HwTimeScheduler(worker)
+        return HwTimeScheduler(worker)
 
     def _action(self):
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
@@ -424,9 +424,9 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         # 이미 대상 채널에 tune돼 있으면 retune 불필요 → 기본 TX lead(100 ms) 이상.
         center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
         from types import SimpleNamespace
-        from apps.poc_device_seams_inprocess import Stage7HwTimeScheduler
+        from apps.poc_device_seams_inprocess import HwTimeScheduler
         worker = SimpleNamespace(hardware_time_ns=lambda: now, tx_lo_hz=center)
-        sched = Stage7HwTimeScheduler(worker, current_channel=PhysicalChannel.LOWER)
+        sched = HwTimeScheduler(worker, current_channel=PhysicalChannel.LOWER)
         slot2 = sched.resolve(self._action(), request_id="u3")
         self.assertGreaterEqual(slot2.scheduled_hw_timestamp_ns - now, _TX_LEAD_NS)
         # lead가 5,632 ns 같은 값으로 되돌아가지 않는다(회귀 고정).
@@ -491,8 +491,8 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
     """P08: 공유매체 opt-in에서만 송신자별 두 물리 경로로 fan-out한다(legacy 보존)."""
 
     def _context(self, *, shared):
-        from vdeter.b210_system.routing import Stage7RouteContext
-        return Stage7RouteContext(
+        from vdeter.b210_system.routing import RouteContext
+        return RouteContext(
             method_kind="TEST", source_station_id=333333333,       # MASS-B
             destination_kind="ADDRESSED", destination_station_id=222222222,  # ROC
             original_source_station_id=None, original_destination_kind=None,
@@ -529,8 +529,8 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
     def test_broadcast_route_is_unchanged_by_optin(self):
         # BROADCAST는 기존 표(C1+C3)를 그대로 쓰고 opt-in 분기를 타지 않는다.
         from vdeter.b210_system.configuration import UPPER_CHANNEL_NAME
-        from vdeter.b210_system.routing import Stage7RouteContext, resolve_lane_plan_route
-        ctx = Stage7RouteContext(
+        from vdeter.b210_system.routing import RouteContext, resolve_lane_plan_route
+        ctx = RouteContext(
             method_kind="TEST", source_station_id=222222222, destination_kind="BROADCAST",
             destination_station_id=None, original_source_station_id=None,
             original_destination_kind=None, original_destination_station_id=None,
@@ -545,7 +545,7 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
 class CommonLoTuningApplyTest(unittest.TestCase):
     """P07: common LO/DSP/BW 계획을 **실 worker surface**에 적용·readback 검증·복구·capability 광고.
 
-    장치 double은 `Stage7FakeMediumWorker`다 — 실 `Stage7DualLaneFlowgraphBackend`와 **같은 이름의
+    장치 double은 `Stage7FakeMediumWorker`다 — 실 `DualLaneFlowgraphBackend`와 **같은 이름의
     method**(`apply_manual_tuning`/`read_tuning`/`restore_tuning`)를 가지며, echo가 아니라 장치 모델이다
     (analog BW를 필터 격자로 양자화하고 lane 실효 중심을 승인 규약 effective = rf_lo - dsp로 계산).
     실제 B210은 열지 않는다 — UHD 경계만 대체하고 명령·순서·오류·복구를 검증한다.
@@ -655,12 +655,12 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_real_backend_uses_manual_rf_and_dsp_policies_on_the_uhd_boundary(self):
-        """실 `Stage7DualLaneFlowgraphBackend`가 UHD 경계에 거는 **명령 자체**를 검증한다.
+        """실 `DualLaneFlowgraphBackend`가 UHD 경계에 거는 **명령 자체**를 검증한다.
 
         RF/DSP policy를 둘 다 MANUAL로 두지 않으면 UHD가 lane마다 RF LO를 다시 잡아 공통 LO가
         깨진다. 장치는 열지 않고 UHD 경계 객체만 대체한다.
         """
-        from vdeter.b210_system.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.b210_system.b210_worker import DualLaneFlowgraphBackend
         from vdeter.poc.shared_medium import constants
 
         class _TuneRequest:
@@ -701,7 +701,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
             def get_bandwidth(self, lane):
                 return self.bandwidth[lane]
 
-        backend = Stage7DualLaneFlowgraphBackend.__new__(Stage7DualLaneFlowgraphBackend)
+        backend = DualLaneFlowgraphBackend.__new__(DualLaneFlowgraphBackend)
         backend._uhd = _Uhd()
         backend._source = source = _Source()
         backend._control_lock = threading.RLock()
@@ -730,13 +730,13 @@ class CommonLoTuningApplyTest(unittest.TestCase):
 
     def test_real_backend_refuses_when_uhd_lacks_manual_tune_policy(self):
         """UHD가 manual policy를 제공하지 않으면 **추정하지 않고 거부**한다(fail-closed)."""
-        from vdeter.b210_system.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.b210_system.b210_worker import DualLaneFlowgraphBackend
         from vdeter.poc.shared_medium import constants
 
         class _Uhd:
             pass
 
-        backend = Stage7DualLaneFlowgraphBackend.__new__(Stage7DualLaneFlowgraphBackend)
+        backend = DualLaneFlowgraphBackend.__new__(DualLaneFlowgraphBackend)
         backend._uhd = _Uhd()
         backend._control_lock = threading.RLock()
         backend._manual_rx_tuning = None
@@ -752,7 +752,7 @@ class NormalDispatchPocRefusalTest(unittest.TestCase):
     무시한다. 그래서 운영자가 PoC를 요청해도 PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓 성공이
     가능했다. 세션 계층에서 그 조합을 거부하고 request 자체를 발행하지 않는다(시나리오 미제출).
 
-    이 검사는 **자격 결속된 coordinator 함수를 바꾸지 않는다** — `stage7_coordinator_main.main()`이나
+    이 검사는 **자격 결속된 coordinator 함수를 바꾸지 않는다** — `coordinator_main.main()`이나
     `run_mass_roc_session`에 분기를 넣으면 Phase-I function binding이 바뀌어 RF 접근이 거부된다.
     """
 
@@ -785,7 +785,7 @@ class NormalDispatchPocRefusalTest(unittest.TestCase):
         PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓 성공을 자격 경로에서 차단한다(정적 증거).
         """
         path = os.path.normpath(os.path.join(
-            os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
+            os.path.dirname(__file__), "..", "..", "apps", "coordinator_main.py"))
         with open(path, "r", encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("POC_EVIDENCE_MISSING", source)
@@ -801,7 +801,7 @@ class NormalDispatchPocRefusalTest(unittest.TestCase):
     def test_qualified_coordinator_entry_is_not_branched_for_rf_off(self):
         """검증 전용 RF-off 경로가 자격 결속 함수(main)를 거치지 않는다."""
         path = os.path.normpath(os.path.join(
-            os.path.dirname(__file__), "..", "..", "apps", "stage7_coordinator_main.py"))
+            os.path.dirname(__file__), "..", "..", "apps", "coordinator_main.py"))
         with open(path, "r", encoding="utf-8") as handle:
             source = handle.read()
         self.assertNotIn("rf_off_software", source)

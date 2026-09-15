@@ -32,7 +32,7 @@ class D10DualPocTest(unittest.TestCase):
             harness.CollisionSocketTests.setUp(self)
 
     def _exercise(self, payload, payload_format='test.stage0.opaque', *, promoted=True):
-        from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
+        from apps.mass_roc_workload_controller import _AdapterChannel, PocWorkloadHost
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.standalone import poc_run
         from vdeter.poc.execution.snapshot import create_snapshot
@@ -119,7 +119,7 @@ class D10DualPocTest(unittest.TestCase):
 
     def test_scenario005_command_shared_d10(self):
         from apps.console_transport import strip_envelope
-        from apps.stage7_mass_roc_controller import _default_agents
+        from apps.mass_roc_workload_controller import _default_agents
         from common import config
         from common.messages import route_instruction as route
         roc, _ = _default_agents()

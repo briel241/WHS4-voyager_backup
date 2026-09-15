@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 7 MASS/ROC 업무 시나리오 controller (Phase B).
 
-기존 RR scenario controller(`VDETER/apps/stage7_scenario_controller.py`)를 **덮어쓰지
+기존 RR scenario controller(`VDETER/apps/scenario_controller.py`)를 **덮어쓰지
 않는다.** 그 controller는 정적 fixture로 전송 특성(단편화·ACK·방향)만 재현하고
 판정은 SHA/길이로 한다. 이 controller는 별도 파일로, 실제 ``RocAgent`` /
 ``MassAgent`` / ``cert_flow`` 업무 흐름을 돌려 SC-VDE-001/005/006을 실증한다.
@@ -79,7 +79,7 @@ from ROC import RocAgent  # noqa: E402
 # 주소 매핑 — 응용 MMSI ↔ Stage 7 endpoint/station. 번역은 이 경계에서만.
 # --------------------------------------------------------------------------
 
-#: Stage 7 endpoint id → station id (`stage7_scenario_controller.py`와 동일 값).
+#: Stage 7 endpoint id → station id (`scenario_controller.py`와 동일 값).
 STATION_BY_ENDPOINT = {"MASS-A": 111_111_111, "MASS-B": 333_333_333, "ROC": 222_222_222}
 
 #: 응용 MMSI ↔ endpoint. 행위자는 MMSI-공간, 전선은 station-공간으로 다룬다.
@@ -108,7 +108,7 @@ def _default_agents() -> tuple:
     )
 
 
-class Stage7MassRocResult:
+class MassRocResult:
     """한 시나리오 실행의 evidence 누적기 — step·transfer·counter."""
 
     def __init__(self, scenario_id: str) -> None:
@@ -160,7 +160,7 @@ class MassRocScenarioController:
     ``events``: launcher event JSONL 소스 — ``poll()``·``records``·
     ``wait(predicate, timeout)``. in-process 하네스에서는 poll()이 시계를
     진행시키며 DATA_RECEIVED를 수집한다.
-    ``controller``: ``vdeter.b210_system.control_plane.controller.Stage7ScenarioController``
+    ``controller``: ``vdeter.b210_system.control_plane.controller.ScenarioController``
     (inline SUBMIT/STATUS 명령 발행자).
     """
 
@@ -171,7 +171,7 @@ class MassRocScenarioController:
         self._controller = controller
         self._events = events
         if trace is None:
-            from apps.stage7_trace import NullTrace
+            from apps.service_trace import NullTrace
             trace = NullTrace()
         #: 상위 계층 계측기. 계측 유무가 명령 순서·판정을 바꾸지 않는다.
         self._trace = trace
@@ -269,7 +269,7 @@ class MassRocScenarioController:
 
     # ---- 공통: 명령→수신→ACK→상관 왕복 ------------------------------------
 
-    def _deliver_command(self, result: Stage7MassRocResult, *, step: str,
+    def _deliver_command(self, result: MassRocResult, *, step: str,
                          sender_ep: str, receiver_ep: str, payload_format: str,
                          app_payload: bytes, ack_required: bool) -> dict:
         """sender→receiver로 application bytes를 실어 나르고 evidence를 남긴다.
@@ -393,14 +393,14 @@ class MassRocScenarioController:
     # ---- SC-VDE-005 노선 계획 교환 ----------------------------------------
 
     def run_sc_vde_005(self, *, now: float | None = None,
-                       agents: tuple | None = None) -> Stage7MassRocResult:
+                       agents: tuple | None = None) -> MassRocResult:
         """SC-VDE-005 노선 계획 교환.
 
         `agents=(roc, mass)`를 주면 그 행위자로 실행한다 — SC-VDE-006이
         사전 조건으로 이 시나리오를 돌릴 때 상태(교환된 노선)가 본시험으로
         이어지게 하기 위한 것이다.
         """
-        result = Stage7MassRocResult("SC-VDE-005")
+        result = MassRocResult("SC-VDE-005")
         now = self._now() if now is None else now
         roc, mass = agents if agents is not None else _default_agents()
         try:
@@ -514,7 +514,7 @@ class MassRocScenarioController:
 
     # ---- SC-VDE-006 원격 조종 (SC-VDE-005 선행) ---------------------------
 
-    def _command_round_trip(self, result: Stage7MassRocResult, *, prefix: str,
+    def _command_round_trip(self, result: MassRocResult, *, prefix: str,
                             roc, mass, outbound, now: float) -> None:
         """ROC 명령 1건: 전송→MASS 수신·반영→ACK 역송신→ROC 상관.
 
@@ -585,7 +585,7 @@ class MassRocScenarioController:
     def run_sc_vde_006(self, *, now: float | None = None,
                        standalone: bool = True,
                        agents: tuple | None = None,
-                       precondition: Stage7MassRocResult | None = None) -> dict:
+                       precondition: MassRocResult | None = None) -> dict:
         """SC-VDE-006 본시험. 단독 실행이면 SC-VDE-005 사전 조건을 먼저 돌린다.
 
         사전 조건 005와 본시험은 **같은 행위자 쌍**을 쓴다 — 005가 교환한
@@ -617,14 +617,14 @@ class MassRocScenarioController:
             pre = self.run_sc_vde_005(now=now, agents=(roc, mass))
         precondition_dict = pre.to_dict() if pre is not None else None
         if pre is not None and pre.status != "PASS":
-            result = Stage7MassRocResult("SC-VDE-006")
+            result = MassRocResult("SC-VDE-006")
             result.status = "FAIL"
             result.reason = "SC-VDE-005 사전 조건 실패"
             return {"precondition": precondition_dict,
                     "precondition_reused": reused,
                     "result": result.to_dict()}
 
-        result = Stage7MassRocResult("SC-VDE-006")
+        result = MassRocResult("SC-VDE-006")
         try:
             # 사전 조건 완료 **상태** 검증 — 기록이 아니라 MASS의 실제 상태로.
             precondition_linkage = mass.route_linkage_id
@@ -733,14 +733,14 @@ class MassRocScenarioController:
     # ---- SC-VDE-001 X.509 인증서 (정상/위조) ------------------------------
 
     def run_sc_vde_001(self, *, certificate_case: str = "normal",
-                       now: float | None = None) -> Stage7MassRocResult:
+                       now: float | None = None) -> MassRocResult:
         """정상 또는 위조 인증서 한 case를 돌린다.
 
         정상: 검증 통과 후 TrustStore 저장, 재수신 시 중복 저장 없음.
         위조: 구조 유지·서명만 변조 — transfer는 COMPLETED 가능하나 MASS가
         ``bad-signature``로 거부하고 TrustStore 불변.
         """
-        result = Stage7MassRocResult(f"SC-VDE-001[{certificate_case}]")
+        result = MassRocResult(f"SC-VDE-001[{certificate_case}]")
         now = self._now() if now is None else now
         day = 86_400.0
         try:
@@ -1078,7 +1078,7 @@ class _AdapterChannel:
 
 
 def _connect_channels(run_id: str):
-    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController  # noqa: F401
+    from vdeter.b210_system.control_plane.controller import ScenarioController  # noqa: F401
     from vdeter.b210_system.transport import SeqPacketClient, runtime_socket_root
 
     root = runtime_socket_root(run_id)
@@ -1114,7 +1114,7 @@ def _install_signal_handlers() -> None:
     """SIGTERM을 첫 Ctrl+C와 같은 정상 종료 절차로 바꾼다.
 
     coordinator는 session shutdown·workload abort에서 이 child를 `process.terminate()`로
-    회수하고(`stage7_coordinator_main._terminate_process_bounded`) **30초를 기다린다**
+    회수하고(`coordinator_main._terminate_process_bounded`) **30초를 기다린다**
     (`CHILD_TERMINATE_TIMEOUT_S`). 그런데 이 프로세스에 처분이 없으면 SIGTERM 기본 동작으로
     즉사해 `run_workload`의 `finally`가 실행되지 않는다 — PoC child·socket 정리
     (`abort_prepared`), RX scope 복원과 `collision_model_closed`, `poc-result` 기록이 통째로
@@ -1183,7 +1183,7 @@ def main(argv=None) -> int:
     workload_id = arguments.workload_id or "single"
 
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
-    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+    from vdeter.b210_system.control_plane.controller import ScenarioController
 
     # START/STOP은 기존 access-controlled fixture 경로를 그대로 쓴다 (§16.2).
     fixtures = {}
@@ -1194,7 +1194,7 @@ def main(argv=None) -> int:
             fixtures[name] = (data, hashlib.sha256(data).hexdigest())
 
     channels = _connect_channels(arguments.run_id)
-    inline_controller = Stage7ScenarioController(
+    inline_controller = ScenarioController(
         run_id=arguments.run_id,
         resolved_test_plan_sha256=arguments.test_plan_sha,
         adapter_channels=channels,
@@ -1203,7 +1203,7 @@ def main(argv=None) -> int:
     session_owned = arguments.lifecycle == "session"
     events = EventLog(arguments.run_root, events_dir=arguments.events_dir,
                       start_at_end=session_owned)
-    from apps.stage7_trace import TraceWriter
+    from apps.service_trace import TraceWriter
     trace = TraceWriter(
         os.path.join(arguments.run_root, "workload-trace.jsonl"),
         session_id=arguments.run_id, workload_id=workload_id,
@@ -1700,7 +1700,7 @@ def run_scenarios(controller: MassRocScenarioController, scenario_id: str,
     여전히 자기 사전 조건 005를 스스로 실행한다.
     """
     if trace is None:
-        from apps.stage7_trace import NullTrace
+        from apps.service_trace import NullTrace
         trace = NullTrace()
     results: dict = {}
     trace.emit("scenarios_begin", scenario_id=scenario_id,

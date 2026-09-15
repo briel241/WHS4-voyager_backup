@@ -10,14 +10,14 @@ entrypoint가 import해서는 안 된다.
 
 from .plan import (
     P1_MEMBER_PLAN_TABLE,
-    Stage7P1QualificationMemberPlan,
-    Stage7ResolvedTestPlan,
-    Stage7TestPlanLoader,
+    P1QualificationMemberPlan,
+    ResolvedTestPlan,
+    TestPlanLoader,
 )
 
 __all__ = (
     "P1_MEMBER_PLAN_TABLE",
-    "Stage7P1QualificationMemberPlan",
-    "Stage7ResolvedTestPlan",
-    "Stage7TestPlanLoader",
+    "P1QualificationMemberPlan",
+    "ResolvedTestPlan",
+    "TestPlanLoader",
 )

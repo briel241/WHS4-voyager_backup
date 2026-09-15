@@ -2,7 +2,7 @@
 import unittest
 from types import SimpleNamespace as NS
 from apps.poc_device_seams_launcher import MacSlotScheduler
-from apps.poc_device_seams_inprocess import Stage7ReceiverReadiness, hw_ns_to_slot
+from apps.poc_device_seams_inprocess import ReceiverReadiness, hw_ns_to_slot
 from vdeter.poc.shared_medium.radiation import ReadinessDecision, ReadinessRequest
 from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
 from vdeter.poc.api.errors import PocError, PocErrorCode
@@ -52,7 +52,7 @@ class ReadySlotTests(unittest.TestCase):
             rx_continuous_since_ns=lambda: 0,
             rx_windows={0: [dict(start_ns=1000, count=8192, consumed=False)]},
             map_from_sender=lambda sender, timestamp: (timestamp-4000000000, {'mapped': True}))
-        checker = Stage7ReceiverReadiness({'ROC': receiver}, {PhysicalChannel.LOWER: 10}, source_worker=object())
+        checker = ReceiverReadiness({'ROC': receiver}, {PhysicalChannel.LOWER: 10}, source_worker=object())
         request = ReadinessRequest('ROC', PhysicalChannel.LOWER, 'slot', 0, 4000001000, 'clock', 1, 0)
         proof = checker.window_ready(request)
         self.assertTrue(proof.ready)

@@ -52,7 +52,7 @@ PAIR_PATHS = {
 }
 
 
-class Stage7RfTimeError(ValueError):
+class RfTimeError(ValueError):
     pass
 
 
@@ -77,9 +77,9 @@ def build_rf_time_measurement_summary(
     """§13.3 `RF_TIME_MEASUREMENT_V1` summary 하나를 gate와 함께 만든다."""
 
     if validation_phase not in ("PRE_CORRECTION", "POST_CORRECTION"):
-        raise Stage7RfTimeError("validation_phase 위반")
+        raise RfTimeError("validation_phase 위반")
     if path_id not in PATH_ENDPOINTS:
-        raise Stage7RfTimeError(f"알 수 없는 path: {path_id}")
+        raise RfTimeError(f"알 수 없는 path: {path_id}")
     source_endpoint_id, receiver_endpoint_id = PATH_ENDPOINTS[path_id]
     span_ns = scheduled_last_ns - scheduled_first_ns
     values = tuple(int(value) for value in d_values_ns)
@@ -146,15 +146,15 @@ def evaluate_pre_correction_set(summaries_by_path: dict, *, present_pairs=("RA",
         for path in (forward_path, reverse_path):
             summary = summaries_by_path.get(path)
             if summary is None:
-                raise Stage7RfTimeError(f"{path} summary 누락")
+                raise RfTimeError(f"{path} summary 누락")
             if summary["outcome"] != "PASS":
-                raise Stage7RfTimeError(f"{path} summary가 PASS가 아닙니다")
+                raise RfTimeError(f"{path} summary가 PASS가 아닙니다")
         offsets[pair] = pairwise_offsets(
             _median_of(summaries_by_path[forward_path]),
             _median_of(summaries_by_path[reverse_path]),
         )
         if offsets[pair].p_ij <= 0:
-            raise Stage7RfTimeError(f"{pair} P_ij가 양수가 아닙니다")
+            raise RfTimeError(f"{pair} P_ij가 양수가 아닙니다")
 
     result = {
         "offsets": {
@@ -175,7 +175,7 @@ def evaluate_pre_correction_set(summaries_by_path: dict, *, present_pairs=("RA",
         result["triangle_closure_ns_num"] = closure.numerator
         result["triangle_closure_ns_den"] = closure.denominator
         if closure > TRIANGLE_CLOSURE_LIMIT_NS:
-            raise Stage7RfTimeError("triangle closure 한계 초과")
+            raise RfTimeError("triangle closure 한계 초과")
         result["corrections"] = corrections_from_roc(
             offsets["RA"].o_ij, offsets["RB"].o_ij
         )
@@ -184,7 +184,7 @@ def evaluate_pre_correction_set(summaries_by_path: dict, *, present_pairs=("RA",
     elif present_pairs == ("RB",):
         result["corrections"] = {"ROC": (0, 1), "MASS-B": _neg_pair(offsets["RB"].o_ij)}
     else:
-        raise Stage7RfTimeError("지원하지 않는 pair 조합입니다")
+        raise RfTimeError("지원하지 않는 pair 조합입니다")
     return result
 
 
@@ -208,7 +208,7 @@ __all__ = (
     "SAMPLE_COUNT",
     "SPREAD_LIMIT_NS",
     "TRIANGLE_CLOSURE_LIMIT_NS",
-    "Stage7RfTimeError",
+    "RfTimeError",
     "build_rf_time_measurement_summary",
     "check_fanout_same_window",
     "evaluate_pre_correction_set",

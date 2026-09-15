@@ -21,9 +21,9 @@ from vdeter.common.contracts.service import (
 from vdeter.common.identifiers import PayloadFormat, StationId
 from vdeter.common.time import ClockDomain, TimePoint
 from vdeter.common.addressing import Addressed
-from vdeter.b210_system.configuration import Stage7ConfigurationLoader
+from vdeter.b210_system.configuration import ConfigurationLoader
 from vdeter.b210_system.time_bridge import AffineCoefficients, HostUtcAnchor
-from vdeter.b210_system.wiring import Stage7RestartFactory, build_stage7_b210_endpoint
+from vdeter.b210_system.wiring import RestartFactory, build_b210_endpoint
 
 from tests.support.stage4 import (
     HAS_CRYPTO,
@@ -159,7 +159,7 @@ def _install_identity_bridge(endpoint, *, now_utc_ns):
 @unittest.skipUnless(HAS_CRYPTO, "cryptography extra가 필요합니다")
 class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
     def _build(self, source_builder=build_source, endpoint_station=111111111):
-        loader = Stage7ConfigurationLoader()
+        loader = ConfigurationLoader()
         resolved = loader.load_endpoint_configuration(
             source_builder(), DATA_PROFILE_17, run_id="stage7-unit-run"
         )
@@ -168,7 +168,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
         deployment = deployment_profile(expected_fingerprint=fingerprint)
         is_control = endpoint_station == 222222222
         crypto = crypto_dependencies(signer, certificate_der, is_control=is_control)
-        built = build_stage7_b210_endpoint(
+        built = build_b210_endpoint(
             resolved.value,
             deployment,
             crypto_dependencies=crypto,
@@ -188,7 +188,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
     def test_build_and_graph_validation(self):
         endpoint = self._build()
         self.assertIsNone(endpoint._validate_effective_graph())
-        graph = endpoint.stage7_graph
+        graph = endpoint.b210_graph
         self.assertIsNot(graph["rf_a_stack"], graph["rf_b_stack"])
         self.assertIs(endpoint._phy, graph["rf_a_stack"].facade)
         self.assertIs(endpoint._phy_radio_bridge, graph["rf_a_stack"].bridge)
@@ -229,7 +229,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
         now_utc_ns = endpoint.dependencies.time_source.now_utc().total_nanoseconds()
         _install_identity_bridge(endpoint, now_utc_ns=now_utc_ns)
         configured = radio.configure(
-            RadioConfigureRequest(configuration=endpoint._stage7_resolved.radio)
+            RadioConfigureRequest(configuration=endpoint._b210_resolved.radio)
         )
         self.assertTrue(configured.is_ok, getattr(configured, "error", None))
         self.assertEqual(configured.value.adapter_kind, "b210-stage7-affine")
@@ -245,7 +245,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
         start_at = endpoint.dependencies.time_source.now_utc().shifted(3_000_000_000)
         rx = radio.request_rx(
             RadioRxRequest(
-                channel=endpoint._stage7_resolved.radio.channels[1].channel,
+                channel=endpoint._b210_resolved.radio.channels[1].channel,
                 start_at=start_at,
                 duration_nanoseconds=26_666_667,
                 sample_rate_hz=307_200,
@@ -260,12 +260,12 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
 
     def test_restart_factory_rebuilds_new_generation(self):
         endpoint = self._build()
-        graph_before = dict(endpoint.stage7_graph)
-        factory = endpoint._stage7_restart_factory
-        self.assertIsInstance(factory, Stage7RestartFactory)
+        graph_before = dict(endpoint.b210_graph)
+        factory = endpoint._b210_restart_factory
+        self.assertIsInstance(factory, RestartFactory)
         with endpoint._service_lock:
             endpoint._reset_stage5_runtime_locked()
-        graph_after = endpoint.stage7_graph
+        graph_after = endpoint.b210_graph
         self.assertEqual(factory.call_count, 1)
         self.assertEqual(graph_after["lane_generation"], graph_before["lane_generation"] + 1)
         self.assertIsNot(graph_after["rf_a_stack"], graph_before["rf_a_stack"])
@@ -275,14 +275,14 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
     def test_restart_factory_ten_cycle_loop(self):
         # §18 restart 내구: 10회 연속 재조립에도 graph 검증·sidecar 연속성 유지.
         endpoint = self._build()
-        base_generation = endpoint.stage7_graph["lane_generation"]
-        sidecar = endpoint.stage7_graph["sidecar"]
+        base_generation = endpoint.b210_graph["lane_generation"]
+        sidecar = endpoint.b210_graph["sidecar"]
         # 이전 stack 객체 참조를 유지해야 id() 재사용으로 인한 오판이 없다.
-        seen_stacks = [(endpoint.stage7_graph["rf_a_stack"], endpoint.stage7_graph["rf_b_stack"])]
+        seen_stacks = [(endpoint.b210_graph["rf_a_stack"], endpoint.b210_graph["rf_b_stack"])]
         for cycle in range(1, 11):
             with endpoint._service_lock:
                 endpoint._reset_stage5_runtime_locked()
-            graph = endpoint.stage7_graph
+            graph = endpoint.b210_graph
             self.assertEqual(graph["lane_generation"], base_generation + cycle)
             self.assertIs(graph["sidecar"], sidecar)
             self.assertEqual(sidecar.lane_generation, base_generation + cycle)
@@ -291,7 +291,7 @@ class TC_STAGE7_WIRING_SMOKE(unittest.TestCase):
                 self.assertIsNot(graph["rf_b_stack"], old_b)
             seen_stacks.append((graph["rf_a_stack"], graph["rf_b_stack"]))
             self.assertIsNone(endpoint._validate_effective_graph())
-        self.assertEqual(endpoint._stage7_restart_factory.call_count, 10)
+        self.assertEqual(endpoint._b210_restart_factory.call_count, 10)
 
     def test_roc_build(self):
         endpoint = self._build(source_builder=build_roc_source, endpoint_station=222222222)

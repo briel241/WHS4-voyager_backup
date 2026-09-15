@@ -37,7 +37,7 @@ MAD_SCALE = 1.4826
 MIN_PROBE_SPAN_S = 60.0
 
 
-class Stage7CfoError(ValueError):
+class CfoError(ValueError):
     """측정 계약 위반 또는 측정 실패."""
 
 
@@ -64,7 +64,7 @@ def median_even_binary64(sorted_values) -> float:
 
     values = list(sorted_values)
     if not values:
-        raise Stage7CfoError("빈 입력의 median은 정의되지 않습니다")
+        raise CfoError("빈 입력의 median은 정의되지 않습니다")
     count = len(values)
     if count % 2 == 1:
         return float(values[count // 2])
@@ -90,7 +90,7 @@ def estimate_block(block_cf32le: bytes) -> BlockEstimate:
     import numpy
 
     if len(block_cf32le) != BLOCK_SAMPLES * 8:
-        raise Stage7CfoError("block은 정확히 3,072 cf32le sample이어야 합니다")
+        raise CfoError("block은 정확히 3,072 cf32le sample이어야 합니다")
     interleaved = _decode_cf32le(block_cf32le)
     # binary32 → binary64 exact 승격.
     real = [float(interleaved[2 * i]) for i in range(BLOCK_SAMPLES)]
@@ -173,14 +173,14 @@ def estimate_burst(burst_cf32le: bytes) -> BurstEstimate:
     """energy gate를 통과한 1초를 3,072-sample block 100개로 나눠 추정한다."""
 
     if len(burst_cf32le) != BLOCK_SAMPLES * BLOCKS_PER_BURST * 8:
-        raise Stage7CfoError("burst는 정확히 1초(307,200 sample)여야 합니다")
+        raise CfoError("burst는 정확히 1초(307,200 sample)여야 합니다")
     estimates = []
     for index in range(BLOCKS_PER_BURST):
         start = index * BLOCK_SAMPLES * 8
         estimates.append(estimate_block(burst_cf32le[start : start + BLOCK_SAMPLES * 8]))
     valid = [item.f_b_hz for item in estimates if item.valid]
     if len(valid) < MIN_VALID_BLOCKS:
-        raise Stage7CfoError(
+        raise CfoError(
             f"유효 block {len(valid)}/{BLOCKS_PER_BURST}: 90개 미만은 측정 실패입니다"
         )
     ordered = sorted(valid)
@@ -226,14 +226,14 @@ def fit_path(burst_estimates, t_k_seconds, horizon_seconds: float) -> PathCfoFit
     """
 
     if len(burst_estimates) != 10 or len(t_k_seconds) != 10:
-        raise Stage7CfoError("10개 burst 표본이 필요합니다")
+        raise CfoError("10개 burst 표본이 필요합니다")
     pairs = list(zip(t_k_seconds, burst_estimates))
     if any(b[0] <= a[0] for a, b in zip(pairs, pairs[1:])):
-        raise Stage7CfoError("t_k는 오름차순이어야 합니다")
+        raise CfoError("t_k는 오름차순이어야 합니다")
     if pairs[-1][0] != 0.0:
-        raise Stage7CfoError("마지막 burst의 t_k는 0이어야 합니다")
+        raise CfoError("마지막 burst의 t_k는 0이어야 합니다")
     if -pairs[0][0] < MIN_PROBE_SPAN_S:
-        raise Stage7CfoError("첫/마지막 probe 간격이 60초 미만입니다")
+        raise CfoError("첫/마지막 probe 간격이 60초 미만입니다")
     count = 10.0
     sum_t = math.fsum(t for t, _ in pairs)
     sum_f = math.fsum(estimate.f_k_hz for _, estimate in pairs)
@@ -241,7 +241,7 @@ def fit_path(burst_estimates, t_k_seconds, horizon_seconds: float) -> PathCfoFit
     sum_tf = math.fsum(t * estimate.f_k_hz for t, estimate in pairs)
     denominator = count * sum_tt - sum_t * sum_t
     if denominator == 0.0:
-        raise Stage7CfoError("OLS 분모가 0입니다")
+        raise CfoError("OLS 분모가 0입니다")
     b = (count * sum_tf - sum_t * sum_f) / denominator
     a = (sum_f - b * sum_t) / count
     r_max = max(
@@ -271,7 +271,7 @@ __all__ = (
     "PROBE_SAMPLES",
     "PathCfoFit",
     "SAMPLE_RATE_HZ",
-    "Stage7CfoError",
+    "CfoError",
     "estimate_block",
     "estimate_burst",
     "fit_path",

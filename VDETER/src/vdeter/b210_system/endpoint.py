@@ -1,6 +1,6 @@
 """Stage 7 endpoint (`stage7` §15, §16.1).
 
-`Stage7Endpoint`는 frozen `Stage5Endpoint`를 복사하거나 source를 수정하지 않고
+`Endpoint`는 frozen `Stage5Endpoint`를 복사하거나 source를 수정하지 않고
 상속해 public `VdeService` 구현과 Stage 4/5 protocol 동작을 재사용하되,
 behavioral override surface를 `start()` gate, `submit/cancel/status/stop`의 얇은
 public-admission guard, `_validate_effective_graph()`와
@@ -37,8 +37,8 @@ from ..common.serialization import to_reference_json
 from ..runtime.projection import PublicErrorCode, to_service_error
 from ..runtime.stage5 import Stage5Endpoint
 from .canonical_json import canonical_sha256, encode_canonical_json, sha256_hex
-from .errors import Stage7PrivateErrorCode
-from .records import Stage7ServiceStartIntentRecord
+from .errors import PrivateErrorCode
+from .records import ServiceStartIntentRecord
 
 
 def _jsonable(value):
@@ -55,7 +55,7 @@ def canonical_dto_digest(dto) -> str:
     return sha256_hex(encode_canonical_json(_jsonable(to_reference_json(dto))))
 
 
-class Stage7PublicStartGate:
+class PublicStartGate:
     """application sink 앞의 start-event gate (§15).
 
     staged transaction이 열린 동안 inherited start와 administrative rollback이
@@ -196,11 +196,11 @@ def _invalid_request_error(message: str):
     )
 
 
-class Stage7Endpoint(Stage5Endpoint):
+class Endpoint(Stage5Endpoint):
     """schema v4 Stage 7 endpoint (`stage7` §15)."""
 
     __slots__ = (
-        "_stage7_resolved",
+        "_b210_resolved",
         "_gate_lock",
         "_gate_condition",
         "public_service_published",
@@ -209,8 +209,8 @@ class Stage7Endpoint(Stage5Endpoint):
         "_start_terminal",
         "_intent_notifier",
         "_start_gate",
-        "_stage7_restart_factory",
-        "_stage7_graph",
+        "_b210_restart_factory",
+        "_b210_graph",
         "_lifecycle_generation",
         "_bridge_generation",
         "_host_raw_clock",
@@ -220,7 +220,7 @@ class Stage7Endpoint(Stage5Endpoint):
 
     def __init__(self, dependencies, policy=None, *, resolved=None) -> None:
         super().__init__(dependencies, policy)
-        self._stage7_resolved = resolved
+        self._b210_resolved = resolved
         self._gate_lock = RLock()
         self._gate_condition = Condition(self._gate_lock)
         self.public_service_published = False
@@ -229,8 +229,8 @@ class Stage7Endpoint(Stage5Endpoint):
         self._start_terminal = None
         self._intent_notifier = None
         self._start_gate = None
-        self._stage7_restart_factory = None
-        self._stage7_graph = None
+        self._b210_restart_factory = None
+        self._b210_graph = None
         self._lifecycle_generation = 0
         self._bridge_generation = None
         self._host_raw_clock = None
@@ -239,18 +239,18 @@ class Stage7Endpoint(Stage5Endpoint):
 
     # --- 조립 seam (builder 전용) ---------------------------------------------
 
-    def bind_stage7(
+    def bind_b210_system(
         self,
         *,
-        start_gate: Stage7PublicStartGate,
+        start_gate: PublicStartGate,
         graph: dict,
         restart_factory=None,
         intent_notifier=None,
         host_raw_clock=None,
     ) -> None:
         self._start_gate = start_gate
-        self._stage7_graph = graph
-        self._stage7_restart_factory = restart_factory
+        self._b210_graph = graph
+        self._b210_restart_factory = restart_factory
         self._intent_notifier = intent_notifier
         self._host_raw_clock = host_raw_clock
 
@@ -265,8 +265,8 @@ class Stage7Endpoint(Stage5Endpoint):
         return self._start_gate
 
     @property
-    def stage7_graph(self):
-        return self._stage7_graph
+    def b210_graph(self):
+        return self._b210_graph
 
     # --- Service admission window (§16.1) --------------------------------------
 
@@ -366,7 +366,7 @@ class Stage7Endpoint(Stage5Endpoint):
                         retryable=True,
                     )
                 )
-            record = Stage7ServiceStartIntentRecord(
+            record = ServiceStartIntentRecord(
                 intent_window_id=admission["intent_window_id"],
                 service_start_deadline_host_raw_ns=admission[
                     "service_start_deadline_host_raw_ns"
@@ -501,7 +501,7 @@ class Stage7Endpoint(Stage5Endpoint):
                     ErrorCategory.INTERNAL,
                     "intent digest가 local pending record와 다릅니다",
                     details=Details.of(
-                        stage7_private_code=Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID.value
+                        stage7_private_code=PrivateErrorCode.CONTROL_MESSAGE_INVALID.value
                     ),
                 )
         reserved = self._publisher.reserve_lifecycle()
@@ -684,10 +684,10 @@ class Stage7Endpoint(Stage5Endpoint):
         from ..link.data_plane import LinkDataPlane
         from ..mac.interface import Stage4Mac
         from ..presentation.adapter import RegistryPresentationAdapter
-        from .phy_facade import Stage7DiagnosticPhyFacade
-        from .radio_adapter import Stage7B210RadioAdapter
-        from .routing import Stage7RouteAwareLinkPort
-        from .support import Stage7Stage5Support
+        from .phy_facade import DiagnosticPhyFacade
+        from .radio_adapter import LaneB210RadioAdapter
+        from .routing import RouteAwareLinkPort
+        from .support import LaneStage5Support
 
         def mismatch(operation):
             return internal_error(
@@ -700,19 +700,19 @@ class Stage7Endpoint(Stage5Endpoint):
 
         if not isinstance(self._presentation, RegistryPresentationAdapter):
             return mismatch("presentation")
-        if not isinstance(self._link, Stage7RouteAwareLinkPort):
+        if not isinstance(self._link, RouteAwareLinkPort):
             return mismatch("link")
         if not isinstance(self._link.delegate, LinkDataPlane):
             return mismatch("link_delegate")
         if not isinstance(self._mac, Stage4Mac):
             return mismatch("mac")
-        if not isinstance(self._phy, Stage7DiagnosticPhyFacade):
+        if not isinstance(self._phy, DiagnosticPhyFacade):
             return mismatch("phy")
-        if not isinstance(self._radio, Stage7B210RadioAdapter):
+        if not isinstance(self._radio, LaneB210RadioAdapter):
             return mismatch("radio")
-        if self._stage4 is None or not isinstance(self._stage4, Stage7Stage5Support):
+        if self._stage4 is None or not isinstance(self._stage4, LaneStage5Support):
             return mismatch("mac_execution")
-        graph = self._stage7_graph
+        graph = self._b210_graph
         if graph is None:
             return mismatch("stage7_graph_binding")
         rf_a = graph.get("rf_a_stack")
@@ -725,8 +725,8 @@ class Stage7Endpoint(Stage5Endpoint):
         if rf_a.facade is rf_b.facade or rf_a.bridge is rf_b.bridge:
             return mismatch("lane_isolation")
         if (
-            self._stage7_resolved is None
-            or self._stage7_resolved.source_schema_version != 4
+            self._b210_resolved is None
+            or self._b210_resolved.source_schema_version != 4
         ):
             return mismatch("schema_v4_fingerprint")
         return None
@@ -735,7 +735,7 @@ class Stage7Endpoint(Stage5Endpoint):
 
     def _reset_stage5_runtime_locked(self) -> None:
         super()._reset_stage5_runtime_locked()
-        factory = self._stage7_restart_factory
+        factory = self._b210_restart_factory
         if factory is None:
             return
         try:
@@ -750,7 +750,7 @@ class Stage7Endpoint(Stage5Endpoint):
                     Layer.RUNTIME,
                     ErrorCode.INTERNAL_ERROR,
                     ErrorCategory.INTERNAL,
-                    "Stage7RestartFactory가 실패해 재시작을 거부합니다",
+                    "RestartFactory가 실패해 재시작을 거부합니다",
                     details=Details.of(reason=type(error).__name__),
                 ).error
             )
@@ -761,7 +761,7 @@ def _not_started_error_result():
 
 
 __all__ = (
-    "Stage7Endpoint",
-    "Stage7PublicStartGate",
+    "Endpoint",
+    "PublicStartGate",
     "canonical_dto_digest",
 )

@@ -22,7 +22,7 @@ class StalledClockActivationTest(unittest.TestCase):
     setUp = _fixture.CollisionSocketTests.setUp
 
     def test_stalled_clock_fails_closed_and_returns_activation_resources(self):
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         from vdeter.poc.api.errors import PocError, Severity

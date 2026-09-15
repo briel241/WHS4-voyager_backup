@@ -40,7 +40,7 @@ class D10SharedTest(unittest.TestCase):
 
     def test_launcher_and_both_harness_hosts_call_same_factory(self):
         repo = Path(__file__).resolve().parents[3]
-        for path in (repo/'VDETER/apps/stage7_endpoint_launcher.py',
+        for path in (repo/'VDETER/apps/endpoint_launcher.py',
                      repo/'VDETER/tests/support/poc_device_harness.py',
                      repo/'apps/rf_off_software_session.py'):
             with self.subTest(path=str(path)):

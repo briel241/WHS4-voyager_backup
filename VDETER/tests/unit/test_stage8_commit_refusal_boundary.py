@@ -19,7 +19,7 @@ from __future__ import annotations
 import unittest
 
 from apps.poc_device_seams_launcher import LauncherRadioSink
-from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.controller import ScenarioController
 from vdeter.poc.api.types import PhysicalChannel
 from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused, ChildPath
 
@@ -170,7 +170,7 @@ class CommandLogRefusalEvidenceTest(unittest.TestCase):
     """거부 사유가 evidence(`command_log`)에 남는다 — 봉투만 보면 성공과 구별되지 않는다."""
 
     def _controller(self, result):
-        return Stage7ScenarioController(
+        return ScenarioController(
             run_id="run-1", resolved_test_plan_sha256="0" * 64,
             adapter_channels={"MASS-B": _FakeChannel(result)},
             host_raw_clock=lambda: 1_000_000_000,
@@ -298,10 +298,10 @@ class AuthoritativeSinkDestinationTest(unittest.TestCase):
     """RF-off 좌표의 **같은 결함**. 기존 시험이 ROC 표적만 밟아 실물까지 통과시킨 지점이다."""
 
     def _sink(self):
-        from apps.poc_device_seams_inprocess import Stage7AuthoritativeRadioSink
+        from apps.poc_device_seams_inprocess import AuthoritativeRadioSink
 
         sidecar = _FakeSidecar()
-        sink = Stage7AuthoritativeRadioSink(
+        sink = AuthoritativeRadioSink(
             object(), sidecar=sidecar, source_station_id=333_333_333,
             station_id_by_endpoint=_STATIONS)
         return sink, sidecar

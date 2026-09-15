@@ -41,7 +41,7 @@ from vdeter.poc.api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
 from vdeter.poc.api.transport import OversizedPacket, connect  # noqa: E402
 
 #: child는 자체 수명 제한을 두지 않는다. 정상 종료는 server의 CLOSE(engine CLOSED)로만 온다.
-#: workload/close 상한(workload 900초·close 600초, 기존 Stage 7 코드 상한, `apps/stage7_session.py`)의
+#: workload/close 상한(workload 900초·close 600초, 기존 Stage 7 코드 상한, `apps/service_session.py`)의
 #: **실제 강제와 종료(CLOSE→SIGTERM→SIGKILL)** 는 workload를 소유한 runtime(기존 Stage 7 resident
 #: session)이 수행하며, 이는 Stage 6 통합에서 Stage 8 실행 layer에 연결된다(Stage 4는 이 deadline을
 #: session.py 모델로만 표현한다). 아래 값은 그 runtime이 사라져 CLOSE도 SIGKILL도 오지 않는 극단의

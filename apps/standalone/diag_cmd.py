@@ -8,7 +8,7 @@
 분리 원칙 (실행 명세 §5A):
 - `active.json`·`releases/`·`candidate/`에는 **쓰지 않는다**(읽기만). reference 해시 교체·
   재결속 위장을 하지 않는다.
-- `artifact_type`이 다르므로 `stage7_profile.load_reference`(정상 경로의 유일한 reference
+- `artifact_type`이 다르므로 `run_profile.load_reference`(정상 경로의 유일한 reference
   검증기)를 통과할 수 없다 — 정상 run은 이 파일을 구조적으로 볼 수 없다.
 - QUALIFIED·RESEARCH_READY로 표시하지 않는다. run.json/summary.json은
   `reference_sha256=null`, `qualification_status=NOT_QUALIFIED`,
@@ -319,10 +319,10 @@ def authorize(paths: StatePaths, *, calibration_reference, plan_path,
     environment_manifest = (environment_manifest
                             or local_config.build_environment_manifest())
 
-    from apps import stage7_profile
+    from apps import run_profile
     try:
-        source = stage7_profile.load_reference(str(calibration_reference))
-    except stage7_profile.ProfileError as exc:
+        source = run_profile.load_reference(str(calibration_reference))
+    except run_profile.ProfileError as exc:
         raise DiagError(EXIT_CONFIG, "calibration source reference rejected: %s"
                         % exc) from exc
     source_sha = source.get("_reference_sha256") or _sha256_bytes(
@@ -575,7 +575,7 @@ def unique_run_id(paths: StatePaths, *, clock=time.time) -> str:
 
 
 #: coordinator가 "빈 측정"(workload 0)에 붙이는 정확한 실패 사유
-#: (`VDETER/apps/stage7_coordinator_main.py::_service_session_terminal_status`).
+#: (`VDETER/apps/coordinator_main.py::_service_session_terminal_status`).
 #: 이 문자열 **하나만** 있을 때가 RX-only 세션의 기대 결과다.
 EMPTY_MEASUREMENT_FAILURE = "workload가 하나도 완료되지 않음"
 

@@ -1,11 +1,11 @@
 """Phase G formal service 실행 계층의 내부 로직 (CLI 아님).
 
 정식 사용자 진입점은 `apps/scenario_runner.py menu --transport stage7
---profile <profile.json>` 하나뿐이고, 그 아래 `apps/stage7_run.py`가 이 모듈의
+--profile <profile.json>` 하나뿐이고, 그 아래 `apps/service_run.py`가 이 모듈의
 함수를 호출한다. 이 파일에는 `__main__` 진입점을 두지 않는다.
 
 한 session의 순서 (§3)
-    1. profile/reference schema·SHA 검증        (stage7_profile)
+    1. profile/reference schema·SHA 검증        (run_profile)
     2. qualification-critical manifest 대조      (원격 배포본 실측)
     3. baseline/gain/config 결속 확인
     4. B210 serial/role/USB topology 확인
@@ -36,8 +36,12 @@ SESSION_RUN_ID_PREFIX = "svc"
 #: B210 backend는 multiprocessing ``spawn`` child라 모듈 파일명이 argv에
 #: 나타나지 않을 수 있으므로 ``spawn_main`` 계열도 보수적으로 차단한다.
 _COMPETING_PROCESS_PATTERN = (
-    "stage7_coordinator_main|stage7_endpoint_launcher|"
-    "stage7_mass_roc_controller|multiprocessing\\.spawn|spawn_main|"
+    "coordinator_main|endpoint_launcher|"
+    "mass_roc_workload_controller|"
+    # 2-3 이전 이름으로 배포된 설치본의 잔존 프로세스도 계속 잡는다 —
+    # 이 gate는 fail-closed이므로 탐지 범위를 좁히지 않는다.
+    "stage7_coordinator_main|stage7_endpoint_launcher|stage7_mass_roc_controller|"
+    "multiprocessing\\.spawn|spawn_main|"
     # decode worker는 forkserver로 뜬다 (spawn 자식은 코디네이터의 B210
     # worker 계수에 잡힌다). 그래서 잔존 탐지도 여기서 따로 해야 한다 —
     # 실제로 고아 워커가 다음 세션을 막은 적이 있다.
@@ -376,7 +380,7 @@ def build_coordinator_script(profile: dict, run_id: str, scenario_id: str,
         "cd " + root + "/VDETER\n"
         "mkdir -p " + root + "/runs/" + run_id + "\n"
         "PYTHONPYCACHEPREFIX=/tmp/stage7-service-pyc "
-        + profile["pi"]["venv_python"] + " apps/stage7_coordinator_main.py"
+        + profile["pi"]["venv_python"] + " apps/coordinator_main.py"
         + " --run-id " + run_id
         + " --phase mass-roc-service"
         + " --run-root " + root + "/runs/" + run_id
@@ -398,7 +402,7 @@ def run_service_session(profile: dict, *, scenario_id: str,
                         runner=subprocess.run,
                         clock=time.time) -> dict:
     """독립 service session 하나를 끝까지 조율한다."""
-    from apps import stage7_profile
+    from apps import run_profile
 
     started = clock()
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(started))
@@ -434,7 +438,7 @@ def run_service_session(profile: dict, *, scenario_id: str,
         "fallback_used": None,
     }
     try:
-        result["local_validation"] = stage7_profile.validate_local_bindings(profile)
+        result["local_validation"] = run_profile.validate_local_bindings(profile)
         mark("local_validation")
 
         result["remote_preflight"] = verify_remote_environment(

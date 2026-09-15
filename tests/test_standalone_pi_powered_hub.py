@@ -12,7 +12,7 @@
                + hub asset/attestation 결속; 480M·다른 hub/root·bus-powered
                hub·cascade·asset/attestation 누락·모순·serial 불일치·초과
                장치는 전부 fail-closed.
-  계약 일치  : setup 초안 → hardware.toml → 실제 Stage7ConfigurationLoader →
+  계약 일치  : setup 초안 → hardware.toml → 실제 ConfigurationLoader →
                preflight → RR-P0 기대값(coordinator)이 모두 같은 profile
                정의에서 나온다.
   결속       : issue_reference/compare_critical의 host_profile·usb_topology,
@@ -216,7 +216,7 @@ def preflight_kwargs(tmp, hardware, sysfs):
 def load_coordinator():
     spec = importlib.util.spec_from_file_location(
         "stage7_coordinator_main_pi_hub_test",
-        REPO / "VDETER" / "apps" / "stage7_coordinator_main.py")
+        REPO / "VDETER" / "apps" / "coordinator_main.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -241,7 +241,7 @@ def generate(tmp, hardware, *, usb_paths=None, machine_id=MACHINE_ID, phase="rr-
 
 def test_single_definition_legacy_constants_are_derived_not_duplicated():
     legacy = host_profiles.LEGACY_PI
-    assert legacy.name == LEGACY == configuration.STAGE7_HOST_PROFILE
+    assert legacy.name == LEGACY == configuration.HOST_PROFILE
     assert local_preflight.ROLE_SPEED_CLASS == legacy.speed_classes == {
         "MASS-A": "super", "MASS-B": "high", "ROC": "super"}
     coordinator = load_coordinator()
@@ -249,7 +249,7 @@ def test_single_definition_legacy_constants_are_derived_not_duplicated():
         role: legacy.expected_sysfs_speed(role) for role in ROLES} == {
         "MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
     assert configuration.USB_TRANSPORTS == host_profiles.USB_TRANSPORTS
-    assert configuration.STAGE7_HOST_PROFILES == host_profiles.HOST_PROFILES == (LEGACY, HUB)
+    assert configuration.HOST_PROFILE_TABLE == host_profiles.HOST_PROFILES == (LEGACY, HUB)
     hub = host_profiles.PI_POWERED_HUB
     assert hub.speed_classes == {role: "super" for role in ROLES}
     assert hub.platform_profiles == ("pi",)
@@ -338,7 +338,7 @@ def test_legacy_config_generation_and_loader_rules_unchanged():
         assert generated["installation_state"]["endpoint_template_dir"] == (
             "VDETER/configs/stage7/endpoints")
         # legacy MASS-B must not accept the powered-hub power token as a DC asset.
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
         profile_text = (REPO / "VDETER/configs/stage7/profiles/data-profile.toml").read_text(
             encoding="utf-8")
         forged = mass_b.replace('external_power_asset = "AT2024T"',
@@ -500,7 +500,7 @@ def test_hub_config_generation_with_real_loader_and_fail_closed_provisioning():
         assert generated["installation_state"]["host_profile"] == HUB
         assert generated["installation_state"]["endpoint_template_dir"] == (
             "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub")
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
         profile_text = (configs / "profiles" / "data-profile.toml").read_text(encoding="utf-8")
         for endpoint, role in (("mass-a", "MASS-A"), ("mass-b", "MASS-B"), ("roc", "ROC")):
             text = (configs / "endpoints" / f"{endpoint}.toml").read_text(encoding="utf-8")
@@ -539,7 +539,7 @@ def test_loader_refuses_mixed_or_relaxed_hub_configs():
         configs = Path(generated["configs_dir"])
         profile_text = (configs / "profiles" / "data-profile.toml").read_text(encoding="utf-8")
         text = (configs / "endpoints" / "mass-b.toml").read_text(encoding="utf-8")
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
 
         def load(mutated):
             return loader.load_endpoint_configuration(
@@ -573,7 +573,7 @@ def test_rr_p0_expected_speed_and_hub_check_derive_from_resolved_profile():
     coordinator = load_coordinator()
     with tempfile.TemporaryDirectory() as tmp:
         sysfs = make_topology(tmp)
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
         resolved = {}
         for hardware, usb_paths in ((HUB_HARDWARE, hub_usb_paths()), (LEGACY_HARDWARE, None)):
             generated = generate(tmp + "/" + str(hardware["schema_version"]), hardware,

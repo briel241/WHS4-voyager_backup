@@ -5,7 +5,7 @@ import uuid
 
 from vdeter.b210_system.ipc import (
     RUNTIME_PROTOCOL,
-    Stage7IpcError,
+    IpcError,
     body_set_sha256,
     body_sha256_of,
     build_barrier_manifest,
@@ -94,26 +94,26 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
     def test_unknown_envelope_key_rejected(self):
         message = make_prepare()
         message["extra"] = 1
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_missing_envelope_key_rejected(self):
         message = make_prepare()
         del message["barrier_id"]
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_wrong_body_hash_rejected(self):
         message = make_prepare()
         message["body_sha256"] = "9" * 64
         message["request_body_sha256"] = "9" * 64
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_deadline_not_after_issued_rejected(self):
         message = make_prepare()
         message["deadline_host_raw_ns"] = message["issued_host_raw_ns"]
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_bool_as_integer_rejected(self):
@@ -126,7 +126,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
                 "radio_generation": True,
             },
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_status_requires_null_barrier(self):
@@ -135,7 +135,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
         message = make_command(
             "status", {"query_command_id": None}, barrier_id=_uuid(9)
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(message)
 
     def test_active_bridge_verb_phase_binding(self):
@@ -155,7 +155,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
             "correction_den": 4,
         }
         validate_runtime_command(make_command("prepare_active_bridge", body, phase="PREPARE"))
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(
                 make_command("prepare_active_bridge", body, phase="COMMIT")
             )
@@ -175,7 +175,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
             "correction_num": 0,
             "correction_den": 1,
         }
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(make_command("prepare_active_bridge", body))
 
     def test_member_order_enforced(self):
@@ -193,7 +193,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
             "correction_num": 0,
             "correction_den": 1,
         }
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(make_command("prepare_active_bridge", body))
 
     def test_open_service_admission_deadline_formula(self):
@@ -222,7 +222,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
             digest = body_sha256_of(broken["body"])
             broken["body_sha256"] = digest
             broken["request_body_sha256"] = digest
-            with self.assertRaises(Stage7IpcError):
+            with self.assertRaises(IpcError):
                 validate_runtime_command(broken)
 
     def test_calibrate_rf_mode_null_hash_combinations(self):
@@ -249,7 +249,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
                 "operational_config_sha256": None,
             },
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(broken)
         apply_missing = make_command(
             "calibrate_rf",
@@ -260,7 +260,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
                 "operational_config_sha256": None,
             },
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(apply_missing)
 
     def test_path_ids_canonical_order(self):
@@ -281,7 +281,7 @@ class TC_STAGE7_IPC_COMMANDS(unittest.TestCase):
                 "operation_deadline_host_raw_ns": 5_000_000_000,
             },
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_command(bad)
 
 
@@ -308,7 +308,7 @@ class TC_STAGE7_IPC_RESPONSES(unittest.TestCase):
         command = make_prepare()
         validate_runtime_response(self._response(command, "PREPARED"), command)
         validate_runtime_response(self._response(command, "REJECTED"), command)
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_response(self._response(command, "ACCEPTED"), command)
 
     def test_measurement_commit_rejects_accepted(self):
@@ -321,7 +321,7 @@ class TC_STAGE7_IPC_RESPONSES(unittest.TestCase):
             },
             phase="COMMIT",
         )
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_response(self._response(command, "ACCEPTED"), command)
         validate_runtime_response(self._response(command, "COMPLETED"), command)
 
@@ -333,7 +333,7 @@ class TC_STAGE7_IPC_RESPONSES(unittest.TestCase):
         )
         validate_runtime_response(good, command)
         bad = self._response(command, "PREPARED", result=result, result_sha256="9" * 64)
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_response(bad, command)
 
 
@@ -377,19 +377,19 @@ class TC_STAGE7_IPC_EVENTS(unittest.TestCase):
         validate_runtime_event(self._intent_event())
 
     def test_start_intent_null_artifact_rejected(self):
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_event(
                 self._intent_event(body_overrides={"artifact_sha256": None})
             )
 
     def test_start_intent_null_bridge_generation_rejected(self):
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_event(
                 self._intent_event(body_overrides={"bridge_generation": None})
             )
 
     def test_command_terminal_requires_command_binding(self):
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             validate_runtime_event(
                 self._intent_event(
                     body_overrides={
@@ -410,7 +410,7 @@ class TC_STAGE7_IPC_MANIFEST(unittest.TestCase):
         entries = (("MASS-A", "1" * 64), ("MASS-B", "2" * 64), ("ROC", "3" * 64))
         digest = build_barrier_manifest(entries)
         self.assertEqual(len(digest), 64)
-        with self.assertRaises(Stage7IpcError):
+        with self.assertRaises(IpcError):
             build_barrier_manifest((("ROC", "3" * 64), ("MASS-A", "1" * 64)))
 
 

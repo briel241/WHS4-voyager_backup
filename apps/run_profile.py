@@ -2,7 +2,7 @@
 
 이 모듈은 **직접 실행하는 CLI가 아니다.** 정식 사용자 진입점은
 `apps/scenario_runner.py menu --transport stage7 --profile <profile.json>`이며,
-그 아래 `apps/stage7_run.py`(formal service 계층)가 이 모듈을 호출한다.
+그 아래 `apps/service_run.py`(formal service 계층)가 이 모듈을 호출한다.
 
 profile은 비밀정보를 담지 않는다. 개인키 본문·해시는 어디에도 기록하지 않고,
 Pi 안에 존재하는지와 권한(0600)·key/cert 일치 여부만 확인한다.
@@ -13,7 +13,7 @@ Pi 안에 존재하는지와 권한(0600)·key/cert 일치 여부만 확인한�
     3. reference 내부 정합(TC PASS·gain·baseline·hardware·wiring)
     4. gain artifact 파일 SHA-256이 reference와 일치
     5. qualification-critical manifest: reference에 결속된 파일 해시가
-       현재 배포본과 일치 (원격 대조는 stage7_run이 수행)
+       현재 배포본과 일치 (원격 대조는 service_run이 수행)
 """
 
 from __future__ import annotations

@@ -13,7 +13,7 @@ from vdeter.common.addressing import Addressed
 from vdeter.common.contracts.service import ServiceStartRequest, SubmitTransferRequest
 from vdeter.common.events import ServiceEventType
 from vdeter.common.identifiers import PayloadFormat, StationId
-from vdeter.b210_system.coordinator import Stage7BarrierFailure
+from vdeter.b210_system.coordinator import BarrierFailure
 from vdeter.b210_system.ipc import ENDPOINT_IDS, body_set_sha256
 
 from tests.support.stage4 import HAS_CRYPTO

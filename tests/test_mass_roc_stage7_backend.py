@@ -5,8 +5,8 @@
 실제 Stage 7 경로의 소켓·RF만 가짜로 바꾸고 나머지는 전부 실물을 쓴다:
 
     MassRocScenarioController (실제 업무 흐름)
-    → Stage7ScenarioController.invoke_service_inline (실제 §16.2 명령)
-    → Stage7ServiceApiTestAdapter (실제 TEST adapter)
+    → ScenarioController.invoke_service_inline (실제 §16.2 명령)
+    → ServiceApiTestAdapter (실제 TEST adapter)
     → LoopbackService (가짜 — submit이 상대 endpoint의 event JSONL에
       launcher의 service_event_record 형식 그대로 DATA_RECEIVED를 쓴다)
     → EventLog tail (실제 controller가 실장비에서 읽는 것과 같은 코드)
@@ -53,11 +53,11 @@ from vdeter.common.identifiers import PayloadFormat, StationId, TransferId
 from vdeter.common.results import Ok
 from vdeter.common.time import ClockDomain, TimePoint
 
-from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
-from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.adapter import ServiceApiTestAdapter
+from vdeter.b210_system.control_plane.controller import ScenarioController
 
-from apps.stage7_endpoint_launcher import service_event_record
-from apps.stage7_mass_roc_controller import (
+from apps.endpoint_launcher import service_event_record
+from apps.mass_roc_workload_controller import (
     ENDPOINT_IDS,
     EventLog,
     MassRocScenarioController,
@@ -158,12 +158,12 @@ def build_harness(run_root: str, *, wrong_destination_from: str | None = None,
         service = LoopbackService(endpoint_id, run_root, extra_deliver_to=extra,
                                   destination_override=override)
         services[endpoint_id] = service
-        channels[endpoint_id] = _Channel(Stage7ServiceApiTestAdapter(
+        channels[endpoint_id] = _Channel(ServiceApiTestAdapter(
             endpoint_id=endpoint_id, service=service,
             resolved_test_plan_sha256=_PLAN_SHA,
             authorized_controller=_PEER,
         ))
-    inline = Stage7ScenarioController(
+    inline = ScenarioController(
         run_id="stage7-backend-test",
         resolved_test_plan_sha256=_PLAN_SHA,
         adapter_channels=channels,

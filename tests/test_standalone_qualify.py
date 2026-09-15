@@ -4,7 +4,7 @@
   사다리     : P0→P1(+gain)→candidate→P2-17→P3-fault→verification bundle→
                final builder→전체 PASS 시에만 원자적 승격. 단계 실패 시
                기존 active 유지.
-  발급       : reference v2가 **실제 검증기**(apps.stage7_profile.load_reference)
+  발급       : reference v2가 **실제 검증기**(apps.run_profile.load_reference)
                를 통과하고, final builder는 **실물 도구**를 installation digest
                provider 주입으로 실행한다.
   installation audit : git 없는 설치 감사가 재측정 대조로 정직 판정.
@@ -365,14 +365,14 @@ def test_ladder_excludes_link19_and_builder_ready_without_rr006():
 
 def _coordinator_module():
     return qualify_cmd._load_module(
-        Path(_REPO) / "VDETER" / "apps" / "stage7_coordinator_main.py",
+        Path(_REPO) / "VDETER" / "apps" / "coordinator_main.py",
         "stage7_coordinator_main_p3_policy_check")
 
 
 def test_rr_p3_fault_runs_exactly_six_software_subcases():
     import ast
     source = (Path(_REPO) / "VDETER" / "apps"
-              / "stage7_coordinator_main.py").read_text("utf-8")
+              / "coordinator_main.py").read_text("utf-8")
     tree = ast.parse(source)
     function = next(node for node in tree.body
                     if isinstance(node, ast.FunctionDef)

@@ -94,7 +94,7 @@ def _render_trace_event(row: dict) -> str | None:
     return None
 
 
-class Stage7ServiceSession:
+class ServiceSession:
     """살아 있는 하드웨어 service session 하나. workload는 이 위에서만 돈다."""
 
     #: 계측용 session 상태 전이.
@@ -137,7 +137,7 @@ class Stage7ServiceSession:
         self._started = clock()
         self.diagnostics = bool(diagnostics)
         if trace is None:
-            from apps.stage7_trace import TraceWriter
+            from apps.service_trace import TraceWriter
             trace = TraceWriter(
                 os.path.join(session_dir, "session-trace.jsonl"),
                 session_id=session_id, diagnostics=self.diagnostics)
@@ -148,7 +148,7 @@ class Stage7ServiceSession:
 
     @property
     def remote_root(self) -> str:
-        from apps.stage7_service_layer import remote_deploy_root
+        from apps.service_layer import remote_deploy_root
         return remote_deploy_root(self.profile)
 
     @property
@@ -160,7 +160,7 @@ class Stage7ServiceSession:
         return f"{self.remote_run_root}/{SESSION_DIR_NAME}"
 
     def _ssh(self, script, *, timeout=300.0, check=True):
-        from apps.stage7_service_layer import _ssh
+        from apps.service_layer import _ssh
         return _ssh(self.profile, script, timeout=timeout, check=check,
                     runner=self.runner)
 
@@ -249,14 +249,14 @@ class Stage7ServiceSession:
 
     def start(self) -> dict:
         """profile/reference 검증 → 원격 preflight → fresh config → bring-up."""
-        from apps import stage7_profile
-        from apps.stage7_service_layer import (
+        from apps import run_profile
+        from apps.service_layer import (
             ServiceSessionError, prepare_service_config,
             verify_remote_environment,
         )
 
         self.trace.state("VALIDATING")
-        self.local_validation = stage7_profile.validate_local_bindings(self.profile)
+        self.local_validation = run_profile.validate_local_bindings(self.profile)
         self._mark("local_validation")
         reference = self.profile["_reference"]
         self.trace.emit("profile_reference_validated",
@@ -296,7 +296,7 @@ class Stage7ServiceSession:
             #  성공 대조군 rr-p2-17-20260830k는 40,242줄).
             + ("STAGE7_DIAG=1 " if self.diagnostics else "")
             + self.profile["pi"]["venv_python"]
-            + " apps/stage7_coordinator_main.py"
+            + " apps/coordinator_main.py"
             + " --run-id " + self.session_id
             + " --phase mass-roc-session"
             + " --run-root " + self.remote_run_root
@@ -374,7 +374,7 @@ class Stage7ServiceSession:
     def run_workload(self, scenario_id: str,
                      certificate_case: str = "normal") -> dict:
         """workload child 하나 — application state만 새로 만든다."""
-        from apps.stage7_service_layer import ServiceSessionError
+        from apps.service_layer import ServiceSessionError
 
         if self.status != "READY":
             raise ServiceSessionError(f"session이 READY가 아닙니다: {self.status}")
@@ -576,7 +576,7 @@ class Stage7ServiceSession:
         return self.closed
 
     def _validate_existing_evidence_target(self, target: str) -> dict:
-        from apps.stage7_service_layer import ServiceSessionError
+        from apps.service_layer import ServiceSessionError
 
         if not os.path.isdir(target):
             raise ServiceSessionError(
@@ -635,7 +635,7 @@ class Stage7ServiceSession:
                 "target": target}
 
     def collect_evidence(self) -> dict:
-        from apps.stage7_service_layer import ServiceSessionError
+        from apps.service_layer import ServiceSessionError
 
         target = os.path.join(self.session_dir, "remote-run")
         if os.path.exists(target):
@@ -697,9 +697,9 @@ def open_service_session(profile: dict, *, session_id: str | None = None,
                          evidence_root: str | None = None,
                          runner=subprocess.run, clock=time.time,
                          sleeper=time.sleep, live: bool = True,
-                         diagnostics: bool = False) -> Stage7ServiceSession:
+                         diagnostics: bool = False) -> ServiceSession:
     """CLI 시작 시 하드웨어 session을 세운다 (§2)."""
-    from apps.stage7_service_layer import ServiceSessionError
+    from apps.service_layer import ServiceSessionError
 
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(clock()))
     session_id = session_id or ("phase-g-service-" + stamp)
@@ -708,7 +708,7 @@ def open_service_session(profile: dict, *, session_id: str | None = None,
     if os.path.exists(session_dir):
         raise ServiceSessionError(f"session 디렉터리 중복: {session_dir}")
     os.makedirs(session_dir)
-    session = Stage7ServiceSession(profile, session_id=session_id,
+    session = ServiceSession(profile, session_id=session_id,
                                    session_dir=session_dir, runner=runner,
                                    clock=clock, sleeper=sleeper, live=live,
                                    diagnostics=diagnostics)

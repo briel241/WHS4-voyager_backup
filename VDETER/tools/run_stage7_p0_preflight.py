@@ -186,21 +186,21 @@ def worker_plan(endpoint_id: str) -> dict:
 
 
 def run_cycle(cycle_index: int) -> dict:
-    from vdeter.b210_system.b210_worker import Stage7IsolatedDualLaneWorker
+    from vdeter.b210_system.b210_worker import IsolatedDualLaneWorker
 
     outcome = {"cycle": cycle_index, "devices": {}, "pass": True}
     workers = {}
     try:
         for endpoint_id, expected in EXPECTED_DEVICES.items():
             selector = f"serial={expected['serial']}"
-            found = Stage7IsolatedDualLaneWorker.discover(selector)
+            found = IsolatedDualLaneWorker.discover(selector)
             device = {"discovered": list(found)}
             if tuple(found) != (expected["serial"],):
                 device["error"] = "discovery mismatch"
                 outcome["pass"] = False
                 outcome["devices"][endpoint_id] = device
                 continue
-            worker = Stage7IsolatedDualLaneWorker(selector, "fc32", "sc16")
+            worker = IsolatedDualLaneWorker(selector, "fc32", "sc16")
             workers[endpoint_id] = worker
             readback = worker.configure_dual(worker_plan(endpoint_id))
             device["readback_serial"] = readback.get("serial")

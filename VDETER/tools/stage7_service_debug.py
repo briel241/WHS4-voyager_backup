@@ -34,8 +34,8 @@ def main() -> int:
     parser.add_argument("--gain-artifact", default=None)
     arguments = parser.parse_args()
 
-    import stage7_coordinator_main as app
-    from vdeter.b210_system.coordinator import Stage7RuntimeCoordinator
+    import coordinator_main as app
+    from vdeter.b210_system.coordinator import RuntimeCoordinator
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     os.makedirs(os.path.join(arguments.run_root, "evidence"), exist_ok=True)
@@ -50,7 +50,7 @@ def main() -> int:
         arguments.run_id, arguments.run_root, arguments.configs_dir, plan,
         arguments.gain_artifact, test_plan_sha=test_plan_sha,
     )
-    coordinator = Stage7RuntimeCoordinator(
+    coordinator = RuntimeCoordinator(
         plan, channels, host_raw_clock=read_monotonic_raw_ns,
         run_id=arguments.run_id,
     )

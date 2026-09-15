@@ -18,8 +18,8 @@ from vdeter.common.contracts.service import (
 from vdeter.common.identifiers import TransferId
 from vdeter.common.results import Ok
 from vdeter.common.time import ClockDomain, TimePoint
-from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
-from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.adapter import ServiceApiTestAdapter
+from vdeter.b210_system.control_plane.controller import ScenarioController
 
 _PEER = (4242, 1000)
 _TP = TimePoint(1, 0, ClockDomain.UTC, "test-utc")
@@ -59,7 +59,7 @@ class _RecordingService:
 
 def _build(service=None):
     service = service or _RecordingService()
-    adapter = Stage7ServiceApiTestAdapter(
+    adapter = ServiceApiTestAdapter(
         endpoint_id="MASS-A",
         service=service,
         resolved_test_plan_sha256="e" * 64,
@@ -70,7 +70,7 @@ def _build(service=None):
         def request(self, message):
             return adapter.handle_command(message, _PEER)
 
-    controller = Stage7ScenarioController(
+    controller = ScenarioController(
         run_id="stage7-inline-test",
         resolved_test_plan_sha256="e" * 64,
         adapter_channels={"MASS-A": _Channel()},
@@ -196,7 +196,7 @@ class TC_STAGE7_INLINE_SUBMIT(unittest.TestCase):
     def test_fixture_command_still_works_alongside_inline(self):
         """기존 fixture 경로 회귀 — inline 추가가 fixture 계약을 바꾸지 않는다."""
         service, adapter, controller = _build()
-        fixture, digest = Stage7ScenarioController.fixture_bytes(
+        fixture, digest = ScenarioController.fixture_bytes(
             {"transfer_id": str(uuid.uuid4())})
         adapter.register_fixture("fixtures/status.json", fixture)
         response = controller.invoke_service_fixture(

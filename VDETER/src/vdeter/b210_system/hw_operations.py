@@ -17,7 +17,7 @@ from .cfo import estimate_burst, fit_path, generate_probe_vector
 from .time_bridge import (
     BracketObservation,
     MAX_BRACKET_NS,
-    Stage7TimeBridgeError,
+    TimeBridgeError,
     fit_affine,
     select_utc_anchor,
     verify_round_trip,
@@ -82,7 +82,7 @@ def acquire_host_time_fit(
     restart_log: list | None = None,
     on_observation=None,
 ):
-    """§13.2 adaptive acquisition. 실패는 `Stage7TimeBridgeError`다.
+    """§13.2 adaptive acquisition. 실패는 `TimeBridgeError`다.
 
     hardware time 역행·bracket 실패는 표본 선별 없이 해당 시리즈 전체를
     폐기하고, 600초 예산 안이면 빈 시리즈에서 재시작한다 (`0.8.19`).
@@ -95,7 +95,7 @@ def acquire_host_time_fit(
 
     def _restart(reason: str):
         nonlocal observations, last_error
-        last_error = Stage7TimeBridgeError(reason)
+        last_error = TimeBridgeError(reason)
         if restart_log is not None:
             restart_log.append({"reason": reason, "discarded": len(observations)})
         observations = []
@@ -103,7 +103,7 @@ def acquire_host_time_fit(
     while True:
         now = read_monotonic_raw_ns()
         if now > deadline:
-            raise Stage7TimeBridgeError(
+            raise TimeBridgeError(
                 f"600초 안에 host affine fit이 합격하지 못했습니다: {last_error}"
             )
         observation = collect_bracket(worker)
@@ -127,7 +127,7 @@ def acquire_host_time_fit(
                 start = fit.coefficients.forward(observations[0].hardware_ns)
                 verify_round_trip(fit.coefficients, start, start + 120_000_000_000)
                 return fit, tuple(observations)
-            except Stage7TimeBridgeError as error:
+            except TimeBridgeError as error:
                 last_error = error
         _time.sleep(observation_period_s)
 

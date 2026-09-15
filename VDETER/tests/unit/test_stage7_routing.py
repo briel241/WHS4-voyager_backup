@@ -44,11 +44,11 @@ from vdeter.common.results import Err, Ok, internal_error
 from vdeter.common.time import ClockDomain, TimePoint
 from vdeter.b210_system.canonical_json import sha256_hex
 from vdeter.b210_system.routing import (
-    Stage7QualificationPhyRequest,
-    Stage7QualificationRouteSeeder,
-    Stage7RouteAwareLinkPort,
-    Stage7RouteSidecar,
-    Stage7SignedQualificationStep,
+    QualificationPhyRequest,
+    QualificationRouteSeeder,
+    RouteAwareLinkPort,
+    RouteSidecar,
+    SignedQualificationStep,
     canonical_request_digest,
     resolve_lane_plan_route,
 )
@@ -161,8 +161,8 @@ class _FakeDelegate:
 
 def _wrapper():
     delegate = _FakeDelegate()
-    sidecar = Stage7RouteSidecar(lane_generation=0)
-    wrapper = Stage7RouteAwareLinkPort(delegate, sidecar, roc_station_id=ROC)
+    sidecar = RouteSidecar(lane_generation=0)
+    wrapper = RouteAwareLinkPort(delegate, sidecar, roc_station_id=ROC)
     return delegate, sidecar, wrapper
 
 
@@ -461,9 +461,9 @@ def _bulletin_board():
 
 class TC_STAGE7_LANE_PLAN(unittest.TestCase):
     def _context(self, source, destination_kind, destination=None, method="build_packet"):
-        from vdeter.b210_system.routing import Stage7RouteContext
+        from vdeter.b210_system.routing import RouteContext
 
-        return Stage7RouteContext(
+        return RouteContext(
             method_kind=method,
             source_station_id=source,
             destination_kind=destination_kind,
@@ -580,7 +580,7 @@ class TC_STAGE7_SIDECAR_LIFECYCLE(unittest.TestCase):
 
 class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
     def _step(self, packet: bytes):
-        return Stage7SignedQualificationStep(
+        return SignedQualificationStep(
             step_id="step-c2-l11",
             plan_sha256="a" * 64,
             source_endpoint_id="MASS-A",
@@ -593,7 +593,7 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
         )
 
     def _request(self, packet: bytes):
-        return Stage7QualificationPhyRequest(
+        return QualificationPhyRequest(
             step_id="step-c2-l11",
             source_endpoint_id="MASS-A",
             destination_endpoint_id="ROC",
@@ -606,8 +606,8 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
 
     def test_signed_step_seeds_once(self):
         packet = b"\x00" * 54
-        sidecar = Stage7RouteSidecar()
-        seeder = Stage7QualificationRouteSeeder(
+        sidecar = RouteSidecar()
+        seeder = QualificationRouteSeeder(
             sidecar,
             (self._step(packet),),
             endpoint_id="MASS-A",
@@ -632,8 +632,8 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
 
     def test_wrong_packet_bytes_rejected(self):
         packet = b"\x00" * 54
-        sidecar = Stage7RouteSidecar()
-        seeder = Stage7QualificationRouteSeeder(
+        sidecar = RouteSidecar()
+        seeder = QualificationRouteSeeder(
             sidecar,
             (self._step(packet),),
             endpoint_id="MASS-A",
@@ -648,8 +648,8 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
 
     def test_unknown_step_rejected(self):
         packet = b"\x00" * 54
-        sidecar = Stage7RouteSidecar()
-        seeder = Stage7QualificationRouteSeeder(
+        sidecar = RouteSidecar()
+        seeder = QualificationRouteSeeder(
             sidecar,
             (),
             endpoint_id="MASS-A",
@@ -662,8 +662,8 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
 
     def test_wrong_clock_rejected(self):
         packet = b"\x00" * 54
-        sidecar = Stage7RouteSidecar()
-        seeder = Stage7QualificationRouteSeeder(
+        sidecar = RouteSidecar()
+        seeder = QualificationRouteSeeder(
             sidecar,
             (self._step(packet),),
             endpoint_id="MASS-A",
@@ -671,7 +671,7 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
             deterministic_seed=7,
             expected_clock_id="pair-clock",
         )
-        request = Stage7QualificationPhyRequest(
+        request = QualificationPhyRequest(
             step_id="step-c2-l11",
             source_endpoint_id="MASS-A",
             destination_endpoint_id="ROC",
@@ -686,8 +686,8 @@ class TC_STAGE7_QUALIFICATION_SEEDER(unittest.TestCase):
 
     def test_normal_run_mode_cannot_assemble(self):
         with self.assertRaises(ValueError):
-            Stage7QualificationRouteSeeder(
-                Stage7RouteSidecar(),
+            QualificationRouteSeeder(
+                RouteSidecar(),
                 (),
                 endpoint_id="MASS-A",
                 run_mode="RF_OFF_QUALIFICATION",

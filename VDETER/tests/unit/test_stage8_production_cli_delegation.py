@@ -75,7 +75,7 @@ class ControllerSignalDispositionTests(unittest.TestCase):
         import ast
         import inspect
 
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         self.assertTrue(callable(getattr(controller, "_install_signal_handlers", None)),
                         "controller에 신호 처분 설치 함수가 없다")
@@ -100,7 +100,7 @@ class ControllerSignalDispositionTests(unittest.TestCase):
         """
         import signal as _signal
 
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         previous = _signal.getsignal(_signal.SIGTERM)
         try:
@@ -139,7 +139,7 @@ class ControllerArmInterruptTests(unittest.TestCase):
         import ast
         import inspect
 
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         tree = ast.parse(inspect.getsource(controller.main))
         for node in ast.walk(tree):
@@ -234,7 +234,7 @@ class ControllerArmFailureTests(unittest.TestCase):
     조립기(`poc_run.arm_failure_evidence`)로 기록한다. 실제 실행은 RF-off 실 child 시험이 맡는다."""
 
     def _arm_try(self):
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         tree = ast.parse(inspect.getsource(controller.main))
         for node in ast.walk(tree):
@@ -311,7 +311,7 @@ class ControllerPreselectedCatalogTests(unittest.TestCase):
                                                  "poc_run.snapshot_for_request")
 
     def test_controller_delegates_resolution_to_the_single_owner(self):
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         self._assert_delegates_resolution(controller.main, "실물 controller")
 
@@ -352,7 +352,7 @@ class ControllerScenarioInterruptTests(unittest.TestCase):
         import ast
         import inspect
 
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
 
         tree = ast.parse(inspect.getsource(controller.main))
         for node in ast.walk(tree):

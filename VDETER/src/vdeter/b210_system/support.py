@@ -1,9 +1,9 @@
 """Stage 7 lane RX dispatch·merge와 Stage5Support 확장 (`stage7` §15, §15.1.2).
 
-`Stage7Stage5Support(Stage5Support)`는 frozen support의 MAC command dispatch,
+`LaneStage5Support(Stage5Support)`는 frozen support의 MAC command dispatch,
 Service hook, pump, stop-drain과 repository 의미를 그대로 상속하되 RX 관련
 `_execute_rx`, `on_samples_received`, `on_rx_window_completed`, `on_layer_error`만
-`Stage7LaneRxDispatcher`로 위임한다. 나머지 method, 특히 TX
+`LaneRxDispatcher`로 위임한다. 나머지 method, 특히 TX
 encode/accept/completion과 Service dispatch는 inherited path를 사용한다.
 """
 
@@ -18,11 +18,11 @@ from ..common.errors import Correlation, Details, ErrorCategory, ErrorCode, Laye
 from ..common.results import Ok, internal_error
 from ..runtime.phy_bridge import RuntimePhyRadioBridge
 from ..runtime.stage5 import Stage5Support
-from .errors import Stage7PrivateErrorCode
-from .phy_facade import Stage7DiagnosticPhyFacade, Stage7LaneRxIngress
+from .errors import PrivateErrorCode
+from .phy_facade import DiagnosticPhyFacade, LaneRxIngress
 
 
-def _private_error(private_code: Stage7PrivateErrorCode, message: str, **details):
+def _private_error(private_code: PrivateErrorCode, message: str, **details):
     return internal_error(
         Layer.RUNTIME,
         ErrorCode.INTERNAL_ERROR,
@@ -54,7 +54,7 @@ def error_precedence_rank(code) -> int:
     return _ERROR_PRECEDENCE.get(code, 5)
 
 
-class Stage7LaneRxStack:
+class LaneRxStack:
     """RF lane 하나의 frozen bridge + 진단 facade + ingress 묶음 (§15)."""
 
     __slots__ = ("lane_index", "bridge", "facade", "ingress", "lane_generation")
@@ -63,8 +63,8 @@ class Stage7LaneRxStack:
         self,
         *,
         lane_index: int,
-        facade: Stage7DiagnosticPhyFacade,
-        ingress: Stage7LaneRxIngress,
+        facade: DiagnosticPhyFacade,
+        ingress: LaneRxIngress,
         lane_generation: int,
     ) -> None:
         self.lane_index = lane_index
@@ -102,7 +102,7 @@ class _LogicalWindow:
         self.delivered = False
 
 
-class Stage7LaneRxDispatcher:
+class LaneRxDispatcher:
     """adapter private child event를 lane stack에 결속하고 merge를 소유한다."""
 
     __slots__ = (
@@ -380,7 +380,7 @@ class Stage7LaneRxDispatcher:
             self._stale_events.append(
                 {
                     "kind": kind,
-                    "code": Stage7PrivateErrorCode.STALE_LANE_EVENT.value,
+                    "code": PrivateErrorCode.STALE_LANE_EVENT.value,
                     "lane_generation": lane_generation,
                     "lane_index": lane_index,
                 }
@@ -395,7 +395,7 @@ class Stage7LaneRxDispatcher:
         with self._lock:
             if key in self._windows:
                 return _private_error(
-                    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                    PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
                     "이미 등록된 logical RX window key입니다",
                 )
             window = _LogicalWindow(key, command, canonical_allowed)
@@ -479,7 +479,7 @@ class Stage7LaneRxDispatcher:
             self._lane_terminal(
                 window, lane_index,
                 error=_private_error(
-                    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                    PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
                     "lane window가 완전한 연속 8,192 sample이 아닙니다",
                 ).error,
                 received_at_ns=None,
@@ -538,7 +538,7 @@ class Stage7LaneRxDispatcher:
             self._lane_terminal(
                 window, lane_index,
                 error=_private_error(
-                    Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                    PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
                     "lane window가 완전한 연속 8,192 sample이 아닙니다",
                 ).error,
                 received_at_ns=None,
@@ -710,7 +710,7 @@ class Stage7LaneRxDispatcher:
         )
 
 
-class Stage7Stage5Support(Stage5Support):
+class LaneStage5Support(Stage5Support):
     """frozen `Stage5Support`의 four-method RX override (§15)."""
 
     __slots__ = ("_lane_dispatcher", "collision_gate", "_collision_pump_lock")
@@ -735,7 +735,7 @@ class Stage7Stage5Support(Stage5Support):
                         command, key, merged, _, _ = item
                         if failure:
                             self._finish_collision_window(command, key, error=_private_error(
-                                Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID, failure).error)
+                                PrivateErrorCode.RX_LANE_CONTEXT_INVALID, failure).error)
                         else:
                             self._finish_collision_window(command, key,
                                 merged=replace(merged, packets=packets,
@@ -744,7 +744,7 @@ class Stage7Stage5Support(Stage5Support):
                 self._collision_pump_lock.release()
         super().pump()
 
-    def bind_lane_runtime(self, dispatcher: Stage7LaneRxDispatcher) -> None:
+    def bind_lane_runtime(self, dispatcher: LaneRxDispatcher) -> None:
         """restart factory가 완전한 새 lane set을 한 번 atomic rebind한다."""
 
         self._lane_dispatcher = dispatcher
@@ -773,7 +773,7 @@ class Stage7Stage5Support(Stage5Support):
         dispatcher = self._lane_dispatcher
         if dispatcher is None:
             error = _private_error(
-                Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+                PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
                 "lane dispatcher가 결속되지 않았습니다",
             ).error
             self.report_error(error)
@@ -888,7 +888,7 @@ class Stage7Stage5Support(Stage5Support):
                 return
             if held:
                 return
-            error = _private_error(Stage7PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
+            error = _private_error(PrivateErrorCode.RX_LANE_CONTEXT_INVALID,
                                    "MODEL_COLLISION_RX_CAPACITY").error
             merged = None
         self._finish_collision_window(command, key, merged=merged, error=error)
@@ -924,8 +924,8 @@ class Stage7Stage5Support(Stage5Support):
 
 
 __all__ = (
-    "Stage7LaneRxDispatcher",
-    "Stage7LaneRxStack",
-    "Stage7Stage5Support",
+    "LaneRxDispatcher",
+    "LaneRxStack",
+    "LaneStage5Support",
     "error_precedence_rank",
 )

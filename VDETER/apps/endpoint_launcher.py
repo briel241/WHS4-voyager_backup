@@ -1,7 +1,7 @@
 """Stage 7 endpoint process launcher (`stage7` §14, §16).
 
 Runtime Coordinator가 Pi에서 endpoint별로 spawn하는 process다. resolved
-endpoint config를 적재하고 `Stage7Endpoint`+`Stage7B210RadioAdapter`를 조립한
+endpoint config를 적재하고 `Endpoint`+`LaneB210RadioAdapter`를 조립한
 뒤 `SOCK_SEQPACKET` socket에서 coordinator command를 처리한다.
 
 TBB 신뢰자료는 기본적으로 `configs/stage7/trust/`의 provisioned TEST
@@ -258,18 +258,18 @@ def main(argv=None) -> int:
 
     from vdeter.common.contracts.service import ServiceRole
     from vdeter.b210_system.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+        ConfigurationLoader,
+        OperationalGainInput,
     )
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
-    from vdeter.b210_system.pi_runtime import Stage7PiOperations
-    from vdeter.b210_system.runtime_client import Stage7EndpointRuntimeClient
+    from vdeter.b210_system.pi_runtime import PiOperations
+    from vdeter.b210_system.runtime_client import EndpointRuntimeClient
     from vdeter.b210_system.transport import (
         SeqPacketServer,
         ensure_socket_root,
         runtime_socket_root,
     )
-    from vdeter.b210_system.wiring import build_stage7_b210_endpoint
+    from vdeter.b210_system.wiring import build_b210_endpoint
 
     with open(arguments.config, "r", encoding="utf-8") as handle:
         config_text = handle.read()
@@ -284,11 +284,11 @@ def main(argv=None) -> int:
         value = (
             common[arguments.endpoint_id] if isinstance(common, dict) else common
         )
-        operational_gain = Stage7OperationalGainInput(
+        operational_gain = OperationalGainInput(
             endpoint_common_rx_gain_db=int(value),
             source_gain_artifact_sha256=artifact["source_gain_artifact_sha256"],
         )
-    loaded = Stage7ConfigurationLoader().load_endpoint_configuration(
+    loaded = ConfigurationLoader().load_endpoint_configuration(
         config_text,
         data_profile_text,
         run_id=arguments.run_id,
@@ -396,7 +396,7 @@ def main(argv=None) -> int:
     def _utc_ns():
         return _launcher_clock.now_utc().total_nanoseconds()
 
-    built = build_stage7_b210_endpoint(
+    built = build_b210_endpoint(
         resolved,
         deployment,
         crypto_dependencies=crypto,
@@ -426,7 +426,7 @@ def main(argv=None) -> int:
             artifact_sha256=_hashlib.sha256(note.encode("utf-8")).hexdigest(),
         )
 
-    operations = Stage7PiOperations(
+    operations = PiOperations(
         endpoint=endpoint,
         resolved=resolved,
         run_root=arguments.run_root,
@@ -444,7 +444,7 @@ def main(argv=None) -> int:
 
     #: 실시간 펌프를 돌리는 endpoint 상태 (§16.1 서비스 구간).
     #: 그 앞의 RF qualification 구간(CONFIGURED·RX_READY·CFO_*·HOST_TIME_*·
-    #: RF_GAIN_*)에서는 Stage7PiOperations가 radio를 독점해야 한다.
+    #: RF_GAIN_*)에서는 PiOperations가 radio를 독점해야 한다.
     #:
     #: TBB_ACTIVE/TBB_ACQUIRING 누락은 자기 교착이었다 (2026-08-31 실측):
     #: ROC는 방송자라 수신 없이 self-activation으로 TBB_ACTIVE가 되는데, 그
@@ -519,7 +519,7 @@ def main(argv=None) -> int:
             # 이 펌프는 rr-p2 서비스 구간(svc-run-*)에서 frozen 런타임의
             # radio.poll_once/MAC 박동을 대신 돌리려고 도입됐다. 그런데
             # RF qualification 사다리(CFO·adaptive gain·rf_time)는 같은
-            # B210을 Stage7PiOperations가 직접 시분할로 몰아 쓰는 구간이라,
+            # B210을 PiOperations가 직접 시분할로 몰아 쓰는 구간이라,
             # 50ms 주기의 poll_once가 그 위에 겹치면 revalidate 버스트가
             # 송신 시한을 넘겨 통째로 스킵된다 (mass-roc-rr-p1-20260831a/b
             # 실측: skipped_past_due C2=19·6, C4=3, C6=1 → REVALIDATE 불합격.
@@ -611,7 +611,7 @@ def main(argv=None) -> int:
             server.send_message(message)
         return True
 
-    client = Stage7EndpointRuntimeClient(
+    client = EndpointRuntimeClient(
         endpoint_id=arguments.endpoint_id,
         run_id=arguments.run_id,
         plan_sha256=os.environ.get("STAGE7_PLAN_SHA256", "0" * 64),
@@ -654,7 +654,7 @@ def main(argv=None) -> int:
                     _dmod.to_service_error = _diag_tse
 
             from vdeter.b210_system.radio_adapter import (
-                Stage7B210RadioAdapter as _DRA,
+                LaneB210RadioAdapter as _DRA,
             )
 
             _diag_orig_rx = _DRA.request_rx
@@ -1285,7 +1285,7 @@ def main(argv=None) -> int:
             return _orig_fail_rollback(self_ep, error, rollback)
 
         _S5._fail_start_rollback = _fail_rollback_logged
-        from vdeter.b210_system.support import Stage7LaneRxDispatcher as _D7
+        from vdeter.b210_system.support import LaneRxDispatcher as _D7
 
         # 배송 3계열은 _dispatch_lock으로 직렬화해 원본을 그대로 호출한다
         # (frozen ledger dict의 스레드 경쟁 차단 — 원인 사슬은 기준선 개정
@@ -2052,7 +2052,7 @@ def main(argv=None) -> int:
                     RuntimePhyRadioBridge as _BRG_c,
                 )
                 from vdeter.b210_system.phy_facade import (
-                    Stage7LaneRxIngress as _ING_c,
+                    LaneRxIngress as _ING_c,
                 )
 
                 _cost_wrap(_ING_c, "observe_block", "ingress.observe_block")
@@ -2675,7 +2675,7 @@ def main(argv=None) -> int:
 
         import hashlib as _hashlib
 
-        from vdeter.b210_system.records import Stage7TbbActiveRecord
+        from vdeter.b210_system.records import TbbActiveRecord
 
         state = endpoint.stage4.mac.state
         active = state.active_tbb
@@ -2688,7 +2688,7 @@ def main(argv=None) -> int:
             fingerprint_bytes = _hashlib.sha256(fingerprint.encode("utf-8")).digest()
         if len(fingerprint_bytes) != 32:
             fingerprint_bytes = _hashlib.sha256(fingerprint.encode("utf-8")).digest()
-        record = Stage7TbbActiveRecord(
+        record = TbbActiveRecord(
             endpoint_id=arguments.endpoint_id,
             readiness_kind=(
                 "ROC_BROADCAST_READY" if arguments.endpoint_id == "ROC" else "MASS_ACQUIRED"
@@ -2712,7 +2712,7 @@ def main(argv=None) -> int:
         import glob as _glob
         import json as _json_local
 
-        from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
+        from vdeter.b210_system.control_plane.adapter import ServiceApiTestAdapter
 
         fixtures = {}
         if arguments.fixtures_dir and os.path.isdir(arguments.fixtures_dir):
@@ -2723,16 +2723,16 @@ def main(argv=None) -> int:
         # op으로만 노출한다. 이 seam이 없으면 PoC op은 전부 거부된다(기본값 = 쓸 수 없음).
         # 송신은 권위 `schedule_tx` 하나로만 나가며 별도 예약 원장·우회 경로를 만들지 않는다.
         from vdeter.b210_system.configuration import CANONICAL_ROLES
-        from vdeter.b210_system.control_plane.poc_device import Stage7PocDeviceSeam
+        from vdeter.b210_system.control_plane.poc_device import PocDeviceSeam
 
-        poc_device = Stage7PocDeviceSeam(
+        poc_device = PocDeviceSeam(
             endpoint_id=arguments.endpoint_id,
             endpoint=endpoint,
             # §7 canonical mapping이 station id의 권위 출처다(별도 표를 만들지 않는다).
             station_id_by_endpoint={name: station
                                     for name, (_role, station) in CANONICAL_ROLES.items()},
         )
-        adapter = Stage7ServiceApiTestAdapter(
+        adapter = ServiceApiTestAdapter(
             endpoint_id=arguments.endpoint_id,
             service=endpoint,
             resolved_test_plan_sha256=arguments.test_plan_sha,

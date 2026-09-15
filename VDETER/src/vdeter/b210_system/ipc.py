@@ -15,7 +15,7 @@ from .canonical_json import (
     encode_canonical_json,
     sha256_hex,
 )
-from .errors import Stage7PrivateErrorCode
+from .errors import PrivateErrorCode
 
 RUNTIME_PROTOCOL = "vdeter.b210_system.runtime-coordinator.v1"
 TEST_PROTOCOL = "vdeter.b210_system.scenario-controller.v1"
@@ -227,10 +227,10 @@ COMMAND_BODY_FIELDS["commit_active_bridge"] = COMMAND_BODY_FIELDS["prepare_activ
 COMMAND_BODY_FIELDS["abort_active_bridge"] = COMMAND_BODY_FIELDS["prepare_active_bridge"]
 
 
-class Stage7IpcError(ValueError):
+class IpcError(ValueError):
     """`CONTROL_MESSAGE_INVALID` — framing/schema/type 위반."""
 
-    private_code = Stage7PrivateErrorCode.CONTROL_MESSAGE_INVALID
+    private_code = PrivateErrorCode.CONTROL_MESSAGE_INVALID
 
 
 def is_u31(value) -> bool:
@@ -306,7 +306,7 @@ def is_rational_digits(value, *, positive: bool) -> bool:
 
 def _check_typed(name: str, value, type_tag: str) -> None:
     def fail(reason: str):
-        raise Stage7IpcError(f"body.{name}: {reason}")
+        raise IpcError(f"body.{name}: {reason}")
 
     optional = type_tag.endswith("|null")
     base = type_tag[: -len("|null")] if optional else type_tag
@@ -399,80 +399,80 @@ def body_sha256_of(body: dict) -> str:
 def encode_message(message: dict) -> bytes:
     encoded = encode_canonical_json(message)
     if len(encoded) > MAX_RECORD_BYTES:
-        raise Stage7IpcError("record가 1 MiB를 넘습니다")
+        raise IpcError("record가 1 MiB를 넘습니다")
     return encoded
 
 
 def decode_message(data: bytes) -> dict:
     if len(data) > MAX_RECORD_BYTES:
-        raise Stage7IpcError("record가 1 MiB를 넘습니다")
+        raise IpcError("record가 1 MiB를 넘습니다")
     try:
         value = decode_canonical_json(data)
     except CanonicalJsonError as error:
-        raise Stage7IpcError(f"canonical JSON 위반: {error}") from error
+        raise IpcError(f"canonical JSON 위반: {error}") from error
     if not isinstance(value, dict):
-        raise Stage7IpcError("record는 object여야 합니다")
+        raise IpcError("record는 object여야 합니다")
     return value
 
 
 def validate_runtime_command(message: dict) -> None:
-    """§16/§16.1 command envelope+body 검증. 위반은 `Stage7IpcError`다."""
+    """§16/§16.1 command envelope+body 검증. 위반은 `IpcError`다."""
 
     keys = set(message)
     if keys != _ENVELOPE_KEYS:
-        raise Stage7IpcError(
+        raise IpcError(
             f"command envelope key 집합 위반: {sorted(keys ^ _ENVELOPE_KEYS)}"
         )
     if message["protocol"] != RUNTIME_PROTOCOL:
-        raise Stage7IpcError("protocol literal 위반")
+        raise IpcError("protocol literal 위반")
     if message["kind"] != "command":
-        raise Stage7IpcError("kind는 command여야 합니다")
+        raise IpcError("kind는 command여야 합니다")
     command_name = message["command_name"]
     if command_name not in RUNTIME_COMMANDS:
-        raise Stage7IpcError(f"허용되지 않은 command_name: {command_name!r}")
+        raise IpcError(f"허용되지 않은 command_name: {command_name!r}")
     if not is_run_id(message["run_id"]):
-        raise Stage7IpcError("run_id 형식 위반")
+        raise IpcError("run_id 형식 위반")
     if not is_sha256(message["resolved_system_plan_sha256"]):
-        raise Stage7IpcError("resolved_system_plan_sha256 위반")
+        raise IpcError("resolved_system_plan_sha256 위반")
     if not is_uuid(message["command_id"]):
-        raise Stage7IpcError("command_id UUID 위반")
+        raise IpcError("command_id UUID 위반")
     if message["endpoint_id"] not in ENDPOINT_IDS:
-        raise Stage7IpcError("endpoint_id 위반")
+        raise IpcError("endpoint_id 위반")
     if not is_u31(message["expected_lifecycle_generation"]):
-        raise Stage7IpcError("expected_lifecycle_generation 위반")
+        raise IpcError("expected_lifecycle_generation 위반")
     expected_bridge = message["expected_bridge_generation"]
     if expected_bridge is not None and not is_u31(expected_bridge):
-        raise Stage7IpcError("expected_bridge_generation 위반")
+        raise IpcError("expected_bridge_generation 위반")
     issued = message["issued_host_raw_ns"]
     deadline = message["deadline_host_raw_ns"]
     if not is_u63(issued) or not is_u63(deadline) or deadline <= issued:
-        raise Stage7IpcError("issued/deadline 위반")
+        raise IpcError("issued/deadline 위반")
     for key in ("request_body_sha256", "body_sha256"):
         if not is_sha256(message[key]):
-            raise Stage7IpcError(f"{key} 위반")
+            raise IpcError(f"{key} 위반")
     body = message["body"]
     if not isinstance(body, dict):
-        raise Stage7IpcError("body는 object여야 합니다")
+        raise IpcError("body는 object여야 합니다")
     if body_sha256_of(body) != message["body_sha256"]:
-        raise Stage7IpcError("body_sha256이 body와 다릅니다")
+        raise IpcError("body_sha256이 body와 다릅니다")
     if message["request_body_sha256"] != message["body_sha256"]:
-        raise Stage7IpcError("command의 request_body_sha256은 body_sha256과 같아야 합니다")
+        raise IpcError("command의 request_body_sha256은 body_sha256과 같아야 합니다")
 
     # barrier field 규칙.
     if command_name in NON_BARRIER_COMMANDS:
         for key in ("barrier_id", "barrier_phase", "barrier_manifest_sha256"):
             if message[key] is not None:
-                raise Stage7IpcError(f"{command_name}의 {key}는 null이어야 합니다")
+                raise IpcError(f"{command_name}의 {key}는 null이어야 합니다")
     else:
         if not is_uuid(message["barrier_id"]):
-            raise Stage7IpcError("barrier_id UUID 위반")
+            raise IpcError("barrier_id UUID 위반")
         if message["barrier_phase"] not in ("PREPARE", "COMMIT", "ABORT"):
-            raise Stage7IpcError("barrier_phase 위반")
+            raise IpcError("barrier_phase 위반")
         if not is_sha256(message["barrier_manifest_sha256"]):
-            raise Stage7IpcError("barrier_manifest_sha256 위반")
+            raise IpcError("barrier_manifest_sha256 위반")
         if command_name in ACTIVE_BRIDGE_COMMANDS:
             if message["barrier_phase"] != ACTIVE_BRIDGE_PHASE[command_name]:
-                raise Stage7IpcError("active-bridge verb와 barrier_phase 불일치")
+                raise IpcError("active-bridge verb와 barrier_phase 불일치")
 
     # body schema.
     expected_fields = COMMAND_BODY_FIELDS[command_name]
@@ -482,7 +482,7 @@ def validate_runtime_command(message: dict) -> None:
     else:
         allowed = set(field_names) | set(_STATE_CHANGING_BODY_COMMON)
     if set(body) != allowed:
-        raise Stage7IpcError(
+        raise IpcError(
             f"{command_name} body key 집합 위반: {sorted(set(body) ^ allowed)}"
         )
     for name, type_tag in expected_fields:
@@ -494,21 +494,21 @@ def validate_runtime_command(message: dict) -> None:
             else command_name
         )
         if body["logical_action"] != expected_action:
-            raise Stage7IpcError("logical_action 위반")
+            raise IpcError("logical_action 위반")
         if not is_sha256(body["phase_plan_sha256"]):
-            raise Stage7IpcError("phase_plan_sha256 위반")
+            raise IpcError("phase_plan_sha256 위반")
         commit_at = body["commit_at_host_raw_ns"]
         if not is_u63(commit_at):
-            raise Stage7IpcError("commit_at_host_raw_ns 위반")
+            raise IpcError("commit_at_host_raw_ns 위반")
         if commit_at > deadline:
-            raise Stage7IpcError("commit_at이 deadline 이후입니다")
+            raise IpcError("commit_at이 deadline 이후입니다")
 
     # command별 추가 규칙.
     if command_name == "prepare":
         p1_relpath = body["p1_member_plan_relpath"]
         p1_sha = body["p1_member_plan_sha256"]
         if (p1_relpath is None) != (p1_sha is None):
-            raise Stage7IpcError("P1 member plan field는 둘 다 null이거나 둘 다 non-null이어야 합니다")
+            raise IpcError("P1 member plan field는 둘 다 null이거나 둘 다 non-null이어야 합니다")
     if command_name == "calibrate_rf":
         mode = body["calibration_mode"]
         has_artifacts = (
@@ -519,65 +519,65 @@ def validate_runtime_command(message: dict) -> None:
             body["source_gain_artifact_sha256"] is not None
             or body["operational_config_sha256"] is not None
         ):
-            raise Stage7IpcError("SEARCH_AND_SEAL은 두 SHA field가 null이어야 합니다")
+            raise IpcError("SEARCH_AND_SEAL은 두 SHA field가 null이어야 합니다")
         if mode == "APPLY_AND_REVERIFY" and not has_artifacts:
-            raise Stage7IpcError("APPLY_AND_REVERIFY는 두 SHA field가 non-null이어야 합니다")
+            raise IpcError("APPLY_AND_REVERIFY는 두 SHA field가 non-null이어야 합니다")
     if command_name == "open_service_admission":
         commit_at = body["commit_at_host_raw_ns"]
         start_deadline = body["service_start_deadline_host_raw_ns"]
         tbb_deadline = body["tbb_publish_deadline_host_raw_ns"]
         if commit_at + SERVICE_START_INTENT_TIMEOUT_NS > MAX_U63:
-            raise Stage7IpcError("intent deadline checked-add overflow")
+            raise IpcError("intent deadline checked-add overflow")
         if start_deadline != commit_at + SERVICE_START_INTENT_TIMEOUT_NS:
-            raise Stage7IpcError("service_start_deadline 식 위반")
+            raise IpcError("service_start_deadline 식 위반")
         if start_deadline + SERVICE_START_TBB_PUBLISH_TIMEOUT_NS > MAX_U63:
-            raise Stage7IpcError("TBB publish deadline checked-add overflow")
+            raise IpcError("TBB publish deadline checked-add overflow")
         if tbb_deadline != start_deadline + SERVICE_START_TBB_PUBLISH_TIMEOUT_NS:
-            raise Stage7IpcError("tbb_publish_deadline 식 위반")
+            raise IpcError("tbb_publish_deadline 식 위반")
     if command_name == "commit_service_start":
         if message["issued_host_raw_ns"] >= body["service_start_deadline_host_raw_ns"]:
-            raise Stage7IpcError("commit_service_start는 intent cutoff 전에만 허용됩니다")
+            raise IpcError("commit_service_start는 intent cutoff 전에만 허용됩니다")
     if command_name == "publish_service_start":
         if body["publish_at_host_raw_ns"] != body.get("commit_at_host_raw_ns"):
-            raise Stage7IpcError("publish_at은 commit_at과 exact-equal이어야 합니다")
+            raise IpcError("publish_at은 commit_at과 exact-equal이어야 합니다")
     if command_name == "resume_runtime":
         if body["bridge_generation"] != message["expected_bridge_generation"]:
-            raise Stage7IpcError("resume bridge_generation과 envelope 불일치")
+            raise IpcError("resume bridge_generation과 envelope 불일치")
         if body["resume_at_host_raw_ns"] != body.get("commit_at_host_raw_ns"):
-            raise Stage7IpcError("resume_at은 commit_at과 exact-equal이어야 합니다")
+            raise IpcError("resume_at은 commit_at과 exact-equal이어야 합니다")
     if command_name in ACTIVE_BRIDGE_COMMANDS:
         for name in ("alpha_den", "beta_num", "beta_den", "correction_den"):
             if body[name] <= 0:
-                raise Stage7IpcError(f"{name}은 양수여야 합니다")
+                raise IpcError(f"{name}은 양수여야 합니다")
         from math import gcd
 
         if gcd(abs(body["alpha_num"]), body["alpha_den"]) != 1 and body["alpha_num"] != 0:
-            raise Stage7IpcError("alpha rational이 gcd-reduced가 아닙니다")
+            raise IpcError("alpha rational이 gcd-reduced가 아닙니다")
         if gcd(body["beta_num"], body["beta_den"]) != 1:
-            raise Stage7IpcError("beta rational이 gcd-reduced가 아닙니다")
+            raise IpcError("beta rational이 gcd-reduced가 아닙니다")
         if (
             gcd(abs(body["correction_num"]), body["correction_den"]) != 1
             and body["correction_num"] != 0
         ):
-            raise Stage7IpcError("correction rational이 gcd-reduced가 아닙니다")
+            raise IpcError("correction rational이 gcd-reduced가 아닙니다")
         entries = {entry[0]: entry[1] for entry in body["candidate_set"]}
         if message["endpoint_id"] not in entries:
-            raise Stage7IpcError("candidate_set에 자기 entry가 없습니다")
+            raise IpcError("candidate_set에 자기 entry가 없습니다")
         if entries[message["endpoint_id"]] != body["candidate_sha256"]:
-            raise Stage7IpcError("자기 candidate digest가 set entry와 다릅니다")
+            raise IpcError("자기 candidate digest가 set entry와 다릅니다")
         if body_set_sha256(body["candidate_set"]) != body["candidate_set_sha256"]:
-            raise Stage7IpcError("candidate_set_sha256 위반")
+            raise IpcError("candidate_set_sha256 위반")
     if command_name == "commit_service_start":
         if body_set_sha256(body["intent_set"]) != body["intent_set_sha256"]:
-            raise Stage7IpcError("intent_set_sha256 위반")
+            raise IpcError("intent_set_sha256 위반")
     if command_name == "publish_service_start":
         if body_set_sha256(body["start_result_set"]) != body["start_result_set_sha256"]:
-            raise Stage7IpcError("start_result_set_sha256 위반")
+            raise IpcError("start_result_set_sha256 위반")
         if body_set_sha256(body["tbb_active_set"]) != body["tbb_active_set_sha256"]:
-            raise Stage7IpcError("tbb_active_set_sha256 위반")
+            raise IpcError("tbb_active_set_sha256 위반")
     if command_name == "resume_runtime":
         if body_set_sha256(body["tbb_active_set"]) != body["tbb_active_set_sha256"]:
-            raise Stage7IpcError("tbb_active_set_sha256 위반")
+            raise IpcError("tbb_active_set_sha256 위반")
 
 
 def body_set_sha256(member_set) -> str:
@@ -597,9 +597,9 @@ _RESPONSE_BODY_KEYS = frozenset(
 def validate_runtime_response(message: dict, command: dict) -> None:
     keys = set(message)
     if keys != _ENVELOPE_KEYS:
-        raise Stage7IpcError("response envelope key 집합 위반")
+        raise IpcError("response envelope key 집합 위반")
     if message["kind"] != "response":
-        raise Stage7IpcError("kind는 response여야 합니다")
+        raise IpcError("kind는 response여야 합니다")
     for key in (
         "protocol", "command_name", "run_id", "resolved_system_plan_sha256",
         "command_id", "endpoint_id", "expected_lifecycle_generation",
@@ -607,20 +607,20 @@ def validate_runtime_response(message: dict, command: dict) -> None:
         "barrier_manifest_sha256", "issued_host_raw_ns", "deadline_host_raw_ns",
     ):
         if message[key] != command[key]:
-            raise Stage7IpcError(f"response가 request {key}를 보존하지 않습니다")
+            raise IpcError(f"response가 request {key}를 보존하지 않습니다")
     if message["request_body_sha256"] != command["body_sha256"]:
-        raise Stage7IpcError("response request_body_sha256 위반")
+        raise IpcError("response request_body_sha256 위반")
     body = message["body"]
     if not isinstance(body, dict) or set(body) != _RESPONSE_BODY_KEYS:
-        raise Stage7IpcError("response body key 집합 위반")
+        raise IpcError("response body key 집합 위반")
     if body_sha256_of(body) != message["body_sha256"]:
-        raise Stage7IpcError("response body_sha256 위반")
+        raise IpcError("response body_sha256 위반")
     if body["endpoint_state"] not in ENDPOINT_STATES:
-        raise Stage7IpcError("endpoint_state enum 위반")
+        raise IpcError("endpoint_state enum 위반")
     if not is_u31(body["lifecycle_generation"]):
-        raise Stage7IpcError("lifecycle_generation 위반")
+        raise IpcError("lifecycle_generation 위반")
     if body["bridge_generation"] is not None and not is_u31(body["bridge_generation"]):
-        raise Stage7IpcError("bridge_generation 위반")
+        raise IpcError("bridge_generation 위반")
     status = body["status"]
     command_name = command["command_name"]
     phase = command["barrier_phase"]
@@ -633,37 +633,37 @@ def validate_runtime_response(message: dict, command: dict) -> None:
         if command_name in MEASUREMENT_COMMANDS and phase == "COMMIT":
             allowed = ("COMPLETED", "REJECTED", "TIMED_OUT")
     if status not in allowed:
-        raise Stage7IpcError(f"{command_name}/{phase} response status 위반: {status}")
+        raise IpcError(f"{command_name}/{phase} response status 위반: {status}")
     result = body["result"]
     result_sha = body["result_sha256"]
     if result is None:
         if result_sha is not None:
-            raise Stage7IpcError("result 없이 result_sha256을 가질 수 없습니다")
+            raise IpcError("result 없이 result_sha256을 가질 수 없습니다")
     else:
         if not is_sha256(result_sha) or body_sha256_of(result) != result_sha:
-            raise Stage7IpcError("result_sha256 위반")
+            raise IpcError("result_sha256 위반")
 
 
 def validate_runtime_event(message: dict) -> None:
     keys = set(message)
     expected = (_ENVELOPE_KEYS - {"body"}) | {"body"}
     if keys != expected:
-        raise Stage7IpcError("event envelope key 집합 위반")
+        raise IpcError("event envelope key 집합 위반")
     if message["kind"] != "event":
-        raise Stage7IpcError("kind는 event여야 합니다")
+        raise IpcError("kind는 event여야 합니다")
     if message["protocol"] != RUNTIME_PROTOCOL:
-        raise Stage7IpcError("protocol literal 위반")
+        raise IpcError("protocol literal 위반")
     body = message["body"]
     if not isinstance(body, dict) or set(body) != {
         "event_type", "endpoint_state", "lifecycle_generation", "bridge_generation",
         "terminal_command_id", "terminal_status", "artifact_sha256", "private_code",
     }:
-        raise Stage7IpcError("event body key 집합 위반")
+        raise IpcError("event body key 집합 위반")
     if body_sha256_of(body) != message["body_sha256"]:
-        raise Stage7IpcError("event body_sha256 위반")
+        raise IpcError("event body_sha256 위반")
     event_type = body["event_type"]
     if event_type not in EVENT_TYPES:
-        raise Stage7IpcError("event_type 위반")
+        raise IpcError("event_type 위반")
     source_less = message["command_id"] is None
     if source_less:
         for key in (
@@ -672,34 +672,34 @@ def validate_runtime_event(message: dict) -> None:
             "barrier_phase", "barrier_manifest_sha256",
         ):
             if message[key] is not None:
-                raise Stage7IpcError(f"source-less event의 {key}는 null이어야 합니다")
+                raise IpcError(f"source-less event의 {key}는 null이어야 합니다")
         if event_type == "COMMAND_TERMINAL":
-            raise Stage7IpcError("COMMAND_TERMINAL은 command-bound여야 합니다")
+            raise IpcError("COMMAND_TERMINAL은 command-bound여야 합니다")
     else:
         if not is_uuid(message["command_id"]):
-            raise Stage7IpcError("command_id 위반")
+            raise IpcError("command_id 위반")
         if message["command_name"] not in RUNTIME_COMMANDS:
-            raise Stage7IpcError("command-bound event command_name 위반")
+            raise IpcError("command-bound event command_name 위반")
     if not is_u63(message["issued_host_raw_ns"]):
-        raise Stage7IpcError("issued_host_raw_ns 위반")
+        raise IpcError("issued_host_raw_ns 위반")
     if event_type == "COMMAND_TERMINAL":
         if body["terminal_command_id"] != message["command_id"]:
-            raise Stage7IpcError("terminal_command_id와 envelope command_id 불일치")
+            raise IpcError("terminal_command_id와 envelope command_id 불일치")
         if body["terminal_status"] not in ("COMPLETED", "REJECTED", "TIMED_OUT"):
-            raise Stage7IpcError("terminal_status 위반")
+            raise IpcError("terminal_status 위반")
     else:
         if body["terminal_status"] is not None and event_type == "STATE_CHANGED":
-            raise Stage7IpcError("STATE_CHANGED의 terminal_status는 null이어야 합니다")
+            raise IpcError("STATE_CHANGED의 terminal_status는 null이어야 합니다")
     if not is_u31(body["lifecycle_generation"]):
-        raise Stage7IpcError("event lifecycle_generation 위반")
+        raise IpcError("event lifecycle_generation 위반")
     if body["bridge_generation"] is not None and not is_u31(body["bridge_generation"]):
-        raise Stage7IpcError("event bridge_generation 위반")
+        raise IpcError("event bridge_generation 위반")
     state = body["endpoint_state"]
     if state is not None and state not in ENDPOINT_STATES:
-        raise Stage7IpcError("event endpoint_state 위반")
+        raise IpcError("event endpoint_state 위반")
     artifact = body["artifact_sha256"]
     if artifact is not None and not is_sha256(artifact):
-        raise Stage7IpcError("artifact_sha256 위반")
+        raise IpcError("artifact_sha256 위반")
     # §16.1 start-intent/TBB-active source-less 조합.
     if source_less and event_type == "STATE_CHANGED":
         if state == "SERVICE_START_PENDING":
@@ -710,7 +710,7 @@ def validate_runtime_event(message: dict) -> None:
                 or artifact is None
                 or body["bridge_generation"] is None
             ):
-                raise Stage7IpcError("start-intent event 조합 위반")
+                raise IpcError("start-intent event 조합 위반")
         if state == "TBB_ACTIVE":
             if (
                 body["terminal_command_id"] is not None
@@ -719,7 +719,7 @@ def validate_runtime_event(message: dict) -> None:
                 or artifact is None
                 or body["bridge_generation"] is None
             ):
-                raise Stage7IpcError("TBB-active event 조합 위반")
+                raise IpcError("TBB-active event 조합 위반")
 
 
 def build_barrier_manifest(entries) -> str:
@@ -727,7 +727,7 @@ def build_barrier_manifest(entries) -> str:
 
     ordered = sorted(entries, key=lambda item: ENDPOINT_IDS.index(item[0]))
     if [item[0] for item in ordered] != [item[0] for item in entries]:
-        raise Stage7IpcError("barrier manifest member 순서 위반")
+        raise IpcError("barrier manifest member 순서 위반")
     return sha256_hex(
         encode_canonical_json([[endpoint, digest] for endpoint, digest in entries])
     )
@@ -749,7 +749,7 @@ __all__ = (
     "RUNTIME_PROTOCOL",
     "SERVICE_START_INTENT_TIMEOUT_NS",
     "SERVICE_START_TBB_PUBLISH_TIMEOUT_NS",
-    "Stage7IpcError",
+    "IpcError",
     "TEST_BODY_SCHEMA",
     "TEST_PROTOCOL",
     "body_set_sha256",

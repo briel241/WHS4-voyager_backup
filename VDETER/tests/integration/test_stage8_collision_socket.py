@@ -72,7 +72,7 @@ class CollisionSocketTests(unittest.TestCase):
     def test_real_phy_overhear_survives_local_gate(self):
         import base64
         import time
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         from apps.poc_device_seams_inprocess import Link11WaveformFactory
@@ -160,7 +160,7 @@ class CollisionSocketTests(unittest.TestCase):
             exchange.close()
 
     def test_exchange_start_metadata_and_cleanup_on_real_sockets(self):
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         import time
@@ -192,7 +192,7 @@ class CollisionSocketTests(unittest.TestCase):
         import base64
         import hashlib
         import time
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         for name, channel in tuple(self.controller._channels.items()):
@@ -228,7 +228,7 @@ class CollisionSocketTests(unittest.TestCase):
             exchange.close()
 
     def test_dual_rx_lifecycle_real_socket(self):
-        from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
+        from apps.mass_roc_workload_controller import _AdapterChannel, PocWorkloadHost
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
@@ -255,7 +255,7 @@ class CollisionSocketTests(unittest.TestCase):
     def test_real_workload_required_dual_child_then_restores(self):
         import tempfile
         import os
-        from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
+        from apps.mass_roc_workload_controller import _AdapterChannel, PocWorkloadHost
         from apps.standalone import poc_run
         from vdeter.poc.execution.snapshot import create_snapshot
         from vdeter.poc.testing.execution_fakes import write_poc_package
@@ -307,7 +307,7 @@ class CollisionSocketTests(unittest.TestCase):
 
     def test_dual_workload_observes_real_lower_and_upper_phy(self):
         import base64
-        from apps.stage7_mass_roc_controller import _AdapterChannel
+        from apps.mass_roc_workload_controller import _AdapterChannel
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
         from apps.poc_device_seams_inprocess import Link11WaveformFactory

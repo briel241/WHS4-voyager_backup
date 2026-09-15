@@ -1,4 +1,4 @@
-"""RX energy gate(`Stage7LaneRxDispatcher._energy_gate`)의 계약.
+"""RX energy gate(`LaneRxDispatcher._energy_gate`)의 계약.
 
 이 파일이 생기기 전까지 게이트를 덮는 시험은 **하나도 없었다**. 실장비 stage B
 (diag-20260913-195703)에서 MASS-A lane 0이 잡음 바닥을 신호 전력으로 학습해
@@ -41,7 +41,7 @@ from vdeter.common.contracts.radio import (
 )
 from vdeter.common.identifiers import LinkId
 from vdeter.b210_system import rx_decode_worker as W
-from vdeter.b210_system.support import Stage7LaneRxDispatcher
+from vdeter.b210_system.support import LaneRxDispatcher
 
 #: Link 11 native 창 = 2,048 복소 표본(= 8,192 device 표본을 4배 데시메이션).
 NATIVE_SAMPLES = 2048
@@ -69,7 +69,7 @@ def _request(power: float, *, count: int = NATIVE_SAMPLES) -> PhyDecodeRequest:
 
 
 def _gate(host, request, lane: int = 0):
-    return Stage7LaneRxDispatcher._energy_gate(host, lane, request)
+    return LaneRxDispatcher._energy_gate(host, lane, request)
 
 
 def _is_zeroed(result) -> bool:

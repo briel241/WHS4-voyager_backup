@@ -1,4 +1,4 @@
-"""Stage 7 실장비 배치 profile 조립 (`stage7_endpoint_launcher` production 경로).
+"""Stage 7 실장비 배치 profile 조립 (`endpoint_launcher` production 경로).
 
 세 endpoint(MASS-A·ROC·MASS-B)는 **같은** `MacDeploymentProfile`을 독립 계산해야 group이 시작된다
 (`vdeter.mac.deployment`의 deployment fingerprint 대조). 이 module이 그 단일 production 구현이다.

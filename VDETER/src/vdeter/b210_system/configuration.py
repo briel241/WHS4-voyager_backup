@@ -1,9 +1,9 @@
 """Stage 7 additive schema v4 configuration loader (`stage7_b210_system_baseline.md` §15).
 
-`Stage7ConfigurationLoader`와 private immutable `Stage7ResolvedConfiguration`이
+`ConfigurationLoader`와 private immutable `ResolvedConfiguration`이
 schema v4를 전담한다. 이 loader는 frozen `load_configuration()`과
 `RadioAdapterKind(...)`를 호출하거나 기존 `build_radio_adapter()`로 결과를 보내지
-않는다. `build_stage7_b210_endpoint()`만 `Stage7ResolvedConfiguration`을 받을 수
+않는다. `build_b210_endpoint()`만 `ResolvedConfiguration`을 받을 수
 있다.
 
 - source schema v4의 top-level key 집합은 frozen v3 공통 table에
@@ -70,30 +70,30 @@ except ModuleNotFoundError:  # pragma: no cover - 환경 의존
 
 # --- canonical literal (§3, §9, §10, §13, §15) --------------------------------
 
-STAGE7_SOURCE_SCHEMA_VERSION = 4
-STAGE7_ADAPTER_KIND = "b210-stage7-affine"
-STAGE7_HOST_PROFILE = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
-STAGE7_PI_POWER_PROFILE = "PI5_5V5A_HIGH_CURRENT"
+SOURCE_SCHEMA_VERSION = 4
+SYSTEM_ADAPTER_KIND = "b210-stage7-affine"
+HOST_PROFILE = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
+PI_POWER_PROFILE = "PI5_5V5A_HIGH_CURRENT"
 #: additive host profile (2026-09-10): the same Raspberry Pi 5 with all three
 #: B210s on ONE self-powered USB3 hub (every link 5000M, hub bus power, no
 #: per-B210 DC asset). The Pi profile above keeps its exact per-endpoint
 #: transport/power rules; both are defined once in `host_profiles`.
-STAGE7_HOST_PROFILE_PI_POWERED_HUB = PI_POWERED_HUB_PROFILE
-STAGE7_HOST_PROFILES = _HOST_PROFILES
+HOST_PROFILE_PI_POWERED_HUB = PI_POWERED_HUB_PROFILE
+HOST_PROFILE_TABLE = _HOST_PROFILES
 #: powered-hub profile `usb_transport` / `external_power_asset` literals.
 POWERED_USB3_HUB_TRANSPORT = TRANSPORT_POWERED_USB3_HUB_5000M
 POWERED_USB3_HUB_BUS_POWER = POWER_POWERED_USB3_HUB_BUS
-STAGE7_LANE_MAP_PROFILE = "STAGE7_C1_C6_TRIANGLE_V1"
-STAGE7_PHY_FACADE = "STAGE7_DIAGNOSTIC_PHY_V1"
-STAGE7_TIMING_STATUS_PROJECTION = "STAGE7_PUBLIC_UNAVAILABLE_PRIVATE_AFFINE_V1"
-STAGE7_CLOCK_BRIDGE_PROFILE = "STAGE7_PI_HOST_AFFINE_TIME_V1"
-STAGE7_CFO_PROFILE = "STAGE7_RAW_TONE_CFO_V1"
-STAGE7_CFO_NUMERIC_PROFILE = "STAGE7_NUMPY_FFT3072_BINARY64_V1"
-STAGE7_TBB_FIXTURE_ID = "VDETER_WIDEBAND_100_TBB_V3"
-STAGE7_REGISTRY_FINGERPRINT = (
+LANE_MAP_PROFILE = "STAGE7_C1_C6_TRIANGLE_V1"
+PHY_FACADE = "STAGE7_DIAGNOSTIC_PHY_V1"
+TIMING_STATUS_PROJECTION = "STAGE7_PUBLIC_UNAVAILABLE_PRIVATE_AFFINE_V1"
+CLOCK_BRIDGE_PROFILE = "STAGE7_PI_HOST_AFFINE_TIME_V1"
+CFO_PROFILE = "STAGE7_RAW_TONE_CFO_V1"
+CFO_NUMERIC_PROFILE = "STAGE7_NUMPY_FFT3072_BINARY64_V1"
+TBB_FIXTURE_ID = "VDETER_WIDEBAND_100_TBB_V3"
+SOURCE_REGISTRY_FINGERPRINT = (
     "0a2b8cb8a72727bd54c05c5dd6e6ac5aeeec7a0b51f6ebe41a72bfa2482ae5d2"
 )
-STAGE7_FIXTURE_CLASSIFICATION = "USER_ACCEPTED_UNATTENUATED_FUNCTIONAL_CONDUCTED_V1"
+FIXTURE_CLASSIFICATION = "USER_ACCEPTED_UNATTENUATED_FUNCTIONAL_CONDUCTED_V1"
 
 FREQUENCY_TRANSLATION_HZ = 2_290_000_000
 LOWER_LOGICAL_CENTER_HZ = 157_237_500
@@ -118,7 +118,7 @@ CANONICAL_CHANNEL_NAMES = (LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME)
 USB_TRANSPORTS = _USB_TRANSPORTS
 
 #: §15 stage7 table의 exact 고정 정수 값.
-STAGE7_FIXED_INTEGERS = {
+FIXED_INTEGERS = {
     "frequency_translation_hz": FREQUENCY_TRANSLATION_HZ,
     "lower_rf_tune_hz": LOWER_RF_TUNE_HZ,
     "upper_rf_tune_hz": UPPER_RF_TUNE_HZ,
@@ -136,15 +136,15 @@ STAGE7_FIXED_INTEGERS = {
 }
 
 #: §15 stage7 table의 exact 고정 문자열 값.
-STAGE7_FIXED_STRINGS = {
-    "lane_map_profile": STAGE7_LANE_MAP_PROFILE,
-    "phy_facade": STAGE7_PHY_FACADE,
-    "timing_status_projection": STAGE7_TIMING_STATUS_PROJECTION,
-    "clock_bridge_profile": STAGE7_CLOCK_BRIDGE_PROFILE,
-    "cfo_profile": STAGE7_CFO_PROFILE,
-    "cfo_numeric_profile": STAGE7_CFO_NUMERIC_PROFILE,
-    "registry_fingerprint": STAGE7_REGISTRY_FINGERPRINT,
-    "tbb_fixture_id": STAGE7_TBB_FIXTURE_ID,
+FIXED_STRINGS = {
+    "lane_map_profile": LANE_MAP_PROFILE,
+    "phy_facade": PHY_FACADE,
+    "timing_status_projection": TIMING_STATUS_PROJECTION,
+    "clock_bridge_profile": CLOCK_BRIDGE_PROFILE,
+    "cfo_profile": CFO_PROFILE,
+    "cfo_numeric_profile": CFO_NUMERIC_PROFILE,
+    "registry_fingerprint": SOURCE_REGISTRY_FINGERPRINT,
+    "tbb_fixture_id": TBB_FIXTURE_ID,
 }
 
 # --- 닫힌 key 집합 (§15) -------------------------------------------------------
@@ -246,7 +246,7 @@ _HOST_EXECUTION_PROVISIONING_KEYS = frozenset(
         "environment_manifest_sha256",
     }
 )
-_STAGE7_KEYS = (
+_KEYS = (
     "run_mode",
     "lane_map_profile",
     "frequency_translation_hz",
@@ -441,7 +441,7 @@ def is_exact_serial(value: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7HostExecutionPlan:
+class HostExecutionPlan:
     """resolved `[host_execution]` (placeholder 0)."""
 
     profile: str
@@ -463,7 +463,7 @@ class Stage7HostExecutionPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7LaneBinding:
+class LaneBinding:
     """한 physical lane(RF_A/RF_B)의 canonical 결선."""
 
     lane_index: int
@@ -489,7 +489,7 @@ class Stage7LaneBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7TimePlan:
+class TimePlan:
     """resolved `[stage7]` 시간·CFO parameter."""
 
     clock_bridge_profile: str
@@ -512,7 +512,7 @@ class Stage7TimePlan:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7OperationalGainInput:
+class OperationalGainInput:
     """OPERATIONAL run에 결속하는 signed gain artifact 입력 (§9.2)."""
 
     endpoint_common_rx_gain_db: int
@@ -534,7 +534,7 @@ class Stage7OperationalGainInput:
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7ResolvedConfiguration:
+class ResolvedConfiguration:
     """run별 immutable endpoint resolved config (§15).
 
     TEST controller/scenario plan은 이 object의 field가 아니다. common endpoint
@@ -550,10 +550,10 @@ class Stage7ResolvedConfiguration:
     b210_serial: str
     endpoint: EndpointConfig
     radio: RadioConfiguration
-    host_execution: Stage7HostExecutionPlan
-    time_plan: Stage7TimePlan
+    host_execution: HostExecutionPlan
+    time_plan: TimePlan
     lane_map_profile: str
-    lanes: tuple[Stage7LaneBinding, Stage7LaneBinding]
+    lanes: tuple[LaneBinding, LaneBinding]
     frequency_translation_hz: int
     lower_rf_tune_hz: int
     upper_rf_tune_hz: int
@@ -588,8 +588,8 @@ def _resolved_json_value(
     b210_serial: str,
     endpoint: EndpointConfig,
     radio: RadioConfiguration,
-    host_execution: Stage7HostExecutionPlan,
-    time_plan: Stage7TimePlan,
+    host_execution: HostExecutionPlan,
+    time_plan: TimePlan,
     lanes,
     data_link_id: int,
     deployment_manifest_relpath: str,
@@ -616,7 +616,7 @@ def _resolved_json_value(
         )
     return {
         "resolved_type": "STAGE7_RESOLVED_ENDPOINT_CONFIG_V1",
-        "source_schema_version": STAGE7_SOURCE_SCHEMA_VERSION,
+        "source_schema_version": SOURCE_SCHEMA_VERSION,
         "run_id": run_id,
         "run_mode": run_mode,
         "endpoint_id": endpoint_id,
@@ -665,16 +665,16 @@ def _resolved_json_value(
         "host_execution": host_execution.as_json_value(),
         "stage7": {
             "run_mode": run_mode,
-            "lane_map_profile": STAGE7_LANE_MAP_PROFILE,
+            "lane_map_profile": LANE_MAP_PROFILE,
             "frequency_translation_hz": FREQUENCY_TRANSLATION_HZ,
             "lower_rf_tune_hz": LOWER_RF_TUNE_HZ,
             "upper_rf_tune_hz": UPPER_RF_TUNE_HZ,
-            "phy_facade": STAGE7_PHY_FACADE,
-            "timing_status_projection": STAGE7_TIMING_STATUS_PROJECTION,
+            "phy_facade": PHY_FACADE,
+            "timing_status_projection": TIMING_STATUS_PROJECTION,
             "deployment_manifest_relpath": deployment_manifest_relpath,
             "deployment_manifest_sha256": deployment_manifest_sha256,
-            "registry_fingerprint": STAGE7_REGISTRY_FINGERPRINT,
-            "tbb_fixture_id": STAGE7_TBB_FIXTURE_ID,
+            "registry_fingerprint": SOURCE_REGISTRY_FINGERPRINT,
+            "tbb_fixture_id": TBB_FIXTURE_ID,
             **time_plan.as_json_value(),
         },
         "lanes": [lane.as_json_value() for lane in lanes],
@@ -709,7 +709,7 @@ def load_data_profile(text: str):
     return Ok(value)
 
 
-class Stage7ConfigurationLoader:
+class ConfigurationLoader:
     """schema v4 endpoint file 하나와 data profile 하나를 run별 immutable
     resolved config로 만든다."""
 
@@ -721,7 +721,7 @@ class Stage7ConfigurationLoader:
         data_profile_text: str,
         *,
         run_id: str,
-        operational_gain: Stage7OperationalGainInput | None = None,
+        operational_gain: OperationalGainInput | None = None,
         source_path: str = "",
     ):
         if _toml is None:  # pragma: no cover - 환경 의존
@@ -741,7 +741,7 @@ class Stage7ConfigurationLoader:
         unknown = _check_unknown("<root>", data, _TOP_LEVEL_KEYS)
         if unknown is not None:
             return unknown
-        if data.get("schema_version") != STAGE7_SOURCE_SCHEMA_VERSION:
+        if data.get("schema_version") != SOURCE_SCHEMA_VERSION:
             return _schema_error(
                 "schema_version은 integer literal 4여야 합니다",
                 schema_version=str(data.get("schema_version")),
@@ -786,7 +786,7 @@ class Stage7ConfigurationLoader:
             missing = _require_key("radio", radio_section, key)
             if missing is not None:
                 return missing
-        if radio_section["adapter"] != STAGE7_ADAPTER_KIND:
+        if radio_section["adapter"] != SYSTEM_ADAPTER_KIND:
             return _semantic_error(
                 "radio.adapter는 b210-stage7-affine이어야 합니다",
                 adapter=str(radio_section["adapter"]),
@@ -889,14 +889,14 @@ class Stage7ConfigurationLoader:
             if error is not None:
                 return error
             host_values[key] = value
-        if host_values["profile"] not in STAGE7_HOST_PROFILES:
+        if host_values["profile"] not in HOST_PROFILE_TABLE:
             return _semantic_error(
                 "host_execution.profile이 canonical Stage 7 profile이 아닙니다",
                 profile=host_values["profile"],
             )
         if host_values["provider_id"] != "none" or host_values["provider_version"] != "none":
             return _semantic_error("host_execution.provider_id/version은 canonical none이어야 합니다")
-        if host_values["pi_power_profile"] != STAGE7_PI_POWER_PROFILE:
+        if host_values["pi_power_profile"] != PI_POWER_PROFILE:
             return _semantic_error("host_execution.pi_power_profile이 승인값과 다릅니다")
         for key, value in host_values.items():
             if value == REQUIRED_UNSET and key not in _HOST_EXECUTION_PROVISIONING_KEYS:
@@ -908,10 +908,10 @@ class Stage7ConfigurationLoader:
         stage7_section, error = _require_table("stage7", data)
         if error is not None:
             return error
-        unknown = _check_unknown("stage7", stage7_section, _STAGE7_KEYS)
+        unknown = _check_unknown("stage7", stage7_section, _KEYS)
         if unknown is not None:
             return unknown
-        for key in _STAGE7_KEYS:
+        for key in _KEYS:
             missing = _require_key("stage7", stage7_section, key)
             if missing is not None:
                 return missing
@@ -921,14 +921,14 @@ class Stage7ConfigurationLoader:
                 "stage7.run_mode는 RF_OFF_QUALIFICATION|GAIN_CALIBRATION|OPERATIONAL이어야 합니다",
                 run_mode=str(run_mode),
             )
-        for key, expected in STAGE7_FIXED_STRINGS.items():
+        for key, expected in FIXED_STRINGS.items():
             if stage7_section[key] != expected:
                 return _semantic_error(
                     f"stage7.{key}가 canonical literal과 다릅니다",
                     field=key,
                     value=str(stage7_section[key]),
                 )
-        for key, expected in STAGE7_FIXED_INTEGERS.items():
+        for key, expected in FIXED_INTEGERS.items():
             value = stage7_section[key]
             if isinstance(value, bool) or not isinstance(value, int):
                 return _schema_error(f"stage7.{key}는 bool이 아닌 integer여야 합니다")
@@ -1232,7 +1232,7 @@ class Stage7ConfigurationLoader:
                 otw_format="sc16",
             )
             radio_config = RadioConfiguration(
-                adapter_kind=STAGE7_ADAPTER_KIND,
+                adapter_kind=SYSTEM_ADAPTER_KIND,
                 device_selector=selector,
                 clock_reference=ClockReference.INTERNAL,
                 channels=tuple(resolved_settings),
@@ -1245,9 +1245,9 @@ class Stage7ConfigurationLoader:
         except (VdeterValidationError, ValueError) as error:
             return _semantic_error(f"Radio 설정 값이 올바르지 않습니다: {error}")
 
-        host_execution = Stage7HostExecutionPlan(**host_values)
-        time_plan = Stage7TimePlan(
-            clock_bridge_profile=STAGE7_CLOCK_BRIDGE_PROFILE,
+        host_execution = HostExecutionPlan(**host_values)
+        time_plan = TimePlan(
+            clock_bridge_profile=CLOCK_BRIDGE_PROFILE,
             max_bridge_generations=3,
             host_time_min_observations=8,
             host_time_min_span_s=2,
@@ -1258,13 +1258,13 @@ class Stage7ConfigurationLoader:
             rf_time_reference_max_gap_s=5,
             rf_time_loss_gap_s=10,
             active_command_horizon_s=120,
-            cfo_profile=STAGE7_CFO_PROFILE,
-            cfo_numeric_profile=STAGE7_CFO_NUMERIC_PROFILE,
+            cfo_profile=CFO_PROFILE,
+            cfo_numeric_profile=CFO_NUMERIC_PROFILE,
             cfo_accept_bound_hz=1_800,
         )
         lane_entries = CANONICAL_LANE_MAP[endpoint_id]
         lanes = tuple(
-            Stage7LaneBinding(
+            LaneBinding(
                 lane_index=index,
                 lane_id="RF_A" if index == 0 else "RF_B",
                 tx_path=entry["tx_path"],
@@ -1299,8 +1299,8 @@ class Stage7ConfigurationLoader:
         )
         resolved_bytes = encode_canonical_json(resolved_value)
         return Ok(
-            Stage7ResolvedConfiguration(
-                source_schema_version=STAGE7_SOURCE_SCHEMA_VERSION,
+            ResolvedConfiguration(
+                source_schema_version=SOURCE_SCHEMA_VERSION,
                 run_id=run_id,
                 run_mode=run_mode,
                 endpoint_id=endpoint_id,
@@ -1309,18 +1309,18 @@ class Stage7ConfigurationLoader:
                 radio=radio_config,
                 host_execution=host_execution,
                 time_plan=time_plan,
-                lane_map_profile=STAGE7_LANE_MAP_PROFILE,
+                lane_map_profile=LANE_MAP_PROFILE,
                 lanes=lanes,
                 frequency_translation_hz=FREQUENCY_TRANSLATION_HZ,
                 lower_rf_tune_hz=LOWER_RF_TUNE_HZ,
                 upper_rf_tune_hz=UPPER_RF_TUNE_HZ,
                 data_link_id=data_link_id,
-                phy_facade=STAGE7_PHY_FACADE,
-                timing_status_projection=STAGE7_TIMING_STATUS_PROJECTION,
+                phy_facade=PHY_FACADE,
+                timing_status_projection=TIMING_STATUS_PROJECTION,
                 deployment_manifest_relpath=stage7_section["deployment_manifest_relpath"],
                 deployment_manifest_sha256=stage7_section["deployment_manifest_sha256"],
-                registry_fingerprint=STAGE7_REGISTRY_FINGERPRINT,
-                tbb_fixture_id=STAGE7_TBB_FIXTURE_ID,
+                registry_fingerprint=SOURCE_REGISTRY_FINGERPRINT,
+                tbb_fixture_id=TBB_FIXTURE_ID,
                 endpoint_common_rx_gain_db=common_gain,
                 source_gain_artifact_sha256=gain_artifact,
                 source_sha256=source_sha256,
@@ -1346,26 +1346,26 @@ __all__ = (
     "POWERED_USB3_HUB_TRANSPORT",
     "REQUIRED_UNSET",
     "RUN_MODES",
-    "STAGE7_ADAPTER_KIND",
-    "STAGE7_CFO_NUMERIC_PROFILE",
-    "STAGE7_CFO_PROFILE",
-    "STAGE7_CLOCK_BRIDGE_PROFILE",
-    "STAGE7_FIXTURE_CLASSIFICATION",
-    "STAGE7_HOST_PROFILE",
-    "STAGE7_HOST_PROFILES",
-    "STAGE7_HOST_PROFILE_PI_POWERED_HUB",
-    "STAGE7_LANE_MAP_PROFILE",
-    "STAGE7_PHY_FACADE",
-    "STAGE7_REGISTRY_FINGERPRINT",
-    "STAGE7_SOURCE_SCHEMA_VERSION",
-    "STAGE7_TBB_FIXTURE_ID",
-    "STAGE7_TIMING_STATUS_PROJECTION",
-    "Stage7ConfigurationLoader",
-    "Stage7HostExecutionPlan",
-    "Stage7LaneBinding",
-    "Stage7OperationalGainInput",
-    "Stage7ResolvedConfiguration",
-    "Stage7TimePlan",
+    "SYSTEM_ADAPTER_KIND",
+    "CFO_NUMERIC_PROFILE",
+    "CFO_PROFILE",
+    "CLOCK_BRIDGE_PROFILE",
+    "FIXTURE_CLASSIFICATION",
+    "HOST_PROFILE",
+    "HOST_PROFILE_TABLE",
+    "HOST_PROFILE_PI_POWERED_HUB",
+    "LANE_MAP_PROFILE",
+    "PHY_FACADE",
+    "SOURCE_REGISTRY_FINGERPRINT",
+    "SOURCE_SCHEMA_VERSION",
+    "TBB_FIXTURE_ID",
+    "TIMING_STATUS_PROJECTION",
+    "ConfigurationLoader",
+    "HostExecutionPlan",
+    "LaneBinding",
+    "OperationalGainInput",
+    "ResolvedConfiguration",
+    "TimePlan",
     "UPPER_CHANNEL_NAME",
     "UPPER_LOGICAL_CENTER_HZ",
     "UPPER_RF_TUNE_HZ",

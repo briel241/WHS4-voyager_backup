@@ -22,8 +22,8 @@ ID를 입력하면 즉시 실행하고 타임라인·판정을 보여준 뒤 다
                   cert_flow가 public Service API로 payload를 왕복한다
                   (`apps/mass_roc_software.py`).
     stage7        별도 process Stage 7 coordinator·launcher·B210 경로
-                  (`apps/stage7_run.py` → coordinator --workload mass-roc →
-                  `apps/stage7_mass_roc_controller.py`). `--run-id`·
+                  (`apps/service_run.py` → coordinator --workload mass-roc →
+                  `apps/mass_roc_workload_controller.py`). `--run-id`·
                   `--configs-dir`가 필수이며, 조립·연결 실패는 명시적 FAIL이다
                   — direct/software로 fallback하지 않는다.
 
@@ -463,7 +463,7 @@ _SERVICE_SCENARIO_IDS = ("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all")
 
 def _summarize_service_results(results: dict) -> bool:
     """software/stage7 결과 dict를 사람이 읽게 요약하고 전체 성패를 돌려준다."""
-    from apps.stage7_mass_roc_controller import _result_ok
+    from apps.mass_roc_workload_controller import _result_ok
 
     overall = True
     for scenario_id, payload in sorted(results.items()):
@@ -490,14 +490,14 @@ def _run_software(args) -> int:
         SoftwareHarnessUnavailable,
         build_software_scenario_controller,
     )
-    from apps.stage7_mass_roc_controller import run_scenarios
+    from apps.mass_roc_workload_controller import run_scenarios
 
     certificate_case = _resolve_certificate_case(args)
 
     # run-id를 쓰면 결과 디렉터리 중복을 실행 전에 거부한다 (stage7과 동일 규칙).
     run_dir = None
     if args.run_id and not args.no_save:
-        from apps.stage7_run import runs_root
+        from apps.service_run import runs_root
         run_dir = os.path.join(runs_root(), args.run_id)
         if os.path.exists(run_dir):
             print(f"run-id {args.run_id!r}가 이미 존재한다: {run_dir}",
@@ -543,25 +543,25 @@ def _run_software(args) -> int:
     return 0 if overall else 1
 
 
-def _run_stage7(args) -> int:
+def _run_service_transport(args) -> int:
     """stage7 backend — 별도 process coordinator·launcher·B210 경로.
 
     조립·연결 실패는 명시적 FAIL이며 direct/software로 fallback하지 않는다.
     """
-    from apps.stage7_run import Stage7RequestError, run_stage7
+    from apps.service_run import ServiceRequestError, run_service_session
 
     if not args.run_id or not args.configs_dir:
         print("stage7 전송에는 --run-id와 --configs-dir이 필수다",
               file=sys.stderr)
         return 2
     try:
-        return run_stage7(
+        return run_service_session(
             scenario_id=args.scenario_id,
             run_id=args.run_id,
             configs_dir=args.configs_dir,
             certificate_case=_resolve_certificate_case(args),
         )
-    except Stage7RequestError as exc:
+    except ServiceRequestError as exc:
         print(f"stage7 실행 거부: {exc}", file=sys.stderr)
         return 2
 
@@ -578,10 +578,10 @@ def command_run(args) -> int:
         return 2
     if args.transport == "software":
         return _run_software(args)
-    return _run_stage7(args)
+    return _run_service_transport(args)
 
 
-def _stage7_menu(args) -> int:
+def _service_transport_menu(args) -> int:
     """Stage 7 대화형 메뉴 — bounded persistent service session (Phase G).
 
     CLI 시작 시 하드웨어 session을 **한 번** 세우고(B210 acquire·endpoint START·
@@ -593,22 +593,22 @@ def _stage7_menu(args) -> int:
     출력한다. 상세 event/transfer/quiescence/traceback은 evidence 파일에만
     남는다 (`--verbose`가 있어야 터미널 상세가 늘어난다).
     """
-    from apps import stage7_profile
-    from apps.stage7_run import open_service_session
+    from apps import run_profile
+    from apps.service_run import open_service_session
 
     verbose = bool(getattr(args, "verbose", False))
 
     try:
-        profile = stage7_profile.load_profile(args.profile)
-        checks = stage7_profile.validate_local_bindings(profile)
-    except stage7_profile.ProfileError as exc:
+        profile = run_profile.load_profile(args.profile)
+        checks = run_profile.validate_local_bindings(profile)
+    except run_profile.ProfileError as exc:
         print(f"Stage 7 profile 거부: {exc}", file=sys.stderr)
         return 2
 
     print("=== MASS/ROC 시나리오 (Stage 7 실장비) ===")
     print(f"Stage 7 환경 검증: profile·qualification reference 결속 통과 "
           f"({len(checks)}개 항목)")
-    for line in stage7_profile.summary_lines(profile):
+    for line in run_profile.summary_lines(profile):
         print("  " + line)
 
     print("\n하드웨어 service session 준비 중 — B210 acquire·endpoint START·"
@@ -685,7 +685,7 @@ def _stage7_menu(args) -> int:
                 break
 
             if lowered in ("a", "all", "전체"):
-                from apps.stage7_service_layer import DEFAULT_BATCH_PLAN
+                from apps.service_layer import DEFAULT_BATCH_PLAN
                 for scenario_id, certificate_case in DEFAULT_BATCH_PLAN:
                     result = run_one(scenario_id, certificate_case)
                     if result.get("status") != "PASS":
@@ -750,7 +750,7 @@ def command_interactive(args) -> int:
         if not getattr(args, "profile", None):
             print("stage7 대화형 메뉴에는 --profile이 필요하다", file=sys.stderr)
             return 2
-        return _stage7_menu(args)
+        return _service_transport_menu(args)
     if getattr(args, "profile", None):
         print("--profile은 --transport stage7 전용이다", file=sys.stderr)
         return 2

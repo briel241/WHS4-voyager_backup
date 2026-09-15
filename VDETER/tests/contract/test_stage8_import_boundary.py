@@ -33,7 +33,7 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
 # (그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
 # 광범위 allowlist가 아니라 실제 결선에 필요한 파일만 명시 추가한다.
 # - rf_off_software_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
-#   `RfOffStage7DeviceSession`이 실 Stage 7 software group을 띄우고(하드웨어 경계만 fake medium
+#   `RfOffDeviceSession`이 실 Stage 7 software group을 띄우고(하드웨어 경계만 fake medium
 #   worker) 권위 provider(`assemble_authoritative_provider`)를 그 members에 결속한다 — 그 결선
 #   계약은 아래 `_rf_off_session_wiring`(AST)이 검사한다.
 # - poc_device_seams_inprocess.py: Stage 8 PoC provider seam을 **실 Stage 7 객체**(worker·frozen PHY·MAC
@@ -52,7 +52,7 @@ _SANCTIONED_LAUNCHER_SEAMS = frozenset({
     # workload를 소유한 scenario controller child가 PoC supervisor를 호스팅한다(연결 §3.1).
     # stage8 참조는 전부 **method 안 lazy import**이며 `--poc-request` 없이는 실행되지 않는다 —
     # 그 성질은 아래 `test_controller_without_poc_request_loads_no_stage8`이 실제 실행으로 증명한다.
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage7_mass_roc_controller.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "mass_roc_workload_controller.py")),
 })
 
 # (호환) 옛 공개 경로 shim. 구현이 아니라 `vdeter.poc.api`의 같은 객체를 옛 이름으로
@@ -77,7 +77,7 @@ def _run_py(code: str) -> subprocess.CompletedProcess:
 
 
 _RF_OFF_SESSION_HOST = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "rf_off_software_session.py"))
-_RF_OFF_SESSION_CLASS = "RfOffStage7DeviceSession"
+_RF_OFF_SESSION_CLASS = "RfOffDeviceSession"
 _STAGE7_GROUP_SUPPORT = "tests.support.stage7"
 _STAGE7_GROUP_BUILDER = "build_stage7_software_group"
 _STAGE7_GROUP_STARTER = "start_stage7_group"
@@ -98,7 +98,7 @@ def _is_self_attr(node, attr):
 
 
 def _rf_off_session_wiring(tree):
-    """`RfOffStage7DeviceSession`↔실 Stage 7 software group 결선을 AST에서 읽어 dict로 돌려준다.
+    """`RfOffDeviceSession`↔실 Stage 7 software group 결선을 AST에서 읽어 dict로 돌려준다.
 
     - `imported_from`: `__init__` 안 from-import 이름 → module.
     - `group_names`: `build_stage7_software_group()` 반환값을 받은 변수 이름들(clock·medium·members…).
@@ -282,7 +282,7 @@ class ImportBoundaryTest(unittest.TestCase):
         """
         done = _run_py(
             "import importlib, sys;"
-            "importlib.import_module('apps.stage7_mass_roc_controller');"
+            "importlib.import_module('apps.mass_roc_workload_controller');"
             "print(sorted(m for m in sys.modules if m.startswith('vdeter.poc')))"
         )
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -310,7 +310,7 @@ class ImportBoundaryTest(unittest.TestCase):
 
         production CLI 파일(cli/run_cmd/local_session)은 이들을 통해서도 stage8을 직접 참조하지 않는다
         (여전히 stage8 문자열 0). coordinator(VDETER/apps)는 scan root 밖이라 여기서 검사하지 않는다.
-        각 파일의 double 성격: rf_off_session은 `RfOffStage7DeviceSession`이 **실 Stage 7 software
+        각 파일의 double 성격: rf_off_session은 `RfOffDeviceSession`이 **실 Stage 7 software
         group**(tests.support.stage7; 하드웨어 경계만 fake medium worker)을 띄워 권위 provider를 그
         members에 결속한다(AST 결선 계약 검사); stage7_seams는 실 frozen PHY·production provider 조립이다.
         """
@@ -341,7 +341,7 @@ class ImportBoundaryTest(unittest.TestCase):
             # (a) 연결 제거: provider를 group members가 아닌 다른 객체로 조립한다.
             "provider_not_from_group": _DetachProviderMembers(),
             # (b) 잘못된 공급자: 권위 경로 대신 worker 직접 제출 fallback 조립기.
-            "fallback_provider": _RenameCalls(_AUTHORITATIVE_PROVIDER, "assemble_stage7_provider"),
+            "fallback_provider": _RenameCalls(_AUTHORITATIVE_PROVIDER, "assemble_inprocess_provider"),
             # (b) 잘못된 공급자: 실 Stage 7 객체가 아닌 rf_off stub seam module에서 조립.
             "stub_seam_module": _RenameCalls(_AUTHORITATIVE_PROVIDER, _AUTHORITATIVE_PROVIDER,
                                              module="vdeter.poc.integration.rf_off"),

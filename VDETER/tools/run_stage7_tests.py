@@ -28,7 +28,7 @@ for path in (VDETER_ROOT, os.path.join(VDETER_ROOT, "src")):
 
 from vdeter.b210_system.testing.evidence import (  # noqa: E402
     ALL_TEST_CASES,
-    Stage7EvidenceBundle,
+    EvidenceBundle,
     sha256_file,
 )
 
@@ -255,7 +255,7 @@ def main(argv=None) -> int:
         "stage7-software-%Y%m%dT%H%M%SZ"
     )
     bundle_root = os.path.join(VDETER_ROOT, "results", "runs", run_id)
-    bundle = Stage7EvidenceBundle(bundle_root, run_id=run_id, judgement_scope="SOFTWARE_ONLY")
+    bundle = EvidenceBundle(bundle_root, run_id=run_id, judgement_scope="SOFTWARE_ONLY")
 
     frozen = frozen_hash_audit()
     frozen_artifact = bundle.write_artifact("artifacts/frozen_hash_audit.json", frozen)

@@ -1,6 +1,6 @@
 """`vdeter.b210_system.deployment` — launcher 배치 profile의 단일 production 구현 (STR-07, 묶음 1-3).
 
-1-3 이전 launcher(`stage7_endpoint_launcher.py:309-334`)는 시험 fixture module `tests.support.stage4`의
+1-3 이전 launcher(`endpoint_launcher.py:309-334`)는 시험 fixture module `tests.support.stage4`의
 `tbb_fixture()`를 `dataclasses.replace(start_time=UTC 자정, validity=2880)`로 고쳐 쓰고
 `deployment_profile(expected_fingerprint=…, fixture=…)`를 불렀다. 여기의 대조 구현 `_legacy_launcher_profile`은
 그 본문과 fixture 값을 literal로 옮긴 것이고, GOLDEN은 그 이전 조합을 **1-3 편집 전 트리**(1-2 커밋

@@ -1,7 +1,7 @@
 """Stage 7 Pi runtime operations (`stage7` §9, §13, §16.1).
 
 runtime client의 `operations` 실제 구현. 모든 hardware 동작은 endpoint의
-`Stage7B210RadioAdapter` lease worker를 통해서만 수행한다. plan 파일은 run
+`LaneB210RadioAdapter` lease worker를 통해서만 수행한다. plan 파일은 run
 디렉터리에 배포된 immutable JSON이며 command body의 SHA-256과 exact 일치해야
 실행한다.
 """
@@ -60,7 +60,7 @@ def _load_plan(run_root: str, name: str, expected_sha256: str):
     return json.loads(data.decode("utf-8"))
 
 
-class Stage7PiOperations:
+class PiOperations:
     """Pi에서 실행되는 runtime client operations."""
 
     def __init__(
@@ -359,7 +359,7 @@ class Stage7PiOperations:
             endpoint_id=self.endpoint_id,
             b210_serial=self.resolved.b210_serial,
             radio_generation=self.radio.lease.radio_generation,
-            lane_generation=self.endpoint.stage7_graph["lane_generation"],
+            lane_generation=self.endpoint.b210_graph["lane_generation"],
             acquisition_attempt=self.acquisition_attempt,
             provisional_clock_id=clock_id,
         )
@@ -406,7 +406,7 @@ class Stage7PiOperations:
         worker = self.radio.lease.worker
         burst = link11_calibration_burst_device_bytes()
         expected_digest = link11_calibration_packet_sha256()
-        graph = self.endpoint.stage7_graph
+        graph = self.endpoint.b210_graph
         mode = body["calibration_mode"]
         adaptive = mode == "ADAPTIVE_SEARCH_AND_SEAL"
         lane_candidates = {}
@@ -1202,7 +1202,7 @@ class Stage7PiOperations:
         sealed 공통 gain에서 step-창을 캡처해 warm-up 제외 판정 슬롯 전부를
         decode하고 decoded/no-decode/wrong-byte를 센다 (첫 실패 중단 없음)."""
 
-        graph = self.endpoint.stage7_graph
+        graph = self.endpoint.b210_graph
         lane = entry["rx_lane_index"]
         stack = graph["rf_a_stack"] if lane == 0 else graph["rf_b_stack"]
         worker = self.radio.lease.worker
@@ -1258,7 +1258,7 @@ class Stage7PiOperations:
         from .hw_operations import capture_slot_window
         from .rf_time import build_rf_time_measurement_summary
 
-        graph = self.endpoint.stage7_graph
+        graph = self.endpoint.b210_graph
         lane = entry["rx_lane_index"]
         stack = graph["rf_a_stack"] if lane == 0 else graph["rf_b_stack"]
         worker = self.radio.lease.worker
@@ -1506,4 +1506,4 @@ class Stage7PiOperations:
         self.evidence.append({"kind": "inhibit", "private_code": body.get("private_code")})
 
 
-__all__ = ("Stage7PiOperations",)
+__all__ = ("PiOperations",)

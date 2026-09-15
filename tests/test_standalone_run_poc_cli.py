@@ -385,7 +385,7 @@ class PocNegativeCliTest(unittest.TestCase):
     def test_r4_scenario_fail_propagates_to_poc_verdict(self):
         """매핑의 production 소유자는 실물 controller의 `_finalize_workload`다(RF-off 세션은 scenario를
         돌리지 않아 PASS 고정). 실 child로 arm한 PoC를 scenario FAIL로 종결해 poc-result를 확인한다."""
-        from apps import stage7_mass_roc_controller as controller
+        from apps import mass_roc_workload_controller as controller
         with tempfile.TemporaryDirectory() as poc_dir, \
                 tempfile.TemporaryDirectory() as run_root:
             os.chmod(poc_dir, 0o700)

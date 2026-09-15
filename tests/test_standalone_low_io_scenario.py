@@ -37,7 +37,7 @@ import standalone_v2_fixtures as fx  # noqa: E402
 import test_mass_roc_stage7_backend as backend  # noqa: E402
 import test_standalone_local_session as ls  # noqa: E402
 import test_standalone_run_cli as rc  # noqa: E402
-from apps import stage7_trace  # noqa: E402
+from apps import service_trace  # noqa: E402
 from apps.standalone import local_session, progress as pg, run_cmd  # noqa: E402
 
 
@@ -233,18 +233,18 @@ def _run_with_trace_spy(scenario: str):
     """backend 하네스 + 실제 TraceWriter: flush 호출자 이름을 기록한다."""
 
     callers = []
-    original_flush = stage7_trace.TraceWriter.flush
+    original_flush = service_trace.TraceWriter.flush
 
     def spy_flush(self):
         callers.append(sys._getframe(1).f_code.co_name)
         return original_flush(self)
 
-    stage7_trace.TraceWriter.flush = spy_flush
+    service_trace.TraceWriter.flush = spy_flush
     try:
         with tempfile.TemporaryDirectory() as run_root:
             _services, controller = backend.build_harness(run_root)
             trace_path = os.path.join(run_root, "workload-trace.jsonl")
-            trace = stage7_trace.TraceWriter(trace_path, session_id="r2", workload_id="w")
+            trace = service_trace.TraceWriter(trace_path, session_id="r2", workload_id="w")
             controller._trace = trace
             if scenario == "005":
                 status = controller.run_sc_vde_005().to_dict()["status"]
@@ -256,7 +256,7 @@ def _run_with_trace_spy(scenario: str):
             trace.close()
             closed_lines = open(trace_path, "r", encoding="utf-8").read().splitlines()
     finally:
-        stage7_trace.TraceWriter.flush = original_flush
+        service_trace.TraceWriter.flush = original_flush
     return status, during, list(callers), closed_lines
 
 
@@ -280,11 +280,11 @@ def test_production_sources_have_no_tracer_or_on_poll_references():
         Path(_REPO) / "apps" / "standalone" / "run_cmd.py",
         Path(_REPO) / "apps" / "standalone" / "local_session.py",
         Path(_REPO) / "apps" / "standalone" / "progress.py",
-        Path(_REPO) / "apps" / "stage7_mass_roc_controller.py",
+        Path(_REPO) / "apps" / "mass_roc_workload_controller.py",
     ]
     for path in sources:
         text = path.read_text(encoding="utf-8")
         assert "ScenarioTracer" not in text, path
         assert "on_poll" not in text, path
-    assert "flush()" not in (Path(_REPO) / "apps" / "stage7_mass_roc_controller.py").read_text(
+    assert "flush()" not in (Path(_REPO) / "apps" / "mass_roc_workload_controller.py").read_text(
         encoding="utf-8").split("class MassRocScenarioController", 1)[1].split("def run_scenarios", 1)[0]

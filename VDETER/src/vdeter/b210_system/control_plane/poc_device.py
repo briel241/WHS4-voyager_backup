@@ -6,7 +6,7 @@ launcher 프로세스가 단독 소유한다. 그 사이를 잇는 유일한 경
 
 설계 규칙:
 
-- **권위 구현 재사용**: 송신은 `Stage7B210RadioAdapter.schedule_tx`(최소 lead·timed retune·lane 겹침·
+- **권위 구현 재사용**: 송신은 `LaneB210RadioAdapter.schedule_tx`(최소 lead·timed retune·lane 겹침·
   정상 TX 우선·TX 원장) 하나로만 나간다. 별도 PoC 예약 원장이나 우회 송신 경로를 만들지 않는다.
 - **상위 계층 미의존**: 이 module은 PoC 계층 package를 import하지 않는다(Stage 7 것만 쓴다).
   launcher 진입점의 import 폐포에 상위 계층 전체가 끌려 들어가 qualification 결속 범위가 불필요하게
@@ -55,8 +55,8 @@ def build_poc_tx_request(*, bridge, burst_id: str, channel_name: str, transmit_a
                          samples: bytes, transmit_at_utc_ns=None):
     """PoC group TX를 권위 `radio_adapter.schedule_tx`에 낼 `RadioTxRequest`를 만든다.
 
-    launcher 경로(`Stage7PocDeviceSeam.schedule_group_tx`)와 RF-off 세션의 in-process sink
-    (`apps/poc_device_seams_inprocess.Stage7AuthoritativeRadioSink`)가 **같은** 구성을 쓴다. 시각 변환
+    launcher 경로(`PocDeviceSeam.schedule_group_tx`)와 RF-off 세션의 in-process sink
+    (`apps/poc_device_seams_inprocess.AuthoritativeRadioSink`)가 **같은** 구성을 쓴다. 시각 변환
     (hardware→UTC label)과 UTC label 축의 clock id는 bridge가 소유한다 — 임의 문자열로 채우면 요청이
     갖지 않은 clock 정체를 주장하게 된다(`schedule_tx`는 이 필드를 검증하지 않아 조용히 통과한다).
     표본은 device-rate cf32le 한 slot(8,192)이어야 한다. 파형을 만들지도 값을 해석하지도 않는다.
@@ -98,7 +98,7 @@ def build_poc_tx_request(*, bridge, burst_id: str, channel_name: str, transmit_a
     return request, utc_ns
 
 
-class Stage7PocDeviceSeam:
+class PocDeviceSeam:
     """launcher 프로세스 안에서 radio adapter/worker/route sidecar를 감싸는 TEST-only seam."""
 
     __slots__ = ("_endpoint", "endpoint_id", "_station_id_by_endpoint", "_rx_scope")
@@ -498,5 +498,5 @@ def _tuning_from_wire(value: dict) -> dict:
     return out
 
 
-__all__ = ("Stage7PocDeviceSeam", "PocDeviceUnavailable", "CHANNEL_NAMES",
+__all__ = ("PocDeviceSeam", "PocDeviceUnavailable", "CHANNEL_NAMES",
            "DEVICE_SAMPLE_RATE_HZ", "DEVICE_SLOT_SAMPLES")

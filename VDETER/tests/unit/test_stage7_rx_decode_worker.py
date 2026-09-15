@@ -26,10 +26,10 @@ from vdeter.profiles.link_phy import build_combined_phy_profile_registry
 from vdeter.runtime.phy_bridge import RuntimePhyRadioBridge
 from vdeter.b210_system import rx_decode_worker as W
 from vdeter.b210_system.phy_facade import (
-    Stage7DiagnosticPhyFacade,
-    Stage7PhyDiagnosticSink,
+    DiagnosticPhyFacade,
+    PhyDiagnosticSink,
 )
-from vdeter.b210_system.support import Stage7LaneRxDispatcher
+from vdeter.b210_system.support import LaneRxDispatcher
 
 RX_KEY = (CHANNEL.name, FIRST_SAMPLE_AT.clock_id, 1_000, 26_666_666)
 
@@ -69,8 +69,8 @@ def _reference_decode(device_request):
 
     registry = build_combined_phy_profile_registry().value
     assert registry.freeze().is_ok
-    sink = Stage7PhyDiagnosticSink(lane_index=0, lane_generation=1)
-    facade = Stage7DiagnosticPhyFacade(
+    sink = PhyDiagnosticSink(lane_index=0, lane_generation=1)
+    facade = DiagnosticPhyFacade(
         registry, TIME_SOURCE, DeterministicIdSource(0x91),
         diagnostic_sink=sink, route_sidecar=None,
     )
@@ -78,7 +78,7 @@ def _reference_decode(device_request):
     prepared = bridge.to_native_decode_request(device_request)
     assert prepared.is_ok, prepared.error
     host = W._GateHost()
-    native = Stage7LaneRxDispatcher._energy_gate(host, 0, prepared.value)
+    native = LaneRxDispatcher._energy_gate(host, 0, prepared.value)
     sink.begin_window(RX_KEY, 1, 0)
     try:
         return facade.decode_samples(native), sink

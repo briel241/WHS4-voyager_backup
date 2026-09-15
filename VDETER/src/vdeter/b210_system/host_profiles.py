@@ -7,7 +7,7 @@ expectation from this module instead of restating the rule:
     apps/standalone/local_preflight.py     speed class per role + shared-hub check
     apps/standalone/local_config.py        endpoint template directory + provisioning
     vdeter.b210_system.configuration            per-endpoint usb_transport / power rule
-    VDETER/apps/stage7_coordinator_main.py RR-P0 live link-speed / hub topology check
+    VDETER/apps/coordinator_main.py RR-P0 live link-speed / hub topology check
 
 Two profiles exist. The legacy Pi profile is the qualified baseline and its
 values are reproduced here **verbatim** (MASS-A/ROC direct USB3 5000M on Pi

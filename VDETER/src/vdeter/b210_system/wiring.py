@@ -2,7 +2,7 @@
 
 frozen `runtime/wiring.py`와 그 `build_wideband_group()` software-only
 shared-medium 검증을 바꾸지 않는다. 이 module에만 Stage 7 B210용
-`build_stage7_b210_endpoint()`와 resolved identity validator를 가산한다. 기존
+`build_b210_endpoint()`와 resolved identity validator를 가산한다. 기존
 builder를 monkey patch, 재등록 또는 이름 shadowing하지 않는다.
 """
 
@@ -36,24 +36,24 @@ from ..runtime.wiring import (
     STAGE5_MAX_CONCURRENT_TRANSFERS,
 )
 from ..service.models import Stage5ServicePolicy
-from .configuration import Stage7ResolvedConfiguration
-from .endpoint import Stage7Endpoint, Stage7PublicStartGate
-from .errors import Stage7PrivateErrorCode
+from .configuration import ResolvedConfiguration
+from .endpoint import Endpoint, PublicStartGate
+from .errors import PrivateErrorCode
 from .phy_facade import (
-    Stage7DiagnosticPhyFacade,
-    Stage7LaneRxIngress,
-    Stage7PhyDiagnosticSink,
+    DiagnosticPhyFacade,
+    LaneRxIngress,
+    PhyDiagnosticSink,
 )
-from .radio_adapter import Stage7B210RadioAdapter, Stage7HostBridgeHandle
-from .routing import Stage7RouteAwareLinkPort, Stage7RouteSidecar
-from .support import Stage7LaneRxDispatcher, Stage7LaneRxStack, Stage7Stage5Support
+from .radio_adapter import LaneB210RadioAdapter, HostBridgeHandle
+from .routing import RouteAwareLinkPort, RouteSidecar
+from .support import LaneRxDispatcher, LaneRxStack, LaneStage5Support
 
 #: frozen `_radio_schedule_horizon` 공식과 동일: 구조 검증용 canonical timing의
 #: `mapping_valid_for_nanoseconds(1e9)`에서 한 hexslot 여유를 뺀 값. §16.1의
 #: 120초 active command horizon은 bridge 유효성 경계이며 frozen MAC의 planning
 #: horizon이 아니다 (Stage 5/6 검증 envelope 보존).
-STAGE7_SCHEDULE_HORIZON_NS = 1_000_000_000 - 160_000_000
-STAGE7_LEAD_NS = 100_000_000
+SCHEDULE_HORIZON_NS = 1_000_000_000 - 160_000_000
+LEAD_NS = 100_000_000
 
 
 def _config_error(message: str, **details):
@@ -66,7 +66,7 @@ def _config_error(message: str, **details):
     )
 
 
-class Stage7RestartFactory:
+class RestartFactory:
     """§15 restart seam: frozen reset 뒤 lane graph를 새 generation으로 재조립한다.
 
     factory는 hardware configure/start, qualification lease 재사용, worker spawn
@@ -80,15 +80,15 @@ class Stage7RestartFactory:
         self.call_count = 0
         self._lock = RLock()
 
-    def rebuild(self, endpoint: Stage7Endpoint) -> None:
+    def rebuild(self, endpoint: Endpoint) -> None:
         with self._lock:
             self.call_count += 1
-            resolved = endpoint._stage7_resolved
+            resolved = endpoint._b210_resolved
             dependencies = endpoint.dependencies
             support = endpoint._stage4
             if resolved is None or support is None:
                 raise RuntimeError("stage7 graph binding이 없습니다")
-            old_graph = endpoint._stage7_graph or {}
+            old_graph = endpoint._b210_graph or {}
             old_sidecar = old_graph.get("sidecar")
             new_lane_generation = (
                 old_sidecar.lane_generation + 1 if old_sidecar is not None else 1
@@ -98,7 +98,7 @@ class Stage7RestartFactory:
                 old_sidecar.restart(new_lane_generation)
                 sidecar = old_sidecar
             else:
-                sidecar = Stage7RouteSidecar(lane_generation=new_lane_generation)
+                sidecar = RouteSidecar(lane_generation=new_lane_generation)
             # frozen reset이 만든 임시 일반 Link/PHY를 public 관측 전에 폐기하고
             # 완전한 새 lane graph로 교체한다.
             graph = _assemble_lane_graph(
@@ -110,15 +110,15 @@ class Stage7RestartFactory:
                 roc_station_id=self._roc_station_id,
             )
             radio = dependencies.radio
-            if isinstance(radio, Stage7B210RadioAdapter):
+            if isinstance(radio, LaneB210RadioAdapter):
                 radio.rebind_lane_runtime(new_lane_generation, graph["dispatcher"])
 
 
 def _assemble_lane_graph(
-    endpoint: Stage7Endpoint,
+    endpoint: Endpoint,
     dependencies: EndpointDependencies,
-    resolved: Stage7ResolvedConfiguration,
-    sidecar: Stage7RouteSidecar,
+    resolved: ResolvedConfiguration,
+    sidecar: RouteSidecar,
     *,
     lane_generation: int,
     roc_station_id: int,
@@ -134,7 +134,7 @@ def _assemble_lane_graph(
         if crypto_dependencies is not None
         else endpoint._crypto_dependencies,
     )
-    wrapper = Stage7RouteAwareLinkPort(delegate, sidecar, roc_station_id=roc_station_id)
+    wrapper = RouteAwareLinkPort(delegate, sidecar, roc_station_id=roc_station_id)
     radio_ref = dependencies.radio
 
     def hardware_clock_id():
@@ -147,17 +147,17 @@ def _assemble_lane_graph(
         )
     stacks = []
     for lane_index in (0, 1):
-        sink = Stage7PhyDiagnosticSink(
+        sink = PhyDiagnosticSink(
             lane_index=lane_index, lane_generation=lane_generation
         )
-        facade = Stage7DiagnosticPhyFacade(
+        facade = DiagnosticPhyFacade(
             dependencies.registries.phy_profile,
             dependencies.time_source,
             dependencies.id_source,
             diagnostic_sink=sink,
             route_sidecar=sidecar if lane_index == 0 else None,
         )
-        ingress = Stage7LaneRxIngress(
+        ingress = LaneRxIngress(
             run_id=resolved.run_id,
             endpoint_id=resolved.endpoint_id,
             b210_serial=resolved.b210_serial,
@@ -167,7 +167,7 @@ def _assemble_lane_graph(
             expected_hardware_clock_id=hardware_clock_id,
         )
         stacks.append(
-            Stage7LaneRxStack(
+            LaneRxStack(
                 lane_index=lane_index,
                 facade=facade,
                 ingress=ingress,
@@ -175,7 +175,7 @@ def _assemble_lane_graph(
             )
         )
     support = endpoint._stage4
-    dispatcher = Stage7LaneRxDispatcher(support, stacks, lane_generation=lane_generation)
+    dispatcher = LaneRxDispatcher(support, stacks, lane_generation=lane_generation)
     support.bind_lane_runtime(dispatcher)
     endpoint._link = wrapper
     endpoint._phy = stacks[0].facade
@@ -189,12 +189,12 @@ def _assemble_lane_graph(
         "lane_generation": lane_generation,
         "hardware_clock_id": hardware_clock_id,
     }
-    endpoint._stage7_graph = graph
+    endpoint._b210_graph = graph
     return graph
 
 
-def build_stage7_b210_endpoint(
-    resolved: Stage7ResolvedConfiguration,
+def build_b210_endpoint(
+    resolved: ResolvedConfiguration,
     deployment,
     *,
     crypto_dependencies=None,
@@ -210,14 +210,14 @@ def build_stage7_b210_endpoint(
     id_source_override=None,
     random_source_override=None,
 ):
-    """process-local `VdeService`를 구현하는 `Stage7Endpoint`를 반환한다 (§15).
+    """process-local `VdeService`를 구현하는 `Endpoint`를 반환한다 (§15).
 
     TEST harness와 정상 application 조립은 이 함수가 반환한 endpoint에 서로 다른
     sink/handler를 주입한다. Coordinator/group wrapper가 아니다.
     """
 
-    if not isinstance(resolved, Stage7ResolvedConfiguration):
-        return _config_error("Stage7ResolvedConfiguration이 필요합니다")
+    if not isinstance(resolved, ResolvedConfiguration):
+        return _config_error("ResolvedConfiguration이 필요합니다")
     endpoint_config = resolved.endpoint
     if endpoint_config.service.max_payload_bytes != STAGE5_MAX_APPLICATION_BYTES:
         return _config_error("max_payload_bytes는 65,531이어야 합니다")
@@ -233,7 +233,7 @@ def build_stage7_b210_endpoint(
     )
     from ..common.events import RecordingServiceEventSink
 
-    gate = Stage7PublicStartGate(application_sink or RecordingServiceEventSink())
+    gate = PublicStartGate(application_sink or RecordingServiceEventSink())
 
     # Link 11·17·19 운용 profile은 OPERATIONAL registry에 등록된다. Stage 4~6과
     # 같은 조립 패턴으로 combined three-entry phy registry를 사용한다.
@@ -272,8 +272,8 @@ def build_stage7_b210_endpoint(
 
     # frozen `build_radio_adapter()`는 schema v4/`b210-stage7-affine`을 절대
     # 처리하지 않는다 (§15). dependencies는 frozen source helper로 직접 조립한다.
-    bridge_handle = Stage7HostBridgeHandle()
-    sidecar = Stage7RouteSidecar(lane_generation=0)
+    bridge_handle = HostBridgeHandle()
+    sidecar = RouteSidecar(lane_generation=0)
 
     from ..common.events import RecordingInternalEventSink
     from ..runtime.wiring import (
@@ -286,7 +286,7 @@ def build_stage7_b210_endpoint(
     time_source = time_source_override or build_time_source(loaded).value
     random_source = random_source_override or build_random_source(loaded).value
     id_source = id_source_override or build_id_source(loaded).value
-    radio = Stage7B210RadioAdapter(
+    radio = LaneB210RadioAdapter(
         time_source,
         id_source,
         internal_sink,
@@ -337,7 +337,7 @@ def build_stage7_b210_endpoint(
     if capacity.is_err:
         return capacity
 
-    endpoint = Stage7Endpoint(dependencies, policy or Stage5ServicePolicy(), resolved=resolved)
+    endpoint = Endpoint(dependencies, policy or Stage5ServicePolicy(), resolved=resolved)
     adapter = build_presentation_adapter(dependencies.registries.payload_format)
     if adapter.is_err:
         return adapter
@@ -360,9 +360,9 @@ def build_stage7_b210_endpoint(
             450_000_000 if resolved.endpoint_id == "MASS-B" else 300_000_000
         ),
         receive_lead_nanoseconds=20_000_000,
-        channel_switch_gap_nanoseconds=STAGE7_LEAD_NS,
+        channel_switch_gap_nanoseconds=LEAD_NS,
         sample_rate_hz=endpoint_config.phy.sample_rate_hz,
-        schedule_horizon_nanoseconds=STAGE7_SCHEDULE_HORIZON_NS,
+        schedule_horizon_nanoseconds=SCHEDULE_HORIZON_NS,
         data_link_id=wideband_profile.data_link_id,
         lower_channel=WIDEBAND_LOWER_CHANNEL,
         upper_channel=WIDEBAND_UPPER_CHANNEL,
@@ -384,11 +384,11 @@ def build_stage7_b210_endpoint(
     )
     mac = Stage4Mac(coordinator, repository, outbox, lock, dependencies.id_source)
     endpoint._mac = mac
-    support = Stage7Stage5Support(endpoint, mac, outbox, ingress_queue, health, lock)
+    support = LaneStage5Support(endpoint, mac, outbox, ingress_queue, health, lock)
     endpoint.attach_stage4(support)
 
     roc_station_id = deployment.roc_station_id.value
-    restart_factory = Stage7RestartFactory(roc_station_id=roc_station_id)
+    restart_factory = RestartFactory(roc_station_id=roc_station_id)
     graph = _assemble_lane_graph(
         endpoint,
         dependencies,
@@ -399,7 +399,7 @@ def build_stage7_b210_endpoint(
         crypto_dependencies=crypto_dependencies,
     )
     radio.bind_lane_dispatcher(graph["dispatcher"])
-    endpoint.bind_stage7(
+    endpoint.bind_b210_system(
         start_gate=gate,
         graph=graph,
         restart_factory=restart_factory,
@@ -412,9 +412,16 @@ def build_stage7_b210_endpoint(
     return Ok(endpoint)
 
 
+#: (호환) 문서화된 링크 팀 in-process seam 의 옛 이름. `docs/사용법.md`·
+#: `docs/인수인계.md` 가 "공식 in-process 연결점"으로 이 이름을 안내해 왔으므로,
+#: **같은 함수 객체**를 가리키는 최소 alias 로 유지한다(구현 복제 없음).
+#: 제거는 날짜가 아니라 전환 확인·안내·별도 승인으로 결정한다.
+build_stage7_b210_endpoint = build_b210_endpoint
+
 __all__ = (
-    "STAGE7_LEAD_NS",
-    "STAGE7_SCHEDULE_HORIZON_NS",
-    "Stage7RestartFactory",
+    "LEAD_NS",
+    "SCHEDULE_HORIZON_NS",
+    "RestartFactory",
+    "build_b210_endpoint",
     "build_stage7_b210_endpoint",
 )

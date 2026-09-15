@@ -1,6 +1,6 @@
 """Stage 7 dual-lane B210 Radio adapter (`stage7` §13.2.1, §15, §15.1.1~§15.1.3).
 
-additive `Stage7B210RadioAdapter`는 frozen `RadioAdapter` Protocol과 Stage 3의
+additive `LaneB210RadioAdapter`는 frozen `RadioAdapter` Protocol과 Stage 3의
 validation, scheduling lead, TX/RX ledger, sample count/continuity, exactly-one
 terminal, lifecycle, generation fencing과 공개 오류 의미를 모두 보존한다.
 제한적 projection 차이는 UTC↔hardware affine conversion, logical requested
@@ -54,11 +54,11 @@ from ..common.results import Ok, internal_error
 from ..common.time import ClockDomain, TimePoint
 from .configuration import (
     LOWER_CHANNEL_NAME,
-    STAGE7_ADAPTER_KIND,
-    Stage7ResolvedConfiguration,
+    SYSTEM_ADAPTER_KIND,
+    ResolvedConfiguration,
     UPPER_CHANNEL_NAME,
 )
-from .errors import Stage7PrivateErrorCode
+from .errors import PrivateErrorCode
 
 _LEAD_NS = 100_000_000
 # 연속 RX 구조의 정직한 수신 최소 lead: 창은 등록만 하면 되므로 RPC
@@ -76,7 +76,7 @@ _UTC_FLAGS = (
 )
 
 #: §13.2.1 고정 공개 timing 투영.
-STAGE7_PUBLIC_TIMING_STATUS = RadioTimingStatus(
+PUBLIC_TIMING_STATUS = RadioTimingStatus(
     profile=RadioTimingProfile.INTERNAL_FREE_RUNNING,
     clock_state=RadioClockState.FREE_RUNNING,
     pps_state=RadioPpsState.PPS_NOT_PRESENT,
@@ -89,7 +89,7 @@ STAGE7_PUBLIC_TIMING_STATUS = RadioTimingStatus(
 
 
 @dataclass(frozen=True, slots=True)
-class Stage7AppliedLaneSettings:
+class AppliedLaneSettings:
     """§15 private applied record (logical channel/child별 closed layout)."""
 
     settings_type: str
@@ -120,7 +120,7 @@ class Stage7AppliedLaneSettings:
     outcome: str
 
 
-class Stage7HostBridgeHandle:
+class HostBridgeHandle:
     """Runtime-private timed-I/O 변환 handle (§13.2.1).
 
     public `RadioTimingStatus.mapping`을 대체하는 private 경로다. endpoint
@@ -234,7 +234,7 @@ class _RxChild:
     terminal: bool = False
 
 
-class Stage7QualificationLease:
+class QualificationLease:
     """public Radio state와 분리된 private preflight lease (§15).
 
     lease 동안 public Radio state는 `DISCONNECTED`, normal public TX/RX
@@ -252,7 +252,7 @@ class Stage7QualificationLease:
         self.gain_db = (0, 0)
 
 
-class Stage7B210RadioAdapter:
+class LaneB210RadioAdapter:
     """frozen `RadioAdapter` Protocol 구현 (schema v4 전용)."""
 
     __slots__ = (
@@ -277,11 +277,11 @@ class Stage7B210RadioAdapter:
         id_source,
         event_sink,
         *,
-        resolved: Stage7ResolvedConfiguration,
+        resolved: ResolvedConfiguration,
         sidecar,
         lane_dispatcher=None,
         worker_factory=None,
-        bridge: Stage7HostBridgeHandle | None = None,
+        bridge: HostBridgeHandle | None = None,
         pairwise_edge: str | None = None,
         monitor_enabled: bool = True,
     ) -> None:
@@ -292,14 +292,14 @@ class Stage7B210RadioAdapter:
         self._sidecar = sidecar
         self._lane_dispatcher = lane_dispatcher
         self._worker_factory = worker_factory
-        self._lease = Stage7QualificationLease()
+        self._lease = QualificationLease()
         self._state = RadioDeviceState.DISCONNECTED
         self._generation = 0
         self._lane_generation = sidecar.lane_generation if sidecar is not None else 0
         self._configuration = None
         self._applied = None
         self._applied_lane_settings = ()
-        self._bridge = bridge or Stage7HostBridgeHandle()
+        self._bridge = bridge or HostBridgeHandle()
         self._tx_parents = {}
         self._rx_children = {}
         self._terminal_keys = set()
@@ -342,11 +342,11 @@ class Stage7B210RadioAdapter:
             self._lane_dispatcher = dispatcher
 
     @property
-    def bridge(self) -> Stage7HostBridgeHandle:
+    def bridge(self) -> HostBridgeHandle:
         return self._bridge
 
     @property
-    def lease(self) -> Stage7QualificationLease:
+    def lease(self) -> QualificationLease:
         return self._lease
 
     @property
@@ -364,7 +364,7 @@ class Stage7B210RadioAdapter:
     def _error(self, code, category, message, correlation=Correlation(), details=Details()):
         return internal_error(Layer.RADIO, code, category, message, correlation=correlation, details=details)
 
-    def _private_fault(self, private_code: Stage7PrivateErrorCode, message: str, **fields):
+    def _private_fault(self, private_code: PrivateErrorCode, message: str, **fields):
         with self._lock:
             self._private_faults.append(
                 {"private_code": private_code.value, "message": message, **fields}
@@ -385,9 +385,9 @@ class Stage7B210RadioAdapter:
                     "이미 열린 qualification lease가 있습니다",
                 )
             if self._worker_factory is None:
-                from .b210_worker import Stage7IsolatedDualLaneWorker
+                from .b210_worker import IsolatedDualLaneWorker
 
-                factory = Stage7IsolatedDualLaneWorker
+                factory = IsolatedDualLaneWorker
             else:
                 factory = self._worker_factory
             resolved = self._resolved
@@ -637,7 +637,7 @@ class Stage7B210RadioAdapter:
                 "fc32", "sc16",
             )
             applied = RadioConfigurationApplied(
-                STAGE7_ADAPTER_KIND, RadioDeviceState.CONFIGURED,
+                SYSTEM_ADAPTER_KIND, RadioDeviceState.CONFIGURED,
                 tuple(value.channel.name for value in applied_channels),
                 SAMPLE_FORMAT_CF32LE, capabilities, settings,
             )
@@ -697,7 +697,7 @@ class Stage7B210RadioAdapter:
             lane_readback = readback.get("lanes", {}).get(str(lane.lane_index), {})
             tx_tune = resolved.rf_tune_for_channel(lane.tx_channel)
             records.append(
-                Stage7AppliedLaneSettings(
+                AppliedLaneSettings(
                     settings_type="STAGE7_APPLIED_LANE_V1",
                     run_id=resolved.run_id,
                     endpoint_id=resolved.endpoint_id,
@@ -755,7 +755,7 @@ class Stage7B210RadioAdapter:
                                                detail=str(error)[:160]),
                         )
             self._state = RadioDeviceState.RUNNING
-            started = RadioStarted(STAGE7_ADAPTER_KIND, self._state, self._time_source.now_monotonic())
+            started = RadioStarted(SYSTEM_ADAPTER_KIND, self._state, self._time_source.now_monotonic())
             self._emit_status_changed_locked()
             if not self._monitor_enabled:
                 # 결정적 harness는 `poll_once()`로 동기 진행한다.
@@ -869,7 +869,7 @@ class Stage7B210RadioAdapter:
                     "worker stop이 timeout으로 실패했습니다",
                 )
             self._state = RadioDeviceState.STOPPED
-            self._last_stopped = RadioStopped(STAGE7_ADAPTER_KIND, self._state, self._time_source.now_monotonic())
+            self._last_stopped = RadioStopped(SYSTEM_ADAPTER_KIND, self._state, self._time_source.now_monotonic())
             self._emit_status_changed_locked()
             self._condition.notify_all()
             return Ok(self._last_stopped)
@@ -919,7 +919,7 @@ class Stage7B210RadioAdapter:
             if hardware_start is None:
                 self._reject_tx_locked(request.channel)
                 self._private_fault(
-                    Stage7PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED,
+                    PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED,
                     "active bridge 없이 timed TX를 수락할 수 없습니다",
                 )
                 return self._error(ErrorCode.CLOCK_MAPPING_UNAVAILABLE, ErrorCategory.DEVICE, "host affine bridge가 잠겨 있지 않습니다", correlation)
@@ -1041,7 +1041,7 @@ class Stage7B210RadioAdapter:
             if hardware_start is None:
                 self._rx_reject_probe("BRIDGE_UNLOCKED")
                 self._private_fault(
-                    Stage7PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED,
+                    PrivateErrorCode.HOST_AFFINE_BRIDGE_NOT_LOCKED,
                     "active bridge 없이 timed RX를 수락할 수 없습니다",
                 )
                 return self._error(ErrorCode.CLOCK_MAPPING_UNAVAILABLE, ErrorCategory.DEVICE, "host affine bridge가 잠겨 있지 않습니다")
@@ -1124,7 +1124,7 @@ class Stage7B210RadioAdapter:
                     )
             return Ok(
                 RadioStatusSnapshot(
-                    adapter_kind=STAGE7_ADAPTER_KIND,
+                    adapter_kind=SYSTEM_ADAPTER_KIND,
                     device_state=self._state,
                     clock_reference=ClockReference.INTERNAL,
                     clock_locked=False,
@@ -1132,7 +1132,7 @@ class Stage7B210RadioAdapter:
                     underflow_count=self._underflow_count,
                     overflow_count=self._overflow_count,
                     late_command_count=self._late_command_count,
-                    timing_status=STAGE7_PUBLIC_TIMING_STATUS,
+                    timing_status=PUBLIC_TIMING_STATUS,
                     queue_status=tuple(queue_status),
                     event_delivery_status=self._delivery_status,
                 )
@@ -1175,7 +1175,7 @@ class Stage7B210RadioAdapter:
             import sys as _sys
             # __slots__ 클래스라 인스턴스 속성 대입 불가 — 함수 속성 사용
             # (svc-run-d 실측: AttributeError가 펌프 회전을 통째로 중단시킴)
-            f = Stage7B210RadioAdapter._consume_async_locked.__dict__
+            f = LaneB210RadioAdapter._consume_async_locked.__dict__
             n = f["_n"] = f.get("_n", 0) + 1
             if outcome != "BURST_ACK" or n <= 30 or n % 20 == 0:
                 print(
@@ -1313,7 +1313,7 @@ class Stage7B210RadioAdapter:
         # 한 lane만 성공한 fanout: PARTIAL_RF_EMISSION 처리 (§15.1.1).
         if len(parent.children) > 1 and any(state == "COMPLETED" for state in states):
             self._private_fault(
-                Stage7PrivateErrorCode.PARTIAL_RF_EMISSION,
+                PrivateErrorCode.PARTIAL_RF_EMISSION,
                 "fanout child 일부만 성공했습니다",
                 fanout_scope=parent.fanout_scope,
             )
@@ -1642,9 +1642,9 @@ class Stage7B210RadioAdapter:
 
 
 __all__ = (
-    "STAGE7_PUBLIC_TIMING_STATUS",
-    "Stage7AppliedLaneSettings",
-    "Stage7B210RadioAdapter",
-    "Stage7HostBridgeHandle",
-    "Stage7QualificationLease",
+    "PUBLIC_TIMING_STATUS",
+    "AppliedLaneSettings",
+    "LaneB210RadioAdapter",
+    "HostBridgeHandle",
+    "QualificationLease",
 )

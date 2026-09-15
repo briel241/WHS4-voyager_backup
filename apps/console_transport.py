@@ -14,7 +14,7 @@ software와 stage7은 같은 공개 Service API 계약(`_ServiceApiTransport`)�
 
 Stage 7 주입 seam
     VDETER 공개 API의 공식 연결점은 in-process 조립뿐이다:
-    `vdeter.b210_system.wiring.build_stage7_b210_endpoint(..., application_sink=...)`가
+    `vdeter.b210_system.wiring.build_b210_endpoint(..., application_sink=...)`가
     반환하는 endpoint가 곧 `VdeService`다. 응용 쪽 연결은
     `ExternalServiceTransport.event_handler_for(mmsi)`를 `HandlerServiceEventSink`로
     감싸 application_sink로 넘기고, 조립된 endpoint를 `attach_service()`로 주입한다.
@@ -370,7 +370,7 @@ class ExternalServiceTransport(_ServiceApiTransport):
     조립 순서(모듈 docstring의 Stage 7 주입 seam 참조):
         transport = ExternalServiceTransport(station_by_mmsi={...})
         sink = HandlerServiceEventSink(transport.event_handler_for(mmsi))
-        ... build_stage7_b210_endpoint(..., application_sink=sink) ...
+        ... build_b210_endpoint(..., application_sink=sink) ...
         transport.attach_service(mmsi, endpoint)
     """
 

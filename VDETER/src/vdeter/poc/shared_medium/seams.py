@@ -4,7 +4,7 @@ spy/fake로 대체한다. duck-typing(`typing.Protocol`)이므로 명시적 상�
 - `WaveformFactory` : parent waveform을 **정확히 한 번** 생성한다(single-burst invariant).
 - `RadioBurstSink`  : fan-out group을 **atomic 2단계**(prepare_group -> commit_group)로 제출한다.
   per-child 순차 제출을 하지 않으므로 "한 child만 방사"가 구조적으로 불가능하다. 실장비에서는
-  Stage 7의 group TX 경계(`Stage7B210RadioAdapter.schedule_tx` -> `worker.retune_tx_lo` +
+  Stage 7의 group TX 경계(`LaneB210RadioAdapter.schedule_tx` -> `worker.retune_tx_lo` +
   `worker.submit_tx_group`)에 결속한다: prepare_group = 두 lane staging/retune 예약,
   commit_group = 같은 hardware timestamp의 group TX 단일 atomic 제출.
 - `SlotScheduler`   : PoC의 상대 schedule(NEXT_SAFE_SLOT / after_slots / after_ms)을 받아 기존
