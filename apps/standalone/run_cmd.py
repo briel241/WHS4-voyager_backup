@@ -1014,8 +1014,15 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
     close만 수행하는 RX-only 세션이다. 정상 `vdeter run`은 이 인자를 쓰지 않는다."""
     try:
         if workload_plan is not None:
-            plan = [(str(sid), str(case)) for sid, case in workload_plan]
-            for scenario_id, case in plan:
+            # 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`. poc_id는 catalog
+            # 선택을 비대화형으로 고정하기 위한 값이며 None이면 종전과 같다.
+            plan = []
+            for item in workload_plan:
+                sid, case = item[0], item[1]
+                poc_id_of = item[2] if len(item) > 2 else None
+                plan.append((str(sid), str(case),
+                             None if poc_id_of is None else str(poc_id_of)))
+            for scenario_id, case, _poc_id in plan:
                 if scenario_id not in SCENARIOS or case not in ("normal", "forged"):
                     raise RunRefusal(EXIT_CONFIG,
                                      "Unknown workload %r/%r in plan" % (scenario_id, case))
@@ -1033,9 +1040,15 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
     poc_run = None
     if poc is not None or poc_dir is not None:
         from apps.standalone import poc_run as poc_run
+        # 계획이 workload마다 poc_id를 확정해 두었으면 menu를 띄우지 않는다. 그 경우에만
+        # 비대화형 catalog가 허용된다(§6.1의 "prompt 금지" 취지는 그대로 — prompt를 열지
+        # 않는 경로다). 계획에 id가 하나도 없으면 종전대로 비대화형 catalog는 거부된다.
+        preselected = bool(workload_plan) and any(
+            len(item) > 2 and item[2] is not None for item in workload_plan)
         try:
             poc_option = poc_run.resolve_option(poc=poc, poc_dir=poc_dir,
-                                                interactive=interactive)
+                                                interactive=interactive,
+                                                preselected=preselected)
         except poc_run.PocRunError as exc:
             out("Refused: " + str(exc))
             return EXIT_CONFIG
@@ -1253,11 +1266,18 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                         rx_only_ok = False
                         break
             else:
-                for number, (scenario_id, case) in enumerate(plan, 1):
+                for number, entry in enumerate(plan, 1):
+                    # 계획 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`다.
+                    # 세 번째 값은 catalog(`--poc-dir`)에서 **prompt 없이** 고를 PoC id이며,
+                    # None/"none"이면 그 workload는 baseline(PoC 자원 0)이다. 선택 계약은
+                    # 대화형과 같은 `select_and_snapshot`을 그대로 쓴다(별도 선택기 없음).
+                    scenario_id, case = entry[0], entry[1]
+                    planned_poc_id = entry[2] if len(entry) > 2 else None
                     result = _run_workload(session, scenario_id, case,
                                            out=out, clock=clock,
                                            index=number, total=len(plan),
-                                           poc_ctx=poc_ctx)
+                                           poc_ctx=poc_ctx,
+                                           poc_id=planned_poc_id)
                     results.append(result)
                     # R2: scenario 실패·quiescence 실패·PoC SESSION_INHIBIT면 다음 workload 제출 0.
                     if result.get("status") != "PASS" or _stop_after_workload(result, out):
@@ -1304,9 +1324,20 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             # R2: PoC experiment 인프라 실패(ABORTED/ERROR)를 최종 판정·exit에 정직하게 반영한다
             # (scenario verdict는 보존하되 experiment 실패를 숨기지 않는다). REQUEST_REJECTED 단일
             # action 거부는 poc_infrastructure=COMPLETED이므로 여기 걸리지 않는다.
-            poc_infra_ok = all(
-                (r.get("poc") or {}).get("poc_infrastructure") in (None, "COMPLETED")
-                for r in results)
+            def _poc_infra_ok(result):
+                poc = result.get("poc") or {}
+                infra = poc.get("poc_infrastructure")
+                if infra in (None, "COMPLETED"):
+                    return True
+                # baseline(none) workload는 PoC를 **쓰지 않기로 한** 것이지 인프라 실패가 아니다.
+                # 실물 controller와 RF-off 세션 모두 {"status": "BASELINE",
+                # "poc_infrastructure": "NOT_RUN"} 짝으로만 NOT_RUN을 낸다. 이전에는 이 값이
+                # 인프라 실패로 집계돼 **scenario가 전부 PASS인 run이 FAIL**로 떨어졌다(동일
+                # 세션 baseline↔PoC 전환을 처음 태우면서 드러난 거짓 FAIL). NOT_RUN을 통째로
+                # 허용하지 않고 BASELINE 상태와 짝일 때만 허용한다 — ABORTED/ERROR는 그대로 FAIL.
+                return infra == "NOT_RUN" and poc.get("status") == "BASELINE"
+
+            poc_infra_ok = all(_poc_infra_ok(r) for r in results)
             if not poc_infra_ok:
                 overall = "FAIL"
             if overall != "PASS":

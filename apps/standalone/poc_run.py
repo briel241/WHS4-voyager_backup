@@ -105,13 +105,29 @@ class PocOption:
         return self.mode != SourceMode.OFF
 
 
-def resolve_option(*, poc: str | None, poc_dir: str | None, interactive: bool) -> PocOption:
+def resolve_option(*, poc: str | None, poc_dir: str | None, interactive: bool,
+                   preselected: bool = False) -> PocOption:
     """`--poc`/`--poc-dir`를 해석한다(§5.3, §6.1). 위반은 :class:`PocRunError`.
 
     - 두 option 동시 사용 금지.
     - `--poc-dir`는 대화형 전용(비대화형 prompt 금지). 비대화형은 `--poc`만.
+
+    `preselected=True`는 **선택이 이미 확정된** 비대화형 catalog다. 진단 계획
+    (`diag` plan의 `allowed_workloads[].poc_id`)이 workload마다 어느 package를 쓸지 미리
+    정해 둔 경우이며, 그때는 menu를 띄우지 않고 그 id로 바로 고른다. §6.1의 금지 취지는
+    "비대화형에서 **prompt를 열지 않는다**"이고 이 경로는 prompt를 열지 않으므로 그 취지를
+    지킨다 — 검사를 완화하는 것이 아니라 **선택이 이미 있는 경우**를 구분하는 것이다.
+    호출자가 `poc_id`를 주지 않으면 `select_and_snapshot`이 baseline(`None`)을 돌려주므로
+    임의 package가 조용히 선택되지 않는다.
+
+    `resolve_source_mode`(rf 영역)는 바꾸지 않는다 — 대화형 계약과 그 계약시험은 그대로다.
     """
 
+    if poc and poc_dir:
+        raise PocRunError("--poc와 --poc-dir는 동시에 사용할 수 없습니다(§5.3)")
+    if poc_dir and preselected and not interactive:
+        # prompt 없는 확정 선택. mode는 CATALOG이되 menu 경로를 타지 않는다.
+        return PocOption(mode=SourceMode.CATALOG, poc=poc, poc_dir=poc_dir)
     try:
         mode = resolve_source_mode(poc=poc, poc_dir=poc_dir, interactive=interactive)
     except SelectionError as error:
@@ -130,12 +146,20 @@ def select_snapshot(option: PocOption, *, scenario_id: str, dest_dir: str,
 
     if not option.active:
         return None
+    # 선택이 이미 확정된 비대화형 catalog(진단 계획)는 menu를 띄우지 않으므로
+    # `select_and_snapshot`의 대화형 게이트를 통과시킨다. 비대화형에서 CATALOG mode에
+    # 도달했다는 것 자체가 `resolve_option(preselected=True)`를 지났다는 뜻이다 — 그 뒤
+    # workload별 `poc_id`는 계획이 정한 값이며 None/"none"은 baseline, id는 그 package다.
+    # prompt를 열지 않는다는 §6.1의 취지는 그대로다 — 여기서 새 package를 탐색·추천하지 않는다.
+    # (`poc_id is None`을 조건에 넣으면 계획의 baseline workload가 거부돼 scenario가
+    #  제출되지 않는다 — 실측으로 잡은 빈틈이다.)
+    preselected = option.mode == SourceMode.CATALOG and not interactive
     try:
         return select_and_snapshot(
             scenario_id=scenario_id, dest_dir=dest_dir,
             poc=option.poc, poc_dir=option.poc_dir, poc_id=poc_id,
             server_config=server_config or ServerCapabilityConfig(),
-            interactive=interactive)
+            interactive=interactive or preselected)
     except SelectionError as error:
         raise PocRunError(str(error)) from error
 

@@ -796,6 +796,51 @@ class RealCoordinatorPocEndToEnd(unittest.TestCase):
             self.assertEqual(summary["status"], "PASS")
             self.assertEqual(code, cli.EXIT_PASS, joined)
 
+    def test_real_coordinator_plan_catalog_preselected_baseline_and_poc_in_one_session(self):
+        """진단 계획이 정한 `(scenario, case, poc_id)` 조합이 실 coordinator·controller까지 통한다.
+
+        catalog(`--poc-dir`)를 **비대화형**으로 열되 prompt 없이 계획의 poc_id로 고른다(확정 선택).
+        같은 세션에서 PoC workload 다음에 baseline workload가 실행되고(동일 세션 전환), forged
+        case가 계획대로 전달된다. controller가 위임 요청을 확정 선택으로 해석하지 못하면 첫
+        workload가 비대화형 catalog 거부로 **arm 실패**한다 — 이 시험이 그 회귀를 잡는다.
+
+        baseline은 `select_and_snapshot`이 호환성 판정 전에 None을 돌려주므로 006 전용 catalog로도
+        001 forged baseline이 성립한다(PoC 자원 0).
+        """
+        import json as _json
+        import test_standalone_run_cli as harness
+        from apps.standalone.local_session import LocalCoordinatorSession
+        with tempfile.TemporaryDirectory() as poc_dir, tempfile.TemporaryDirectory() as tmp:
+            os.chmod(poc_dir, 0o700)
+            _write_poc(poc_dir)                          # poc_id "cli-replay", SC-VDE-006 호환
+            paths, _ = harness.fx.prepare_environment(tmp)
+            plan = [("SC-VDE-006", "normal", "cli-replay"),   # catalog에서 계획의 id로 선택
+                    ("SC-VDE-006", "normal", None),           # 같은 세션의 baseline
+                    ("SC-VDE-001", "forged", "none")]         # forged case + 명시 baseline
+            code, lines = harness.run(paths, LocalCoordinatorSession, scenario=None,
+                                      workload_plan=plan, poc_dir=poc_dir,
+                                      rf_off_software=True)
+            joined = chr(10).join(lines)
+            runs = sorted(Path(paths.runs_dir).glob("*/summary.json"))
+            self.assertTrue(runs, joined)
+            summary = _json.loads(runs[-1].read_text(encoding="utf-8"))
+            workloads = summary["workloads"]
+            self.assertEqual(len(workloads), 3, joined)
+            first, second, third = workloads
+            # 1) PoC workload — 계획의 id가 catalog에서 골라져 실 child가 실행됐다.
+            self.assertEqual(first["status"], "PASS", joined)
+            self.assertEqual(first["poc"]["poc_infrastructure"], "COMPLETED", joined)
+            self.assertEqual(first["poc"]["poc_id"], "cli-replay")
+            # 2) baseline — 같은 세션, PoC 자원 0. 실행됐다고 꾸미지 않는다.
+            self.assertEqual(second["status"], "PASS", joined)
+            self.assertEqual(second["poc"]["poc_infrastructure"], "NOT_RUN", joined)
+            self.assertEqual(second["poc"]["status"], "BASELINE")
+            # 3) forged case가 계획대로 전달됐고 명시 "none"도 baseline이다.
+            self.assertEqual(third["certificate_case"], "forged")
+            self.assertEqual(third["poc"]["poc_infrastructure"], "NOT_RUN", joined)
+            self.assertEqual(summary["status"], "PASS", joined)
+            self.assertEqual(code, cli.EXIT_PASS, joined)
+
 
 if __name__ == "__main__":
     unittest.main()

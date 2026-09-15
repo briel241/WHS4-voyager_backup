@@ -129,6 +129,162 @@ def never_preflight():
 
 # ---------------------------------------------------------------- plan 검증
 
+def test_preselected_catalog_is_allowed_only_with_a_decided_poc_id():
+    """확정 선택(계획의 poc_id)만 비대화형 catalog를 연다 — prompt는 여전히 열지 않는다.
+
+    §6.1의 금지 취지는 "비대화형에서 prompt 금지"다. 계획이 어느 package를 쓸지 미리
+    정했으면 menu가 필요 없으므로 그 경우를 구분한다. 검사를 완화하는 것이 아니다 —
+    id가 없는 비대화형 catalog는 **여전히 거부**되어야 한다.
+    """
+    from apps.standalone import poc_run
+    from vdeter.stage8.execution.selection import SourceMode
+
+    # 확정 선택: 허용되고 mode는 CATALOG.
+    option = poc_run.resolve_option(poc=None, poc_dir="/poc", interactive=False,
+                                    preselected=True)
+    assert option.mode == SourceMode.CATALOG and option.poc_dir == "/poc"
+
+    # 확정 선택이 아니면 종전대로 거부.
+    try:
+        poc_run.resolve_option(poc=None, poc_dir="/poc", interactive=False)
+        raise AssertionError("non-interactive catalog without a decided id was accepted")
+    except poc_run.PocRunError:
+        pass
+
+    # 두 option 동시 사용은 preselected 여부와 무관하게 거부(§5.3).
+    try:
+        poc_run.resolve_option(poc="./a.py", poc_dir="/poc", interactive=False,
+                               preselected=True)
+        raise AssertionError("--poc and --poc-dir together were accepted")
+    except poc_run.PocRunError:
+        pass
+
+
+def test_preselected_catalog_treats_missing_poc_id_as_baseline():
+    """계획이 catalog를 연 뒤에는 poc_id 없는 workload가 baseline이다 — 거부되지 않는다.
+
+    `{scenario: SC-VDE-006}`처럼 PoC가 없는 항목이 `--poc-dir`와 함께 실행될 때 scenario가
+    제출되지 않는 빈틈이 있었다(preselected 조건에 `poc_id is not None`이 들어 있었다).
+    """
+    from apps.standalone import poc_run
+    from vdeter.stage8.execution.selection import SourceMode
+
+    if not (hasattr(os, "getuid") and sys.platform != "win32"):
+        import unittest
+        raise unittest.SkipTest("catalog scan은 POSIX owner/mode 검사 전용")
+
+    # `select_and_snapshot`은 poc_id 판정 **전에** catalog를 scan한다(존재·소유자·0700 검사).
+    # 그래서 실제 directory를 준다 — 없는 경로를 주면 CatalogError로 죽는 것은 baseline 판정이
+    # 아니라 scan 실패다(첫 판의 시험이 그 전제를 잘못 잡았다).
+    with tempfile.TemporaryDirectory() as catalog, tempfile.TemporaryDirectory() as dest:
+        os.chmod(catalog, 0o700)
+        option = poc_run.PocOption(mode=SourceMode.CATALOG, poc=None, poc_dir=catalog)
+        for poc_id in (None, "none"):
+            result = poc_run.select_snapshot(option, scenario_id="SC-VDE-006",
+                                             dest_dir=dest, poc_id=poc_id, interactive=False)
+            assert result is None, (poc_id, result)
+
+
+def test_diag_run_refuses_plan_poc_without_a_catalog():
+    """계획이 이 run에 PoC를 골랐는데 `--poc-dir`가 없으면 장치 접근 전에 거부한다.
+
+    조용히 baseline으로 돌면서 ledger에 poc_id가 남으면 기록과 실제가 어긋난다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        paths, _ = fx.prepare_environment(tmp, qualified=False)
+        plan = write_plan(tmp, poc_allowed=True,
+                          allowed_workloads=[{"scenario": "SC-VDE-005", "poc_id": "obs"}])
+        authorize(paths, tmp, plan_path=plan)
+        factory = rc.make_session_factory()
+        code, lines = diag_run(paths, factory, ["SC-VDE-005"], preflight_fn=never_preflight)
+        assert code == run_cmd.EXIT_CONFIG
+        assert any("no --poc-dir catalog" in line for line in lines), lines
+        # 장치 접근 전 거부: ledger에 run이 기록되지 않는다.
+        assert ledger(paths).get("runs", []) == []
+
+
+def test_rf_domain_selection_contract_is_unchanged():
+    """`resolve_source_mode`(rf 영역)는 손대지 않았다 — 대화형 계약이 그대로다."""
+    from vdeter.stage8.execution.selection import (
+        SelectionError,
+        SourceMode,
+        resolve_source_mode,
+    )
+
+    assert resolve_source_mode(poc_dir="/poc") == SourceMode.CATALOG
+    assert resolve_source_mode(poc="./a.py", interactive=False) == SourceMode.DIRECT
+    try:
+        resolve_source_mode(poc_dir="/poc", interactive=False)
+        raise AssertionError("rf-domain contract changed")
+    except SelectionError:
+        pass
+
+
+def test_plan_workloads_defaults_to_scenarios_times_normal():
+    """`allowed_workloads`가 없으면 종전과 같다 — 기존 계획 파일 호환."""
+    assert diag_cmd.plan_workloads(dict(PLAN), ["SC-VDE-005"]) == [
+        ("SC-VDE-005", "normal", None)]
+    assert diag_cmd.plan_workloads(dict(PLAN), []) == []
+
+
+def test_plan_workloads_carries_case_and_poc_id_from_the_plan():
+    """계획이 표현한 조합(forged·PoC id)이 그대로 실행 계획이 된다 — 별도 선택기 없음."""
+    plan = {**PLAN, "allowed_scenarios": ["SC-VDE-001", "SC-VDE-005"],
+            "poc_allowed": True, "max_workloads_per_run": 3,
+            "allowed_workloads": [
+                {"scenario": "SC-VDE-005", "poc_id": "none"},
+                {"scenario": "SC-VDE-005", "poc_id": "stage-d-dual-observer"},
+                {"scenario": "SC-VDE-001", "case": "forged"}]}
+    assert diag_cmd.validate_plan(dict(plan)) == plan
+    workloads = diag_cmd.plan_workloads(plan, ["SC-VDE-005", "SC-VDE-005", "SC-VDE-001"])
+    assert workloads == [("SC-VDE-005", "normal", "none"),
+                         ("SC-VDE-005", "normal", "stage-d-dual-observer"),
+                         ("SC-VDE-001", "forged", None)]
+
+
+def test_plan_workloads_never_invents_a_combination_outside_the_plan():
+    """요청이 계획보다 많아도 계획에 없는 조합을 만들지 않는다(초과분은 생성 0)."""
+    plan = {**PLAN, "poc_allowed": True,
+            "allowed_workloads": [{"scenario": "SC-VDE-005", "poc_id": "obs"}]}
+    workloads = diag_cmd.plan_workloads(plan, ["SC-VDE-005", "SC-VDE-005"])
+    assert workloads == [("SC-VDE-005", "normal", "obs")]
+
+
+def test_ledger_refuses_more_workloads_than_the_plan_allows():
+    """계획이 한 번 허용한 scenario를 두 번 요청하면 **장치 접근 전** 거부된다."""
+    plan = {**PLAN, "poc_allowed": True,
+            "allowed_workloads": [{"scenario": "SC-VDE-005", "poc_id": "obs"}]}
+    reasons = diag_cmd.ledger_refusals(
+        {"runs": []}, plan, scenarios=["SC-VDE-005", "SC-VDE-005"],
+        poc_requested=True, hold_after_ready_s=0)
+    assert any("allows 1 workload" in r for r in reasons), reasons
+
+
+def test_validate_plan_rejects_bad_allowed_workloads():
+    """조합 표현의 계약을 잠근다 — 검증기를 우회하는 값은 발급 전에 거부한다."""
+    base = {**PLAN, "allowed_scenarios": ["SC-VDE-005"], "poc_allowed": True}
+    for bad in (
+        {**base, "allowed_workloads": []},
+        {**base, "allowed_workloads": ["SC-VDE-005"]},
+        {**base, "allowed_workloads": [{"scenario": "SC-VDE-006"}]},
+        {**base, "allowed_workloads": [{"scenario": "SC-VDE-005", "case": "bogus"}]},
+        {**base, "allowed_workloads": [{"scenario": "SC-VDE-005", "unknown": 1}]},
+        {**base, "allowed_workloads": [{"scenario": "SC-VDE-005", "poc_id": ""}]},
+        # poc_allowed=false인데 poc_id를 쓰면 거부(권한 밖 PoC 실행 금지).
+        {**base, "poc_allowed": False,
+         "allowed_workloads": [{"scenario": "SC-VDE-005", "poc_id": "obs"}]},
+        # 항목 수가 run당 상한을 넘으면 거부.
+        {**base, "max_workloads_per_run": 1,
+         "allowed_workloads": [{"scenario": "SC-VDE-005"},
+                               {"scenario": "SC-VDE-005"}]},
+    ):
+        try:
+            diag_cmd.validate_plan(bad)
+            raise AssertionError("accepted bad allowed_workloads: %r" % (bad,))
+        except diag_cmd.DiagError as exc:
+            assert exc.code == run_cmd.EXIT_CONFIG
+
+
 def test_validate_plan_rejects_bad_plans():
     for bad in (
         {**PLAN, "allowed_scenarios": ["SC-VDE-999"]},

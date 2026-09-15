@@ -191,13 +191,22 @@ def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
     child_root.mkdir(parents=True, exist_ok=True)
     dest = child_root / "poc-snapshot"
 
-    option = poc_run.resolve_option(poc=poc_path, poc_dir=poc_dir, interactive=False)
+    # 세션에 도착한 요청은 선택이 **이미 끝난** 것이다 — CLI가 menu(대화형) 또는 진단 계획
+    # (`allowed_workloads`)으로 poc_id를 정해 실어 보낸다. 따라서 catalog(`poc_dir`) 요청은
+    # prompt 없는 확정 선택이며, 그 사실을 명시해야 비대화형 catalog 거부(§6.1)에 걸리지
+    # 않는다(실물 controller `stage7_mass_roc_controller`와 같은 규칙). poc_id가 None/"none"이면
+    # baseline, id면 그 package다. 이 프로세스는 menu를 띄우지 않는다.
+    option = poc_run.resolve_option(poc=poc_path, poc_dir=poc_dir, interactive=False,
+                                    preselected=True)
     # snapshot은 runtime(coordinator)에서 workload 시작 직전에 만든다(§5.3).
     snapshot = poc_run.select_snapshot(option, scenario_id=scenario_id,
                                        dest_dir=str(dest), poc_id=poc_id, interactive=False)
     if snapshot is None:
-        # baseline(none): PoC 자원 0(구조적 0).
-        return {"status": "BASELINE", "workload_id": workload_id, "scenario_id": scenario_id}
+        # baseline(none): PoC 자원 0(구조적 0). 형태는 실물 controller
+        # (`stage7_mass_roc_controller`, `poc_infrastructure: NOT_RUN`)와 같게 둔다 — 판정 축이
+        # `poc_infrastructure`인데 RF-off evidence에만 그 축이 비면 RF-off가 실물을 대변하지 못한다.
+        return {"status": "BASELINE", "poc_infrastructure": "NOT_RUN",
+                "workload_id": workload_id, "scenario_id": scenario_id}
 
     # R1/N1: scenario submit **전에** arm. 준비/ARMED 실패면 scenario 자극 0.
     runtime.begin_workload()

@@ -1262,9 +1262,14 @@ def main(argv=None) -> int:
             poc_request = json.loads(handle.read().decode("utf-8"))
         poc_host = PocWorkloadHost(controller=inline_controller, events=events)
         try:
+            # coordinator에 도착한 요청은 선택이 **이미 끝난** 것이다 — CLI가 menu(대화형) 또는
+            # 진단 계획(`allowed_workloads`)으로 poc_id를 정해 실어 보낸다. 따라서 catalog
+            # (`poc_dir`) 요청은 prompt 없는 확정 선택이며, 그 사실을 명시해야 비대화형 catalog
+            # 거부(§6.1)에 걸리지 않는다. poc_id가 None/"none"이면 baseline, id면 그 package다.
+            # 이 프로세스는 menu를 띄우지 않고 새 package를 탐색·추천하지 않는다.
             option = _poc_run.resolve_option(poc=poc_request.get("poc"),
                                              poc_dir=poc_request.get("poc_dir"),
-                                             interactive=False)
+                                             interactive=False, preselected=True)
             snapshot = _poc_run.select_snapshot(
                 option, scenario_id=arguments.scenario_id,
                 dest_dir=os.path.join(arguments.run_root, "poc-snapshot"),

@@ -118,6 +118,42 @@ def validate_plan(plan: dict) -> dict:
         raise DiagError(EXIT_CONFIG, "plan.max_runs must be at least 1")
     if not isinstance(plan["poc_allowed"], bool):
         raise DiagError(EXIT_CONFIG, "plan.poc_allowed must be true/false")
+    # 선택 키 `allowed_workloads`: `(scenario, case, poc_id)` 조합을 계획이 직접 표현한다.
+    # 없으면 종전과 같이 `allowed_scenarios` × normal 로 해석한다(기존 계획 파일 호환).
+    # 이것이 있어야 SC-VDE-001 forged와 workload별 PoC(동일 세션 baseline↔PoC 전환)를
+    # 비대화형 진단에서 지정할 수 있다. 새 실행 엔진을 만들지 않고 기존 run 계획 통로를 쓴다.
+    workloads = plan.get("allowed_workloads")
+    if workloads is not None:
+        if not isinstance(workloads, list) or not workloads:
+            raise DiagError(EXIT_CONFIG,
+                            "plan.allowed_workloads must be a non-empty list when present")
+        for item in workloads:
+            if not isinstance(item, dict):
+                raise DiagError(EXIT_CONFIG,
+                                "plan.allowed_workloads entries must be objects "
+                                "{scenario, case[, poc_id]}")
+            unknown = sorted(set(item) - {"scenario", "case", "poc_id"})
+            if unknown:
+                raise DiagError(EXIT_CONFIG,
+                                "unknown allowed_workloads field(s): %s" % unknown)
+            if item.get("scenario") not in plan["allowed_scenarios"]:
+                raise DiagError(EXIT_CONFIG,
+                                "allowed_workloads.scenario %r is not in allowed_scenarios"
+                                % item.get("scenario"))
+            if item.get("case", "normal") not in ("normal", "forged"):
+                raise DiagError(EXIT_CONFIG,
+                                "allowed_workloads.case must be normal or forged")
+            poc_id = item.get("poc_id")
+            if poc_id is not None and not (isinstance(poc_id, str) and poc_id.strip()):
+                raise DiagError(EXIT_CONFIG,
+                                "allowed_workloads.poc_id must be a non-empty string or absent")
+            if poc_id is not None and not plan["poc_allowed"]:
+                raise DiagError(EXIT_CONFIG,
+                                "allowed_workloads.poc_id is set but plan.poc_allowed is false")
+        if len(workloads) > plan["max_workloads_per_run"]:
+            raise DiagError(EXIT_CONFIG,
+                            "allowed_workloads has %d entries but max_workloads_per_run is %d"
+                            % (len(workloads), plan["max_workloads_per_run"]))
     hold = plan.get("max_hold_after_ready_s", 0)
     if (not isinstance(hold, (int, float)) or isinstance(hold, bool)
             or hold < 0 or hold > MAX_HOLD_AFTER_READY_S):
@@ -461,6 +497,30 @@ def load_ledger(paths: StatePaths, authorization_sha256: str) -> dict:
     return ledger
 
 
+def plan_workloads(plan: dict, scenarios: list) -> list:
+    """계획 + 요청 scenario → `run_cmd.execute`의 `workload_plan`.
+
+    `allowed_workloads`가 있으면 그 조합(`scenario`, `case`, `poc_id`)을 **순서 그대로** 쓰되,
+    요청된 scenario로 걸러 낸다(요청이 비면 RX-only이므로 빈 목록). 없으면 종전과 같이
+    `scenario × normal`이다. 계획에 없는 case·PoC 조합은 여기서 만들어지지 않는다 —
+    `ledger_refusals`가 장치 접근 전에 거부하고, 이 함수는 계획을 넘어 확장하지 않는다.
+    """
+    requested = list(scenarios)
+    entries = plan.get("allowed_workloads")
+    if not entries:
+        return [(s, "normal", None) for s in requested]
+    if not requested:
+        return []
+    remaining = list(requested)
+    selected = []
+    for item in entries:
+        scenario = item.get("scenario")
+        if scenario in remaining:
+            remaining.remove(scenario)
+            selected.append((scenario, item.get("case", "normal"), item.get("poc_id")))
+    return selected
+
+
 def ledger_refusals(ledger: dict, plan: dict, *, scenarios: list, poc_requested: bool,
                     hold_after_ready_s: float) -> list:
     """plan 한도 대조 — 장치 접근 전. 시작된 run은 결과와 무관하게 전부 계상한다."""
@@ -475,6 +535,24 @@ def ledger_refusals(ledger: dict, plan: dict, *, scenarios: list, poc_requested:
     outside = [s for s in scenarios if s not in plan["allowed_scenarios"]]
     if outside:
         reasons.append("scenario(s) not allowed by plan: %s" % outside)
+    # `allowed_workloads`가 있으면 **조합 단위**로도 대조한다. scenario만 맞고 계획에 없는
+    # 조합이 실행되는 것을 막는다(계획 밖 workload 금지). 요청 scenario가 계획 항목에
+    # 없으면 위 `outside`가 이미 잡지만, 계획이 scenario를 한 번만 허용했는데 같은
+    # scenario를 여러 번 요청한 경우는 여기서 걸린다.
+    entries = plan.get("allowed_workloads")
+    if entries:
+        available = {}
+        for item in entries:
+            available[item.get("scenario")] = available.get(item.get("scenario"), 0) + 1
+        requested_counts = {}
+        for scenario in scenarios:
+            requested_counts[scenario] = requested_counts.get(scenario, 0) + 1
+        for scenario, count in sorted(requested_counts.items()):
+            allowed = available.get(scenario, 0)
+            if count > allowed:
+                reasons.append(
+                    "scenario %s requested %d time(s) but the plan allows %d workload(s)"
+                    % (scenario, count, allowed))
     if poc_requested and not plan["poc_allowed"]:
         reasons.append("PoC is not allowed by this plan")
     limit = float(plan.get("max_hold_after_ready_s", 0) or 0)
@@ -576,6 +654,20 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
                             + "\n  - ".join(reasons)
                             + "\nImpact: no device access. Action: adjust the "
                             "request or re-issue a new authorization.")
+        # 실행할 조합을 **여기서 한 번** 확정해 ledger 기록과 execute 인자가 같은 값을 쓰게
+        # 한다. 기록이 `scenarios`만 담으면 forged·PoC 조합을 실행하고도 남지 않는다.
+        workloads = plan_workloads(plan, list(scenarios))
+        # 계획이 이 run에 PoC(id)를 골랐는데 catalog가 없으면 조용히 baseline으로 돌면서
+        # ledger에는 poc_id가 남아 기록과 실제가 어긋난다. `--poc`(direct)는 poc_id를 무시하므로
+        # 같은 불일치다. 둘 다 **장치 접근 전** 거부한다.
+        planned_pocs = sorted({p for _s, _c, p in workloads
+                               if p is not None and p != "none"})
+        if planned_pocs and not poc_dir:
+            raise DiagError(EXIT_CONFIG,
+                            "plan selects PoC %s for this run but no --poc-dir catalog was "
+                            "given (plan poc_id is resolved from the catalog; --poc direct "
+                            "mode ignores it). Impact: no device access. Action: pass "
+                            "--poc-dir, or request only baseline workloads." % planned_pocs)
     except DiagError as exc:
         out("Refused (exit %d): %s" % (exc.code, exc))
         return exc.code
@@ -584,6 +676,8 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
     before = _qualification_invariants(paths)
     entry = {"run_id": run_id, "started_utc": _utc_now(), "state": "STARTED",
              "scenarios": list(scenarios), "rx_only": not scenarios,
+             "workloads": [{"scenario": s, "case": c, "poc_id": p}
+                           for s, c, p in workloads],
              "hold_after_ready_s": hold, "poc": bool(poc or poc_dir),
              "rf_off_software": bool(rf_off_software),
              "invariants_before": before}
@@ -599,7 +693,7 @@ def run(paths: StatePaths, *, scenarios: list, poc=None, poc_dir=None,
     try:
         exit_code = run_cmd.execute(
             paths, run_id=run_id,
-            workload_plan=[(s, "normal") for s in scenarios],
+            workload_plan=workloads,
             reference_loader=lambda _paths: authorization,
             critical_check=compare_authorization,
             retry=False, diagnostics=diagnostics, json_summary=json_summary,

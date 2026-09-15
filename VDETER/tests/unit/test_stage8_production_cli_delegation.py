@@ -200,6 +200,58 @@ class ControllerArmInterruptTests(unittest.TestCase):
         self.assertTrue(bare, "인터럽트를 원형 그대로 재전달하지 않는다")
 
 
+class ControllerPreselectedCatalogTests(unittest.TestCase):
+    """coordinator에 위임된 PoC 요청은 선택이 **이미 끝난** 것이다.
+
+    CLI가 menu(대화형) 또는 진단 계획(`allowed_workloads`)으로 poc_id를 정해 실어 보내므로,
+    controller는 catalog(`poc_dir`) 요청을 prompt 없는 확정 선택으로 해석해야 한다. 그렇지
+    않으면 실물의 `--poc-dir`(계획 기반 조합 포함)이 controller의 비대화형 catalog 거부(§6.1)에
+    걸려 **arm 실패**로 끝난다 — 지금까지 실물이 전부 `--poc` direct라 드러나지 않던 공백이다.
+
+    행위 확인은 RF-off 재현(실 controller subprocess에 catalog 요청)이 맡고, 여기서는 결선을
+    잠근다.
+    """
+
+    @staticmethod
+    def _resolve_option_calls(function):
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(function))
+        return [node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "resolve_option"]
+
+    def _assert_preselected_non_interactive(self, function, who):
+        import ast
+
+        calls = self._resolve_option_calls(function)
+        self.assertEqual(1, len(calls), f"{who}의 resolve_option 호출은 하나여야 한다")
+        keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+        self.assertIn("preselected", keywords,
+                      f"{who}가 위임된 catalog 요청을 확정 선택으로 표시하지 않는다 — arm 실패로 끝난다")
+        self.assertIsInstance(keywords["preselected"], ast.Constant)
+        self.assertIs(keywords["preselected"].value, True)
+        self.assertIs(keywords["interactive"].value, False,
+                      f"{who}는 어떤 경우에도 prompt를 열지 않는다")
+
+    def test_controller_resolves_delegated_catalog_as_preselected(self):
+        from apps import stage7_mass_roc_controller as controller
+
+        self._assert_preselected_non_interactive(controller.main, "실물 controller")
+
+    def test_rf_off_session_resolves_delegated_catalog_as_preselected(self):
+        """위임 요청의 소비자는 **둘**이다 — 실물 controller와 RF-off software 세션.
+
+        둘 중 하나만 고치면 RF-off e2e는 통과하는데 실물이 arm 실패하거나 그 반대가 된다.
+        실측: controller만 고친 뒤 실 coordinator e2e가 같은 거부 문구로 실패했다
+        (`--poc-dir는 대화형 mode 전용`, 0.3 s, controller 미기동).
+        """
+        from apps import stage8_rf_off_session as rf_off
+
+        self._assert_preselected_non_interactive(rf_off._handle_poc_request, "RF-off 세션")
+
+
 class ControllerScenarioInterruptTests(unittest.TestCase):
     """scenario 실행 중 중단도 종결 evidence를 남긴다 — **`finally` 안에서** 기록해야 한다.
 

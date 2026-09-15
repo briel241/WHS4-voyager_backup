@@ -406,7 +406,15 @@ vdeter diag status
   라이브러리 4종·RF-critical 심볼 동일; 아니면 발급 거부 + 필요한 교정 보고) → 정상 run과 같은
   블록 검사로 자기 검증 → `var/diagnostic/authorization.json` + `.sha256`. `var/qualification`에는
   쓰지 않는다. plan: `label, allowed_scenarios, poc_allowed, max_runs, max_workloads_per_run,
-  expires_utc[, max_hold_after_ready_s ≤ 600]`.
+  expires_utc[, max_hold_after_ready_s ≤ 600][, allowed_workloads]`.
+  `allowed_workloads`(선택)는 `{scenario, case, poc_id}` 객체 목록으로 **조합**을 표현한다 —
+  `case`는 `normal`/`forged`(기본 `normal`), `poc_id`는 `--poc-dir` catalog에서 prompt 없이
+  고를 PoC id(생략·`null`이면 그 workload는 baseline). 이것이 있어야 SC-VDE-001 `forged`와
+  동일 세션 baseline↔PoC 전환을 비대화형 진단에서 지정할 수 있다. 각 `scenario`는
+  `allowed_scenarios`에 있어야 하고, `poc_id`는 `poc_allowed=true`일 때만 쓸 수 있으며,
+  항목 수는 `max_workloads_per_run`을 넘을 수 없다. 없으면 종전대로
+  `allowed_scenarios × normal`로 해석한다(기존 계획 파일 호환). 선택·실행은 정상 run과 **같은**
+  `run_cmd.execute`·`select_and_snapshot` 경로이며 별도 실행 엔진을 만들지 않는다.
 - `run`: authorization(sidecar·만료·plan)과 ledger(한도)를 **장치 접근 전** 검사 → `run_cmd.execute`
   를 그대로 호출(주입: 진단 loader·블록 검사·비대화형 계획·**재시도 없음**). 인자 없이 실행하면
   RX-only 세션(bring-up → `--hold-after-ready` 동안 READY 유지 → close). run id 접두 `diag-`.

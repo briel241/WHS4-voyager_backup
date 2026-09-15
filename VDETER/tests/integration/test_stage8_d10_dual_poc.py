@@ -88,8 +88,20 @@ class D10DualPocTest(unittest.TestCase):
             finally:
                 if workload is not None:
                     workload.abort()
-                host.close_collision_exchange()
+                closed = host.close_collision_exchange()
         self.assertTrue(host._exchange.evidence['cleanup_complete'])
+        # C항: tuning 적용·복원 readback 값이 **실 dual 경로**에서 evidence에 실린다.
+        # 이 시험은 required dual PoC로 적용 경로에 실제로 진입하므로, 값이 비어 있으면
+        # 그것은 규약(적용 안 함)이 아니라 배선 결함이다. mock 시험(collision_lifecycle)이
+        # 값 보존·오류 이력을 덮고, 여기서는 실경로에서 값이 실제로 생기는지를 본다.
+        # 적용 전/후 값이 없거나 복원이 미검증이면 복원 PASS로 세지 않는다.
+        actor = (closed or {})['endpoints']['MASS-B']
+        self.assertIsNotNone(actor['dual_previous'], closed)
+        self.assertIsNotNone(actor['dual_readback'], closed)
+        self.assertIs(actor['restore']['verified'], True, actor['restore'])
+        self.assertEqual(actor['restore']['previous'], actor['restore']['readback'])
+        # dual이 아닌 endpoint는 값이 없다 — 있는 척하지 않는다.
+        self.assertIsNone((closed or {})['endpoints']['MASS-A']['dual_readback'])
         # A(설치 capability)는 설치 증언에서만 온다. 이 시험은 증언 fixture 안에서 돌므로
         # 광고되며, 그 값은 scope close 여부와 무관하다(runtime readiness를 추종하지 않는다).
         self.assertTrue(host.poc_server_config().wsm_g1_production_installed)
