@@ -38,13 +38,13 @@ class RealStage7SeamsTest(unittest.TestCase):
 
         정상 role tuning(§5.5)은 바꾸지 않는다 — lower 송신의 required receiver(ROC)는 자연 TUNED다.
         """
-        from apps.stage8_stage7_seams import assemble_authoritative_provider
+        from apps.poc_device_seams_inprocess import assemble_authoritative_provider
         from tests.support.stage7 import STATION_BY_ENDPOINT
         return assemble_authoritative_provider(
             members, station_id_by_endpoint=STATION_BY_ENDPOINT)
 
     def test_poc_action_flows_through_real_mac_phy_group_tx_and_receive(self):
-        from apps.stage8_stage7_seams import stage7_target_response, Stage7TxTerminalSource
+        from apps.poc_device_seams_inprocess import stage7_target_response, Stage7TxTerminalSource
         from tests.support.stage7 import drive_stage7_group
         from vdeter.phy.transmitter import Phy11Transmitter
         from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
@@ -91,7 +91,7 @@ class RealStage7SeamsTest(unittest.TestCase):
         # 3) TX terminal은 **권위 원장**에서 와야 한다. PoC group TX는 radio adapter의 schedule_tx를
         #    거치지 않으므로 adapter가 BURST_ACK을 드레인해도 대응 원장이 없다 → terminal 미확정.
         #    매질 delivery 기록으로 COMPLETED를 만들지 않는다(P10: 과거/우회 로그로 성공 추정 금지).
-        from apps.stage8_stage7_seams import Stage7LedgerTerminalSource
+        from apps.poc_device_seams_inprocess import Stage7LedgerTerminalSource
         # 접수 직후에는 원장이 SUBMITTED(진행 중)여야 한다 — 즉시 완료로 확정하지 않는다.
         burst = bindings["sink"].burst_by_group[parent.parent_id]
         immediate = bindings["adapter"].tx_burst_state(burst)
@@ -113,7 +113,7 @@ class RealStage7SeamsTest(unittest.TestCase):
         # 수신기 RX LO가 송신 채널에 정합하지 않으면 실 rx_readiness가 RF 전 fail-closed(방사 0).
         from vdeter.poc.api.errors import PocError
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
-        from apps.stage8_stage7_seams import assemble_stage7_provider
+        from apps.poc_device_seams_inprocess import assemble_stage7_provider
 
         clock, medium, members = self._group()
         # required 수신기(ROC)의 RX LO를 채널 center와 다른 값으로 강제(common-LO 미정합).
@@ -198,7 +198,7 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
         from vdeter.poc.shared_medium import constants
         from vdeter.poc.testing.execution_fakes import write_poc_package
         from vdeter.poc.testing.fakes import make_observation
-        from apps.stage8_stage7_seams import (
+        from apps.poc_device_seams_inprocess import (
             assemble_stage7_provider, stage7_target_response, Stage7TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
@@ -306,7 +306,7 @@ class RealScenarioObservationTest(unittest.TestCase):
         from vdeter.poc.api.types import ObservationRecord, PhysicalChannel, TuningState
         from vdeter.poc.shared_medium import constants
         from vdeter.poc.testing.execution_fakes import write_poc_package
-        from apps.stage8_stage7_seams import (assemble_stage7_provider, stage7_target_response,
+        from apps.poc_device_seams_inprocess import (assemble_stage7_provider, stage7_target_response,
                                               Stage7TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
@@ -383,7 +383,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
 
     def _scheduler(self, now_ns, *, tx_lo_hz=None):
         from types import SimpleNamespace
-        from apps.stage8_stage7_seams import Stage7HwTimeScheduler
+        from apps.poc_device_seams_inprocess import Stage7HwTimeScheduler
         worker = SimpleNamespace(hardware_time_ns=lambda: now_ns, tx_lo_hz=tx_lo_hz)
         return Stage7HwTimeScheduler(worker)
 
@@ -395,7 +395,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
     def test_p03_slot_uses_real_device_slot_duration_not_sample_count(self):
         # 수정 전: hardware ns를 8192(sample 수)로 나눠 lead가 5,632 ns였다.
         # 수정 후: slot 경계는 8192/307,200 s = 26,666,666 ns.
-        from apps.stage8_stage7_seams import DEVICE_SLOT_NS, hw_ns_to_slot, slot_to_hw_ns
+        from apps.poc_device_seams_inprocess import DEVICE_SLOT_NS, hw_ns_to_slot, slot_to_hw_ns
         from vdeter.phy import resampling
         self.assertEqual(DEVICE_SLOT_NS,
                          resampling.DEVICE_SLOT_SAMPLES * 10**9 // resampling.DEVICE_SAMPLE_RATE_HZ)
@@ -407,14 +407,14 @@ class RealUnitsAndConversionTest(unittest.TestCase):
     def test_p03_sample_index_and_hardware_ns_are_distinct_units(self):
         slot = self._scheduler(1_000_000_000).resolve(self._action(), request_id="u1")
         from vdeter.phy import resampling
-        from apps.stage8_stage7_seams import slot_to_hw_ns
+        from apps.poc_device_seams_inprocess import slot_to_hw_ns
         index = slot.scheduled_sample // resampling.DEVICE_SLOT_SAMPLES
         self.assertNotEqual(slot.scheduled_sample, slot.scheduled_hw_timestamp_ns)
         self.assertEqual(slot.scheduled_sample, index * resampling.DEVICE_SLOT_SAMPLES)
         self.assertEqual(slot.scheduled_hw_timestamp_ns, slot_to_hw_ns(index))
 
     def test_p03_lead_meets_authoritative_minimum(self):
-        from apps.stage8_stage7_seams import _RETUNE_LEAD_NS, _TX_LEAD_NS
+        from apps.poc_device_seams_inprocess import _RETUNE_LEAD_NS, _TX_LEAD_NS
         from vdeter.poc.shared_medium import constants
         from vdeter.poc.api.types import PhysicalChannel
         now = 1_000_000_000
@@ -424,7 +424,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         # 이미 대상 채널에 tune돼 있으면 retune 불필요 → 기본 TX lead(100 ms) 이상.
         center = constants.CHANNEL_EFFECTIVE_CENTER_HZ[PhysicalChannel.LOWER]
         from types import SimpleNamespace
-        from apps.stage8_stage7_seams import Stage7HwTimeScheduler
+        from apps.poc_device_seams_inprocess import Stage7HwTimeScheduler
         worker = SimpleNamespace(hardware_time_ns=lambda: now, tx_lo_hz=center)
         sched = Stage7HwTimeScheduler(worker, current_channel=PhysicalChannel.LOWER)
         slot2 = sched.resolve(self._action(), request_id="u3")
@@ -464,7 +464,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         self.assertLess(spy.retunes[0][1], spy.submits[0][0][2])       # staging < 방사
 
     def test_p05_waveform_is_device_rate_with_authoritative_conversion(self):
-        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.phy import resampling
         from vdeter.phy.transmitter import Phy11Transmitter
         from vdeter.poc.api.types import PhysicalChannel
@@ -480,7 +480,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         self.assertAlmostEqual(duration_ms, 26.6667, places=3)
 
     def test_p05_oversized_payload_is_rejected_not_truncated(self):
-        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.poc.api.types import PhysicalChannel
         with self.assertRaises(ValueError):
             Link11WaveformFactory().encode(source_station="MASS-B",
@@ -571,7 +571,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         return derive_dual_channel_plan()
 
     def test_plan_is_applied_to_device_and_readback_verified(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier
         from vdeter.poc.shared_medium import constants
         worker = self._worker()
         applier = CommonLoTuningApplier(worker)
@@ -592,7 +592,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertIn("observe_dual_physical_channel", applier.advertise_capabilities())
 
     def test_missing_device_support_is_fail_closed_and_advertises_nothing(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier, CommonLoTuningError
 
         class _Unsupported:
             pass
@@ -604,7 +604,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_readback_mismatch_beyond_tune_tolerance_rejects_and_recovers(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier, CommonLoTuningError
         # 승인 계약은 ±1 Hz다. 2 Hz 오차는 거부돼야 한다.
         worker = self._worker(tuning_lo_error_hz=2)
         before = worker.read_tuning()
@@ -618,7 +618,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertEqual(worker.read_tuning()["lane_center_hz"], before["lane_center_hz"])
 
     def test_readback_within_approved_tune_tolerance_is_accepted(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier
         # 기존 승인 계약(`_validate_dual_readback`)과 같은 ±1 Hz. 여기서 넓히지도 좁히지도 않는다.
         applier = CommonLoTuningApplier(self._worker(tuning_lo_error_hz=1))
         readback = applier.apply(self._plan())
@@ -626,7 +626,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertIn("observe_dual_physical_channel", applier.advertise_capabilities())
 
     def test_narrower_analog_bandwidth_than_plan_is_rejected(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier, CommonLoTuningError
         # 통과대역이 계획보다 좁으면 ±2.3 MHz lane 하나가 잘린다 — 조용히 받아들이면 안 된다.
         applier = CommonLoTuningApplier(self._worker(tuning_bandwidth_cap_hz=4_000_000))
         with self.assertRaises(CommonLoTuningError) as ctx:
@@ -635,7 +635,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_apply_failure_recovers_previous_tuning(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier, CommonLoTuningError
         worker = self._worker(tuning_fault="injected device tuning failure")
         before = worker.read_tuning()
         applier = CommonLoTuningApplier(worker)
@@ -645,7 +645,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         self.assertEqual(applier.advertise_capabilities(), frozenset())
 
     def test_recovery_failure_is_recorded_not_hidden(self):
-        from apps.stage8_stage7_seams import CommonLoTuningApplier, CommonLoTuningError
+        from apps.poc_device_seams_inprocess import CommonLoTuningApplier, CommonLoTuningError
         worker = self._worker(tuning_fault="injected device tuning failure",
                               restore_fault="injected restore failure")
         applier = CommonLoTuningApplier(worker)

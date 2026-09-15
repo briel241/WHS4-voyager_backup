@@ -25,7 +25,7 @@ def _unavailable(message, *, ownership=False):
     return collision_state_error(message, ownership=ownership)
 
 
-class CollisionExchange:
+class WorkloadRxScope:
     def __init__(self, clients, actor="MASS-B", *, dual=False, guard=None):
         self.clients, self.actor, self.dual, self.guard = clients, actor, dual, guard
         self.session_id = uuid.uuid4().hex

@@ -222,7 +222,7 @@ def workload_request(option: PocOption, *, poc_id: str | None, src_path: str | N
     """CLI가 coordinator에 실어 보내는 PoC workload 요청(`submit_workload(poc=...)`).
 
     선택은 CLI에서 이미 끝난 것이다(menu 또는 진단 계획이 `poc_id`를 확정). 소비자는 실물 controller
-    (`stage7_mass_roc_controller`, `--poc-request` 파일)와 RF-off software 세션(`stage8_rf_off_session`,
+    (`stage7_mass_roc_controller`, `--poc-request` 파일)와 RF-off software 세션(`rf_off_software_session`,
     request의 `poc`)이며 둘 다 :func:`snapshot_for_request`로 해석한다 — 필드 이름은 여기 한 곳이 소유한다.
     """
     return {"poc": option.poc, "poc_dir": option.poc_dir, "poc_id": poc_id, "src_path": src_path}

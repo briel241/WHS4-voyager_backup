@@ -38,7 +38,7 @@ class PrehardwareSafetyTests(unittest.TestCase):
         scope, clients = control_module.ScopeControlTests().build()
         scope.start()
         clients['MASS-B'].call.side_effect = RuntimeError('device unavailable')
-        with patch('apps.stage8_collision_exchange.time.monotonic', side_effect=[0, 8]):
+        with patch('apps.workload_rx_scope.time.monotonic', side_effect=[0, 8]):
             with self.assertRaises(Exception):
                 scope.close()
         self.assertFalse(scope.dual_ready)
@@ -48,7 +48,7 @@ class PrehardwareSafetyTests(unittest.TestCase):
         from vdeter.poc.api.errors import PocError
         scope, clients = control_module.ScopeControlTests().build()
         clients['MASS-A'].call.side_effect = RuntimeError('reply lost')
-        with patch('apps.stage8_collision_exchange.time.monotonic', side_effect=[0, 8]):
+        with patch('apps.workload_rx_scope.time.monotonic', side_effect=[0, 8]):
             with self.assertRaises(PocError) as caught:
                 scope.start()
         self.assertEqual('SESSION_INHIBIT', caught.exception.severity.value)

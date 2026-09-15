@@ -116,7 +116,7 @@ class PreSerializedBytesTest(unittest.TestCase):
     def test_launcher_sink_sends_the_preserialized_bytes_without_recomputing(self):
         import base64
 
-        from apps.stage8_launcher_seams import LauncherRadioSink
+        from apps.poc_device_seams_launcher import LauncherRadioSink
 
         samples = (0.5 + 0.5j,) * 8
         expected = to_cf32le(samples)
@@ -145,7 +145,7 @@ class PreSerializedBytesTest(unittest.TestCase):
         # 캐시를 주지 않는 factory 경로도 그대로 동작해야 한다(계약 확장이지 교체가 아니다).
         import base64
 
-        from apps.stage8_launcher_seams import LauncherRadioSink
+        from apps.poc_device_seams_launcher import LauncherRadioSink
 
         samples = (0.25 - 0.25j,) * 8
 

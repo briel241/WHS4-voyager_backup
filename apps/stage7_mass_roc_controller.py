@@ -915,7 +915,7 @@ class PocWorkloadHost:
     """workload를 소유한 이 프로세스가 PoC supervisor를 호스팅한다(연결 §3.1, P01).
 
     장치는 launcher가 단독 소유하므로 provider seam은 §16.2 TEST adapter op으로만 장치에 닿는다
-    (`apps/stage8_launcher_seams`). 이 class는 `poc_run`이 읽는 device 경계 공급자 계약을 만족시킨다.
+    (`apps/poc_device_seams_launcher`). 이 class는 `poc_run`이 읽는 device 경계 공급자 계약을 만족시킨다.
 
     관측(P09)은 actor의 실제 PHY 복호 + 수신기 내부 복호 구간 gate에서만 온다.
     TEST 소켓은 실제 RX 채널·첫 표본 장치 시각을 운반한다. 다른 endpoint의 Service
@@ -923,7 +923,7 @@ class PocWorkloadHost:
     """
 
     def __init__(self, *, controller, events, actor_endpoint: str = "MASS-B") -> None:
-        from apps.stage8_launcher_seams import assemble_launcher_provider
+        from apps.poc_device_seams_launcher import assemble_launcher_provider
 
         self._events = events
         self._controller = controller
@@ -946,15 +946,15 @@ class PocWorkloadHost:
         return installed_server_config()
 
     def prepare_poc_scope(self, descriptor):
-        from apps.stage8_collision_exchange import CollisionExchange
-        from apps.stage8_launcher_seams import assemble_launcher_provider
+        from apps.workload_rx_scope import WorkloadRxScope
+        from apps.poc_device_seams_launcher import assemble_launcher_provider
         from apps.standalone.poc_run import DUAL_CHANNEL_CAPABILITY, installed_server_config
         if self._exchange is not None:
             raise RuntimeError("workload RX scope already prepared")
         dual = DUAL_CHANNEL_CAPABILITY in descriptor.requested_capabilities
         # A: 설치 capability(증언). B: runtime readiness(아래 dual_ready). 둘을 섞지 않는다.
         installed = DUAL_CHANNEL_CAPABILITY in installed_server_config().advertised_capabilities()
-        self._exchange = CollisionExchange(self._bindings["clients"], self._actor, dual=dual)
+        self._exchange = WorkloadRxScope(self._bindings["clients"], self._actor, dual=dual)
         self._exchange.start()
         self._provider, self._bindings = assemble_launcher_provider(
             self._controller, actor_endpoint=self._actor, endpoint_ids=ENDPOINT_IDS,
@@ -965,7 +965,7 @@ class PocWorkloadHost:
     def poc_server_config(self):
         """설치 capability(A)만 돌려준다. `dual_ready`(B)는 여기에 섞지 않는다.
 
-        runtime readiness는 별도 경로(`CollisionExchange.dual_ready`)가 생산·검증·철회하며,
+        runtime readiness는 별도 경로(`WorkloadRxScope.dual_ready`)가 생산·검증·철회하며,
         readiness 미충족은 해당 동작 단계에서 거부된다(capability 광고가 그 gate를 대신하지 않는다).
         """
         from apps.standalone.poc_run import installed_server_config
@@ -973,8 +973,8 @@ class PocWorkloadHost:
 
     def poc_provider(self):
         if self._exchange is None:
-            from apps.stage8_collision_exchange import CollisionExchange
-            self._exchange = CollisionExchange(self._bindings["clients"], self._actor)
+            from apps.workload_rx_scope import WorkloadRxScope
+            self._exchange = WorkloadRxScope(self._bindings["clients"], self._actor)
             self._exchange.start()
             self._bindings["actor"].collision_session_id = self._exchange.session_id
         return self._provider
@@ -1306,7 +1306,7 @@ def main(argv=None) -> int:
             # 걸리지 않아 종결 기록을 한 줄도 남기지 않았다. 자원 회수는 두 곳이 나눠 맡는다:
             #   - PoC child·socket·provider 예약 → `poc_run.prepare_workload`가 이미
             #     cleanup-only로 정리하고(그 evidence를 인터럽트에 싣는다) 원형 재전달한다.
-            #   - workload RX scope(`CollisionExchange`) → **이 프로세스가 소유**하므로 여기서
+            #   - workload RX scope(`WorkloadRxScope`) → **이 프로세스가 소유**하므로 여기서
             #     닫는다. `prepare_poc_scope`가 `arm()`보다 **먼저** 열기 때문에 중단 창이
             #     `prepare_workload`의 인터럽트 처리 구간보다 넓다.
             # 새 정리 로직·새 상한·신규 action을 만들지 않는다 — 일반 예외 경로와 같은 호출이다.

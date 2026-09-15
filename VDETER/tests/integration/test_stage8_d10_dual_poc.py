@@ -33,7 +33,7 @@ class D10DualPocTest(unittest.TestCase):
 
     def _exercise(self, payload, payload_format='test.stage0.opaque', *, promoted=True):
         from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
-        from apps.stage8_launcher_seams import LauncherDeviceClient
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.standalone import poc_run
         from vdeter.poc.execution.snapshot import create_snapshot
         from vdeter.poc.testing.execution_fakes import write_poc_package

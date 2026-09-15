@@ -56,7 +56,7 @@ def build_poc_tx_request(*, bridge, burst_id: str, channel_name: str, transmit_a
     """PoC group TX를 권위 `radio_adapter.schedule_tx`에 낼 `RadioTxRequest`를 만든다.
 
     launcher 경로(`Stage7PocDeviceSeam.schedule_group_tx`)와 RF-off 세션의 in-process sink
-    (`apps/stage8_stage7_seams.Stage7AuthoritativeRadioSink`)가 **같은** 구성을 쓴다. 시각 변환
+    (`apps/poc_device_seams_inprocess.Stage7AuthoritativeRadioSink`)가 **같은** 구성을 쓴다. 시각 변환
     (hardware→UTC label)과 UTC label 축의 clock id는 bridge가 소유한다 — 임의 문자열로 채우면 요청이
     갖지 않은 clock 정체를 주장하게 된다(`schedule_tx`는 이 필드를 검증하지 않아 조용히 통과한다).
     표본은 device-rate cf32le 한 slot(8,192)이어야 한다. 파형을 만들지도 값을 해석하지도 않는다.

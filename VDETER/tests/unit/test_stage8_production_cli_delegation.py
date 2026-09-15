@@ -126,7 +126,7 @@ class ControllerArmInterruptTests(unittest.TestCase):
 
     자원 회수는 두 곳이 나눠 맡는다. PoC child·socket·provider 예약은
     `poc_run.prepare_workload`가 이미 cleanup-only로 정리한다. 반면 workload RX scope
-    (`CollisionExchange`)는 `prepare_poc_scope`가 `arm()`보다 **먼저** 열고 controller가
+    (`WorkloadRxScope`)는 `prepare_poc_scope`가 `arm()`보다 **먼저** 열고 controller가
     소유하므로, 중단 창이 `prepare_workload`의 처리 구간보다 넓고 controller가 닫아야 한다.
 
     여기서는 그 구조를 잠근다. 실제로 자원이 회수되고 파일 셋이 생기는지는 실 controller
@@ -316,7 +316,7 @@ class ControllerPreselectedCatalogTests(unittest.TestCase):
         self._assert_delegates_resolution(controller.main, "실물 controller")
 
     def test_rf_off_session_delegates_resolution_to_the_single_owner(self):
-        from apps import stage8_rf_off_session as rf_off
+        from apps import rf_off_software_session as rf_off
 
         self._assert_delegates_resolution(rf_off._handle_poc_request, "RF-off 세션")
 

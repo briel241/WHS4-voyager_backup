@@ -73,16 +73,16 @@ class CollisionSocketTests(unittest.TestCase):
         import base64
         import time
         from apps.stage7_mass_roc_controller import _AdapterChannel
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
-        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
+        from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.poc.api.types import PhysicalChannel
         from vdeter.stage7.configuration import UPPER_CHANNEL_NAME, LOWER_CHANNEL_NAME
         from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
-        exchange = CollisionExchange(clients)
+        exchange = WorkloadRxScope(clients)
         try:
             exchange.start()
             clients["ROC"].collision_session_id = exchange.session_id
@@ -161,15 +161,15 @@ class CollisionSocketTests(unittest.TestCase):
 
     def test_exchange_start_metadata_and_cleanup_on_real_sockets(self):
         from apps.stage7_mass_roc_controller import _AdapterChannel
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
         import time
         # Use the production serialized socket adapter, not the parent's
         # single-thread test adapter, because the exchange has a worker thread.
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
-        exchange = CollisionExchange(clients)
+        exchange = WorkloadRxScope(clients)
         try:
             exchange.start()
             time.sleep(0.25)
@@ -193,12 +193,12 @@ class CollisionSocketTests(unittest.TestCase):
         import hashlib
         import time
         from apps.stage7_mass_roc_controller import _AdapterChannel
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
-        exchange = CollisionExchange(clients)
+        exchange = WorkloadRxScope(clients)
         try:
             exchange.start()
             payload = b"stage8-normal-receipt"
@@ -229,14 +229,14 @@ class CollisionSocketTests(unittest.TestCase):
 
     def test_dual_rx_lifecycle_real_socket(self):
         from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
         from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
         previous = clients["MASS-B"].call("poc_tuning", {"mode": "READ", "rx_lo_hz": None, "lane_dsp_hz": None, "analog_bandwidth_hz": None, "snapshot": None})
-        scope = CollisionExchange(clients, dual=True)
+        scope = WorkloadRxScope(clients, dual=True)
         try:
             scope.start()
             self.assertTrue(scope.dual_ready, scope.evidence)
@@ -308,16 +308,16 @@ class CollisionSocketTests(unittest.TestCase):
     def test_dual_workload_observes_real_lower_and_upper_phy(self):
         import base64
         from apps.stage7_mass_roc_controller import _AdapterChannel
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
-        from apps.stage8_stage7_seams import Link11WaveformFactory
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
+        from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.poc.api.types import PhysicalChannel
         from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
         from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
-        scope = CollisionExchange(clients, dual=True)
+        scope = WorkloadRxScope(clients, dual=True)
         try:
             scope.start()
             for client in clients.values():

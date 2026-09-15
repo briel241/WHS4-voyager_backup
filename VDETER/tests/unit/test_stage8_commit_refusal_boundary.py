@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import unittest
 
-from apps.stage8_launcher_seams import LauncherRadioSink
+from apps.poc_device_seams_launcher import LauncherRadioSink
 from vdeter.stage7.testing.controller import Stage7ScenarioController
 from vdeter.poc.api.types import PhysicalChannel
 from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused, ChildPath
@@ -298,7 +298,7 @@ class AuthoritativeSinkDestinationTest(unittest.TestCase):
     """RF-off 좌표의 **같은 결함**. 기존 시험이 ROC 표적만 밟아 실물까지 통과시킨 지점이다."""
 
     def _sink(self):
-        from apps.stage8_stage7_seams import Stage7AuthoritativeRadioSink
+        from apps.poc_device_seams_inprocess import Stage7AuthoritativeRadioSink
 
         sidecar = _FakeSidecar()
         sink = Stage7AuthoritativeRadioSink(

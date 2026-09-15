@@ -23,13 +23,13 @@ class StalledClockActivationTest(unittest.TestCase):
 
     def test_stalled_clock_fails_closed_and_returns_activation_resources(self):
         from apps.stage7_mass_roc_controller import _AdapterChannel
-        from apps.stage8_launcher_seams import LauncherDeviceClient
-        from apps.stage8_collision_exchange import CollisionExchange
+        from apps.poc_device_seams_launcher import LauncherDeviceClient
+        from apps.workload_rx_scope import WorkloadRxScope
         from vdeter.poc.api.errors import PocError, Severity
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
-        exchange = CollisionExchange(clients)
+        exchange = WorkloadRxScope(clients)
         try:
             exchange.start()
             self.assertFalse(hasattr(exchange, "thread"))

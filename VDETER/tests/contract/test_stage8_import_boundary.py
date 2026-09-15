@@ -32,15 +32,15 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
 # software group(`tests.support.stage7`)과 `vdeter.poc.testing` seam을 의도적으로 import하며
 # (그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
 # 광범위 allowlist가 아니라 실제 결선에 필요한 파일만 명시 추가한다.
-# - stage8_rf_off_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
+# - rf_off_software_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
 #   `RfOffStage7DeviceSession`이 실 Stage 7 software group을 띄우고(하드웨어 경계만 fake medium
 #   worker) 권위 provider(`assemble_authoritative_provider`)를 그 members에 결속한다 — 그 결선
 #   계약은 아래 `_rf_off_session_wiring`(AST)이 검사한다.
-# - stage8_stage7_seams.py: Stage 8 PoC provider seam을 **실 Stage 7 객체**(worker·frozen PHY·MAC
+# - poc_device_seams_inprocess.py: Stage 8 PoC provider seam을 **실 Stage 7 객체**(worker·frozen PHY·MAC
 #   hardware clock·route sidecar·수신기)에 결속하는 RF-off 통합 adapter(하드웨어 경계만 double).
 _SANCTIONED_RF_OFF_SESSION = frozenset({
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py")),
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "rf_off_software_session.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "poc_device_seams_inprocess.py")),
 })
 
 # 일반 운용 경로의 PoC device 결선 adapter. 장치는 launcher가 단독 소유하므로 supervisor(workload를
@@ -48,7 +48,7 @@ _SANCTIONED_RF_OFF_SESSION = frozenset({
 # 경계를 조립하며, launcher **쪽** 구현(vdeter/stage7/testing/poc_device.py)은 PoC 계층을 참조하지
 # 않으므로 여기 목록에 없다(그 성질은 아래 규칙이 정적으로 강제한다).
 _SANCTIONED_LAUNCHER_SEAMS = frozenset({
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_launcher_seams.py")),
+    os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "poc_device_seams_launcher.py")),
     # workload를 소유한 scenario controller child가 PoC supervisor를 호스팅한다(연결 §3.1).
     # stage8 참조는 전부 **method 안 lazy import**이며 `--poc-request` 없이는 실행되지 않는다 —
     # 그 성질은 아래 `test_controller_without_poc_request_loads_no_stage8`이 실제 실행으로 증명한다.
@@ -76,12 +76,12 @@ def _run_py(code: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
 
 
-_RF_OFF_SESSION_HOST = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_rf_off_session.py"))
+_RF_OFF_SESSION_HOST = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "rf_off_software_session.py"))
 _RF_OFF_SESSION_CLASS = "RfOffStage7DeviceSession"
 _STAGE7_GROUP_SUPPORT = "tests.support.stage7"
 _STAGE7_GROUP_BUILDER = "build_stage7_software_group"
 _STAGE7_GROUP_STARTER = "start_stage7_group"
-_SEAMS_MODULE = "apps.stage8_stage7_seams"
+_SEAMS_MODULE = "apps.poc_device_seams_inprocess"
 _AUTHORITATIVE_PROVIDER = "assemble_authoritative_provider"
 
 
@@ -169,7 +169,7 @@ def _assert_rf_off_session_wired(case, tree):
                      "self._provider는 권위 schedule_tx 경로 provider(assemble_authoritative_provider)"
                      "여야 한다(stub·fallback seam 아님)")
     case.assertEqual(imported.get(_AUTHORITATIVE_PROVIDER), _SEAMS_MODULE,
-                     "권위 provider 조립기는 apps.stage8_stage7_seams에서 가져와야 한다")
+                     "권위 provider 조립기는 apps.poc_device_seams_inprocess에서 가져와야 한다")
     case.assertIn(wiring["provider_members_arg"], wiring["group_names"],
                   "provider는 실행 중 software group의 members로 조립해야 한다")
     case.assertTrue(wiring["provider_has_station_map"],
@@ -319,7 +319,7 @@ class ImportBoundaryTest(unittest.TestCase):
             self.assertIn(adapter, hits, "RF-off 통합 adapter가 stage8을 실제로 import해야 함")
         with open(_RF_OFF_SESSION_HOST, "r", encoding="utf-8") as fh:
             _assert_rf_off_session_wired(self, ast.parse(fh.read(), filename=_RF_OFF_SESSION_HOST))
-        seams = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage8_stage7_seams.py"))
+        seams = os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "poc_device_seams_inprocess.py"))
         with open(seams, "r", encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("Phy11Transmitter", text, "seams adapter는 실 frozen PHY에 결속한다")

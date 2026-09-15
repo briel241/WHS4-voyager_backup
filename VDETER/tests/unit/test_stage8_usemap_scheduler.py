@@ -12,7 +12,7 @@ from vdeter.stage7.testing.poc_device import Stage7PocDeviceSeam
 
 class UseMapSchedulerTests(unittest.TestCase):
     def test_default_scheduler_queries_each_logical_targets_channel(self):
-        from apps.stage8_launcher_seams import MacSlotScheduler
+        from apps.poc_device_seams_launcher import MacSlotScheduler
         from vdeter.stage7.configuration import UPPER_CHANNEL_NAME
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
 
@@ -32,8 +32,8 @@ class UseMapSchedulerTests(unittest.TestCase):
                              result.scheduled_sample)
 
     def test_exact_after_slots_does_not_move_to_later_free_mac_slot(self):
-        from apps.stage8_launcher_seams import MacSlotScheduler
-        from apps.stage8_stage7_seams import hw_ns_to_slot
+        from apps.poc_device_seams_launcher import MacSlotScheduler
+        from apps.poc_device_seams_inprocess import hw_ns_to_slot
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
         from vdeter.poc.api.errors import PocError, PocErrorCode
 

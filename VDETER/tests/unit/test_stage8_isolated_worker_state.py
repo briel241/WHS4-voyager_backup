@@ -44,7 +44,7 @@ class IsolatedWorkerStateTests(unittest.TestCase):
                 seam.radio_state()
 
     def test_tuned_comparison_uses_existing_one_hz_readback_contract(self):
-        from apps.stage8_stage7_seams import Stage7ReceiverReadiness
+        from apps.poc_device_seams_inprocess import Stage7ReceiverReadiness
         worker = NS(rx_rf_lo_hz=100, lane_rx_center_hz={0: 199, 1: 202})
         self.assertEqual((0,), Stage7ReceiverReadiness._tuned_lanes(worker, 200))
         worker.rx_rf_lo_hz, worker.rx_lo_hz = None, 199

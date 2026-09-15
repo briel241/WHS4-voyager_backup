@@ -6,7 +6,7 @@
   (`poc_run.workload_request`)을 coordinator 세션에 실어 위임한다. 요청 해석·baseline·arm 실패 evidence는
   `poc_run` 공통 조립기가 소유한다(2-1).
 - 실행 종단(Linux 전용): coordinator 세션 fake가 production RF-off 세션의 per-workload handler
-  (`stage8_rf_off_session.poc_workload_record` → `_handle_poc_request` → `poc_run`)를 **같은 프로세스에서**
+  (`rf_off_software_session.poc_workload_record` → `_handle_poc_request` → `poc_run`)를 **같은 프로세스에서**
   실행해 실 child·Unix socket·SDK·engine·Stage 5 provider·독립 판정·cleanup을 CLI 경로(`_run_workload`/
   `_menu`/`execute`)로 검증한다. device 경계 seam은 session이 제공한다(RF-off software). 실 coordinator
   프로세스(`--rf-off-software`) 종단은 `RealCoordinatorPocEndToEnd`가 맡는다. scenario verdict → PoC
@@ -98,7 +98,7 @@ class _PocDeviceSession:
     poc_workloads_in_coordinator = True
 
     def __init__(self, run_root, run_id):
-        from apps import stage8_rf_off_session as rf_off
+        from apps import rf_off_software_session as rf_off
         self.run_root = Path(run_root)
         self.run_id = run_id
         self.submitted = []
@@ -117,7 +117,7 @@ class _PocDeviceSession:
         request = self._requests[workload_id]
         if request.get("poc") is None:
             return self._scenario_result()
-        from apps import stage8_rf_off_session as rf_off
+        from apps import rf_off_software_session as rf_off
         return rf_off.poc_workload_record(self, self.runtime, request,
                                           run_root=self.run_root, run_id=self.run_id)
 
@@ -355,7 +355,7 @@ class PocNegativeCliTest(unittest.TestCase):
             self.assertIn(result["poc"]["poc_infrastructure"], ("ERROR", "ABORTED"), "\n".join(lines))
             self.assertEqual(result["poc_severity"], "POC_ABORT")
             self.assertEqual(session.seams.group_tx.committed_groups, 0)
-            from apps import stage8_rf_off_session as rf_off
+            from apps import rf_off_software_session as rf_off
             self.assertEqual(session.runtime.state, rf_off.build_rf_off_runtime().state)
 
     def test_r1_poc_off_is_structural_zero(self):
@@ -582,7 +582,7 @@ class ExecuteLevelPocEndToEnd(unittest.TestCase):
 
     def _factory(self, *, terminal=True):
         import test_standalone_run_cli as harness
-        from apps import stage8_rf_off_session as rf_off
+        from apps import rf_off_software_session as rf_off
         base_cls = harness.make_session_factory()
 
         class PocFakeSession(base_cls):

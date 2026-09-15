@@ -42,7 +42,7 @@ class D10SharedTest(unittest.TestCase):
         repo = Path(__file__).resolve().parents[3]
         for path in (repo/'VDETER/apps/stage7_endpoint_launcher.py',
                      repo/'VDETER/tests/support/poc_device_harness.py',
-                     repo/'apps/stage8_rf_off_session.py'):
+                     repo/'apps/rf_off_software_session.py'):
             with self.subTest(path=str(path)):
                 tree = ast.parse(path.read_text(encoding='utf-8'))
                 self.assertTrue(any(isinstance(n, ast.ImportFrom) and n.module == 'vdeter.stage7.short_data_compat'

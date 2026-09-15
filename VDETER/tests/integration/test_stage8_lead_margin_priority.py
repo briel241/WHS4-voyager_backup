@@ -112,7 +112,7 @@ class AuthoritativeSinkRefusalSeverityTest(unittest.TestCase):
     """명시적 장치 거부는 방사 0이 확정이다 — UNKNOWN으로 올리지 않는다."""
 
     def _sink(self, adapter):
-        from apps.stage8_stage7_seams import Stage7AuthoritativeRadioSink
+        from apps.poc_device_seams_inprocess import Stage7AuthoritativeRadioSink
 
         return Stage7AuthoritativeRadioSink(
             adapter, sidecar=_FakeSidecar(), source_station_id=_STATIONS["MASS-B"],
@@ -169,7 +169,7 @@ class RealGroupLeadAndPriorityTest(unittest.TestCase):
 
     @staticmethod
     def _assemble(members):
-        from apps.stage8_stage7_seams import assemble_authoritative_provider
+        from apps.poc_device_seams_inprocess import assemble_authoritative_provider
         from tests.support.stage7 import STATION_BY_ENDPOINT
 
         return assemble_authoritative_provider(
@@ -207,7 +207,7 @@ class RealGroupLeadAndPriorityTest(unittest.TestCase):
 
     def test_lead_record_survives_after_the_parent_becomes_terminal(self):
         """원장에서 parent가 제거된 뒤에도 lead 기록이 남는다(사후 조회 가능)."""
-        from apps.stage8_stage7_seams import Stage7LedgerTerminalSource
+        from apps.poc_device_seams_inprocess import Stage7LedgerTerminalSource
         from tests.support.stage7 import drive_stage7_group
 
         clock, medium, members = self._group()

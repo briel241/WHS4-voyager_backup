@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock
-from apps.stage8_collision_exchange import CollisionExchange
+from apps.workload_rx_scope import WorkloadRxScope
 from vdeter.stage7.collision_runtime import ENDPOINTS
 
 
@@ -22,7 +22,7 @@ class ScopeControlTests(unittest.TestCase):
                                 dual_ready=ep == "MASS-B")
                 return {"active": True, "enabled": True, "disabled": True}
             clients[ep] = Mock(call=Mock(side_effect=call))
-        return CollisionExchange(clients, dual=True), clients
+        return WorkloadRxScope(clients, dual=True), clients
 
     def test_start_ready_close_no_worker_thread(self):
         scope, clients = self.build()
@@ -170,7 +170,7 @@ class ScopeControlTests(unittest.TestCase):
             return original(command, body)
         clients["MASS-B"].call.side_effect = always_fail
         scope.start()
-        with patch("apps.stage8_collision_exchange.time") as fake_time:
+        with patch("apps.workload_rx_scope.time") as fake_time:
             fake_time.monotonic.side_effect = itertools.count(0.0, 1.0)
             fake_time.sleep = lambda _s: None
             with self.assertRaises(Exception) as ctx:

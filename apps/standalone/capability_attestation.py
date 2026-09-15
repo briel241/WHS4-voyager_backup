@@ -7,7 +7,7 @@
 다음 둘은 여기서 답하지 않으며 이 값으로 대체되지 않는다.
 
     B. runtime readiness — 지금 workload에서 tuning·창 등록·clock/generation·수신 준비가 유효한가?
-       (`CollisionExchange.dual_ready` 등 별도 생산·검증·철회 경로)
+       (`WorkloadRxScope.dual_ready` 등 별도 생산·검증·철회 경로)
     C. RF 실행 권한/최종 qualification — 지금 RF를 실행할 수 있는가? 설치가 qualified인가?
        (`vdeter qualify` reference·RF gate. capability 광고는 이 gate를 우회하지 않는다)
 

@@ -75,7 +75,7 @@ class RfOffStage7DeviceSession:
     def __init__(self, run_root: str) -> None:
         from tests.support.stage7 import (build_stage7_software_group, drive_stage7_group,
                                           start_stage7_group, STATION_BY_ENDPOINT)
-        from apps.stage8_stage7_seams import assemble_authoritative_provider
+        from apps.poc_device_seams_inprocess import assemble_authoritative_provider
         self.run_root = Path(run_root)
         from vdeter.mac.coordinator import MacCoordinator
         from vdeter.stage7.short_data_compat import wrap_short_data_submission
@@ -111,17 +111,17 @@ class RfOffStage7DeviceSession:
         return self._provider
 
     def poc_device_seams(self):
-        from apps.stage8_stage7_seams import stage7_device_seams
+        from apps.poc_device_seams_inprocess import stage7_device_seams
         return stage7_device_seams(self._members)          # provider 미사용 경로의 fallback seam
 
     def poc_terminal_source(self):
-        from apps.stage8_stage7_seams import Stage7LedgerTerminalSource
+        from apps.poc_device_seams_inprocess import Stage7LedgerTerminalSource
         # P10: 권위 TX 원장에서 terminal을 읽는다(매질 로그·직접 통지 휴리스틱 아님).
         return Stage7LedgerTerminalSource(self._bindings["adapter"], self._bindings["sink"],
                                           pump=self._pump)
 
     def poc_target_response(self):
-        from apps.stage8_stage7_seams import stage7_target_response
+        from apps.poc_device_seams_inprocess import stage7_target_response
         return stage7_target_response(self._members)           # 실 application 관측(P09)
 
     def poc_workload_steps(self, scenario_id):

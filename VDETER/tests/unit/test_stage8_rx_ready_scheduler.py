@@ -1,8 +1,8 @@
 """RX-ready NEXT_SAFE_SLOT must not bypass MAC, clocks, or exact-slot semantics."""
 import unittest
 from types import SimpleNamespace as NS
-from apps.stage8_launcher_seams import MacSlotScheduler
-from apps.stage8_stage7_seams import Stage7ReceiverReadiness, hw_ns_to_slot
+from apps.poc_device_seams_launcher import MacSlotScheduler
+from apps.poc_device_seams_inprocess import Stage7ReceiverReadiness, hw_ns_to_slot
 from vdeter.poc.shared_medium.radiation import ReadinessDecision, ReadinessRequest
 from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
 from vdeter.poc.api.errors import PocError, PocErrorCode

@@ -1,6 +1,6 @@
 """PoC provider seam을 **launcher 소유 장치**에 프로세스 경계 너머로 결속한다(P01/P02).
 
-`stage8_stage7_seams`는 같은 프로세스 안의 Stage 7 객체를 직접 잡는다(RF-off 검증 경로). 일반 운용
+`poc_device_seams_inprocess`는 같은 프로세스 안의 Stage 7 객체를 직접 잡는다(RF-off 검증 경로). 일반 운용
 경로에서는 장치를 launcher가 단독 소유하므로, supervisor(=workload를 소유한 scenario controller
 프로세스)는 §16.2 TEST adapter op으로만 장치에 닿는다.
 
@@ -8,7 +8,7 @@
 `poc_radio_state` 응답으로 채워 주므로, 이미 시험된 `Stage7HwTimeScheduler`(P03)·
 `Stage7WorkerArbiter`(P04)·`Stage7ReceiverReadiness`(P06)를 **그대로** 쓴다. 새로 만드는 것은 프로세스
 경계를 실제로 건너가는 두 가지 — 송신 sink와 TX 원장 terminal source — 뿐이다. 그 둘 안에서도 fan-out
-child 검증·논리 목적지 해석(`device_boundary`)·채널 이름 변환·원장 terminal 분류(`stage8_stage7_seams`)는
+child 검증·논리 목적지 해석(`device_boundary`)·채널 이름 변환·원장 terminal 분류(`poc_device_seams_inprocess`)는
 RF-off sink와 **같은 함수**를 쓴다 — 두 경로가 다른 것은 경계를 건너는 방식(RPC vs 직접 호출)뿐이다.
 
 송신은 launcher 쪽에서 권위 `radio_adapter.schedule_tx` 하나로만 나간다(여기서 우회 경로를 만들지
@@ -29,7 +29,7 @@ from vdeter.poc.integration.device_boundary import (
     validate_fanout_children,
 )
 
-from apps.stage8_stage7_seams import (
+from apps.poc_device_seams_inprocess import (
     Link11WaveformFactory,
     Stage7HwTimeScheduler,
     Stage7ReceiverReadiness,

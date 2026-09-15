@@ -205,7 +205,7 @@ class LocalCoordinatorSession:
             #  자격 경로는 byte-identical로 보존한다.) B210 launcher는 spawn하지 않는다.
             return [
                 self.python_executable,
-                str(self.repo_root / "apps" / "stage8_rf_off_session.py"),
+                str(self.repo_root / "apps" / "rf_off_software_session.py"),
                 "--run-id", self.run_id,
                 "--run-root", str(self.run_root),
             ]

@@ -15,8 +15,8 @@ import hashlib
 import unittest
 from types import SimpleNamespace as NS
 
-from apps.stage8_launcher_seams import LauncherLedgerTerminalSource, LauncherRadioSink
-from apps.stage8_stage7_seams import (
+from apps.poc_device_seams_launcher import LauncherLedgerTerminalSource, LauncherRadioSink
+from apps.poc_device_seams_inprocess import (
     Link11WaveformFactory,
     Stage7AuthoritativeRadioSink,
     Stage7LedgerTerminalSource,
