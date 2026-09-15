@@ -1,7 +1,9 @@
 """Stage 4 MAC 시험 fixture (`stage4_mac_baseline.md` §7).
 
 고정 `TimeSource`, seed와 ID로 3-endpoint Software Radio scenario를 재현 가능하게 만든다.
-여기의 station ID, 좌표와 인증서는 시험용 값이며 규범 값이 아니다.
+배치 값(station ID·TBB control station·service area)과 profile 조립기는 production module
+`vdeter.stage7.deployment`의 것을 재사용하고, 여기서는 결정적 시험 기본값(고정 TBB 유효창·시험
+fingerprint·Type 0 override·signer·trust store)만 주입한다. 인증서는 시험용 값이며 규범 값이 아니다.
 """
 
 from __future__ import annotations
@@ -11,8 +13,6 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from vdeter.common.contracts.mac_execution import ServiceAreaMode
-from vdeter.common.contracts.message import ControlStationServiceArea
 from vdeter.common.contracts.service import ServiceRole
 from vdeter.common.identifiers import StationId
 from vdeter.common.results import Ok
@@ -22,6 +22,16 @@ from vdeter.mac.deployment import (
     Type0OverrideProfile,
 )
 from vdeter.mac.tbb import TBB_START_TIME_EPOCH_SECONDS
+from vdeter.stage7.deployment import (
+    MASS_A_STATION_ID,
+    MASS_B_STATION_ID,
+    MEMBER_STATION_IDS,
+    ROC_STATION_ID,
+    SERVICE_AREA,
+    TBB_CONTROL_STATION_ID,
+    build_deployment_profile,
+    build_tbb_fixture,
+)
 
 try:  # optional cryptography extra
     from cryptography import x509  # noqa: F401
@@ -30,21 +40,9 @@ try:  # optional cryptography extra
 except Exception:  # pragma: no cover - optional dependency
     HAS_CRYPTO = False
 
-#: 승인된 이름 매핑. ROC를 제외한 두 ID 중 작은 값이 MASS-A, 큰 값이 MASS-B다.
-MASS_A_STATION_ID = StationId(111111111)
-ROC_STATION_ID = StationId(222222222)
-MASS_B_STATION_ID = StationId(333333333)
-MEMBER_STATION_IDS = (MASS_A_STATION_ID, ROC_STATION_ID, MASS_B_STATION_ID)
-TBB_CONTROL_STATION_ID = 7
-
-#: 시험용 service area. `priority`는 완료 profile에서 정확히 0이다.
-SERVICE_AREA = ControlStationServiceArea(
-    longitude_1_tenth_minutes=1000,
-    latitude_1_tenth_minutes=2000,
-    longitude_2_tenth_minutes=3000,
-    latitude_2_tenth_minutes=4000,
-    priority=0,
-)
+#: 구성원 station ID(MASS_A/ROC/MASS_B, MEMBER_STATION_IDS)·TBB_CONTROL_STATION_ID·SERVICE_AREA는
+#: production 배치 module `vdeter.stage7.deployment`에서 import한 같은 객체다(위). 시험 전용 값은
+#: 아래 고정 유효창·시험 fingerprint·Type 0 override·signer·trust store다.
 
 #: 2000-01-01 이후 초. 아래 `RUN_START_UTC_NANOSECONDS`가 이 구간 안에 있다.
 FIXTURE_START_TIME = 800_000_000
@@ -60,8 +58,8 @@ EXPECTED_CERTIFICATE_FINGERPRINT = bytes.fromhex("a1b2c3d4e5f6")
 
 
 def tbb_fixture() -> Stage4TbbFixtureProfile:
-    return Stage4TbbFixtureProfile(
-        fixture_id="STAGE4_25K_TEST_TBB_V1",
+    """결정적 시험 기본값(고정 start_time 800,000,000 s·60분)을 주입한 production TBB fixture."""
+    return build_tbb_fixture(
         start_time=FIXTURE_START_TIME,
         validity=FIXTURE_VALIDITY_MINUTES,
         service_area=SERVICE_AREA,
@@ -77,14 +75,14 @@ def deployment_profile(
     tbb_control_station_id: int = TBB_CONTROL_STATION_ID,
     fixture: Stage4TbbFixtureProfile | None = None,
 ) -> MacDeploymentProfile:
-    return MacDeploymentProfile(
-        service_area_mode=ServiceAreaMode.INSIDE_CONFIGURED,
-        roc_station_id=roc_station_id,
-        tbb_control_station_id=tbb_control_station_id,
-        member_station_ids=member_station_ids,
-        expected_tbb_certificate_fingerprint=expected_fingerprint,
+    """시험 기본값(시험 fingerprint·`tbb_fixture()`)을 주입한 production 배치 profile."""
+    return build_deployment_profile(
+        expected_fingerprint=expected_fingerprint,
         tbb_fixture=fixture or tbb_fixture(),
         type0_override=type0_override,
+        member_station_ids=member_station_ids,
+        roc_station_id=roc_station_id,
+        tbb_control_station_id=tbb_control_station_id,
     )
 
 

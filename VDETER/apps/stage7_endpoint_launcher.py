@@ -306,31 +306,27 @@ def main(argv=None) -> int:
     is_control = resolved.endpoint.role is ServiceRole.CONTROL
     crypto, expected_fingerprint = _load_trust(APP_ROOT, is_control=is_control)
 
-    from tests.support.stage4 import deployment_profile, tbb_fixture
+    from vdeter.stage7.deployment import (
+        build_deployment_profile,
+        build_utc_day_tbb_fixture,
+    )
 
     # TBB 유효창을 실제 UTC로 결속한다 — 시험 fixture 기본값(2000-epoch
     # 800,000,000s ≈ 2025-05, validity 60분)은 실물 UTC에서 만료 상태라
     # CONTROL start가 MAC_RESOURCE_UNAVAILABLE("활성 TBB 유효기간")로
     # 거부된다 (rr-p2-17 run k 실측 + 로컬 재현). 세 endpoint가 동일 값을
     # 독립 계산하도록 UTC 자정 기준으로 결정적으로 정하고(48h 유효),
-    # 값은 아래 evidence 로그로 남긴다.
-    import dataclasses as _dc
-    import time as _time
-
-    from vdeter.mac.tbb import TBB_START_TIME_EPOCH_SECONDS
-
-    _now_2000 = int(_time.time()) - TBB_START_TIME_EPOCH_SECONDS // 1
-    _midnight_2000 = (_now_2000 // 86_400) * 86_400
-    fixture = _dc.replace(
-        tbb_fixture(), start_time=_midnight_2000, validity=2_880
-    )
+    # 값은 아래 evidence 로그로 남긴다. 배치 값과 그 계산은 production
+    # module `vdeter.stage7.deployment`가 소유한다(시험 package 의존 없음).
+    fixture = build_utc_day_tbb_fixture(now_epoch_seconds=int(time.time()))
     print(
-        f"[launcher] TBB fixture start_time={_midnight_2000} validity=2880min",
+        f"[launcher] TBB fixture start_time={fixture.start_time} "
+        f"validity={fixture.validity}min",
         flush=True,
     )
-    deployment = deployment_profile(
+    deployment = build_deployment_profile(
         expected_fingerprint=expected_fingerprint,
-        fixture=fixture,
+        tbb_fixture=fixture,
     )
 
     # intent notifier는 runtime client 생성 후 바인딩한다 (§16.1 event).
