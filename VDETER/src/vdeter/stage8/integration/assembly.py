@@ -16,14 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..shared_medium.provider import SharedMediumActionProvider
-from .device_boundary import Stage7GroupTxRadioSink
+from .device_boundary import GroupTxRadioSink
 
 
 @dataclass(frozen=True)
 class DeviceSeams:
     """provider가 요구하는 device 경계 seam 묶음.
 
-    - `group_tx`: Stage 7 group TX 경계(retune_tx_lo/submit_tx_group). `Stage7GroupTxRadioSink`로
+    - `group_tx`: Stage 7 group TX 경계(retune_tx_lo/submit_tx_group). `GroupTxRadioSink`로
       감싸 RadioBurstSink가 된다.
     - `arbiter`: 정상 TX 우선 자원 arbiter(reserve/release).
     - `scheduler`: MAC scheduler(resolve/register_trigger/clear_triggers).
@@ -42,13 +42,13 @@ def assemble_provider(seams: DeviceSeams, *, dual_channel_installed: bool = Fals
                       packet_resolver=None) -> SharedMediumActionProvider:
     """`DeviceSeams`로 fail-closed production provider를 조립한다.
 
-    device 경계(`group_tx`)를 `Stage7GroupTxRadioSink`로 감싸 RadioBurstSink 계약을 만든 뒤
+    device 경계(`group_tx`)를 `GroupTxRadioSink`로 감싸 RadioBurstSink 계약을 만든 뒤
     `SharedMediumActionProvider.for_production`을 호출한다. for_production은 scheduler·waveform
     factory·arbiter·radio_sink·rx_readiness가 모두 실제 callable seam인지 검증하고 하나라도
     누락이면 ValueError로 거부한다(조용한 RF-off 기본값 금지).
     """
 
-    radio_sink = Stage7GroupTxRadioSink(group_tx=seams.group_tx)
+    radio_sink = GroupTxRadioSink(group_tx=seams.group_tx)
     return SharedMediumActionProvider.for_production(
         radio_sink=radio_sink,
         rx_readiness=seams.rx_readiness,

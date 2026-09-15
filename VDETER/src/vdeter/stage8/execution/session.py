@@ -92,7 +92,7 @@ class ResidentSession:
             raise SessionExpired(Deadline.BRINGUP, "BRINGUP 상태가 아님")
         now = self.clock.monotonic()
         self._check_absolute(now)
-        if now - self.bringup_started_at > self.policy.stage7.bringup_s:
+        if now - self.bringup_started_at > self.policy.service.bringup_s:
             self._expire(Deadline.BRINGUP, "bring-up 상한 초과")
         self._enter_ready(now)
 
@@ -121,7 +121,7 @@ class ResidentSession:
 
     def _check_close(self, now: float) -> None:
         if (self.state != SessionState.CLOSED and self.closing_started_at is not None
-                and now - self.closing_started_at > self.policy.stage7.close_s):
+                and now - self.closing_started_at > self.policy.service.close_s):
             self._expire(Deadline.CLOSE, "close 상한 초과")
 
     def _check_absolute(self, now: float) -> None:
@@ -140,13 +140,13 @@ class ResidentSession:
         self._check_close(now)
         self._check_absolute(now)
         if self.state == SessionState.BRINGUP and self.bringup_started_at is not None:
-            if now - self.bringup_started_at > self.policy.stage7.bringup_s:
+            if now - self.bringup_started_at > self.policy.service.bringup_s:
                 self._expire(Deadline.BRINGUP, "bring-up 상한 초과")
         if self.state == SessionState.READY and self.ready_since is not None:
             if now - self.ready_since > self.policy.ready_idle_s:
                 self._expire(Deadline.READY_IDLE, "READY idle 상한 초과")
         if self.state == SessionState.RUNNING and self.workload_started_at is not None:
-            if now - self.workload_started_at > self.policy.stage7.workload_s:
+            if now - self.workload_started_at > self.policy.service.workload_s:
                 self._expire(Deadline.WORKLOAD, "workload 상한 초과")
 
     # --- workload 경계 ------------------------------------------------------
@@ -169,7 +169,7 @@ class ResidentSession:
             raise SessionExpired(Deadline.WORKLOAD, "RUNNING 상태가 아님")
         now = self.clock.monotonic()
         self._check_absolute(now)
-        if now - self.workload_started_at > self.policy.stage7.workload_s:
+        if now - self.workload_started_at > self.policy.service.workload_s:
             self._expire(Deadline.WORKLOAD, "workload 상한 초과")
         self.workloads_run += 1
         self.workload_started_at = None
@@ -219,9 +219,9 @@ class ResidentSession:
             "policy": {
                 "session_absolute_s": self.policy.session_absolute_s,
                 "ready_idle_s": self.policy.ready_idle_s,
-                "bringup_s": self.policy.stage7.bringup_s,
-                "workload_s": self.policy.stage7.workload_s,
-                "close_s": self.policy.stage7.close_s,
+                "bringup_s": self.policy.service.bringup_s,
+                "workload_s": self.policy.service.workload_s,
+                "close_s": self.policy.service.close_s,
             },
             "lease": self.lease.as_evidence(),
         }

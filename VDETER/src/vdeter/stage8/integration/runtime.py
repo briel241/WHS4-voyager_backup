@@ -7,7 +7,7 @@ child의 CLOSE→SIGTERM→SIGKILL 종료를 **구동**하게 한다. 순수 모
 보지 않으며, 실제 제어 흐름(만료 → 실 child 종료 → 잔존 0)을 검증한다.
 
 시간은 `session.clock`으로 측정한다(시험은 fake clock으로 단축). production의 900/600초 **권위 값**은
-`SessionPolicy`(기본은 Stage 7 mirror; Stage 6 통합에서 실제 Stage 7 세션 상수 주입)로 결속되며,
+`SessionPolicy`(기본은 서비스 세션 mirror; Stage 6 통합에서 실제 서비스 세션 상수 주입)로 결속되며,
 실제 900초 wall-clock 시험은 이 범위에서 수행하지 않는다(Stage 6 hard gate로 이관). 어느 deadline도
 PoC 활동으로 연장·재무장하지 않는다(`ResidentSession`이 강제). `EXPIRED` 뒤에도 close 예산(close_s)을
 적용하며 재호출로 예산을 연장하지 않는다.

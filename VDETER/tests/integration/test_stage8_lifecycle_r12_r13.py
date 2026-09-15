@@ -188,7 +188,7 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
     """
 
     def test_workload_deadline_expiry_during_steps_terminates_child(self):
-        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
         from vdeter.stage8.execution.session import ResidentSession, SessionExpired
         from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
         from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
@@ -204,7 +204,7 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
         # workload 상한 1초인 권위 정책을 주입하고 fake clock으로 만료를 만든다(상한 완화 아님).
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         self.assertTrue(runner.arm() and conn.running)
@@ -236,7 +236,7 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
         놓친다(고정 pump timeout까지 붙잡힘). guard를 connection의 대기 루프에도 걸어 **블로킹 구간
         안에서** 만료를 잡는지 확인한다. step은 하나뿐이므로 step 경계 검사로는 절대 잡히지 않는다.
         """
-        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
         from vdeter.stage8.execution.session import ResidentSession, SessionExpired
         from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
         from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
@@ -251,7 +251,7 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
                                 tx_executor=ProductionTxExecutor(provider))
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         self.assertTrue(runner.arm() and conn.running)

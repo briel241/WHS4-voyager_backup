@@ -14,7 +14,7 @@ import unittest
 from vdeter.stage8.execution.verdict import ActionExecution, TargetEffect
 from vdeter.stage8.integration.assembly import DeviceSeams, assemble_provider
 from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
-from vdeter.stage8.integration.device_boundary import SoftwareGroupTx, Stage7GroupTxRadioSink
+from vdeter.stage8.integration.device_boundary import SoftwareGroupTx, GroupTxRadioSink
 from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
 from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
 from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
@@ -39,7 +39,7 @@ class AssemblyFailClosedTest(unittest.TestCase):
     def test_group_tx_boundary_requires_stage7_methods(self):
         # group_tx가 retune_tx_lo/submit_tx_group을 제공하지 않으면 device 경계 생성이 실패한다.
         with self.assertRaises(ValueError):
-            Stage7GroupTxRadioSink(group_tx=object())
+            GroupTxRadioSink(group_tx=object())
 
     def test_assemble_provider_fail_closed_on_missing_seam(self):
         # scheduler 누락 → for_production이 fail-closed(조용한 RF-off 기본값 금지).
@@ -159,7 +159,7 @@ class RfOffFailClosedTest(unittest.TestCase):
 
 
 class RealWorkerInterfaceTest(unittest.TestCase):
-    """Stage7GroupTxRadioSink가 **실제 Stage 7 worker(double)**의 group TX 계약에 결속됨을 확인한다.
+    """GroupTxRadioSink가 **실제 Stage 7 worker(double)**의 group TX 계약에 결속됨을 확인한다.
 
     실 worker interface(retune_tx_lo(target_hz, command_time_ns)·submit_tx_group(bursts))에 그대로
     바인딩되어 방사됨을 보인다(§4: 실제 group TX 인터페이스에 맞춘 prepare/commit 경계). 실 UHD/B210·
@@ -191,14 +191,14 @@ class RealWorkerInterfaceTest(unittest.TestCase):
                          ["bursts"])
 
     def test_adapter_radiates_through_real_worker_double(self):
-        from vdeter.stage8.integration.device_boundary import Stage7GroupTxRadioSink
+        from vdeter.stage8.integration.device_boundary import GroupTxRadioSink
         from vdeter.stage8.poc_api.types import PhysicalChannel
         from vdeter.stage8.shared_medium.radiation import (
             AtomicBroadcast, ReferenceWaveformFactory,
         )
         from vdeter.stage8.shared_medium.testing import ReadyReadiness
         medium, worker = self._real_worker()
-        sink = Stage7GroupTxRadioSink(group_tx=worker)
+        sink = GroupTxRadioSink(group_tx=worker)
         broadcast = AtomicBroadcast(radio_sink=sink, rx_readiness=ReadyReadiness(),
                                     waveform_factory=ReferenceWaveformFactory())
         parent = broadcast.build_parent(

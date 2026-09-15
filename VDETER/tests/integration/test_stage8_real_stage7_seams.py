@@ -434,7 +434,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
 
     def test_p03_retune_is_issued_before_tx_not_at_tx_time(self):
         from vdeter.stage8.integration.device_boundary import (RETUNE_LEAD_NS,
-                                                               Stage7GroupTxRadioSink)
+                                                               GroupTxRadioSink)
         from vdeter.stage8.poc_api.types import PhysicalChannel
         from vdeter.stage8.shared_medium.radiation import ChildPath
 
@@ -458,7 +458,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
                       channel=PhysicalChannel.LOWER, payload_digest="d", waveform_sha256="w",
                       scheduled_sample=0, scheduled_hw_timestamp_ns=tx_ns, samples=samples)
             for cable, lane, rx in (("C4", 0, "ROC"), ("C6", 1, "MASS-A")))
-        sink = Stage7GroupTxRadioSink(group_tx=spy)
+        sink = GroupTxRadioSink(group_tx=spy)
         sink.commit_group(sink.prepare_group(group_id="p", children=children))
         self.assertEqual(spy.retunes[0][1], tx_ns - RETUNE_LEAD_NS)   # TX보다 200 ms 앞섬
         self.assertLess(spy.retunes[0][1], spy.submits[0][0][2])       # staging < 방사

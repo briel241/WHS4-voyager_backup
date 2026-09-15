@@ -27,7 +27,7 @@ _HARNESS = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "suppo
 if _LINUX:
     from vdeter.stage8._supervisor.child import SubprocessChildSpawner
     from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
     from vdeter.stage8.execution.runner import observation_step, scenario_started
     from vdeter.stage8.execution.session import Deadline, ResidentSession
     from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure
@@ -184,7 +184,7 @@ class ResidentRuntimeDeadlineTest(unittest.TestCase):
         # 짧은 workload cap(1초)을 주입해 fake clock으로 만료 → 살아있는 협조 child가 종료된다.
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         conn = self._idle_connection("wd")
@@ -202,7 +202,7 @@ class ResidentRuntimeDeadlineTest(unittest.TestCase):
     def test_noncooperative_child_escalates_to_sigkill(self):
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         conn = self._harness_connection("wk")
@@ -229,7 +229,7 @@ class ResidentRuntimeDeadlineTest(unittest.TestCase):
     def test_expired_close_budget_applies_and_does_not_extend(self):
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0, close_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0, close_s=1.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         conn = self._idle_connection("wc")

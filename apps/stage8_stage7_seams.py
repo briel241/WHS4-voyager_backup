@@ -26,7 +26,7 @@ from vdeter.phy.burst.rrc import validate_cf32le_full_scale
 from vdeter.phy.transmitter import Phy11Transmitter
 from vdeter.stage7.testing.poc_device import build_poc_tx_request
 from vdeter.stage8.integration.device_boundary import (
-    Stage7GroupTxRadioSink,
+    GroupTxRadioSink,
     logical_destination_station_id,
     validate_fanout_children,
 )
@@ -612,7 +612,7 @@ def stage7_target_response(members, *, station_to_endpoint=None):
 class Stage7AuthoritativeRadioSink:
     """radio_sink seam → **권위 `radio_adapter.schedule_tx` 경로**로 방사한다(P02/P03/P04/P08/P10).
 
-    이전 sink(`Stage7GroupTxRadioSink`)는 worker에 직접 `submit_tx_group`을 걸어 권위 adapter를
+    이전 sink(`GroupTxRadioSink`)는 worker에 직접 `submit_tx_group`을 걸어 권위 adapter를
     우회했다. 그 결과 (a) 권위 lead/retune/lane 겹침 검사를 받지 않고 (b) adapter TX 원장에 없어
     BURST_ACK이 버려져 terminal이 영원히 미확정이었다.
 
@@ -689,7 +689,7 @@ def stage7_device_seams(members, *, channel_center_hz=None):
     """실행 중 software group의 실 MASS-B endpoint 객체로 `DeviceSeams`를 만든다(no stub).
 
     `assemble_provider(DeviceSeams)` 경로(poc_run→prepare_poc_workload)가 그대로 실 seam으로 provider를
-    조립하도록, 5개 seam을 실 Stage 7 객체로 채운다: group_tx=실 worker(assemble가 Stage7GroupTxRadioSink로
+    조립하도록, 5개 seam을 실 Stage 7 객체로 채운다: group_tx=실 worker(assemble가 GroupTxRadioSink로
     감쌈)·arbiter=실 lane 점유·scheduler=실 hardware clock slot·rx_readiness=실 수신기 RX·waveform=실 frozen PHY.
     """
     from vdeter.stage8.integration.assembly import DeviceSeams
@@ -751,7 +751,7 @@ def assemble_stage7_provider(members, *, channel_center_hz=None, dual_channel_in
     mass_b = members["MASS-B"].endpoint.dependencies.radio.lease.worker
     workers = {ep: members[ep].endpoint.dependencies.radio.lease.worker for ep in members}
     provider = SharedMediumActionProvider.for_production(
-        radio_sink=Stage7GroupTxRadioSink(group_tx=mass_b),      # 실 group-TX worker
+        radio_sink=GroupTxRadioSink(group_tx=mass_b),      # 실 group-TX worker
         waveform_factory=Link11WaveformFactory(),                # 실 frozen PHY
         scheduler=Stage7HwTimeScheduler(mass_b),                 # 실 hardware clock slot
         arbiter=Stage7WorkerArbiter(mass_b),                     # 실 worker lane 점유

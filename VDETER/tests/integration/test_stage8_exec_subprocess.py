@@ -200,7 +200,7 @@ class SubprocessExecutionTest(unittest.TestCase):
         # session workload-deadline 만료가 살아 있는 실 child의 close→종료→cleanup을 구동함을
         # 보인다(enforcement mechanism, 짧은 cap 주입). 900초 literal과 비협조 child의
         # SIGKILL-at-900s는 Stage 6 hard gate로 이관(spec §5.2: 900초는 기존 Stage 7 세션 상한).
-        from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
         from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired
         from vdeter.stage8.testing.fakes import FakeClock
 
@@ -209,7 +209,7 @@ class SubprocessExecutionTest(unittest.TestCase):
         sup = self._supervisor(snap, provider, "w-d")
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock,
-                                  policy=SessionPolicy(stage7=Stage7Timeouts(workload_s=1.0)))
+                                  policy=SessionPolicy(service=ServiceSessionTimeouts(workload_s=1.0)))
         session.start()
         clock.set(0.5)
         session.complete_bringup()

@@ -32,7 +32,7 @@ from vdeter.stage7.testing.controller import PocDeviceCallError
 from vdeter.stage7.testing.poc_device import PocDeviceUnavailable, Stage7PocDeviceSeam
 from vdeter.stage8.integration.device_boundary import (
     SoftwareGroupTx,
-    Stage7GroupTxRadioSink,
+    GroupTxRadioSink,
     logical_destination_station_id,
 )
 from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
@@ -592,7 +592,7 @@ class FanoutValidationParityTest(unittest.TestCase):
         return {
             "launcher": _launcher_path().sink,
             "rf_off": _rf_off_path().sink,
-            "worker_direct": Stage7GroupTxRadioSink(group_tx=SoftwareGroupTx()),
+            "worker_direct": GroupTxRadioSink(group_tx=SoftwareGroupTx()),
         }
 
     def test_identical_rejections_for_malformed_groups(self):
@@ -615,7 +615,7 @@ class FanoutValidationParityTest(unittest.TestCase):
         # 권위 schedule_tx 경계는 한 요청으로 두 lane에 방사하므로 lane 구분을 요구하지 않는다(의도된 차이).
         children = _children("ROC", same_lane=True)
         with self.assertRaises(RuntimeError) as ctx:
-            Stage7GroupTxRadioSink(group_tx=SoftwareGroupTx()).prepare_group(group_id="p", children=children)
+            GroupTxRadioSink(group_tx=SoftwareGroupTx()).prepare_group(group_id="p", children=children)
         self.assertIn("서로 다른 두 TX lane", str(ctx.exception))
         for path in (_launcher_path(), _rf_off_path()):
             path.sink.prepare_group(group_id="p", children=children)   # 거부하지 않는다

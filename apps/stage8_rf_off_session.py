@@ -212,11 +212,11 @@ def build_rf_off_runtime():
     handler를 프로세스 안에서 돌리는 시험이 같은 runtime을 쓴다.
     """
     from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
     from vdeter.stage8.execution.session import ResidentSession
     from vdeter.stage8.integration.runtime import ResidentPocRuntime
 
-    policy = SessionPolicy(stage7=Stage7Timeouts(
+    policy = SessionPolicy(service=ServiceSessionTimeouts(
         bringup_s=SESSION_BRINGUP_TIMEOUT_S, workload_s=WORKLOAD_TIMEOUT_S,
         close_s=SESSION_CLOSE_TIMEOUT_S))
     runtime = ResidentPocRuntime(ResidentSession(clock=RealMonotonicClock(), policy=policy))

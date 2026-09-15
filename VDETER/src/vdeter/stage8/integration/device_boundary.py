@@ -8,7 +8,7 @@ Stage 5 provider의 `RadioBurstSink` seam(§6.1: prepare_group -> commit_group�
     submit_tx_group(bursts)                      # bursts = [(lane, data, hardware_time_ns), ...]
                                                  #   한 번의 atomic group TX 제출(같은 hardware time)
 
-`Stage7GroupTxRadioSink`는 이 실 worker 계약에 **연결 가능한** production adapter다:
+`GroupTxRadioSink`는 이 실 worker 계약에 **연결 가능한** production adapter다:
 
     prepare_group = 선택 채널로 TX LO retune(두 lane 공유 TX LO)  [staging]
     commit_group  = 두 child burst를 같은 hardware timestamp로 submit_tx_group 단일 호출 [atomic]
@@ -33,7 +33,7 @@ def validate_fanout_children(children, *, require_distinct_lanes: bool = False) 
     """fan-out child 계약 검증 — 모든 radio sink(worker 직접·권위 `schedule_tx`·launcher RPC)가 같은 검사를 쓴다.
 
     정확히 두 child, 같은 hardware timestamp, 같은 선택 채널(공유 TX LO). `require_distinct_lanes`면
-    두 child의 TX lane이 서로 달라야 한다 — worker 직접 제출 경계(`Stage7GroupTxRadioSink`)는 lane별
+    두 child의 TX lane이 서로 달라야 한다 — worker 직접 제출 경계(`GroupTxRadioSink`)는 lane별
     burst를 한 group으로 싣기 때문이다. 권위 `schedule_tx` 경계(launcher·RF-off sink)는 한 요청으로 두
     lane에 방사하므로 lane 구분을 요구하지 않는다. 위반은 RuntimeError이고 상위 radiation이 방사 전
     거부(`BroadcastNotAdmitted`, TX 0)로 처리한다.
@@ -67,7 +67,7 @@ def logical_destination_station_id(children, station_id_by_endpoint) -> int:
     return int(target)
 
 
-class Stage7GroupTxRadioSink:
+class GroupTxRadioSink:
     """production `RadioBurstSink`. **실 Stage 7 worker의 group TX 계약**에 결속한다(§6.1, WSM-REQ-01/03).
 
     `group_tx`는 실 worker와 같은 두 method를 제공해야 한다(fail-closed):
@@ -182,5 +182,5 @@ class SoftwareGroupTx:
         return tuple(out)
 
 
-__all__ = ("Stage7GroupTxRadioSink", "SoftwareGroupTx", "validate_fanout_children",
+__all__ = ("GroupTxRadioSink", "SoftwareGroupTx", "validate_fanout_children",
            "logical_destination_station_id")

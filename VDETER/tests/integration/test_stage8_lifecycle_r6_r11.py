@@ -30,7 +30,7 @@ if _LINUX:
     from vdeter.stage8._supervisor.child import SubprocessChildSpawner
     from vdeter.stage8._supervisor.clock import RealMonotonicClock
     from vdeter.stage8.execution.lease import MassBLease
-    from vdeter.stage8.execution.limits import SessionPolicy, Stage7Timeouts
+    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
     from vdeter.stage8.execution.runner import WorkloadRunner, observation_step
     from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired
     from vdeter.stage8.execution.snapshot import create_snapshot
@@ -147,7 +147,7 @@ class R6CloseBudgetTest(_Base):
     def test_r6_700s_teardown_exceeds_close_budget_and_is_rejected(self):
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock, policy=SessionPolicy(
-            stage7=Stage7Timeouts(workload_s=900.0, close_s=600.0)))
+            service=ServiceSessionTimeouts(workload_s=900.0, close_s=600.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         conn, *_ = self._connection("w6a")
@@ -164,7 +164,7 @@ class R6CloseBudgetTest(_Base):
     def test_r6_teardown_within_budget_passes(self):
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock, policy=SessionPolicy(
-            stage7=Stage7Timeouts(workload_s=900.0, close_s=600.0)))
+            service=ServiceSessionTimeouts(workload_s=900.0, close_s=600.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         conn, *_ = self._connection("w6b")
@@ -194,7 +194,7 @@ class R6CloseBudgetTest(_Base):
     def test_r6_begin_close_is_idempotent_no_budget_extension(self):
         clock = FakeClock(0.0)
         session = ResidentSession(clock=clock, policy=SessionPolicy(
-            stage7=Stage7Timeouts(close_s=10.0)))
+            service=ServiceSessionTimeouts(close_s=10.0)))
         runtime = ResidentPocRuntime(session)
         runtime.bring_up()
         session.begin_close()
