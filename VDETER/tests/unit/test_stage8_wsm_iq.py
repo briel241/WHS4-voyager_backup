@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium import decoder as D
-from vdeter.stage8.shared_medium import iq as IQ
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium import decoder as D
+from vdeter.poc.shared_medium import iq as IQ
 
 P1 = b"WSM-POS-ROC-0001"
 P3 = b"WSM-NEG-ALT--003"
@@ -142,7 +142,7 @@ class CollisionDecodeTest(unittest.TestCase):
 
 class BoundedResourceTest(unittest.TestCase):
     def test_collision_group_cap(self):
-        from vdeter.stage8.shared_medium.constants import MAX_COLLISION_GROUP_BURSTS
+        from vdeter.poc.shared_medium.constants import MAX_COLLISION_GROUP_BURSTS
 
         bursts = [
             IQ.IqBurst(PhysicalChannel.LOWER, 0, (complex(0.1, 0.0),))

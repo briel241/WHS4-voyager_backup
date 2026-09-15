@@ -16,15 +16,15 @@ import unittest
 _LINUX = hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET") and hasattr(os, "getuid")
 
 if _LINUX:
-    from vdeter.stage8._supervisor import socket_dir as sd
-    from vdeter.stage8._supervisor.credentials import read_peer_credential, verify_peer
-    from vdeter.stage8._supervisor.supervisor import PocSupervisor
-    from vdeter.stage8._supervisor.transport import SeqPacketServer
-    from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.poc_api.sdk import PocContext, SdkEngine
-    from vdeter.stage8.poc_api.transport import connect
-    from vdeter.stage8.testing import (
+    from vdeter.poc._supervisor import socket_dir as sd
+    from vdeter.poc._supervisor.credentials import read_peer_credential, verify_peer
+    from vdeter.poc._supervisor.supervisor import PocSupervisor
+    from vdeter.poc._supervisor.transport import SeqPacketServer
+    from vdeter.poc.api.errors import PocError, PocErrorCode
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.api.sdk import PocContext, SdkEngine
+    from vdeter.poc.api.transport import connect
+    from vdeter.poc.testing import (
         ClientRunner,
         FakeActionSubmitProvider,
         RecordingCallbacks,
@@ -32,7 +32,7 @@ if _LINUX:
         build_manifest,
         hello_payload,
     )
-    from vdeter.stage8.testing.fakes import make_observation
+    from vdeter.poc.testing.fakes import make_observation
 
 
 def _client_main(socket_path, token, stop_event):

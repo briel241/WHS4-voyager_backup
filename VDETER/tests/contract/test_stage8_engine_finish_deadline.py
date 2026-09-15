@@ -13,18 +13,18 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8._supervisor.engine import SERVER_EVENT_ACK_GRACE_S, EngineState
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.codec import CodecError, decode_wire_packet, encode_wire_packet
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.limits import (
+from vdeter.poc._supervisor.engine import SERVER_EVENT_ACK_GRACE_S, EngineState
+from vdeter.poc.api import protocol
+from vdeter.poc.api.codec import CodecError, decode_wire_packet, encode_wire_packet
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.limits import (
     ARMED_DEADLINE_S,
     CALLBACK_ON_FINISH_DEADLINE_S,
     HELLO_DEADLINE_S,
 )
-from vdeter.stage8.poc_api.messages import parse_envelope
-from vdeter.stage8.testing import FakeClock
-from vdeter.stage8.testing.server_harness import (
+from vdeter.poc.api.messages import parse_envelope
+from vdeter.poc.testing import FakeClock
+from vdeter.poc.testing.server_harness import (
     ack_message,
     drive_to_running,
     hello_message,

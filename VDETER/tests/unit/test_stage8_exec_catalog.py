@@ -18,18 +18,18 @@ from unittest import mock
 _POSIX = hasattr(os, "getuid") and sys.platform != "win32"
 
 if _POSIX:
-    from vdeter.stage8.execution import catalog as catmod
-    from vdeter.stage8.execution.catalog import (
+    from vdeter.poc.execution import catalog as catmod
+    from vdeter.poc.execution.catalog import (
         CatalogError,
         binding_digest,
         scan_catalog,
     )
-    from vdeter.stage8.execution.limits import (
+    from vdeter.poc.execution.limits import (
         MAX_CATALOG_PACKAGES,
         MAX_MANIFEST_BYTES,
         MAX_SCRIPT_BYTES,
     )
-    from vdeter.stage8.testing.execution_fakes import poc_toml, write_poc_package
+    from vdeter.poc.testing.execution_fakes import poc_toml, write_poc_package
 
 
 @unittest.skipUnless(_POSIX, "catalog scan은 POSIX 전용")

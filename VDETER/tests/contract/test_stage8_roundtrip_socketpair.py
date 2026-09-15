@@ -10,14 +10,14 @@ import unittest
 _LINUX = hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET")
 
 if _LINUX:
-    from vdeter.stage8.poc_api.codec import decode_wire_packet, encode_wire_packet
-    from vdeter.stage8.poc_api.limits import MAX_WIRE_PACKET_BYTES
-    from vdeter.stage8.poc_api.messages import parse_envelope
-    from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine
-    from vdeter.stage8.poc_api.transport import OversizedPacket, SeqPacketEndpoint, connected_pair
-    from vdeter.stage8.testing import FakeActionSubmitProvider, RecordingCallbacks, build_manifest, hello_payload
-    from vdeter.stage8.testing.fakes import make_observation
-    from vdeter.stage8.testing.server_harness import DEFAULT_TOKEN_HEX, make_engine
+    from vdeter.poc.api.codec import decode_wire_packet, encode_wire_packet
+    from vdeter.poc.api.limits import MAX_WIRE_PACKET_BYTES
+    from vdeter.poc.api.messages import parse_envelope
+    from vdeter.poc.api.sdk import ClientState, PocContext, SdkEngine
+    from vdeter.poc.api.transport import OversizedPacket, SeqPacketEndpoint, connected_pair
+    from vdeter.poc.testing import FakeActionSubmitProvider, RecordingCallbacks, build_manifest, hello_payload
+    from vdeter.poc.testing.fakes import make_observation
+    from vdeter.poc.testing.server_harness import DEFAULT_TOKEN_HEX, make_engine
 
 
 @unittest.skipUnless(_LINUX, "Linux SOCK_SEQPACKET 전용")

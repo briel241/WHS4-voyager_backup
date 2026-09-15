@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.execution.manifest import ManifestError, parse_and_validate
-from vdeter.stage8.testing.execution_fakes import poc_toml
+from vdeter.poc.execution.manifest import ManifestError, parse_and_validate
+from vdeter.poc.testing.execution_fakes import poc_toml
 
 SCRIPT = "replay_attack.py"
 SHA = "ab" * 32

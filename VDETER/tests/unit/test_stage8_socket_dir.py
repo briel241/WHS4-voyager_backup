@@ -14,8 +14,8 @@ import unittest
 _LINUX = hasattr(os, "getuid")
 
 if _LINUX:
-    from vdeter.stage8._supervisor import socket_dir as sd
-    from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+    from vdeter.poc._supervisor import socket_dir as sd
+    from vdeter.poc.api.errors import PocError, PocErrorCode
 
 
 @unittest.skipUnless(_LINUX, "Linux 전용 socket-dir 시험")

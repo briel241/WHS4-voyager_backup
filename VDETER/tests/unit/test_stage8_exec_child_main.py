@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.execution import child_main
-from vdeter.stage8.poc_api.codec import encode_wire_packet
-from vdeter.stage8.poc_api.messages import parse_envelope
-from vdeter.stage8.testing.client_runner import RecordingCallbacks
-from vdeter.stage8.testing.fakes import build_manifest
-from vdeter.stage8.testing.server_harness import (
+from vdeter.poc.execution import child_main
+from vdeter.poc.api.codec import encode_wire_packet
+from vdeter.poc.api.messages import parse_envelope
+from vdeter.poc.testing.client_runner import RecordingCallbacks
+from vdeter.poc.testing.fakes import build_manifest
+from vdeter.poc.testing.server_harness import (
     DEFAULT_TOKEN,
     armed_message,
     hello_message,

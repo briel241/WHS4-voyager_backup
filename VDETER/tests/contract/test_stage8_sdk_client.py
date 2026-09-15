@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.codec import canonical_sha256
-from vdeter.stage8.poc_api.errors import PocErrorCode
-from vdeter.stage8.poc_api.messages import build_message, parse_envelope
-from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine
-from vdeter.stage8.testing import RecordingCallbacks, build_manifest, hello_payload
+from vdeter.poc.api import protocol
+from vdeter.poc.api.codec import canonical_sha256
+from vdeter.poc.api.errors import PocErrorCode
+from vdeter.poc.api.messages import build_message, parse_envelope
+from vdeter.poc.api.sdk import ClientState, PocContext, SdkEngine
+from vdeter.poc.testing import RecordingCallbacks, build_manifest, hello_payload
 
 TOKEN_HEX = bytes(range(32)).hex()
 

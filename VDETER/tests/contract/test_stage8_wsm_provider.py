@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.seams import ActionSubmitProvider
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.seams import ActionSubmitProvider
+from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+from vdeter.poc.shared_medium import testing as TD
+from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
 
 
 def _provider(**kw):
@@ -257,7 +257,7 @@ class ArbiterReleaseTest(unittest.TestCase):
         self.assertEqual([k for k, v in arbiter.owner_by_key.items() if v == "POC"], [])
 
     def test_resolve_outcome_releases_reservation(self):
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+        from vdeter.poc.shared_medium.radiation import ChildTerminal, ParentOutcome
 
         arbiter = TD.FakeArbiter()
         prov, _s, _f = _provider(arbiter=arbiter)
@@ -273,7 +273,7 @@ class CommitUnknownErrorContractTest(unittest.TestCase):
     """finding 2: group commit 불명확은 Stage 3 PocError(POC_TX_OUTCOME_UNKNOWN)로 변환·correlation 보존."""
 
     def test_commit_unknown_maps_to_session_inhibit_pocerror(self):
-        from vdeter.stage8.poc_api.errors import Severity
+        from vdeter.poc.api.errors import Severity
 
         sink = TD.CountingRadioSink(fail_on_commit=True)
         prov, _s, _f = _provider(sink=sink)
@@ -300,7 +300,7 @@ class CommitUnknownErrorContractTest(unittest.TestCase):
 
     def test_commit_refusal_rejects_the_action_without_inhibiting_the_session(self):
         # 권위 장치가 방사 전 거부를 회신 -> 자원 반환 + PoC action만 거부. 세션은 유지된다.
-        from vdeter.stage8.poc_api.errors import Severity
+        from vdeter.poc.api.errors import Severity
 
         arbiter = TD.FakeArbiter()
         sink = TD.CountingRadioSink(refuse_on_commit=True)
@@ -315,7 +315,7 @@ class CommitUnknownErrorContractTest(unittest.TestCase):
 
     def test_commit_unknown_still_inhibits_and_retains_the_cause(self):
         # 인접 negative: 불명확은 그대로 SESSION_INHIBIT이고, 원인 문구가 detail에 남는다.
-        from vdeter.stage8.poc_api.errors import Severity
+        from vdeter.poc.api.errors import Severity
 
         sink = TD.CountingRadioSink(fail_on_commit=True)
         prov, _s, _f = _provider(sink=sink)
@@ -501,7 +501,7 @@ class TriggerRegistryTest(unittest.TestCase):
     """finding A: trigger registry는 workload당 bounded·cleanup되어야 하고 VDETER hook으로만 등록된다."""
 
     def test_registry_is_bounded_with_eviction(self):
-        from vdeter.stage8.shared_medium.constants import MAX_TRIGGER_REGISTRY
+        from vdeter.poc.shared_medium.constants import MAX_TRIGGER_REGISTRY
 
         sched = NextSafeSlotScheduler(current_slot=0, lead_slots=1)
         for i in range(MAX_TRIGGER_REGISTRY + 500):
@@ -516,7 +516,7 @@ class TriggerRegistryTest(unittest.TestCase):
         self.assertEqual(sched.trigger_count, 0)
 
     def test_constructor_initial_triggers_respect_cap(self):
-        from vdeter.stage8.shared_medium.constants import MAX_TRIGGER_REGISTRY
+        from vdeter.poc.shared_medium.constants import MAX_TRIGGER_REGISTRY
 
         init = {f"o{i}": (1, 1) for i in range(MAX_TRIGGER_REGISTRY + 50)}
         sched = NextSafeSlotScheduler(triggers=init)
@@ -543,7 +543,7 @@ class ResolveIdempotencyTest(unittest.TestCase):
     """finding C: 재-resolve/unknown resolve는 raw 예외가 아니라 PocError/저장결과여야 한다."""
 
     def test_double_resolve_returns_same_outcome_no_raw(self):
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+        from vdeter.poc.shared_medium.radiation import ChildTerminal, ParentOutcome
 
         prov, _s, _f = _provider()
         prov.submit(_action("ROC"), request_id="r1")
@@ -588,7 +588,7 @@ class CleanupRobustnessTest(unittest.TestCase):
         self.assertIsNone(prov.parent_for("r"))
 
     def test_resolve_outcome_release_failure_inhibits_no_raw(self):
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal
+        from vdeter.poc.shared_medium.radiation import ChildTerminal
 
         arb = _ReleaseBoomArbiter()
         prov = SharedMediumActionProvider(
@@ -625,7 +625,7 @@ class ChildTerminalValidationTest(unittest.TestCase):
         self.assertIn("r", prov._reservations)
 
     def test_none_terminal_is_outcome_unknown(self):
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome
+        from vdeter.poc.shared_medium.radiation import ChildTerminal, ParentOutcome
 
         prov, _s, _f = _provider()
         prov.submit(_action("ROC"), request_id="r")
@@ -641,8 +641,8 @@ class ProviderEvidenceTest(unittest.TestCase):
     """finding B: provider.build_evidence는 outcomes 인자 없이도 확정 outcome을 반영한다."""
 
     def test_build_evidence_reflects_resolved_outcome_without_explicit_outcomes(self):
-        from vdeter.stage8.shared_medium import observation as O
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal
+        from vdeter.poc.shared_medium import observation as O
+        from vdeter.poc.shared_medium.radiation import ChildTerminal
 
         sink = TD.CountingRadioSink()
         prov = SharedMediumActionProvider(
@@ -655,7 +655,7 @@ class ProviderEvidenceTest(unittest.TestCase):
         # terminal resolve 후 evidence 조립: outcomes 인자 없이도 provider가 확정 결과를 주입한다.
         prov.resolve_outcome("e1", {c.child_id: ChildTerminal.COMPLETED for c in parent.children})
         scene = O.observe_scene([parent])
-        from vdeter.stage8.shared_medium.radiation import BroadcastResult, ParentOutcome
+        from vdeter.poc.shared_medium.radiation import BroadcastResult, ParentOutcome
         pending_result = BroadcastResult(
             parent=parent, committed=True,
             submitted_child_ids=tuple(c.child_id for c in parent.children),

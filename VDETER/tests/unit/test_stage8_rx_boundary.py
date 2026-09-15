@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium.iq import to_cf32le
-from vdeter.stage8.shared_medium.rx_boundary import (
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium.iq import to_cf32le
+from vdeter.poc.shared_medium.rx_boundary import (
     MAX_WINDOW_ARRIVALS,
     RxArrival,
     RxBoundaryError,

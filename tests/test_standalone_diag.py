@@ -137,7 +137,7 @@ def test_preselected_catalog_is_allowed_only_with_a_decided_poc_id():
     id가 없는 비대화형 catalog는 **여전히 거부**되어야 한다.
     """
     from apps.standalone import poc_run
-    from vdeter.stage8.execution.selection import SourceMode
+    from vdeter.poc.execution.selection import SourceMode
 
     # 확정 선택: 허용되고 mode는 CATALOG.
     option = poc_run.resolve_option(poc=None, poc_dir="/poc", interactive=False,
@@ -167,7 +167,7 @@ def test_preselected_catalog_treats_missing_poc_id_as_baseline():
     제출되지 않는 빈틈이 있었다(preselected 조건에 `poc_id is not None`이 들어 있었다).
     """
     from apps.standalone import poc_run
-    from vdeter.stage8.execution.selection import SourceMode
+    from vdeter.poc.execution.selection import SourceMode
 
     if not (hasattr(os, "getuid") and sys.platform != "win32"):
         import unittest
@@ -205,7 +205,7 @@ def test_diag_run_refuses_plan_poc_without_a_catalog():
 
 def test_rf_domain_selection_contract_is_unchanged():
     """`resolve_source_mode`(rf 영역)는 손대지 않았다 — 대화형 계약이 그대로다."""
-    from vdeter.stage8.execution.selection import (
+    from vdeter.poc.execution.selection import (
         SelectionError,
         SourceMode,
         resolve_source_mode,

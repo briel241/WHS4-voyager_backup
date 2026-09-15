@@ -35,9 +35,9 @@ class D10DualPocTest(unittest.TestCase):
         from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
         from apps.stage8_launcher_seams import LauncherDeviceClient
         from apps.standalone import poc_run
-        from vdeter.stage8.execution.snapshot import create_snapshot
-        from vdeter.stage8.testing.execution_fakes import write_poc_package
-        from vdeter.stage8.execution.verdict import ScenarioVerdict, PocInfrastructure
+        from vdeter.poc.execution.snapshot import create_snapshot
+        from vdeter.poc.testing.execution_fakes import write_poc_package
+        from vdeter.poc.execution.verdict import ScenarioVerdict, PocInfrastructure
         # required dual workload를 쓰는 시험이므로 지원 조건을 충족한 설치 증언 fixture 안에서
         # 돈다(위치만 임시. 판정 논리는 production 그대로이며 후보 설치 검증이 아니다).
         stack = contextlib.ExitStack()

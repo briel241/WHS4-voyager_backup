@@ -11,13 +11,13 @@ import os
 import sys
 import unittest
 
-from vdeter.stage8.execution.verdict import ActionExecution, TargetEffect
-from vdeter.stage8.integration.assembly import DeviceSeams, assemble_provider
-from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
-from vdeter.stage8.integration.device_boundary import SoftwareGroupTx, GroupTxRadioSink
-from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+from vdeter.poc.execution.verdict import ActionExecution, TargetEffect
+from vdeter.poc.integration.assembly import DeviceSeams, assemble_provider
+from vdeter.poc.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
+from vdeter.poc.integration.device_boundary import SoftwareGroupTx, GroupTxRadioSink
+from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.types import ActionDescriptor, ActionKind
 
 
 def _replay(target="ROC", packet_hex="deadbeefcafe", **kw):
@@ -191,12 +191,12 @@ class RealWorkerInterfaceTest(unittest.TestCase):
                          ["bursts"])
 
     def test_adapter_radiates_through_real_worker_double(self):
-        from vdeter.stage8.integration.device_boundary import GroupTxRadioSink
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium.radiation import (
+        from vdeter.poc.integration.device_boundary import GroupTxRadioSink
+        from vdeter.poc.api.types import PhysicalChannel
+        from vdeter.poc.shared_medium.radiation import (
             AtomicBroadcast, ReferenceWaveformFactory,
         )
-        from vdeter.stage8.shared_medium.testing import ReadyReadiness
+        from vdeter.poc.shared_medium.testing import ReadyReadiness
         medium, worker = self._real_worker()
         sink = GroupTxRadioSink(group_tx=worker)
         broadcast = AtomicBroadcast(radio_sink=sink, rx_readiness=ReadyReadiness(),
@@ -224,13 +224,13 @@ class _MinimalArbiter:
 
 class _ReadyRx:
     def window_ready(self, request):
-        from vdeter.stage8.shared_medium.radiation import ReadinessDecision
+        from vdeter.poc.shared_medium.radiation import ReadinessDecision
         return ReadinessDecision(ready=True, reason="READY")
 
 
 class _Wf:
     def encode(self, *, source_station, channel, payload):
-        from vdeter.stage8.shared_medium.radiation import ReferenceWaveformFactory
+        from vdeter.poc.shared_medium.radiation import ReferenceWaveformFactory
         return ReferenceWaveformFactory().encode(
             source_station=source_station, channel=channel, payload=payload)
 

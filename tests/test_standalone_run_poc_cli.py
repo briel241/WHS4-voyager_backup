@@ -62,7 +62,7 @@ _REACTIVE_REPLAY = (
 
 
 def _write_poc(poc_dir, base="cli_replay"):
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.execution_fakes import write_poc_package
     write_poc_package(poc_dir, base, poc_id=base.replace("_", "-"),
                       script=_REACTIVE_REPLAY)
     return os.path.join(poc_dir, base + ".py")
@@ -126,20 +126,20 @@ class _PocDeviceSession:
 
     # PoC device 경계와 scenario event는 session이 제공한다(RF-off software).
     def poc_device_seams(self):
-        from vdeter.stage8.integration.rf_off import rf_off_seams
+        from vdeter.poc.integration.rf_off import rf_off_seams
         self.seams = rf_off_seams()
         return self.seams
 
     def poc_workload_steps(self, scenario_id):
-        from vdeter.stage8.execution.runner import observation_step
-        from vdeter.stage8.testing.fakes import make_observation
+        from vdeter.poc.execution.runner import observation_step
+        from vdeter.poc.testing.fakes import make_observation
         return [observation_step(make_observation(
             source_station="ROC", destination_station="MASS-A"))]
 
     def poc_terminal_source(self):
         # R3: RF-off 시험은 장비 double의 child terminal source를 **명시적으로** 제공한다.
         # 실장비 session은 이 자리에 실 RF terminal 콜백을 연결한다(미제공 시 executor는 TX_UNKNOWN).
-        from vdeter.stage8.integration.rf_off import rf_off_terminal_source
+        from vdeter.poc.integration.rf_off import rf_off_terminal_source
         return rf_off_terminal_source()
 
 
@@ -159,7 +159,7 @@ class CliContractTest(unittest.TestCase):
                 "sys.path[:0]=[%r,%r,%r]\n"
                 "from apps.standalone import cli\n"
                 "cli.build_parser().parse_args(['run','SC-VDE-006'])\n"
-                "bad=[m for m in sys.modules if m.startswith('vdeter.stage8')]\n"
+                "bad=[m for m in sys.modules if m.startswith('vdeter.poc')]\n"
                 "sys.exit(0 if not bad else 3)\n"
                 % (_REPO, _SRC, os.path.join(_REPO, "VDETER")))
         env = dict(os.environ)
@@ -313,7 +313,7 @@ class _NoTerminalSession(_PocDeviceSession):
 class _RejectSession(_PocDeviceSession):
     """action 하나가 RF 전 거부(REJECTED_BEFORE_TX)되는 session — session inhibit 아님(R2)."""
     def poc_device_seams(self):
-        from vdeter.stage8.integration.rf_off import rf_off_seams
+        from vdeter.poc.integration.rf_off import rf_off_seams
         self.seams = rf_off_seams(fail_on_retune=True)
         return self.seams
 
@@ -343,7 +343,7 @@ class PocNegativeCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as poc_dir, \
                 tempfile.TemporaryDirectory() as run_root:
             os.chmod(poc_dir, 0o700)
-            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            from vdeter.poc.testing.execution_fakes import write_poc_package
             write_poc_package(poc_dir, "armfail", poc_id="armfail", script=_ARM_FAIL_POC)
             poc_path = os.path.join(poc_dir, "armfail.py")
             session = _PocDeviceSession(run_root, "run-armfail")
@@ -541,7 +541,7 @@ class PocNegativeCliTest(unittest.TestCase):
                 tempfile.TemporaryDirectory() as run_root:
             os.chmod(poc_dir, 0o700)
             marker = os.path.join(poc_dir, "imported.marker")
-            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            from vdeter.poc.testing.execution_fakes import write_poc_package
             script = ("from pathlib import Path\nPath(%r).write_text('x')\n" % marker
                       + "class Poc:\n    def on_start(self, c): return []\n"
                         "    def on_event(self, e, c): return []\n"
@@ -563,7 +563,7 @@ class PocNegativeCliTest(unittest.TestCase):
 
 
 def _write_poc_compat(poc_dir, base, compat):
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.execution_fakes import write_poc_package
     write_poc_package(poc_dir, base, poc_id=base.replace("_", "-"),
                       script=_REACTIVE_REPLAY, compatible_scenarios=compat)
     return os.path.join(poc_dir, base + ".py")
@@ -618,19 +618,19 @@ class ExecuteLevelPocEndToEnd(unittest.TestCase):
                 return result
 
             def poc_device_seams(self):
-                from vdeter.stage8.integration.rf_off import rf_off_seams
+                from vdeter.poc.integration.rf_off import rf_off_seams
                 return rf_off_seams()
 
             def poc_workload_steps(self, scenario_id):
-                from vdeter.stage8.execution.runner import observation_step
-                from vdeter.stage8.testing.fakes import make_observation
+                from vdeter.poc.execution.runner import observation_step
+                from vdeter.poc.testing.fakes import make_observation
                 return [observation_step(make_observation(
                     source_station="ROC", destination_station="MASS-A"))]
 
             def poc_terminal_source(self):
                 if not terminal:
                     return None
-                from vdeter.stage8.integration.rf_off import rf_off_terminal_source
+                from vdeter.poc.integration.rf_off import rf_off_terminal_source
                 return rf_off_terminal_source()
 
         PocFakeSession.instances = base_cls.instances
@@ -816,11 +816,11 @@ class PocCleanupN1N2Test(unittest.TestCase):
     def test_n2_arm_interrupt_reraises_original_no_action_no_completed(self):
         # ARMED 직후 KeyboardInterrupt: PocRunError로 변환하지 않고 원형 재전달, cleanup 중 신규 event/
         # action 0(TX group 0), 결과 COMPLETED 아님. 실 child.
-        from vdeter.stage8.integration.entry import select_and_snapshot
+        from vdeter.poc.integration.entry import select_and_snapshot
         with tempfile.TemporaryDirectory() as poc_dir, \
                 tempfile.TemporaryDirectory() as run_root:
             os.chmod(poc_dir, 0o700)
-            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            from vdeter.poc.testing.execution_fakes import write_poc_package
             write_poc_package(poc_dir, "reactive", poc_id="reactive", script=_REACTIVE_ANY)
             poc_path = os.path.join(poc_dir, "reactive.py")
             session = _PocDeviceSession(run_root, "run-n2")
@@ -859,11 +859,11 @@ class PocCleanupN1N2Test(unittest.TestCase):
 
     def test_n2_arm_ordinary_failure_is_pocrunerror_aborted_no_action(self):
         # arm이 일반 예외로 실패하면 PocRunError(.evidence ABORTED/ERROR), 신규 action 0.
-        from vdeter.stage8.integration.entry import select_and_snapshot
+        from vdeter.poc.integration.entry import select_and_snapshot
         with tempfile.TemporaryDirectory() as poc_dir, \
                 tempfile.TemporaryDirectory() as run_root:
             os.chmod(poc_dir, 0o700)
-            from vdeter.stage8.testing.execution_fakes import write_poc_package
+            from vdeter.poc.testing.execution_fakes import write_poc_package
             write_poc_package(poc_dir, "reactive", poc_id="reactive", script=_REACTIVE_ANY)
             poc_path = os.path.join(poc_dir, "reactive.py")
             session = _PocDeviceSession(run_root, "run-n2e")

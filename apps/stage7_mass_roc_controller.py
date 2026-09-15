@@ -989,7 +989,7 @@ class PocWorkloadHost:
         return self._bindings["terminal_source"]
 
     def poc_target_response(self):
-        from vdeter.stage8.execution.verdict import TargetEffect
+        from vdeter.poc.execution.verdict import TargetEffect
 
         def response(action, result, parent):
             from vdeter.mac.tdma import FRAME_NANOSECONDS
@@ -1010,14 +1010,14 @@ class PocWorkloadHost:
         return response
 
     def poc_workload_steps(self, scenario_id):
-        from vdeter.stage8.execution.runner import scenario_started
+        from vdeter.poc.execution.runner import scenario_started
         return [scenario_started()]
 
     # --- 실행 중 실 관측 -------------------------------------------------------
 
     def new_observations(self):
         """Only the actor's actual, pre-MAC-policy-cleared PHY observations."""
-        from vdeter.stage8.poc_api.types import ObservationRecord, TuningState, PhysicalChannel
+        from vdeter.poc.api.types import ObservationRecord, TuningState, PhysicalChannel
         from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
         out = []
         for record in self._exchange.observations() if self._exchange is not None else ():

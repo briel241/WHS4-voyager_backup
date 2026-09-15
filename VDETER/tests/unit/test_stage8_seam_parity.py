@@ -30,21 +30,21 @@ from vdeter.common.results import Err, Ok
 from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
 from vdeter.stage7.testing.controller import PocDeviceCallError
 from vdeter.stage7.testing.poc_device import PocDeviceUnavailable, Stage7PocDeviceSeam
-from vdeter.stage8.integration.device_boundary import (
+from vdeter.poc.integration.device_boundary import (
     SoftwareGroupTx,
     GroupTxRadioSink,
     logical_destination_station_id,
 )
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.types import (
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.types import (
     TARGET_TO_PHYSICAL_CHANNEL,
     ActionDescriptor,
     ActionKind,
     PhysicalChannel,
 )
-from vdeter.stage8.shared_medium.iq import to_cf32le
-from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
-from vdeter.stage8.shared_medium.radiation import (
+from vdeter.poc.shared_medium.iq import to_cf32le
+from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
+from vdeter.poc.shared_medium.radiation import (
     BroadcastCommitRefused,
     ChildPath,
     ChildTerminal,

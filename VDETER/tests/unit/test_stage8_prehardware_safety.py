@@ -45,7 +45,7 @@ class PrehardwareSafetyTests(unittest.TestCase):
         self.assertFalse(scope.evidence['cleanup_complete'])
 
     def test_start_cleanup_uncertainty_is_session_inhibit(self):
-        from vdeter.stage8.poc_api.errors import PocError
+        from vdeter.poc.api.errors import PocError
         scope, clients = control_module.ScopeControlTests().build()
         clients['MASS-A'].call.side_effect = RuntimeError('reply lost')
         with patch('apps.stage8_collision_exchange.time.monotonic', side_effect=[0, 8]):

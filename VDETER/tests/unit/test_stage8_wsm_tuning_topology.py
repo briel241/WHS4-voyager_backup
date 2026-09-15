@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium import constants as C
-from vdeter.stage8.shared_medium import topology as T
-from vdeter.stage8.shared_medium import tuning as TU
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium import constants as C
+from vdeter.poc.shared_medium import topology as T
+from vdeter.poc.shared_medium import tuning as TU
 
 
 class G1DerivedConstantsTest(unittest.TestCase):

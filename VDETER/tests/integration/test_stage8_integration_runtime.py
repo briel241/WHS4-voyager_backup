@@ -25,23 +25,23 @@ _HARNESS = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "suppo
                                          "poc_child_harness.py"))
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-    from vdeter.stage8.execution.runner import observation_step, scenario_started
-    from vdeter.stage8.execution.session import Deadline, ResidentSession
-    from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure
-    from vdeter.stage8.integration.rf_off import (
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.clock import RealMonotonicClock
+    from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+    from vdeter.poc.execution.runner import observation_step, scenario_started
+    from vdeter.poc.execution.session import Deadline, ResidentSession
+    from vdeter.poc.execution.verdict import ActionExecution, PocInfrastructure
+    from vdeter.poc.integration.rf_off import (
         assemble_rf_off_provider, rf_off_seams, rf_off_terminal_source,
     )
-    from vdeter.stage8.integration.entry import (
+    from vdeter.poc.integration.entry import (
         run_poc_workload, select_and_snapshot,
     )
-    from vdeter.stage8.integration.runtime import ResidentPocRuntime
-    from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
-    from vdeter.stage8.testing.fakes import FakeClock, build_manifest, make_observation
+    from vdeter.poc.integration.runtime import ResidentPocRuntime
+    from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.fakes import FakeClock, build_manifest, make_observation
 
 
 def _reactive(marker):
@@ -100,7 +100,7 @@ class EntryDriverTest(unittest.TestCase):
     def test_incompatible_poc_not_selectable(self):
         write_poc_package(self.poc, "other", poc_id="other",
                           script=_reactive("A"), compatible_scenarios=("SC-VDE-001",))
-        from vdeter.stage8.execution.selection import SelectionError
+        from vdeter.poc.execution.selection import SelectionError
         with self.assertRaises(SelectionError):
             select_and_snapshot(scenario_id="SC-VDE-006", poc_dir=self.poc, poc_id="other",
                                 dest_dir=os.path.join(self.snap_root, "w1"))
@@ -144,12 +144,12 @@ class ResidentRuntimeDeadlineTest(unittest.TestCase):
 
     def _idle_connection(self, workload_id):
         write_poc_package(self.poc, "idle", poc_id="idle", script=_IDLE)
-        from vdeter.stage8.execution.snapshot import create_snapshot
+        from vdeter.poc.execution.snapshot import create_snapshot
         snap = create_snapshot(self.poc, "idle", dest_dir=os.path.join(self.snap_root, workload_id),
                                scenario_id="SC-VDE-006")
         provider, seams = assemble_rf_off_provider()
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 "VDETER_POC_SNAPSHOT_SCRIPT": snap.script_path,
                 "VDETER_POC_ENTRYPOINT": snap.descriptor.entrypoint,
@@ -241,7 +241,7 @@ class ResidentRuntimeDeadlineTest(unittest.TestCase):
         # EXPIRED 뒤 close 예산(1초) 적용. begin_close 후 close_s 초과면 CLOSE deadline.
         session.begin_close()
         clock.set(2.0 + 1.0 + 0.5)  # close 시작 뒤 close_s(1초) 초과
-        from vdeter.stage8.execution.session import SessionExpired
+        from vdeter.poc.execution.session import SessionExpired
         with self.assertRaises(SessionExpired) as ctx:
             session.complete_close()
         self.assertEqual(ctx.exception.deadline, Deadline.CLOSE)

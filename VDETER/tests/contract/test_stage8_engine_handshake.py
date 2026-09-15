@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8._supervisor.engine import EngineState, SupervisorEngine
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.errors import PocErrorCode
-from vdeter.stage8.poc_api.messages import build_message, parse_envelope
-from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-from vdeter.stage8.testing import FakeActionSubmitProvider, FakeClock, build_manifest
+from vdeter.poc._supervisor.engine import EngineState, SupervisorEngine
+from vdeter.poc.api import protocol
+from vdeter.poc.api.errors import PocErrorCode
+from vdeter.poc.api.messages import build_message, parse_envelope
+from vdeter.poc.api.negotiation import ServerCapabilityConfig
+from vdeter.poc.testing import FakeActionSubmitProvider, FakeClock, build_manifest
 
 TOKEN = bytes(range(32))
 TOKEN_HEX = TOKEN.hex()

@@ -13,7 +13,9 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
-_STAGE8 = os.path.join(_SRC, "vdeter", "stage8")
+_POC_PKG = os.path.join(_SRC, "vdeter", "poc")
+#: (호환) 옛 공개 경로 shim — 구현이 아니라 alias만 담는다.
+_COMPAT_SHIM = os.path.join(_SRC, "vdeter", "stage8")
 _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 
 # Stage 6 RF-off 통합에서 명시 승인된 shared-medium adapter: PoC provider seam을 실 Stage 7 객체에
@@ -45,7 +47,7 @@ class StructuralZeroTest(unittest.TestCase):
         result = _run_py(
             "import threading, sys\n"
             "before=threading.active_count()\n"
-            "import vdeter.stage8.shared_medium\n"
+            "import vdeter.poc.shared_medium\n"
             "after=threading.active_count()\n"
             "sys.exit(0 if before==after==1 else 2)\n"
         )
@@ -65,32 +67,32 @@ class StructuralZeroTest(unittest.TestCase):
             "    if any(m in mode for m in ('w','a','x','+')): calls['write']+=1\n"
             "    return _open(f,mode,*a,**k)\n"
             "builtins.open=_o\n"
-            "import vdeter.stage8.shared_medium\n"
+            "import vdeter.poc.shared_medium\n"
             "sys.exit(0 if calls['sock']==0 and calls['write']==0 else 3)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_import_does_not_load_supervisor_private(self):
         result = _run_py(
-            "import sys, vdeter.stage8.shared_medium\n"
-            "priv=[m for m in sys.modules if m.startswith('vdeter.stage8._supervisor')]\n"
+            "import sys, vdeter.poc.shared_medium\n"
+            "priv=[m for m in sys.modules if m.startswith('vdeter.poc._supervisor')]\n"
             "sys.exit(0 if not priv else 1)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_import_does_not_load_numpy(self):
         result = _run_py(
-            "import sys, vdeter.stage8.shared_medium\n"
-            "import vdeter.stage8.shared_medium.provider\n"
-            "import vdeter.stage8.shared_medium.observation\n"
+            "import sys, vdeter.poc.shared_medium\n"
+            "import vdeter.poc.shared_medium.provider\n"
+            "import vdeter.poc.shared_medium.observation\n"
             "sys.exit(0 if 'numpy' not in sys.modules else 4)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_import_does_not_load_stage4_poc_execution(self):
         result = _run_py(
-            "import sys, vdeter.stage8.shared_medium\n"
-            "bad=[m for m in sys.modules if 'poc_execution' in m or m.startswith('vdeter.stage8.poc_exec')]\n"
+            "import sys, vdeter.poc.shared_medium\n"
+            "bad=[m for m in sys.modules if 'poc_execution' in m or m.startswith('vdeter.poc.poc_exec')]\n"
             "sys.exit(0 if not bad else 5)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -110,8 +112,10 @@ class ImportBoundaryTest(unittest.TestCase):
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
-                if os.path.normpath(dirpath).startswith(os.path.normpath(_STAGE8)):
-                    continue  # stage8 자체 제외(shared_medium 내부 참조는 허용)
+                if os.path.normpath(dirpath).startswith(
+                        (os.path.normpath(_POC_PKG), os.path.normpath(_COMPAT_SHIM))
+                ):
+                    continue  # poc 본체와 호환 shim 자체는 제외(내부 참조는 허용)
                 for name in files:
                     if not name.endswith(".py"):
                         continue
@@ -124,7 +128,7 @@ class ImportBoundaryTest(unittest.TestCase):
         self.assertEqual(offenders, [], f"기존 소스가 shared_medium을 참조함: {offenders}")
 
     def test_shared_medium_source_does_not_import_supervisor(self):
-        base = os.path.join(_STAGE8, "shared_medium")
+        base = os.path.join(_POC_PKG, "shared_medium")
         offenders = []
         for name in os.listdir(base):
             if not name.endswith(".py"):

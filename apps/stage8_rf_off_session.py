@@ -64,7 +64,7 @@ class RfOffStage7DeviceSession:
     `--rf-off-software` coordinator 프로세스 안에서 실행 중 Stage 7 software group(`build_stage7_software_group`
     + `start_stage7_group`)을 한 번 띄우고, PoC provider seam을 그 **실 endpoint 객체**(worker·frozen PHY·
     hardware clock·route 매질·수신기)에 결속한다. 하드웨어 경계(B210 device I/O)만 fake medium worker.
-    rf_off **stub** seam(`vdeter.stage8.integration.rf_off`)을 쓰던 이전 세션 class는 이 class로
+    rf_off **stub** seam(`vdeter.poc.integration.rf_off`)을 쓰던 이전 세션 class는 이 class로
     대체된 뒤 제거됐다(2026-09-15, 호출자 0). stub seam 자체는 시험 harness용으로 남아 있다.
 
     device delivery는 `tx_lo_hz==rx_lo_hz`를 요구하므로(WSM-G1 common-LO), PoC 대상 채널(lower=ROC)로
@@ -125,8 +125,8 @@ class RfOffStage7DeviceSession:
         return stage7_target_response(self._members)           # 실 application 관측(P09)
 
     def poc_workload_steps(self, scenario_id):
-        from vdeter.stage8.execution.runner import observation_step, scenario_started
-        from vdeter.stage8.testing.fakes import make_observation
+        from vdeter.poc.execution.runner import observation_step, scenario_started
+        from vdeter.poc.testing.fakes import make_observation
         # 반응형 관측의 device_hw_timestamp_ns를 **실 worker hardware clock**에서 읽는다(counter 아님).
         mass_b = self._members["MASS-B"].endpoint.dependencies.radio.lease.worker
         hw_ns = int(mass_b.hardware_time_ns())
@@ -138,8 +138,8 @@ class RfOffStage7DeviceSession:
 def _handle_poc_request(session, runtime, request: dict, *, run_root: Path,
                         run_id: str) -> dict:
     """PoC workload 하나를 실 coordinator 프로세스 안에서 실행하고 evidence dict를 돌려준다."""
-    from vdeter.stage8.execution.session import SessionExpired
-    from vdeter.stage8.execution.verdict import ScenarioVerdict
+    from vdeter.poc.execution.session import SessionExpired
+    from vdeter.poc.execution.verdict import ScenarioVerdict
 
     from apps.standalone import poc_run
 
@@ -211,10 +211,10 @@ def build_rf_off_runtime():
     RF-off는 실 B210 bring-up이 없으므로 bring-up은 즉시 완료된다. 실 coordinator 프로세스와, 그
     handler를 프로세스 안에서 돌리는 시험이 같은 runtime을 쓴다.
     """
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-    from vdeter.stage8.execution.session import ResidentSession
-    from vdeter.stage8.integration.runtime import ResidentPocRuntime
+    from vdeter.poc._supervisor.clock import RealMonotonicClock
+    from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+    from vdeter.poc.execution.session import ResidentSession
+    from vdeter.poc.integration.runtime import ResidentPocRuntime
 
     policy = SessionPolicy(service=ServiceSessionTimeouts(
         bringup_s=SESSION_BRINGUP_TIMEOUT_S, workload_s=WORKLOAD_TIMEOUT_S,
@@ -252,7 +252,7 @@ def run_rf_off_software_session(arguments) -> int:
     `arguments`는 `stage7_coordinator_main`의 argparse namespace(run_id·run_root 사용). B210·launcher를
     전혀 spawn하지 않는다. 정상 종료·shutdown 마커·idle/absolute deadline·close 예산을 처리한다.
     """
-    from vdeter.stage8.execution.session import SessionExpired
+    from vdeter.poc.execution.session import SessionExpired
 
     run_root = Path(arguments.run_root)
     run_id = arguments.run_id

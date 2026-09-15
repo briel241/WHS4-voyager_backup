@@ -27,23 +27,23 @@ _LINUX = (hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET")
 _SRC = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.lease import MassBLease
-    from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-    from vdeter.stage8.execution.runner import WorkloadRunner, observation_step
-    from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired
-    from vdeter.stage8.execution.snapshot import create_snapshot
-    from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
-    from vdeter.stage8.integration.runtime import ResidentPocRuntime
-    from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-    from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-    from vdeter.stage8.poc_api.messages import build_message
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.poc_api.protocol import ACTION_RESULT, ACTION_SUBMIT
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
-    from vdeter.stage8.testing.fakes import FakeClock, make_observation
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.clock import RealMonotonicClock
+    from vdeter.poc.execution.lease import MassBLease
+    from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+    from vdeter.poc.execution.runner import WorkloadRunner, observation_step
+    from vdeter.poc.execution.session import Deadline, ResidentSession, SessionExpired
+    from vdeter.poc.execution.snapshot import create_snapshot
+    from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+    from vdeter.poc.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
+    from vdeter.poc.integration.runtime import ResidentPocRuntime
+    from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+    from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+    from vdeter.poc.api.messages import build_message
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.api.protocol import ACTION_RESULT, ACTION_SUBMIT
+    from vdeter.poc.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.fakes import FakeClock, make_observation
 
 _IDLE = (
     "class Poc:\n"
@@ -93,7 +93,7 @@ class _Base(unittest.TestCase):
                                scenario_id="SC-VDE-006")
         provider, seams = assemble_rf_off_provider()
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 "VDETER_POC_SNAPSHOT_SCRIPT": snap.script_path,
                 "VDETER_POC_ENTRYPOINT": snap.descriptor.entrypoint,

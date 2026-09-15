@@ -24,7 +24,7 @@ import uuid
 
 from vdeter.stage7.testing.controller import PocDeviceCallError, Stage7ScenarioController
 
-from vdeter.stage8.integration.device_boundary import (
+from vdeter.poc.integration.device_boundary import (
     logical_destination_station_id,
     validate_fanout_children,
 )
@@ -152,15 +152,15 @@ class LauncherRadioSink:
         self.receipt_by_group: dict = {}
 
     def prepare_group(self, *, group_id: str, children):
-        from vdeter.stage8.shared_medium.radiation import GroupAdmission
+        from vdeter.poc.shared_medium.radiation import GroupAdmission
 
         children = validate_fanout_children(children)
         self.burst_by_group[group_id] = str(uuid.uuid4())
         return GroupAdmission(group_id=group_id, children=children)
 
     def commit_group(self, admission) -> None:
-        from vdeter.stage8.shared_medium.iq import to_cf32le
-        from vdeter.stage8.shared_medium.radiation import BroadcastCommitRefused
+        from vdeter.poc.shared_medium.iq import to_cf32le
+        from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused
 
         children = admission.children
         burst_id = self.burst_by_group.get(admission.group_id)
@@ -268,9 +268,9 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
         })
 
     def resolve(self, action, *, request_id: str):
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-        from vdeter.stage8.poc_api.types import TARGET_TO_PHYSICAL_CHANNEL
-        from vdeter.stage8.shared_medium.radiation import ScheduledSlot
+        from vdeter.poc.api.errors import PocError, PocErrorCode
+        from vdeter.poc.api.types import TARGET_TO_PHYSICAL_CHANNEL
+        from vdeter.poc.shared_medium.radiation import ScheduledSlot
 
         target_channel = stage7_channel_name(TARGET_TO_PHYSICAL_CHANNEL[action.target])
         if self._fixed_channel_name is not None and self._fixed_channel_name != target_channel:
@@ -299,7 +299,7 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
         chosen = None
         for slot in usable:
             if self._rx_readiness is not None:
-                from vdeter.stage8.shared_medium.radiation import ReadinessRequest
+                from vdeter.poc.shared_medium.radiation import ReadinessRequest
                 state = self._client.radio_state()
                 decision = self._rx_readiness.window_ready(ReadinessRequest(
                     endpoint=action.target, channel=TARGET_TO_PHYSICAL_CHANNEL[action.target],
@@ -341,8 +341,8 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
     seam 다섯 개 중 scheduler·arbiter·rx_readiness·waveform_factory는 in-process에서 이미 시험된
     구현을 그대로 쓰고, radio_sink만 프로세스 경계를 건너는 구현이다.
     """
-    from vdeter.stage8.shared_medium import constants
-    from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+    from vdeter.poc.shared_medium import constants
+    from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
 
     center = channel_center_hz or constants.CHANNEL_EFFECTIVE_CENTER_HZ
     clients = {endpoint: LauncherDeviceClient(controller, endpoint) for endpoint in endpoint_ids}

@@ -8,15 +8,15 @@ from __future__ import annotations
 import os
 import unittest
 
-from vdeter.stage8._supervisor.capture import BoundedStream, WorkloadCapture
-from vdeter.stage8._supervisor.token import (
+from vdeter.poc._supervisor.capture import BoundedStream, WorkloadCapture
+from vdeter.poc._supervisor.token import (
     SecretRedactor,
     constant_time_equals,
     make_token_fd,
     new_token,
     token_hex,
 )
-from vdeter.stage8.poc_api.limits import (
+from vdeter.poc.api.limits import (
     STDIO_RETAIN_BYTES_PER_STREAM,
     STDIO_TOTAL_DRAIN_LIMIT_BYTES,
     TOKEN_BYTES,

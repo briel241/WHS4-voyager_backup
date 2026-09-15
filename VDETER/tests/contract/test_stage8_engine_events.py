@@ -6,15 +6,15 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8._supervisor.engine import SERVER_EVENT_ACK_GRACE_S, EngineState
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.codec import canonical_sha256
-from vdeter.stage8.poc_api.errors import PocErrorCode
-from vdeter.stage8.poc_api.messages import parse_envelope
-from vdeter.stage8.poc_api.types import PhysicalChannel, TuningState
-from vdeter.stage8.testing import FakeClock
-from vdeter.stage8.testing.fakes import make_observation
-from vdeter.stage8.testing.server_harness import ack_message, drive_to_running, make_engine
+from vdeter.poc._supervisor.engine import SERVER_EVENT_ACK_GRACE_S, EngineState
+from vdeter.poc.api import protocol
+from vdeter.poc.api.codec import canonical_sha256
+from vdeter.poc.api.errors import PocErrorCode
+from vdeter.poc.api.messages import parse_envelope
+from vdeter.poc.api.types import PhysicalChannel, TuningState
+from vdeter.poc.testing import FakeClock
+from vdeter.poc.testing.fakes import make_observation
+from vdeter.poc.testing.server_harness import ack_message, drive_to_running, make_engine
 
 
 def running():
@@ -126,7 +126,7 @@ class EventPipelineTest(unittest.TestCase):
         self.assertEqual(eng.fatal_error.code, PocErrorCode.POC_PROTOCOL_ERROR)
 
     def test_delivery_matrix_bounded(self):
-        from vdeter.stage8._supervisor.engine import MAX_DELIVERY_MATRIX_ENTRIES
+        from vdeter.poc._supervisor.engine import MAX_DELIVERY_MATRIX_ENTRIES
         eng, clock = running()
         for _ in range(10000):
             eng.enqueue_observation(

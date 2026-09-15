@@ -95,7 +95,7 @@ class _Child:
     """fan-out child double — sink가 읽는 속성만 갖는다."""
 
     def __init__(self, lane, destination="ROC"):
-        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.poc.api.types import PhysicalChannel
 
         self.child_id = f"child-{lane}"
         self.tx_lane = lane
@@ -119,7 +119,7 @@ class AuthoritativeSinkRefusalSeverityTest(unittest.TestCase):
             station_id_by_endpoint=_STATIONS)
 
     def test_explicit_device_refusal_raises_commit_refused_not_runtime_error(self):
-        from vdeter.stage8.shared_medium.radiation import BroadcastCommitRefused
+        from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused
 
         adapter = _RefusingAdapter()
         sink = self._sink(adapter)
@@ -131,7 +131,7 @@ class AuthoritativeSinkRefusalSeverityTest(unittest.TestCase):
 
     def test_commit_refused_maps_to_request_rejected_not_session_inhibit(self):
         """이 sink의 거부가 provider 경계에서 어떤 severity가 되는지 고정한다."""
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.poc.api.errors import PocError, PocErrorCode
 
         # 계약: 방사 전 명시 거부 -> POC_RADIO_RESOURCE_CONFLICT(REQUEST_REJECTED, 자원 반환).
         # UNKNOWN(SESSION_INHIBIT)은 "방사 여부 불명"에만 쓴다.
@@ -177,7 +177,7 @@ class RealGroupLeadAndPriorityTest(unittest.TestCase):
 
     @staticmethod
     def _action(target="ROC"):
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind
 
         return ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target=target,
                                 payload={"packet_hex": bytes(range(54)).hex()})
@@ -275,7 +275,7 @@ class RealGroupLeadAndPriorityTest(unittest.TestCase):
 
     def test_pending_normal_tx_rejects_the_poc_and_keeps_the_reservation(self):
         """정상 TX가 점유 중이면 PoC만 거부된다 — 정상 예약 보존, 추가 제출 0, 세션 유지."""
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.poc.api.errors import PocError, PocErrorCode
 
         clock, medium, members = self._group()
         # 목적지 선택은 **계측으로 정했다**(추정 아님). 같은 harness에서 1,200 step을 돌려 본 결과:

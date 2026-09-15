@@ -1,115 +1,33 @@
-"""Stage 8 PoC 연결 API의 **public** surface.
+"""(호환) 옛 공개 경로 `vdeter.stage8.poc_api` -> 새 경로 `vdeter.poc.api`.
 
-Stage 4·5와 외부 PoC SDK는 이 package만 import한다. 이 package와 하위 module은
-production private 구현(`vdeter.stage8._supervisor`)을 import하지 않는다(import 경계).
-이 규칙은 `test_stage8_import_boundary`가 정적·동적으로 검증한다.
+같은 module·class·enum·함수 **객체**를 옛 이름으로도 찾게 한다. 구현을 복제하지
+않으므로 `isinstance`·enum 동일성이 두 경로에서 동일하다. 새 production 내부
+소비자는 새 경로만 쓴다(계약시험이 정적으로 확인한다).
+
+유지·제거 조건은 `vdeter.stage8` package docstring 참조.
 """
 
 from __future__ import annotations
 
-from . import codec, errors, limits, messages, negotiation, protocol, seams, transport, types
-from .codec import (
-    CodecError,
-    canonical_sha256,
-    decode_bytes_field,
-    decode_wire_packet,
-    encode_bytes_field,
-    encode_canonical,
-    encode_wire_packet,
-)
-from .errors import ERROR_SEVERITY, PocError, PocErrorCode, Severity, escalate, severity_of
-from .messages import ParsedMessage, build_message, new_message_id, parse_envelope
-from .negotiation import HelloRequest, ServerCapabilityConfig, negotiate, restore_matches
-from .sdk import ClientState, PocCallbacks, PocContext, SdkEngine
-from .seams import (
-    ActionSubmitProvider,
-    ChildHandle,
-    ChildSpawner,
-    MonotonicClock,
-    ObservationProvider,
-)
-from .transport import OversizedPacket, SeqPacketEndpoint, connect, connected_pair
-from .types import (
-    ActionDescriptor,
-    ActionKind,
-    ActionResult,
-    ActionTerminal,
-    AdmissionResult,
-    Event,
-    FORBIDDEN_ACTION_FIELDS,
-    Negotiation,
-    ObservationRecord,
-    PhysicalChannel,
-    PocManifestDescriptor,
-    ProviderSubmission,
-    TARGET_TO_PHYSICAL_CHANNEL,
-    TuningState,
+import sys
+
+from vdeter.poc import api as _api
+
+#: 공개 surface의 하위 module. 옛 이름으로도 **같은 객체**가 잡히게 등록한다.
+_PUBLIC_SUBMODULES = (
+    "codec", "errors", "limits", "messages", "negotiation",
+    "protocol", "sdk", "seams", "transport", "types",
 )
 
-__all__ = (
-    "protocol",
-    "limits",
-    "errors",
-    "codec",
-    "types",
-    "seams",
-    "messages",
-    "negotiation",
-    "transport",
-    # transport
-    "OversizedPacket",
-    "SeqPacketEndpoint",
-    "connect",
-    "connected_pair",
-    # codec
-    "CodecError",
-    "decode_wire_packet",
-    "encode_wire_packet",
-    "encode_canonical",
-    "canonical_sha256",
-    "encode_bytes_field",
-    "decode_bytes_field",
-    # errors
-    "PocError",
-    "PocErrorCode",
-    "Severity",
-    "ERROR_SEVERITY",
-    "severity_of",
-    "escalate",
-    # messages
-    "ParsedMessage",
-    "build_message",
-    "parse_envelope",
-    "new_message_id",
-    # negotiation
-    "ServerCapabilityConfig",
-    "HelloRequest",
-    "negotiate",
-    "restore_matches",
-    # sdk
-    "SdkEngine",
-    "PocContext",
-    "PocCallbacks",
-    "ClientState",
-    # seams
-    "MonotonicClock",
-    "ActionSubmitProvider",
-    "ObservationProvider",
-    "ChildHandle",
-    "ChildSpawner",
-    # types
-    "PhysicalChannel",
-    "TuningState",
-    "TARGET_TO_PHYSICAL_CHANNEL",
-    "ActionKind",
-    "FORBIDDEN_ACTION_FIELDS",
-    "AdmissionResult",
-    "Negotiation",
-    "PocManifestDescriptor",
-    "Event",
-    "ActionDescriptor",
-    "ActionResult",
-    "ActionTerminal",
-    "ProviderSubmission",
-    "ObservationRecord",
-)
+for _name in _PUBLIC_SUBMODULES:
+    _module = getattr(_api, _name, None)
+    if _module is None:  # pragma: no cover - 방어적
+        _module = __import__("vdeter.poc.api." + _name, fromlist=(_name,))
+    sys.modules[__name__ + "." + _name] = _module
+    globals()[_name] = _module
+del _name, _module
+
+# 최상위 재수출(같은 객체 바인딩).
+globals().update({_key: getattr(_api, _key) for _key in _api.__all__})
+
+__all__ = tuple(_api.__all__)

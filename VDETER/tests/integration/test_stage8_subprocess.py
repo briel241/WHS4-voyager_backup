@@ -19,11 +19,11 @@ _HARNESS = os.path.normpath(
 )
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.supervisor import PocSupervisor
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.testing import FakeActionSubmitProvider, build_manifest
-    from vdeter.stage8.testing.fakes import make_observation
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.supervisor import PocSupervisor
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.testing import FakeActionSubmitProvider, build_manifest
+    from vdeter.poc.testing.fakes import make_observation
 
 
 def _spawner(mode):

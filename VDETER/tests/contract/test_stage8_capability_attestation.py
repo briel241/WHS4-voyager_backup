@@ -18,15 +18,15 @@ import unittest
 
 from apps.standalone import capability_attestation as CA
 from apps.standalone.state import StatePaths
-from vdeter.stage8.execution.selection import unavailable_required_capabilities
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.negotiation import (
+from vdeter.poc.execution.selection import unavailable_required_capabilities
+from vdeter.poc.api import protocol
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.negotiation import (
     HelloRequest,
     ServerCapabilityConfig,
     negotiate,
 )
-from vdeter.stage8.shared_medium import tuning
+from vdeter.poc.shared_medium import tuning
 
 CAP = protocol.OBSERVE_DUAL_PHYSICAL_CHANNEL
 
@@ -202,7 +202,7 @@ class AdvertisementAgreesEndToEndTest(unittest.TestCase):
 
     @staticmethod
     def _manifest():
-        from vdeter.stage8.testing.fakes import build_manifest
+        from vdeter.poc.testing.fakes import build_manifest
         return build_manifest(requested_capabilities=("observe_packet", CAP),
                               required_capabilities=(CAP,))
 
@@ -243,8 +243,8 @@ class CapabilityDoesNotGrantReadinessOrRfTest(unittest.TestCase):
         supported, _ = CA.support(self.paths, self.installation, capability=CAP)
         self.assertTrue(supported)                     # A = true
 
-        from vdeter.stage8.shared_medium import testing as TD
-        from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+        from vdeter.poc.shared_medium import testing as TD
+        from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
 
         not_ready = SharedMediumActionProvider(
             radio_sink=TD.CountingRadioSink(), rx_readiness=TD.ReadyReadiness(),

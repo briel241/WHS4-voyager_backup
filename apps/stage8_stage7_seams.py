@@ -25,15 +25,15 @@ from vdeter.phy import resampling
 from vdeter.phy.burst.rrc import validate_cf32le_full_scale
 from vdeter.phy.transmitter import Phy11Transmitter
 from vdeter.stage7.testing.poc_device import build_poc_tx_request
-from vdeter.stage8.integration.device_boundary import (
+from vdeter.poc.integration.device_boundary import (
     GroupTxRadioSink,
     logical_destination_station_id,
     validate_fanout_children,
 )
-from vdeter.stage8.shared_medium import constants
-from vdeter.stage8.shared_medium.iq import IqBurst, to_cf32le
-from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
-from vdeter.stage8.shared_medium.radiation import (
+from vdeter.poc.shared_medium import constants
+from vdeter.poc.shared_medium.iq import IqBurst, to_cf32le
+from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
+from vdeter.poc.shared_medium.radiation import (
     BroadcastCommitRefused,
     ChildTerminal,
     ReadinessDecision,
@@ -86,7 +86,7 @@ def stage7_channel_name(stage8_channel) -> str:
     """
 
     from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
-    from vdeter.stage8.poc_api.types import PhysicalChannel as Stage8Channel
+    from vdeter.poc.api.types import PhysicalChannel as Stage8Channel
 
     mapping = {Stage8Channel.LOWER: LOWER_CHANNEL_NAME,
                Stage8Channel.UPPER: UPPER_CHANNEL_NAME}
@@ -574,7 +574,7 @@ def stage7_target_response(members, *, station_to_endpoint=None):
     RF-off에서 합성 packet은 보통 정상 복호·주소 수락을 통과하지 못하므로 `INDETERMINATE`가 정직한
     결과다(없는 효과를 만들지 않는다). 실 복호 품질·간섭·충돌 효과는 실장비에서 확정한다.
     """
-    from vdeter.stage8.execution.verdict import TargetEffect
+    from vdeter.poc.execution.verdict import TargetEffect
 
     mapping = dict(station_to_endpoint or {ep: ep for ep in members})
 
@@ -643,7 +643,7 @@ class Stage7AuthoritativeRadioSink:
         self.burst_by_group: dict = {}
 
     def prepare_group(self, *, group_id: str, children):
-        from vdeter.stage8.shared_medium.radiation import GroupAdmission
+        from vdeter.poc.shared_medium.radiation import GroupAdmission
 
         children = validate_fanout_children(children)
         # route 결속에는 parent의 **논리** 목적지를 쓴다(§15.1 canonical route가 논리 주소로 기대 채널을
@@ -692,7 +692,7 @@ def stage7_device_seams(members, *, channel_center_hz=None):
     조립하도록, 5개 seam을 실 Stage 7 객체로 채운다: group_tx=실 worker(assemble가 GroupTxRadioSink로
     감쌈)·arbiter=실 lane 점유·scheduler=실 hardware clock slot·rx_readiness=실 수신기 RX·waveform=실 frozen PHY.
     """
-    from vdeter.stage8.integration.assembly import DeviceSeams
+    from vdeter.poc.integration.assembly import DeviceSeams
 
     center = channel_center_hz or constants.CHANNEL_EFFECTIVE_CENTER_HZ
     mass_b = members["MASS-B"].endpoint.dependencies.radio.lease.worker
@@ -716,7 +716,7 @@ def assemble_authoritative_provider(members, *, station_id_by_endpoint,
 
     반환 ``(provider, bindings)``. bindings에 sink·adapter가 있어 terminal source를 만들 수 있다.
     """
-    from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+    from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
 
     center = channel_center_hz or constants.CHANNEL_EFFECTIVE_CENTER_HZ
     member = members["MASS-B"]
@@ -901,7 +901,7 @@ class CommonLoTuningApplier:
 
         계획을 만들었다는 사실이나 boolean 설정만으로 광고하지 않는다.
         """
-        from vdeter.stage8.shared_medium.tuning import DUAL_CHANNEL_CAPABILITY
+        from vdeter.poc.shared_medium.tuning import DUAL_CHANNEL_CAPABILITY
 
         if self._verified is None:
             return frozenset()

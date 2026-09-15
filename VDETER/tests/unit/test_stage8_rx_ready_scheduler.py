@@ -3,9 +3,9 @@ import unittest
 from types import SimpleNamespace as NS
 from apps.stage8_launcher_seams import MacSlotScheduler
 from apps.stage8_stage7_seams import Stage7ReceiverReadiness, hw_ns_to_slot
-from vdeter.stage8.shared_medium.radiation import ReadinessDecision, ReadinessRequest
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+from vdeter.poc.shared_medium.radiation import ReadinessDecision, ReadinessRequest
+from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+from vdeter.poc.api.errors import PocError, PocErrorCode
 
 
 class ReadySlotTests(unittest.TestCase):

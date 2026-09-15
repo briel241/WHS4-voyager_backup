@@ -14,7 +14,7 @@ class UseMapSchedulerTests(unittest.TestCase):
     def test_default_scheduler_queries_each_logical_targets_channel(self):
         from apps.stage8_launcher_seams import MacSlotScheduler
         from vdeter.stage7.configuration import UPPER_CHANNEL_NAME
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind
 
         class Query(MacSlotScheduler):
             def _query(self):
@@ -34,8 +34,8 @@ class UseMapSchedulerTests(unittest.TestCase):
     def test_exact_after_slots_does_not_move_to_later_free_mac_slot(self):
         from apps.stage8_launcher_seams import MacSlotScheduler
         from apps.stage8_stage7_seams import hw_ns_to_slot
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind
+        from vdeter.poc.api.errors import PocError, PocErrorCode
 
         class LaterSlot(MacSlotScheduler):
             def _query(self):

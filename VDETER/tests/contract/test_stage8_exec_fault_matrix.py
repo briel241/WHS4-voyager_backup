@@ -22,12 +22,12 @@ import sys
 import tempfile
 import unittest
 
-from vdeter.stage8.execution.lease import MassBLease
-from vdeter.stage8.execution.runner import WorkloadRunner, WorkloadSpec, scenario_started
-from vdeter.stage8.execution.snapshot import Snapshot
-from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-from vdeter.stage8.testing.execution_fakes import FakeTxExecutor
-from vdeter.stage8.testing.fakes import build_manifest
+from vdeter.poc.execution.lease import MassBLease
+from vdeter.poc.execution.runner import WorkloadRunner, WorkloadSpec, scenario_started
+from vdeter.poc.execution.snapshot import Snapshot
+from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+from vdeter.poc.testing.execution_fakes import FakeTxExecutor
+from vdeter.poc.testing.fakes import build_manifest
 
 _POSIX = hasattr(os, "getuid") and hasattr(os, "mkfifo") and sys.platform != "win32"
 
@@ -262,8 +262,8 @@ class FilesystemSeamFaultMatrixTest(unittest.TestCase):
         return d
 
     def test_scan_does_not_block_on_fifo_script(self):
-        from vdeter.stage8.execution.catalog import scan_catalog
-        from vdeter.stage8.testing.execution_fakes import poc_toml, write_poc_package
+        from vdeter.poc.execution.catalog import scan_catalog
+        from vdeter.poc.testing.execution_fakes import poc_toml, write_poc_package
 
         d = self._catalog_dir()
         os.mkfifo(os.path.join(d, "f.py"))
@@ -276,7 +276,7 @@ class FilesystemSeamFaultMatrixTest(unittest.TestCase):
         self.assertTrue(any(p.name == "f" for p in cat.invalid))
 
     def test_scan_does_not_block_on_fifo_manifest(self):
-        from vdeter.stage8.execution.catalog import scan_catalog
+        from vdeter.poc.execution.catalog import scan_catalog
 
         d = self._catalog_dir()
         with open(os.path.join(d, "g.py"), "wb") as fh:
@@ -288,8 +288,8 @@ class FilesystemSeamFaultMatrixTest(unittest.TestCase):
 
     def test_snapshot_does_not_block_on_fifo_source(self):
         """scan 이후 원본 script가 FIFO로 교체(TOCTOU)돼도 snapshot은 block 없이 거부한다."""
-        from vdeter.stage8.execution.snapshot import SnapshotError, create_snapshot
-        from vdeter.stage8.testing.execution_fakes import poc_toml
+        from vdeter.poc.execution.snapshot import SnapshotError, create_snapshot
+        from vdeter.poc.testing.execution_fakes import poc_toml
 
         d = self._catalog_dir()
         os.mkfifo(os.path.join(d, "good.py"))

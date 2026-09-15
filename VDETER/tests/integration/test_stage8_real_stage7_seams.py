@@ -47,9 +47,9 @@ class RealStage7SeamsTest(unittest.TestCase):
         from apps.stage8_stage7_seams import stage7_target_response, Stage7TxTerminalSource
         from tests.support.stage7 import drive_stage7_group
         from vdeter.phy.transmitter import Phy11Transmitter
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-        from vdeter.stage8.shared_medium.radiation import ParentOutcome
-        from vdeter.stage8.execution.verdict import TargetEffect
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+        from vdeter.poc.shared_medium.radiation import ParentOutcome
+        from vdeter.poc.execution.verdict import TargetEffect
 
         clock, medium, members = self._group()
         channel = PhysicalChannel.LOWER  # target ROC
@@ -111,8 +111,8 @@ class RealStage7SeamsTest(unittest.TestCase):
 
     def test_real_readiness_fail_closed_without_common_lo(self):
         # 수신기 RX LO가 송신 채널에 정합하지 않으면 실 rx_readiness가 RF 전 fail-closed(방사 0).
-        from vdeter.stage8.poc_api.errors import PocError
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.poc.api.errors import PocError
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind
         from apps.stage8_stage7_seams import assemble_stage7_provider
 
         clock, medium, members = self._group()
@@ -128,9 +128,9 @@ class RealStage7SeamsTest(unittest.TestCase):
 
     def test_real_arbiter_rejects_when_normal_tx_holds_lane(self):
         # 정상 TX가 lane을 mute(점유)하면 실 arbiter가 예약 거부(정상 TX 우선).
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-        from vdeter.stage8.shared_medium import constants
+        from vdeter.poc.api.errors import PocError, PocErrorCode
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+        from vdeter.poc.shared_medium import constants
 
         clock, medium, members = self._group()
         provider, _ = self._assemble(members, medium, channel=PhysicalChannel.LOWER)
@@ -184,20 +184,20 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
         import json
         from tests.support.stage7 import (build_stage7_software_group, drive_stage7_group,
                                           start_stage7_group)
-        from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-        from vdeter.stage8._supervisor.clock import RealMonotonicClock
-        from vdeter.stage8.execution.child_main import ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT
-        from vdeter.stage8.execution.lease import MassBLease
-        from vdeter.stage8.execution.runner import WorkloadRunner, WorkloadSpec, observation_step
-        from vdeter.stage8.execution.snapshot import create_snapshot
-        from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure, ScenarioVerdict
-        from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-        from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium import constants
-        from vdeter.stage8.testing.execution_fakes import write_poc_package
-        from vdeter.stage8.testing.fakes import make_observation
+        from vdeter.poc._supervisor.child import SubprocessChildSpawner
+        from vdeter.poc._supervisor.clock import RealMonotonicClock
+        from vdeter.poc.execution.child_main import ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT
+        from vdeter.poc.execution.lease import MassBLease
+        from vdeter.poc.execution.runner import WorkloadRunner, WorkloadSpec, observation_step
+        from vdeter.poc.execution.snapshot import create_snapshot
+        from vdeter.poc.execution.verdict import ActionExecution, PocInfrastructure, ScenarioVerdict
+        from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+        from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+        from vdeter.poc.api.negotiation import ServerCapabilityConfig
+        from vdeter.poc.api.types import PhysicalChannel
+        from vdeter.poc.shared_medium import constants
+        from vdeter.poc.testing.execution_fakes import write_poc_package
+        from vdeter.poc.testing.fakes import make_observation
         from apps.stage8_stage7_seams import (
             assemble_stage7_provider, stage7_target_response, Stage7TxTerminalSource)
 
@@ -213,7 +213,7 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
                                scenario_id="SC-VDE-006")
         src = os.path.join(_REPO, "VDETER", "src")
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 ENV_SNAPSHOT_SCRIPT: snap.script_path, ENV_ENTRYPOINT: snap.descriptor.entrypoint,
                 ENV_HELLO: json.dumps(snap.descriptor.as_hello_value()),
@@ -293,19 +293,19 @@ class RealScenarioObservationTest(unittest.TestCase):
         from vdeter.common.addressing import Addressed
         from vdeter.common.contracts.service import SubmitTransferRequest
         from vdeter.common.identifiers import PayloadFormat, StationId
-        from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-        from vdeter.stage8._supervisor.clock import RealMonotonicClock
-        from vdeter.stage8.execution.child_main import ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT
-        from vdeter.stage8.execution.lease import MassBLease
-        from vdeter.stage8.execution.runner import WorkloadRunner, WorkloadSpec, observation_step
-        from vdeter.stage8.execution.snapshot import create_snapshot
-        from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure
-        from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-        from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-        from vdeter.stage8.poc_api.types import ObservationRecord, PhysicalChannel, TuningState
-        from vdeter.stage8.shared_medium import constants
-        from vdeter.stage8.testing.execution_fakes import write_poc_package
+        from vdeter.poc._supervisor.child import SubprocessChildSpawner
+        from vdeter.poc._supervisor.clock import RealMonotonicClock
+        from vdeter.poc.execution.child_main import ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT
+        from vdeter.poc.execution.lease import MassBLease
+        from vdeter.poc.execution.runner import WorkloadRunner, WorkloadSpec, observation_step
+        from vdeter.poc.execution.snapshot import create_snapshot
+        from vdeter.poc.execution.verdict import ActionExecution, PocInfrastructure
+        from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+        from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+        from vdeter.poc.api.negotiation import ServerCapabilityConfig
+        from vdeter.poc.api.types import ObservationRecord, PhysicalChannel, TuningState
+        from vdeter.poc.shared_medium import constants
+        from vdeter.poc.testing.execution_fakes import write_poc_package
         from apps.stage8_stage7_seams import (assemble_stage7_provider, stage7_target_response,
                                               Stage7TxTerminalSource)
 
@@ -335,7 +335,7 @@ class RealScenarioObservationTest(unittest.TestCase):
                                scenario_id="SC-VDE-006")
         src = os.path.join(_REPO, "VDETER", "src")
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 ENV_SNAPSHOT_SCRIPT: snap.script_path, ENV_ENTRYPOINT: snap.descriptor.entrypoint,
                 ENV_HELLO: json.dumps(snap.descriptor.as_hello_value()),
@@ -388,7 +388,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         return Stage7HwTimeScheduler(worker)
 
     def _action(self):
-        from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
+        from vdeter.poc.api.types import ActionDescriptor, ActionKind
         return ActionDescriptor(kind=ActionKind.REPLAY_PACKET, target="ROC",
                                 payload={"packet_hex": bytes(range(54)).hex()})
 
@@ -415,8 +415,8 @@ class RealUnitsAndConversionTest(unittest.TestCase):
 
     def test_p03_lead_meets_authoritative_minimum(self):
         from apps.stage8_stage7_seams import _RETUNE_LEAD_NS, _TX_LEAD_NS
-        from vdeter.stage8.shared_medium import constants
-        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.poc.shared_medium import constants
+        from vdeter.poc.api.types import PhysicalChannel
         now = 1_000_000_000
         # TX LO 미확정 → 보수적으로 retune lead(200 ms) 요구.
         slot = self._scheduler(now).resolve(self._action(), request_id="u2")
@@ -433,10 +433,10 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         self.assertGreater(slot2.scheduled_hw_timestamp_ns - now, 1_000_000)
 
     def test_p03_retune_is_issued_before_tx_not_at_tx_time(self):
-        from vdeter.stage8.integration.device_boundary import (RETUNE_LEAD_NS,
+        from vdeter.poc.integration.device_boundary import (RETUNE_LEAD_NS,
                                                                GroupTxRadioSink)
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium.radiation import ChildPath
+        from vdeter.poc.api.types import PhysicalChannel
+        from vdeter.poc.shared_medium.radiation import ChildPath
 
         class _Spy:
             def __init__(self):
@@ -467,7 +467,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
         from apps.stage8_stage7_seams import Link11WaveformFactory
         from vdeter.phy import resampling
         from vdeter.phy.transmitter import Phy11Transmitter
-        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.poc.api.types import PhysicalChannel
         payload = bytes(range(54))
         burst = Link11WaveformFactory().encode(source_station="MASS-B",
                                                channel=PhysicalChannel.LOWER, payload=payload)
@@ -481,7 +481,7 @@ class RealUnitsAndConversionTest(unittest.TestCase):
 
     def test_p05_oversized_payload_is_rejected_not_truncated(self):
         from apps.stage8_stage7_seams import Link11WaveformFactory
-        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.poc.api.types import PhysicalChannel
         with self.assertRaises(ValueError):
             Link11WaveformFactory().encode(source_station="MASS-B",
                                            channel=PhysicalChannel.LOWER, payload=bytes(200))
@@ -567,12 +567,12 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         return worker
 
     def _plan(self):
-        from vdeter.stage8.shared_medium.tuning import derive_dual_channel_plan
+        from vdeter.poc.shared_medium.tuning import derive_dual_channel_plan
         return derive_dual_channel_plan()
 
     def test_plan_is_applied_to_device_and_readback_verified(self):
         from apps.stage8_stage7_seams import CommonLoTuningApplier
-        from vdeter.stage8.shared_medium import constants
+        from vdeter.poc.shared_medium import constants
         worker = self._worker()
         applier = CommonLoTuningApplier(worker)
         readback = applier.apply(self._plan())
@@ -661,7 +661,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         깨진다. 장치는 열지 않고 UHD 경계 객체만 대체한다.
         """
         from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
-        from vdeter.stage8.shared_medium import constants
+        from vdeter.poc.shared_medium import constants
 
         class _TuneRequest:
             POLICY_MANUAL = "MANUAL"
@@ -731,7 +731,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
     def test_real_backend_refuses_when_uhd_lacks_manual_tune_policy(self):
         """UHD가 manual policy를 제공하지 않으면 **추정하지 않고 거부**한다(fail-closed)."""
         from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
-        from vdeter.stage8.shared_medium import constants
+        from vdeter.poc.shared_medium import constants
 
         class _Uhd:
             pass

@@ -3,14 +3,14 @@
 import json
 import pytest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-from vdeter.stage8.shared_medium import evidence as E
-from vdeter.stage8.shared_medium import observation as O
-from vdeter.stage8.shared_medium import radiation as R
-from vdeter.stage8.shared_medium import testing as T
-from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
+from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+from vdeter.poc.shared_medium import evidence as E
+from vdeter.poc.shared_medium import observation as O
+from vdeter.poc.shared_medium import radiation as R
+from vdeter.poc.shared_medium import testing as T
+from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
 
 
 def parent(ab, *, source="ROC", channel=PhysicalChannel.UPPER, start=0, payload=b"proof"):

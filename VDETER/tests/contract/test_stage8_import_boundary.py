@@ -13,8 +13,10 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
-_STAGE8 = os.path.join(_SRC, "vdeter", "stage8")
-# 기존 production 소스 트리(stage8·tests 제외)에서 stage8을 참조하지 않아야 한다.
+_POC_PKG = os.path.join(_SRC, "vdeter", "poc")
+#: (호환) 옛 공개 경로 shim. 구현이 아니라 새 경로를 가리키는 alias만 담는다.
+_COMPAT_SHIM = os.path.join(_SRC, "vdeter", "stage8")
+# 기존 production 소스 트리(poc 본체·호환 shim·tests 제외)에서 poc를 참조하지 않아야 한다.
 _PROJECT_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", ".."))
 
 # Stage 6 통합에서 명시 승인된 **유일한** CLI opt-in adapter. 이 파일만 stage8을 import할 수 있고
@@ -27,7 +29,7 @@ _SANCTIONED_CLI_ADAPTERS = frozenset({
 # Stage 6 coordinator↔PoC 연결에서 명시 승인된 **RF-off software 세션 host** adapter.
 # production CLI adapter(poc_run)와 달리, 이것은 `--rf-off-software`에서만 진입하는 **명시적
 # 하드웨어 경계 double** harness다(실장비 실행에서는 진입하지 않는다). 따라서 시험 support의 Stage 7
-# software group(`tests.support.stage7`)과 `vdeter.stage8.testing` seam을 의도적으로 import하며
+# software group(`tests.support.stage7`)과 `vdeter.poc.testing` seam을 의도적으로 import하며
 # (그것이 존재 이유), 아래 production-purity 규칙(.testing/rf_off 금지)에서 제외한다.
 # 광범위 allowlist가 아니라 실제 결선에 필요한 파일만 명시 추가한다.
 # - stage8_rf_off_session.py: 실 coordinator 프로세스의 RF-off software 세션 host.
@@ -53,8 +55,16 @@ _SANCTIONED_LAUNCHER_SEAMS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "stage7_mass_roc_controller.py")),
 })
 
-_STAGE8_ADAPTERS = (_SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
-                    | _SANCTIONED_LAUNCHER_SEAMS)
+# (호환) 옛 공개 경로 shim. 구현이 아니라 `vdeter.poc.api`의 같은 객체를 옛 이름으로
+# 노출하는 alias 파일이다. 새 경로를 참조하므로 아래 정적 검사에 잡히지만, 공개 계약
+# 보존을 위한 **명시 승인 파일**이다(디렉터리 통째가 아니라 파일 단위).
+_SANCTIONED_COMPAT_SHIM = frozenset({
+    os.path.normpath(os.path.join(_SRC, "vdeter", "stage8", "__init__.py")),
+    os.path.normpath(os.path.join(_SRC, "vdeter", "stage8", "poc_api", "__init__.py")),
+})
+
+_POC_ADAPTERS = (_SANCTIONED_CLI_ADAPTERS | _SANCTIONED_RF_OFF_SESSION
+                    | _SANCTIONED_LAUNCHER_SEAMS | _SANCTIONED_COMPAT_SHIM)
 
 
 def _run_py(code: str) -> subprocess.CompletedProcess:
@@ -71,7 +81,7 @@ _RF_OFF_SESSION_CLASS = "RfOffStage7DeviceSession"
 _STAGE7_GROUP_SUPPORT = "tests.support.stage7"
 _STAGE7_GROUP_BUILDER = "build_stage7_software_group"
 _STAGE7_GROUP_STARTER = "start_stage7_group"
-_STAGE7_SEAMS_MODULE = "apps.stage8_stage7_seams"
+_SEAMS_MODULE = "apps.stage8_stage7_seams"
 _AUTHORITATIVE_PROVIDER = "assemble_authoritative_provider"
 
 
@@ -158,7 +168,7 @@ def _assert_rf_off_session_wired(case, tree):
     case.assertEqual(wiring["provider_factory"], _AUTHORITATIVE_PROVIDER,
                      "self._provider는 권위 schedule_tx 경로 provider(assemble_authoritative_provider)"
                      "여야 한다(stub·fallback seam 아님)")
-    case.assertEqual(imported.get(_AUTHORITATIVE_PROVIDER), _STAGE7_SEAMS_MODULE,
+    case.assertEqual(imported.get(_AUTHORITATIVE_PROVIDER), _SEAMS_MODULE,
                      "권위 provider 조립기는 apps.stage8_stage7_seams에서 가져와야 한다")
     case.assertIn(wiring["provider_members_arg"], wiring["group_names"],
                   "provider는 실행 중 software group의 members로 조립해야 한다")
@@ -223,7 +233,7 @@ class _DetachProviderMembers(ast.NodeTransformer):
 
 
 class ImportBoundaryTest(unittest.TestCase):
-    def _stage8_referencing_files(self):
+    def _poc_referencing_files(self):
         """apps/common/MASS/ROC/src(stage8 자체 제외)에서 stage8을 문자열 참조하는 파일 목록."""
         hits = []
         scan_roots = [
@@ -237,15 +247,17 @@ class ImportBoundaryTest(unittest.TestCase):
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
-                if os.path.normpath(dirpath).startswith(os.path.normpath(_STAGE8)):
-                    continue  # stage8 자체 제외
+                if os.path.normpath(dirpath).startswith(
+                        (os.path.normpath(_POC_PKG), os.path.normpath(_COMPAT_SHIM))
+                ):
+                    continue  # poc 본체와 호환 shim 자체는 제외
                 for name in files:
                     if not name.endswith(".py"):
                         continue
                     path = os.path.join(dirpath, name)
                     with open(path, "r", encoding="utf-8", errors="replace") as fh:
                         text = fh.read()
-                    if "vdeter.stage8" in text or "stage8.poc_api" in text:
+                    if "vdeter.poc" in text or "poc.api" in text:
                         hits.append(os.path.normpath(path))
         return hits
 
@@ -256,8 +268,8 @@ class ImportBoundaryTest(unittest.TestCase):
         아니다. Stage 6에서 실제 CLI(`vdeter run --poc/--poc-dir`)를 연결하되, stage8 의존을 단 하나의
         sanctioned adapter로 좁히고 나머지 모든 기존 소스는 여전히 stage8을 참조하지 않는다.
         """
-        offenders = [p for p in self._stage8_referencing_files()
-                     if p not in _STAGE8_ADAPTERS]
+        offenders = [p for p in self._poc_referencing_files()
+                     if p not in _POC_ADAPTERS]
         rel = [os.path.relpath(p, _PROJECT_ROOT) for p in offenders]
         self.assertEqual(rel, [], f"승인 adapter 밖에서 stage8을 참조함: {rel}")
 
@@ -271,7 +283,7 @@ class ImportBoundaryTest(unittest.TestCase):
         done = _run_py(
             "import importlib, sys;"
             "importlib.import_module('apps.stage7_mass_roc_controller');"
-            "print(sorted(m for m in sys.modules if m.startswith('vdeter.stage8')))"
+            "print(sorted(m for m in sys.modules if m.startswith('vdeter.poc')))"
         )
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("[]", done.stdout.strip(),
@@ -283,7 +295,7 @@ class ImportBoundaryTest(unittest.TestCase):
         승인 adapter는 실제로 stage8을 참조해야 하고(opt-in 존재), 같은 디렉터리의 다른 CLI
         파일(cli.py·run_cmd.py)은 stage8을 직접 참조하지 않는다(opt-in을 adapter로 국한).
         """
-        hits = set(self._stage8_referencing_files())
+        hits = set(self._poc_referencing_files())
         for adapter in _SANCTIONED_CLI_ADAPTERS:
             self.assertIn(adapter, hits, "승인 adapter가 stage8을 실제로 import해야 함")
         standalone = os.path.join(_PROJECT_ROOT, "apps", "standalone")
@@ -302,7 +314,7 @@ class ImportBoundaryTest(unittest.TestCase):
         group**(tests.support.stage7; 하드웨어 경계만 fake medium worker)을 띄워 권위 provider를 그
         members에 결속한다(AST 결선 계약 검사); stage7_seams는 실 frozen PHY·production provider 조립이다.
         """
-        hits = set(self._stage8_referencing_files())
+        hits = set(self._poc_referencing_files())
         for adapter in _SANCTIONED_RF_OFF_SESSION:
             self.assertIn(adapter, hits, "RF-off 통합 adapter가 stage8을 실제로 import해야 함")
         with open(_RF_OFF_SESSION_HOST, "r", encoding="utf-8") as fh:
@@ -332,7 +344,7 @@ class ImportBoundaryTest(unittest.TestCase):
             "fallback_provider": _RenameCalls(_AUTHORITATIVE_PROVIDER, "assemble_stage7_provider"),
             # (b) 잘못된 공급자: 실 Stage 7 객체가 아닌 rf_off stub seam module에서 조립.
             "stub_seam_module": _RenameCalls(_AUTHORITATIVE_PROVIDER, _AUTHORITATIVE_PROVIDER,
-                                             module="vdeter.stage8.integration.rf_off"),
+                                             module="vdeter.poc.integration.rf_off"),
         }
         for label, transformer in mutations.items():
             with self.subTest(mutation=label):
@@ -362,7 +374,7 @@ class ImportBoundaryTest(unittest.TestCase):
         result = _run_py(
             "import sys\n"
             "import apps.standalone.cli, apps.standalone.run_cmd\n"
-            "bad=[m for m in sys.modules if m.startswith('vdeter.stage8')]\n"
+            "bad=[m for m in sys.modules if m.startswith('vdeter.poc')]\n"
             "print('LOADED', bad)\n"
             "sys.exit(0 if not bad else 4)\n"
         )
@@ -372,15 +384,15 @@ class ImportBoundaryTest(unittest.TestCase):
         """opt-in: 승인 adapter는 stage8을 정상 import할 수 있다(연결이 실제로 가능)."""
         result = _run_py(
             "import sys, apps.standalone.poc_run\n"
-            "ok=[m for m in sys.modules if m.startswith('vdeter.stage8')]\n"
+            "ok=[m for m in sys.modules if m.startswith('vdeter.poc')]\n"
             "sys.exit(0 if ok else 5)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_public_api_import_excludes_supervisor(self):
         result = _run_py(
-            "import sys, vdeter.stage8.poc_api\n"
-            "priv=[m for m in sys.modules if m.startswith('vdeter.stage8._supervisor')]\n"
+            "import sys, vdeter.poc.api\n"
+            "priv=[m for m in sys.modules if m.startswith('vdeter.poc._supervisor')]\n"
             "print('PRIV', priv)\n"
             "sys.exit(0 if not priv else 1)\n"
         )
@@ -388,8 +400,8 @@ class ImportBoundaryTest(unittest.TestCase):
 
     def test_sdk_import_excludes_supervisor(self):
         result = _run_py(
-            "import sys, vdeter.stage8.poc_api.sdk\n"
-            "priv=[m for m in sys.modules if m.startswith('vdeter.stage8._supervisor')]\n"
+            "import sys, vdeter.poc.api.sdk\n"
+            "priv=[m for m in sys.modules if m.startswith('vdeter.poc._supervisor')]\n"
             "sys.exit(0 if not priv else 1)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -398,8 +410,8 @@ class ImportBoundaryTest(unittest.TestCase):
         result = _run_py(
             "import threading, sys\n"
             "before=threading.active_count()\n"
-            "import vdeter.stage8.poc_api\n"
-            "import vdeter.stage8._supervisor.supervisor\n"
+            "import vdeter.poc.api\n"
+            "import vdeter.poc._supervisor.supervisor\n"
             "after=threading.active_count()\n"
             "print('THREADS', before, after)\n"
             "sys.exit(0 if before==after==1 else 2)\n"
@@ -408,12 +420,111 @@ class ImportBoundaryTest(unittest.TestCase):
 
     def test_bare_stage8_package_loads_no_submodules(self):
         result = _run_py(
+            "import sys, vdeter.poc\n"
+            "subs=[m for m in sys.modules if m.startswith('vdeter.poc.')]\n"
+            "print('SUBS', subs)\n"
+            "sys.exit(0 if not subs else 3)\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class PublicApiCompatAliasTest(unittest.TestCase):
+    """공개 SDK 옛 경로 호환 — 같은 객체여야 하고, 비공개 내부는 열리면 안 된다."""
+
+    def test_old_public_path_exposes_the_same_objects(self):
+        """옛 경로와 새 경로가 **같은** module·class·enum 객체를 준다(중복 적재 금지).
+
+        서로 다른 module 객체로 두 번 적재되면 `isinstance`와 enum 동일성이 깨져
+        호환이 이름만 같고 의미가 다른 상태가 된다.
+        """
+        result = _run_py(
+            "import sys\n"
+            "import vdeter.poc.api as new\n"
+            "import vdeter.stage8.poc_api as old\n"
+            "assert old.PocErrorCode is new.PocErrorCode, 'enum 객체가 다르다'\n"
+            "assert old.SdkEngine is new.SdkEngine, 'class 객체가 다르다'\n"
+            "assert old.encode_wire_packet is new.encode_wire_packet, 'function 객체가 다르다'\n"
+            "import vdeter.stage8.poc_api.codec as oc\n"
+            "import vdeter.poc.api.codec as nc\n"
+            "assert oc is nc, 'module 객체가 다르다'\n"
+            "assert sys.modules['vdeter.stage8.poc_api.codec'] is "
+            "sys.modules['vdeter.poc.api.codec']\n"
+            "assert tuple(old.__all__) == tuple(new.__all__), '__all__ 불일치'\n"
+            "sys.exit(0)\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_every_public_submodule_is_aliased(self):
+        """공개 surface의 하위 module 전부가 옛 경로로도 같은 객체다."""
+        result = _run_py(
+            "import sys, importlib\n"
+            "names = ('codec','errors','limits','messages','negotiation',\n"
+            "         'protocol','sdk','seams','transport','types')\n"
+            "for n in names:\n"
+            "    o = importlib.import_module('vdeter.stage8.poc_api.' + n)\n"
+            "    m = importlib.import_module('vdeter.poc.api.' + n)\n"
+            "    assert o is m, n\n"
+            "sys.exit(0)\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_compat_does_not_expose_private_internals(self):
+        """비공개 내부는 옛 경로로 열리지 않는다(포괄 호환 package 금지)."""
+        for module in ("vdeter.stage8._supervisor", "vdeter.stage8.execution",
+                       "vdeter.stage8.integration", "vdeter.stage8.shared_medium",
+                       "vdeter.stage8.testing"):
+            result = _run_py("import %s\n" % module)
+            self.assertNotEqual(
+                result.returncode, 0,
+                "%s 이 호환 경로로 열렸다 — 공개/비공개 경계가 무너진다" % module)
+
+    def test_bare_compat_package_loads_no_submodules(self):
+        """옛 경로 package import만으로는 아무 하위 module도 적재되지 않는다."""
+        result = _run_py(
             "import sys, vdeter.stage8\n"
             "subs=[m for m in sys.modules if m.startswith('vdeter.stage8.')]\n"
             "print('SUBS', subs)\n"
             "sys.exit(0 if not subs else 3)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_production_sources_use_the_new_path_only(self):
+        """호환 shim·계약시험·저장 식별자·과거 기록 밖에서 옛 경로 문자열이 없다.
+
+        허용 범주는 파일 단위로 명시한다(디렉터리 통째 제외 금지). 저장되는 wire 값
+        `vdeter.stage8.poc-api.*`·`vdeter.stage8.poc-manifest.*`는 모듈 경로가 아니라
+        **값**이므로 계약상 보존 대상이다.
+        """
+        allowed_files = {os.path.normpath(p) for p in _SANCTIONED_COMPAT_SHIM}
+        allowed_files.add(os.path.normpath(os.path.abspath(__file__)))
+        offenders = []
+        for root in (_SRC, os.path.join(_PROJECT_ROOT, "apps"),
+                     os.path.join(_PROJECT_ROOT, "VDETER", "apps"),
+                     os.path.join(_PROJECT_ROOT, "VDETER", "tools"),
+                     os.path.join(_PROJECT_ROOT, "tools")):
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _dirs, files in os.walk(root):
+                if "__pycache__" in dirpath:
+                    continue
+                for name in files:
+                    if not name.endswith(".py"):
+                        continue
+                    path = os.path.normpath(os.path.join(dirpath, name))
+                    if path in allowed_files:
+                        continue
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        for lineno, line in enumerate(fh, 1):
+                            if "vdeter.stage8" not in line and "vdeter/stage8" not in line:
+                                continue
+                            # 저장되는 프로토콜/manifest 식별자 값은 보존 대상이다.
+                            if "vdeter.stage8.poc-" in line:
+                                continue
+                            offenders.append("%s:%d %s"
+                                             % (os.path.relpath(path, _PROJECT_ROOT),
+                                                lineno, line.strip()[:120]))
+        self.assertEqual(offenders, [],
+                         "production이 옛 경로를 참조한다: %s" % offenders)
 
 
 if __name__ == "__main__":

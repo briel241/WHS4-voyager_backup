@@ -1,6 +1,6 @@
 """Stage 8 PoC 실행을 실제 `vdeter run` CLI에 연결하는 **sanctioned adapter**.
 
-이 파일은 `apps/`에서 `vdeter.stage8`을 import하도록 **명시 허용된 유일한 CLI adapter**다
+이 파일은 `apps/`에서 `vdeter.poc`을 import하도록 **명시 허용된 유일한 CLI adapter**다
 (import 경계 시험이 이 파일 하나만 allowlist에 둔다). `run_cmd`는 `--poc`/`--poc-dir`가 주어졌을
 때만 이 module을 **lazy import**하므로, PoC를 쓰지 않는 일반 `vdeter run`/`--help` 경로는 stage8을
 로드하지 않는다(기능 OFF 구조적 0). public SDK가 private supervisor를 역참조하지 않는 계약도 그대로다.
@@ -25,15 +25,15 @@ import os
 from dataclasses import dataclass
 
 # stage8 import는 이 sanctioned adapter 안에서만 한다(run_cmd가 PoC 선택 시 lazy import).
-from vdeter.stage8.execution.runner import scenario_started
-from vdeter.stage8.execution.selection import SelectionError, SourceMode, resolve_source_mode
-from vdeter.stage8.execution.verdict import ScenarioVerdict
-from vdeter.stage8.integration.entry import (
+from vdeter.poc.execution.runner import scenario_started
+from vdeter.poc.execution.selection import SelectionError, SourceMode, resolve_source_mode
+from vdeter.poc.execution.verdict import ScenarioVerdict
+from vdeter.poc.integration.entry import (
     prepare_poc_workload,
     select_and_snapshot,
 )
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.negotiation import ServerCapabilityConfig
 
 
 class PocRunError(Exception):
@@ -171,8 +171,8 @@ def catalog_menu_lines(option: PocOption, scenario_id: str,
     """
     if not option.poc_dir:
         return []
-    from vdeter.stage8.execution.catalog import scan_catalog
-    from vdeter.stage8.execution.selection import build_menu
+    from vdeter.poc.execution.catalog import scan_catalog
+    from vdeter.poc.execution.selection import build_menu
     catalog = scan_catalog(option.poc_dir)
     menu = build_menu(catalog, scenario_id,
                       server_config=server_config or ServerCapabilityConfig())
@@ -205,8 +205,8 @@ def resolve_catalog_selection(option: PocOption, scenario_id: str, choice: str, 
         return "rescan", None
     if lowered in MENU_BASELINE:
         return "baseline", None
-    from vdeter.stage8.execution.catalog import scan_catalog
-    from vdeter.stage8.execution.selection import build_menu
+    from vdeter.poc.execution.catalog import scan_catalog
+    from vdeter.poc.execution.selection import build_menu
     catalog = scan_catalog(option.poc_dir)
     menu = build_menu(catalog, scenario_id,
                       server_config=server_config or ServerCapabilityConfig())
@@ -306,7 +306,7 @@ def prepare_workload(session, snapshot, *, scenario_id: str, run_id: str, worklo
                      src_path: str | None = None):
     """PoC child를 spawn·연결·ARMED까지 준비한다(scenario submit 전, §5.1). 실패는 :class:`PocRunError`.
 
-    반환 :class:`~vdeter.stage8.integration.entry.PocWorkload`(ARMED). arm 실패 시 자원을 정리하고
+    반환 :class:`~vdeter.poc.integration.entry.PocWorkload`(ARMED). arm 실패 시 자원을 정리하고
     fail-closed evidence를 담아 `PocRunError`(`.evidence`)로 올린다 — caller는 scenario를 제출하지 않는다.
     `socket_root=None`이면 명세 §4.2 socket root(짧은 경로·nonce dir)를 supervisor가 고른다(production).
     """

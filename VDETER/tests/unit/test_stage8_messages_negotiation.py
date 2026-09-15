@@ -7,16 +7,16 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.messages import build_message, parse_envelope
-from vdeter.stage8.poc_api.negotiation import (
+from vdeter.poc.api import protocol
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.messages import build_message, parse_envelope
+from vdeter.poc.api.negotiation import (
     HelloRequest,
     ServerCapabilityConfig,
     negotiate,
     restore_matches,
 )
-from vdeter.stage8.testing import build_manifest
+from vdeter.poc.testing import build_manifest
 
 
 def _hello(major=1, mn=0, mx=0, caps=("observe_packet", "replay_packet"),

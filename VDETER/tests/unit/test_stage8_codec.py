@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from vdeter.stage8.poc_api.codec import (
+from vdeter.poc.api.codec import (
     CodecError,
     canonical_sha256,
     decode_bytes_field,
@@ -17,7 +17,7 @@ from vdeter.stage8.poc_api.codec import (
     encode_canonical,
     encode_wire_packet,
 )
-from vdeter.stage8.poc_api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
+from vdeter.poc.api.limits import MAX_JSON_NESTING, MAX_WIRE_PACKET_BYTES
 
 
 class CodecTest(unittest.TestCase):

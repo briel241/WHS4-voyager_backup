@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.types import PhysicalChannel, TuningState
-from vdeter.stage8.shared_medium import evidence as EV
-from vdeter.stage8.shared_medium import observation as O
-from vdeter.stage8.shared_medium import radiation as R
-from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium import topology as T
+from vdeter.poc.api.types import PhysicalChannel, TuningState
+from vdeter.poc.shared_medium import evidence as EV
+from vdeter.poc.shared_medium import observation as O
+from vdeter.poc.shared_medium import radiation as R
+from vdeter.poc.shared_medium import testing as TD
+from vdeter.poc.shared_medium import topology as T
 
 
 def _ab():

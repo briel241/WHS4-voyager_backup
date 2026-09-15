@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.execution.lease import (
+from vdeter.poc.execution.lease import (
     MASS_B_SERIAL,
     LeaseError,
     MassBLease,

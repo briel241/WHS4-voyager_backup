@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import unittest
 
-from vdeter.stage8.execution.render import (
+from vdeter.poc.execution.render import (
     NOT_RECORDED,
     load_result,
     render_detailed,
@@ -16,8 +16,8 @@ from vdeter.stage8.execution.render import (
     render_results_file,
     render_rf_console,
 )
-from vdeter.stage8.testing.execution_fakes import ResultWriteError, write_result_fixture
-from vdeter.stage8.execution.verdict import (
+from vdeter.poc.testing.execution_fakes import ResultWriteError, write_result_fixture
+from vdeter.poc.execution.verdict import (
     ActionExecution,
     AttackRecord,
     PocInfrastructure,
@@ -228,7 +228,7 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import os
         from unittest import mock
         path = os.path.join(self.dir, "fail.json")
-        with mock.patch("vdeter.stage8.testing.execution_fakes.os.link",
+        with mock.patch("vdeter.poc.testing.execution_fakes.os.link",
                         side_effect=OSError("disk full")):
             with self.assertRaises(ResultWriteError):
                 write_result_fixture(_result(), path)
@@ -240,7 +240,7 @@ class ResultsFileReadOnlyTest(unittest.TestCase):
         import os
         from unittest import mock
         path = os.path.join(self.dir, "short.json")
-        with mock.patch("vdeter.stage8.testing.execution_fakes.os.write", return_value=0):
+        with mock.patch("vdeter.poc.testing.execution_fakes.os.write", return_value=0):
             with self.assertRaises(ResultWriteError):
                 write_result_fixture(_result(), path)
         self.assertFalse(os.path.exists(path))

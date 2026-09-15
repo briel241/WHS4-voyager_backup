@@ -10,7 +10,7 @@ import os
 import re
 import unittest
 
-from vdeter.stage8.execution.limits import (
+from vdeter.poc.execution.limits import (
     READY_IDLE_TIMEOUT_S,
     SESSION_ABSOLUTE_DEADLINE_S,
     SERVICE_BRINGUP_TIMEOUT_S,
@@ -18,14 +18,14 @@ from vdeter.stage8.execution.limits import (
     SERVICE_WORKLOAD_TIMEOUT_S,
     SessionPolicy,
 )
-from vdeter.stage8.execution.session import (
+from vdeter.poc.execution.session import (
     Deadline,
     ResidentSession,
     SessionExpired,
     SessionState,
     SessionStateError,
 )
-from vdeter.stage8.testing.fakes import FakeClock
+from vdeter.poc.testing.fakes import FakeClock
 
 
 def _ready_session(clock):

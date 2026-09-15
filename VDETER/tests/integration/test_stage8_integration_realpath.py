@@ -27,25 +27,25 @@ _LINUX = (hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET")
           and hasattr(os, "getuid") and sys.platform != "win32")
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8.execution.child_main import (
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.clock import RealMonotonicClock
+    from vdeter.poc.execution.child_main import (
         ENV_ENTRYPOINT, ENV_HELLO, ENV_SNAPSHOT_SCRIPT,
     )
-    from vdeter.stage8.execution.lease import MassBLease
-    from vdeter.stage8.execution.runner import (
+    from vdeter.poc.execution.lease import MassBLease
+    from vdeter.poc.execution.runner import (
         WorkloadRunner, WorkloadSpec, observation_step, scenario_started,
     )
-    from vdeter.stage8.execution.snapshot import create_snapshot
-    from vdeter.stage8.execution.verdict import (
+    from vdeter.poc.execution.snapshot import create_snapshot
+    from vdeter.poc.execution.verdict import (
         ActionExecution, PocInfrastructure, ScenarioVerdict, TargetEffect,
     )
-    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
-    from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-    from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
-    from vdeter.stage8.testing.fakes import make_observation
+    from vdeter.poc.integration.rf_off import assemble_rf_off_provider, rf_off_terminal_source
+    from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+    from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.fakes import make_observation
 
 
 # 반응형: PACKET_OBSERVED에 replay(ROC)를 NEXT_SAFE_SLOT로 제출.
@@ -123,7 +123,7 @@ class ProductionRealPathTest(unittest.TestCase):
     def _chain(self, snap, workload_id, *, seam_kwargs=None, target_response=None):
         provider, seams = assemble_rf_off_provider(**(seam_kwargs or {}))
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 ENV_SNAPSHOT_SCRIPT: snap.script_path,
                 ENV_ENTRYPOINT: snap.descriptor.entrypoint,
@@ -243,7 +243,7 @@ class ProductionRealPathTest(unittest.TestCase):
 
     def test_not_tuned_observation_makes_no_event_or_action(self):
         # NOT_TUNED 관측은 PACKET_OBSERVED event·bytes를 만들지 않는다(§8.4). child는 반응 없음.
-        from vdeter.stage8.poc_api.types import TuningState
+        from vdeter.poc.api.types import TuningState
         snap = self._snapshot("nt", _REACTIVE_REPLAY, "w7")
         provider, seams, conn, lease, runner = self._chain(snap, "w7")
         obs = make_observation(source_station="ROC", destination_station="MASS-A",

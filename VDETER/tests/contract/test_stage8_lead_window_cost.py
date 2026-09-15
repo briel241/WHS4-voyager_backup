@@ -21,14 +21,14 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium.iq import IqError, IqBurst, sha256_cf32le, to_cf32le
-from vdeter.stage8.shared_medium.provider import (
+from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+from vdeter.poc.shared_medium import testing as TD
+from vdeter.poc.shared_medium.iq import IqError, IqBurst, sha256_cf32le, to_cf32le
+from vdeter.poc.shared_medium.provider import (
     NextSafeSlotScheduler,
     SharedMediumActionProvider,
 )
-from vdeter.stage8.shared_medium.radiation import ChildPath, ReferenceWaveformFactory
+from vdeter.poc.shared_medium.radiation import ChildPath, ReferenceWaveformFactory
 
 _STATIONS = {"MASS-A": 111_111_111, "ROC": 222_222_222}
 
@@ -135,7 +135,7 @@ class PreSerializedBytesTest(unittest.TestCase):
                                  station_id_by_endpoint=_STATIONS)
         children = self._children(samples, cf32le=expected)
         # 재계산하면 즉시 실패한다 — "쓰지 않는다"를 구조가 아니라 실행으로 고정한다.
-        with patch("vdeter.stage8.shared_medium.iq.to_cf32le",
+        with patch("vdeter.poc.shared_medium.iq.to_cf32le",
                    side_effect=AssertionError("임계 구간에서 cf32le를 다시 계산했다")):
             sink.commit_group(sink.prepare_group(group_id="p", children=children))
         sent = base64.b64decode(calls[0][1]["samples_base64"])
@@ -199,7 +199,7 @@ class ChildrenCarryCacheTest(unittest.TestCase):
     """build_parent가 미리 만든 직렬화를 child까지 나르는가(없으면 sink가 다시 만든다)."""
 
     def test_children_carry_the_cache_when_the_factory_provides_it(self):
-        from vdeter.stage8.shared_medium.radiation import AtomicBroadcast
+        from vdeter.poc.shared_medium.radiation import AtomicBroadcast
 
         payload = b"lead-window"
 
@@ -224,7 +224,7 @@ class ChildrenCarryCacheTest(unittest.TestCase):
             self.assertEqual(child.samples_cf32le, to_cf32le(parent.waveform.samples))
 
     def test_children_have_no_cache_when_the_factory_omits_it(self):
-        from vdeter.stage8.shared_medium.radiation import AtomicBroadcast
+        from vdeter.poc.shared_medium.radiation import AtomicBroadcast
 
         ab = AtomicBroadcast(radio_sink=TD.CountingRadioSink(),
                              rx_readiness=TD.ReadyReadiness(),

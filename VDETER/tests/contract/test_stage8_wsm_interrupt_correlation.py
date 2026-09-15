@@ -1,10 +1,10 @@
 """Interrupted commit keeps operator control and exposes known outcome identity."""
 import unittest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
-from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
-from vdeter.stage8.shared_medium import testing as TD
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.types import ActionDescriptor, ActionKind
+from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
+from vdeter.poc.shared_medium import testing as TD
 
 
 class InterruptedCorrelationTest(unittest.TestCase):

@@ -16,21 +16,21 @@ import unittest
 _POSIX = hasattr(os, "getuid") and sys.platform != "win32"
 
 if _POSIX:
-    from vdeter.stage8.execution.catalog import scan_catalog
-    from vdeter.stage8.execution.selection import build_menu, rescan_summary
-    from vdeter.stage8.execution.session import ResidentSession, SessionState
-    from vdeter.stage8.execution.snapshot import create_snapshot, verify_snapshot
-    from vdeter.stage8.execution.runner import (
+    from vdeter.poc.execution.catalog import scan_catalog
+    from vdeter.poc.execution.selection import build_menu, rescan_summary
+    from vdeter.poc.execution.session import ResidentSession, SessionState
+    from vdeter.poc.execution.snapshot import create_snapshot, verify_snapshot
+    from vdeter.poc.execution.runner import (
         WorkloadRunner,
         WorkloadSpec,
         observation_step,
         scenario_started,
     )
-    from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.testing.client_runner import RecordingCallbacks
-    from vdeter.stage8.testing.fakes import FakeClock, make_observation
-    from vdeter.stage8.testing.execution_fakes import (
+    from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.testing.client_runner import RecordingCallbacks
+    from vdeter.poc.testing.fakes import FakeClock, make_observation
+    from vdeter.poc.testing.execution_fakes import (
         FakeTxExecutor,
         LoopbackConnection,
         ScenarioPriorityProvider,

@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode, Severity
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind
-from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium.radiation import ChildTerminal, ParentOutcome, ReadinessDecision
-from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
+from vdeter.poc.api.errors import PocError, PocErrorCode, Severity
+from vdeter.poc.api.types import ActionDescriptor, ActionKind
+from vdeter.poc.shared_medium import testing as TD
+from vdeter.poc.shared_medium.radiation import ChildTerminal, ParentOutcome, ReadinessDecision
+from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
 
 
 def _action(target="ROC", **kw):
@@ -287,8 +287,8 @@ class SeamRejectAndMalformedTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, PocErrorCode.POC_ACTION_SCHEMA_INVALID)
 
     def test_waveform_wrong_channel_is_pocerror(self):
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium.iq import IqBurst
+        from vdeter.poc.api.types import PhysicalChannel
+        from vdeter.poc.shared_medium.iq import IqBurst
 
         class WrongChannelFactory:
             def encode(self, *, source_station, channel, payload):
@@ -441,8 +441,8 @@ class TerminalFaultTest(unittest.TestCase):
 # --- evidence surfaces unresolved ownership ---------------------------------
 class UnresolvedOwnershipEvidenceTest(unittest.TestCase):
     def test_unresolved_ownership_in_evidence(self):
-        from vdeter.stage8.shared_medium import observation as O
-        from vdeter.stage8.shared_medium.radiation import BroadcastResult
+        from vdeter.poc.shared_medium import observation as O
+        from vdeter.poc.shared_medium.radiation import BroadcastResult
 
         arb = FaultArbiter(release_exc=RuntimeError("release boom"))
         prov = _provider(arbiter=arb, scheduler=NextSafeSlotScheduler(current_slot=0, lead_slots=1))

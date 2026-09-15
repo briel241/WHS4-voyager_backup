@@ -12,9 +12,9 @@ import hashlib
 import os
 import unittest
 
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium import decoder as D
-from vdeter.stage8.shared_medium import iq as IQ
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium import decoder as D
+from vdeter.poc.shared_medium import iq as IQ
 
 _FIX = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures", "stage8_shared_medium")

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api import limits
-from vdeter.stage8.poc_api.errors import (
+from vdeter.poc.api import limits
+from vdeter.poc.api.errors import (
     ERROR_SEVERITY,
     PocError,
     PocErrorCode,

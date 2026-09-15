@@ -1,11 +1,11 @@
 """Independent boundary regressions: absence, malformed returns and partial cleanup."""
 import unittest
 
-from vdeter.stage8.execution.lease import MassBLease
-from vdeter.stage8.execution.runner import WorkloadRunner, WorkloadSpec, scenario_started
-from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict, ActionExecution
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.testing.execution_fakes import FakeTxExecutor
+from vdeter.poc.execution.lease import MassBLease
+from vdeter.poc.execution.runner import WorkloadRunner, WorkloadSpec, scenario_started
+from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict, ActionExecution
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.testing.execution_fakes import FakeTxExecutor
 from .test_stage8_exec_fault_matrix import SNAPSHOT, _FaultConn
 
 
@@ -210,9 +210,9 @@ class RunnerBoundaryTest(unittest.TestCase):
         self.assertEqual(result.infrastructure_error_code, "POC_TX_OUTCOME_UNKNOWN")
 
     def test_callback_timeout_preserves_already_accepted_action(self):
-        from vdeter.stage8.testing.execution_fakes import LoopbackConnection
-        from vdeter.stage8.testing.fakes import FakeClock, build_manifest
-        from vdeter.stage8.testing.client_runner import RecordingCallbacks
+        from vdeter.poc.testing.execution_fakes import LoopbackConnection
+        from vdeter.poc.testing.fakes import FakeClock, build_manifest
+        from vdeter.poc.testing.client_runner import RecordingCallbacks
         clock = FakeClock()
         class Callbacks(RecordingCallbacks):
             def on_event(self, event, context):

@@ -4,14 +4,14 @@ import sys
 
 import unittest
 
-from vdeter.stage8.execution.lease import LeaseError, MassBLease, MassBRole
-from vdeter.stage8.execution.runner import WorkloadRunner, WorkloadSpec
-from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired, SessionState
-from vdeter.stage8.execution.snapshot import Snapshot
-from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-from vdeter.stage8.testing.client_runner import RecordingCallbacks
-from vdeter.stage8.testing.execution_fakes import FakeTxExecutor, LoopbackConnection
-from vdeter.stage8.testing.fakes import FakeClock, build_manifest
+from vdeter.poc.execution.lease import LeaseError, MassBLease, MassBRole
+from vdeter.poc.execution.runner import WorkloadRunner, WorkloadSpec
+from vdeter.poc.execution.session import Deadline, ResidentSession, SessionExpired, SessionState
+from vdeter.poc.execution.snapshot import Snapshot
+from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+from vdeter.poc.testing.client_runner import RecordingCallbacks
+from vdeter.poc.testing.execution_fakes import FakeTxExecutor, LoopbackConnection
+from vdeter.poc.testing.fakes import FakeClock, build_manifest
 
 
 def make_runner(lease):

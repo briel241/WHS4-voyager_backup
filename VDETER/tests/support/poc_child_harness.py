@@ -23,9 +23,9 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from vdeter.stage8.poc_api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
-from vdeter.stage8.poc_api.transport import connect  # noqa: E402
-from vdeter.stage8.testing import (  # noqa: E402
+from vdeter.poc.api.sdk import ClientState, PocContext, SdkEngine  # noqa: E402
+from vdeter.poc.api.transport import connect  # noqa: E402
+from vdeter.poc.testing import (  # noqa: E402
     ClientRunner,
     RecordingCallbacks,
     build_manifest,

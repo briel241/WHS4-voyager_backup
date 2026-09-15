@@ -11,7 +11,7 @@ import os
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SM = os.path.normpath(os.path.join(_HERE, "..", "..", "src", "vdeter", "stage8", "shared_medium"))
+_SM = os.path.normpath(os.path.join(_HERE, "..", "..", "src", "vdeter", "poc", "shared_medium"))
 
 
 def _imports(path):
@@ -44,8 +44,8 @@ class ConstructorFailClosedArchTest(unittest.TestCase):
     """기본 생성자는 RF-off 기본값을 명시 허용하지 않으면 구조적으로 생성 실패한다."""
 
     def test_plain_constructor_without_optin_fails(self):
-        from vdeter.stage8.shared_medium import testing as TD
-        from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider
+        from vdeter.poc.shared_medium import testing as TD
+        from vdeter.poc.shared_medium.provider import SharedMediumActionProvider
 
         with self.assertRaises(ValueError):
             SharedMediumActionProvider(
@@ -53,8 +53,8 @@ class ConstructorFailClosedArchTest(unittest.TestCase):
             )
 
     def test_for_production_requires_both_dependencies(self):
-        from vdeter.stage8.shared_medium import testing as TD
-        from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
+        from vdeter.poc.shared_medium import testing as TD
+        from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler, SharedMediumActionProvider
 
         with self.assertRaises(ValueError):
             SharedMediumActionProvider.for_production(
@@ -72,7 +72,7 @@ class SlotSchedulerContractTest(unittest.TestCase):
     """trigger 등록·정리가 SlotScheduler 계약에 포함된다(finding A 계약 gap)."""
 
     def test_scheduler_contract_has_trigger_registration(self):
-        from vdeter.stage8.shared_medium.provider import NextSafeSlotScheduler
+        from vdeter.poc.shared_medium.provider import NextSafeSlotScheduler
 
         sched = NextSafeSlotScheduler()
         self.assertTrue(hasattr(sched, "register_trigger"))

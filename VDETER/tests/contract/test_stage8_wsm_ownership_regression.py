@@ -4,11 +4,11 @@ from dataclasses import replace
 
 import pytest
 
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
-from vdeter.stage8.shared_medium import testing as TD
-from vdeter.stage8.shared_medium.provider import SharedMediumActionProvider, NextSafeSlotScheduler
-from vdeter.stage8.shared_medium.radiation import AtomicBroadcast, BroadcastError, ParentOutcome
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.api.types import ActionDescriptor, ActionKind, PhysicalChannel
+from vdeter.poc.shared_medium import testing as TD
+from vdeter.poc.shared_medium.provider import SharedMediumActionProvider, NextSafeSlotScheduler
+from vdeter.poc.shared_medium.radiation import AtomicBroadcast, BroadcastError, ParentOutcome
 
 
 def action():
@@ -176,7 +176,7 @@ def test_resolved_parent_cannot_transmit_again():
 
 
 def test_commit_unknown_is_in_evidence_without_a_success_result():
-    from vdeter.stage8.shared_medium.observation import observe_scene
+    from vdeter.poc.shared_medium.observation import observe_scene
 
     prov = provider(sink=TD.CountingRadioSink(fail_on_commit=True))
     with pytest.raises(PocError):
@@ -248,7 +248,7 @@ def test_malformed_reserve_result_never_commits(result):
 
 
 def test_official_broadcast_reaches_both_authorized_public_receivers():
-    from vdeter.stage8.shared_medium.observation import observe_scene
+    from vdeter.poc.shared_medium.observation import observe_scene
 
     broadcast, _, _ = broadcast_parent()
     parent = broadcast.build_parent(source_station="ROC", channel=PhysicalChannel.UPPER,
@@ -260,7 +260,7 @@ def test_official_broadcast_reaches_both_authorized_public_receivers():
 
 
 def test_exported_evidence_cannot_mutate_retained_evidence():
-    from vdeter.stage8.shared_medium.evidence import SharedMediumEvidence
+    from vdeter.poc.shared_medium.evidence import SharedMediumEvidence
 
     evidence = SharedMediumEvidence(broadcast_infrastructure_result={"nested": {"result": "FAILED"}},
                                    delivery_matrix=({"endpoint": "ROC"},))
@@ -282,7 +282,7 @@ def test_reaction_cannot_transmit_in_the_trigger_slot(schedule):
 
 
 def test_provider_retention_obeys_existing_workload_action_bound():
-    from vdeter.stage8.poc_api.limits import MAX_WORKLOAD_ACTION_REQUESTS
+    from vdeter.poc.api.limits import MAX_WORKLOAD_ACTION_REQUESTS
 
     sink = TD.CountingRadioSink()
     prov = provider(sink=sink)
@@ -318,7 +318,7 @@ def test_missing_terminal_retains_ownership_until_cleanup():
 
 @pytest.mark.parametrize("ready", ["false", 1, object()])
 def test_readiness_requires_an_explicit_boolean_true(ready):
-    from vdeter.stage8.shared_medium.radiation import ReadinessDecision
+    from vdeter.poc.shared_medium.radiation import ReadinessDecision
 
     class Readiness:
         def window_ready(self, request):

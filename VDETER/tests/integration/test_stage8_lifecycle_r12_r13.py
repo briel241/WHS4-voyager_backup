@@ -25,20 +25,20 @@ _LINUX = (hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET")
 _SRC = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.clock import RealMonotonicClock
-    from vdeter.stage8._supervisor.engine import SERVER_EVENT_ACK_GRACE_S
-    from vdeter.stage8.execution.lease import MassBLease
-    from vdeter.stage8.execution.runner import WorkloadRunner
-    from vdeter.stage8.execution.snapshot import create_snapshot
-    from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-    from vdeter.stage8.integration.rf_off import assemble_rf_off_provider
-    from vdeter.stage8.integration.supervisor_connection import SupervisorConnection
-    from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-    from vdeter.stage8.poc_api.codec import decode_wire_packet
-    from vdeter.stage8.poc_api.limits import CALLBACK_ON_FINISH_DEADLINE_S
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.clock import RealMonotonicClock
+    from vdeter.poc._supervisor.engine import SERVER_EVENT_ACK_GRACE_S
+    from vdeter.poc.execution.lease import MassBLease
+    from vdeter.poc.execution.runner import WorkloadRunner
+    from vdeter.poc.execution.snapshot import create_snapshot
+    from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+    from vdeter.poc.integration.rf_off import assemble_rf_off_provider
+    from vdeter.poc.integration.supervisor_connection import SupervisorConnection
+    from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+    from vdeter.poc.api.codec import decode_wire_packet
+    from vdeter.poc.api.limits import CALLBACK_ON_FINISH_DEADLINE_S
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.testing.execution_fakes import write_poc_package
 
 
 def _poc(on_event_body="        return []", on_finish_body="        return None"):
@@ -84,7 +84,7 @@ class _Base(unittest.TestCase):
                                scenario_id="SC-VDE-006")
         provider, seams = assemble_rf_off_provider()
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 "VDETER_POC_SNAPSHOT_SCRIPT": snap.script_path,
                 "VDETER_POC_ENTRYPOINT": snap.descriptor.entrypoint,
@@ -188,14 +188,14 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
     """
 
     def test_workload_deadline_expiry_during_steps_terminates_child(self):
-        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-        from vdeter.stage8.execution.session import ResidentSession, SessionExpired
-        from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
-        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-        from vdeter.stage8.integration.entry import PocWorkload
-        from vdeter.stage8.integration.runtime import ResidentPocRuntime
-        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-        from vdeter.stage8.testing.fakes import FakeClock
+        from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+        from vdeter.poc.execution.session import ResidentSession, SessionExpired
+        from vdeter.poc.execution.runner import WorkloadRunner, scenario_started
+        from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.poc.integration.entry import PocWorkload
+        from vdeter.poc.integration.runtime import ResidentPocRuntime
+        from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+        from vdeter.poc.testing.fakes import FakeClock
 
         conn, provider, snap = self._connection("w11", _FAST_FINISH, "p11poc")
         runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w11",
@@ -236,14 +236,14 @@ class P11WorkloadDeadlineDuringExecutionTest(_Base):
         놓친다(고정 pump timeout까지 붙잡힘). guard를 connection의 대기 루프에도 걸어 **블로킹 구간
         안에서** 만료를 잡는지 확인한다. step은 하나뿐이므로 step 경계 검사로는 절대 잡히지 않는다.
         """
-        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-        from vdeter.stage8.execution.session import ResidentSession, SessionExpired
-        from vdeter.stage8.execution.runner import WorkloadRunner, scenario_started
-        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-        from vdeter.stage8.integration.entry import PocWorkload
-        from vdeter.stage8.integration.runtime import ResidentPocRuntime
-        from vdeter.stage8.integration.tx_executor import ProductionTxExecutor
-        from vdeter.stage8.testing.fakes import FakeClock
+        from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+        from vdeter.poc.execution.session import ResidentSession, SessionExpired
+        from vdeter.poc.execution.runner import WorkloadRunner, scenario_started
+        from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.poc.integration.entry import PocWorkload
+        from vdeter.poc.integration.runtime import ResidentPocRuntime
+        from vdeter.poc.integration.tx_executor import ProductionTxExecutor
+        from vdeter.poc.testing.fakes import FakeClock
 
         conn, provider, snap = self._connection("w11b", _FAST_FINISH, "p11bpoc")
         runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w11b",

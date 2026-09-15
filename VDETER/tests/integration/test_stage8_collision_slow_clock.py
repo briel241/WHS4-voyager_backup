@@ -25,7 +25,7 @@ class StalledClockActivationTest(unittest.TestCase):
         from apps.stage7_mass_roc_controller import _AdapterChannel
         from apps.stage8_launcher_seams import LauncherDeviceClient
         from apps.stage8_collision_exchange import CollisionExchange
-        from vdeter.stage8.poc_api.errors import PocError, Severity
+        from vdeter.poc.api.errors import PocError, Severity
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}

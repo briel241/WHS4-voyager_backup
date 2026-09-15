@@ -76,9 +76,9 @@ class CollisionSocketTests(unittest.TestCase):
         from apps.stage8_launcher_seams import LauncherDeviceClient
         from apps.stage8_collision_exchange import CollisionExchange
         from apps.stage8_stage7_seams import Link11WaveformFactory
-        from vdeter.stage8.poc_api.types import PhysicalChannel
+        from vdeter.poc.api.types import PhysicalChannel
         from vdeter.stage7.configuration import UPPER_CHANNEL_NAME, LOWER_CHANNEL_NAME
-        from vdeter.stage8.shared_medium.iq import to_cf32le, sha256_cf32le
+        from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
@@ -257,9 +257,9 @@ class CollisionSocketTests(unittest.TestCase):
         import os
         from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
         from apps.standalone import poc_run
-        from vdeter.stage8.execution.snapshot import create_snapshot
-        from vdeter.stage8.testing.execution_fakes import write_poc_package
-        from vdeter.stage8.execution.verdict import ScenarioVerdict, PocInfrastructure
+        from vdeter.poc.execution.snapshot import create_snapshot
+        from vdeter.poc.testing.execution_fakes import write_poc_package
+        from vdeter.poc.execution.verdict import ScenarioVerdict, PocInfrastructure
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         host = PocWorkloadHost(controller=self.controller, events=None)
@@ -311,8 +311,8 @@ class CollisionSocketTests(unittest.TestCase):
         from apps.stage8_launcher_seams import LauncherDeviceClient
         from apps.stage8_collision_exchange import CollisionExchange
         from apps.stage8_stage7_seams import Link11WaveformFactory
-        from vdeter.stage8.poc_api.types import PhysicalChannel
-        from vdeter.stage8.shared_medium.iq import to_cf32le, sha256_cf32le
+        from vdeter.poc.api.types import PhysicalChannel
+        from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
         from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)

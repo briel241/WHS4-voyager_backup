@@ -3,8 +3,8 @@
 - production 통합 module은 어떤 `.testing` module이나 RF-off harness(`rf_off`)를 import하지 않는다
   (시험용 seam이 production 조립에 조용히 끼어들 수 없음, §4).
 - `entry.run_poc_workload`는 `device_seams`가 필수다(fail-closed; 조용한 RF-off 기본값 금지).
-- `vdeter.stage8.integration` package를 import하는 것만으로 thread/socket/process가 생기지 않는다.
-- bare `import vdeter.stage8`은 integration submodule을 로드하지 않는다.
+- `vdeter.poc.integration` package를 import하는 것만으로 thread/socket/process가 생기지 않는다.
+- bare `import vdeter.poc`은 integration submodule을 로드하지 않는다.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "..", "src"))
-_INTEGRATION = os.path.join(_SRC, "vdeter", "stage8", "integration")
+_INTEGRATION = os.path.join(_SRC, "vdeter", "poc", "integration")
 
 #: production(=시험용 seam을 쓰지 않는) 통합 module. `rf_off`만 RF-off harness다.
 _PRODUCTION_MODULES = (
@@ -50,7 +50,7 @@ class IntegrationArchitectureTest(unittest.TestCase):
         self.assertEqual(offenders, [], f"production 통합 module이 시험용 seam을 import함: {offenders}")
 
     def test_run_poc_workload_requires_device_seams(self):
-        from vdeter.stage8.integration.entry import run_poc_workload
+        from vdeter.poc.integration.entry import run_poc_workload
         sig = inspect.signature(run_poc_workload)
         self.assertIn("device_seams", sig.parameters)
         self.assertIs(sig.parameters["device_seams"].default, inspect.Parameter.empty,
@@ -58,8 +58,8 @@ class IntegrationArchitectureTest(unittest.TestCase):
 
     def test_for_production_fail_closed_without_seams(self):
         # DeviceSeams에 seam이 빠지면 assemble_provider가 for_production에서 fail-closed.
-        from vdeter.stage8.integration.assembly import DeviceSeams, assemble_provider
-        from vdeter.stage8.integration.device_boundary import SoftwareGroupTx
+        from vdeter.poc.integration.assembly import DeviceSeams, assemble_provider
+        from vdeter.poc.integration.device_boundary import SoftwareGroupTx
         seams = DeviceSeams(group_tx=SoftwareGroupTx(), arbiter=None, scheduler=None,
                             rx_readiness=None, waveform_factory=None)
         with self.assertRaises(ValueError):
@@ -69,9 +69,9 @@ class IntegrationArchitectureTest(unittest.TestCase):
         result = _run_py(
             "import threading, sys\n"
             "before=threading.active_count()\n"
-            "import vdeter.stage8.integration\n"
-            "import vdeter.stage8.integration.assembly, vdeter.stage8.integration.device_boundary\n"
-            "import vdeter.stage8.integration.tx_executor, vdeter.stage8.integration.runtime\n"
+            "import vdeter.poc.integration\n"
+            "import vdeter.poc.integration.assembly, vdeter.poc.integration.device_boundary\n"
+            "import vdeter.poc.integration.tx_executor, vdeter.poc.integration.runtime\n"
             "assert threading.active_count()==before, 'thread leaked on import'\n"
             "assert not any('socket' in m and 'server' in m for m in sys.modules), 'no server'\n"
             "print('OK')\n"
@@ -80,8 +80,8 @@ class IntegrationArchitectureTest(unittest.TestCase):
 
     def test_bare_stage8_import_excludes_integration(self):
         result = _run_py(
-            "import sys, vdeter.stage8\n"
-            "loaded=[m for m in sys.modules if m.startswith('vdeter.stage8.integration')]\n"
+            "import sys, vdeter.poc\n"
+            "loaded=[m for m in sys.modules if m.startswith('vdeter.poc.integration')]\n"
             "sys.exit(0 if not loaded else 1)\n"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

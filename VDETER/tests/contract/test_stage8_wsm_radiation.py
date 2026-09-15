@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium import constants as C
-from vdeter.stage8.shared_medium import observation as O
-from vdeter.stage8.shared_medium import radiation as R
-from vdeter.stage8.shared_medium import testing as TD
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium import constants as C
+from vdeter.poc.shared_medium import observation as O
+from vdeter.poc.shared_medium import radiation as R
+from vdeter.poc.shared_medium import testing as TD
 
 
 def _broadcast(sink=None, readiness=None, factory=None):

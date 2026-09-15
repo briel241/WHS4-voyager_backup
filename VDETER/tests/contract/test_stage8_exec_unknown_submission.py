@@ -2,18 +2,18 @@
 import json
 import unittest
 
-from vdeter.stage8.execution.runner import (
+from vdeter.poc.execution.runner import (
     observation_step,
     scenario_started,
     WorkloadRunner,
     WorkloadSpec,
 )
-from vdeter.stage8.execution.lease import MassBLease
-from vdeter.stage8.execution.verdict import ActionExecution, PocInfrastructure, WorkloadResult, ScenarioVerdict
-from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-from vdeter.stage8.testing.client_runner import RecordingCallbacks
-from vdeter.stage8.testing.execution_fakes import FakeTxExecutor, LoopbackConnection
-from vdeter.stage8.testing.fakes import build_manifest, make_observation
+from vdeter.poc.execution.lease import MassBLease
+from vdeter.poc.execution.verdict import ActionExecution, PocInfrastructure, WorkloadResult, ScenarioVerdict
+from vdeter.poc.api.errors import PocError, PocErrorCode
+from vdeter.poc.testing.client_runner import RecordingCallbacks
+from vdeter.poc.testing.execution_fakes import FakeTxExecutor, LoopbackConnection
+from vdeter.poc.testing.fakes import build_manifest, make_observation
 from .test_stage8_exec_runner import _run, _snap
 
 

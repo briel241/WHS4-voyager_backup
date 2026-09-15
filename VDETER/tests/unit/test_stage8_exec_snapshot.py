@@ -16,14 +16,14 @@ from unittest import mock
 _POSIX = hasattr(os, "getuid") and sys.platform != "win32"
 
 if _POSIX:
-    from vdeter.stage8.execution import snapshot as snapmod
-    from vdeter.stage8.execution.catalog import binding_digest
-    from vdeter.stage8.execution.snapshot import (
+    from vdeter.poc.execution import snapshot as snapmod
+    from vdeter.poc.execution.catalog import binding_digest
+    from vdeter.poc.execution.snapshot import (
         SnapshotError,
         create_snapshot,
         verify_snapshot,
     )
-    from vdeter.stage8.testing.execution_fakes import poc_toml, write_poc_package
+    from vdeter.poc.testing.execution_fakes import poc_toml, write_poc_package
 
 
 @unittest.skipUnless(_POSIX, "snapshot은 POSIX 전용")

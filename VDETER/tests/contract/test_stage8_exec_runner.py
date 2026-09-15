@@ -8,28 +8,28 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.execution.lease import MassBLease, MassBRole
-from vdeter.stage8.execution.runner import (
+from vdeter.poc.execution.lease import MassBLease, MassBRole
+from vdeter.poc.execution.runner import (
     WorkloadRunner,
     WorkloadSpec,
     observation_step,
     scenario_started,
     step_started,
 )
-from vdeter.stage8.execution.snapshot import Snapshot
-from vdeter.stage8.execution.verdict import (
+from vdeter.poc.execution.snapshot import Snapshot
+from vdeter.poc.execution.verdict import (
     ActionExecution,
     PocInfrastructure,
     ScenarioVerdict,
     TargetEffect,
 )
-from vdeter.stage8.poc_api.errors import PocErrorCode
-from vdeter.stage8.poc_api.limits import ACK_MAX_DELAY_S, CALLBACK_ON_EVENT_DEADLINE_S
-from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-from vdeter.stage8.poc_api.types import PhysicalChannel, TuningState
-from vdeter.stage8.testing.client_runner import RecordingCallbacks
-from vdeter.stage8.testing.fakes import FakeClock, build_manifest, make_observation
-from vdeter.stage8.testing.execution_fakes import (
+from vdeter.poc.api.errors import PocErrorCode
+from vdeter.poc.api.limits import ACK_MAX_DELAY_S, CALLBACK_ON_EVENT_DEADLINE_S
+from vdeter.poc.api.negotiation import ServerCapabilityConfig
+from vdeter.poc.api.types import PhysicalChannel, TuningState
+from vdeter.poc.testing.client_runner import RecordingCallbacks
+from vdeter.poc.testing.fakes import FakeClock, build_manifest, make_observation
+from vdeter.poc.testing.execution_fakes import (
     FakeTxExecutor,
     LoopbackConnection,
     ScenarioPriorityProvider,

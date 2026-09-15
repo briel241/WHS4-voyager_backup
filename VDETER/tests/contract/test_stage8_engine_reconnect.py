@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8._supervisor.engine import EngineState
-from vdeter.stage8.poc_api import protocol
-from vdeter.stage8.poc_api.errors import PocErrorCode
-from vdeter.stage8.poc_api.messages import parse_envelope
-from vdeter.stage8.testing import FakeActionSubmitProvider, FakeClock
-from vdeter.stage8.testing.server_harness import (
+from vdeter.poc._supervisor.engine import EngineState
+from vdeter.poc.api import protocol
+from vdeter.poc.api.errors import PocErrorCode
+from vdeter.poc.api.messages import parse_envelope
+from vdeter.poc.testing import FakeActionSubmitProvider, FakeClock
+from vdeter.poc.testing.server_harness import (
     ack_message,
     action_submit_message,
     drive_to_running,

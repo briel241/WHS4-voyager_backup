@@ -23,18 +23,18 @@ _LINUX = (hasattr(socket, "AF_UNIX") and hasattr(socket, "SOCK_SEQPACKET")
           and hasattr(os, "getuid") and sys.platform != "win32")
 
 if _LINUX:
-    from vdeter.stage8._supervisor.child import SubprocessChildSpawner
-    from vdeter.stage8._supervisor.supervisor import PocSupervisor
-    from vdeter.stage8.execution.child_main import (
+    from vdeter.poc._supervisor.child import SubprocessChildSpawner
+    from vdeter.poc._supervisor.supervisor import PocSupervisor
+    from vdeter.poc.execution.child_main import (
         ENV_ENTRYPOINT,
         ENV_HELLO,
         ENV_SNAPSHOT_SCRIPT,
     )
-    from vdeter.stage8.execution.snapshot import create_snapshot
-    from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-    from vdeter.stage8.poc_api.types import ProviderSubmission, TARGET_TO_PHYSICAL_CHANNEL
-    from vdeter.stage8.testing.execution_fakes import write_poc_package
-    from vdeter.stage8.testing.fakes import make_observation
+    from vdeter.poc.execution.snapshot import create_snapshot
+    from vdeter.poc.api.negotiation import ServerCapabilityConfig
+    from vdeter.poc.api.types import ProviderSubmission, TARGET_TO_PHYSICAL_CHANNEL
+    from vdeter.poc.testing.execution_fakes import write_poc_package
+    from vdeter.poc.testing.fakes import make_observation
 
 
 def _script(version):
@@ -95,7 +95,7 @@ class SubprocessExecutionTest(unittest.TestCase):
 
     def _supervisor(self, snap, provider, workload_id):
         spawner = SubprocessChildSpawner(
-            [sys.executable, "-m", "vdeter.stage8.execution.child_main"],
+            [sys.executable, "-m", "vdeter.poc.execution.child_main"],
             extra_env={
                 ENV_SNAPSHOT_SCRIPT: snap.script_path,
                 ENV_ENTRYPOINT: snap.descriptor.entrypoint,
@@ -200,9 +200,9 @@ class SubprocessExecutionTest(unittest.TestCase):
         # session workload-deadline 만료가 살아 있는 실 child의 close→종료→cleanup을 구동함을
         # 보인다(enforcement mechanism, 짧은 cap 주입). 900초 literal과 비협조 child의
         # SIGKILL-at-900s는 Stage 6 hard gate로 이관(spec §5.2: 900초는 기존 Stage 7 세션 상한).
-        from vdeter.stage8.execution.limits import SessionPolicy, ServiceSessionTimeouts
-        from vdeter.stage8.execution.session import Deadline, ResidentSession, SessionExpired
-        from vdeter.stage8.testing.fakes import FakeClock
+        from vdeter.poc.execution.limits import SessionPolicy, ServiceSessionTimeouts
+        from vdeter.poc.execution.session import Deadline, ResidentSession, SessionExpired
+        from vdeter.poc.testing.fakes import FakeClock
 
         snap = self._make_snapshot("idle_poc", "A", "w-d")  # on_event []: child는 ARMED 후 idle 유지
         provider = _RecordingProvider()
@@ -236,14 +236,14 @@ class SubprocessExecutionTest(unittest.TestCase):
         loopback matrix(test_stage8_exec_runner)가 결과 분류를 덮고, 이 시험은 **실제**
         process/socket/workload-dir 잔존이 0인지 확인한다.
         """
-        from vdeter.stage8.execution.lease import MassBLease
-        from vdeter.stage8.execution.runner import (
+        from vdeter.poc.execution.lease import MassBLease
+        from vdeter.poc.execution.runner import (
             WorkloadRunner,
             WorkloadSpec,
             observation_step,
         )
-        from vdeter.stage8.execution.verdict import PocInfrastructure, ScenarioVerdict
-        from vdeter.stage8.testing.execution_fakes import FakeTxExecutor
+        from vdeter.poc.execution.verdict import PocInfrastructure, ScenarioVerdict
+        from vdeter.poc.testing.execution_fakes import FakeTxExecutor
 
         class _SupConn:
             """실 PocSupervisor 위의 WorkloadConnection(시험 전용) + 인터럽트 주입."""

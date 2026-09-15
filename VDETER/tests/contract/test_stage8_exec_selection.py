@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import unittest
 
-from vdeter.stage8.execution.catalog import Catalog, FileFacts, InvalidPackage, PackageEntry
-from vdeter.stage8.execution.manifest import parse_and_validate
-from vdeter.stage8.execution.selection import (
+from vdeter.poc.execution.catalog import Catalog, FileFacts, InvalidPackage, PackageEntry
+from vdeter.poc.execution.manifest import parse_and_validate
+from vdeter.poc.execution.selection import (
     SelectionError,
     SourceMode,
     build_menu,
     rescan_summary,
     resolve_source_mode,
 )
-from vdeter.stage8.poc_api.negotiation import ServerCapabilityConfig
-from vdeter.stage8.testing.execution_fakes import poc_toml
+from vdeter.poc.api.negotiation import ServerCapabilityConfig
+from vdeter.poc.testing.execution_fakes import poc_toml
 
 
 def _facts(name, sha):

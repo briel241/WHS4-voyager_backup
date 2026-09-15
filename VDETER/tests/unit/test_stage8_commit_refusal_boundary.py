@@ -20,8 +20,8 @@ import unittest
 
 from apps.stage8_launcher_seams import LauncherRadioSink
 from vdeter.stage7.testing.controller import Stage7ScenarioController
-from vdeter.stage8.poc_api.types import PhysicalChannel
-from vdeter.stage8.shared_medium.radiation import BroadcastCommitRefused, ChildPath
+from vdeter.poc.api.types import PhysicalChannel
+from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused, ChildPath
 
 _STATIONS = {"MASS-A": 111_111_111, "ROC": 222_222_222}
 
@@ -252,13 +252,13 @@ class ObservationDeliveryCountTest(unittest.TestCase):
     """
 
     def _workload(self, error=None):
-        from vdeter.stage8.integration.entry import PocWorkload
+        from vdeter.poc.integration.entry import PocWorkload
 
         runner = _FakeRunner()
         return PocWorkload(runner, _FakeConnection(error), None, None, ()), runner
 
     def test_successful_delivery_reports_true(self):
-        from vdeter.stage8.testing.fakes import make_observation
+        from vdeter.poc.testing.fakes import make_observation
 
         workload, runner = self._workload()
         self.assertIs(workload.deliver_observation(make_observation()), True)
@@ -266,8 +266,8 @@ class ObservationDeliveryCountTest(unittest.TestCase):
         self.assertEqual(runner.delivered[0].kind, "observation")
 
     def test_after_infrastructure_failure_nothing_is_delivered_or_counted(self):
-        from vdeter.stage8.poc_api.errors import PocError, PocErrorCode
-        from vdeter.stage8.testing.fakes import make_observation
+        from vdeter.poc.api.errors import PocError, PocErrorCode
+        from vdeter.poc.testing.fakes import make_observation
 
         failure = PocError(PocErrorCode.POC_TX_OUTCOME_UNKNOWN, "commit unconfirmed")
         workload, runner = self._workload(failure)
