@@ -40,6 +40,64 @@ class PocDeviceUnavailable(RuntimeError):
     """PoC device 경계를 쓸 수 없다(lease 없음·bridge 미잠금 등). 성공으로 위장하지 않는다."""
 
 
+def utc_label_for_hardware_ns(bridge, hardware_ns: int) -> int:
+    """hardware ns → 권위 host time bridge의 UTC label(ns). bridge가 잠기지 않았으면 거부한다."""
+
+    to_utc = getattr(bridge, "hardware_ns_to_utc_label", None)
+    utc_ns = to_utc(int(hardware_ns)) if callable(to_utc) else None
+    if utc_ns is None:
+        raise PocDeviceUnavailable(
+            "host time bridge가 잠겨 있지 않아 TX 시각을 UTC로 변환할 수 없습니다")
+    return int(utc_ns)
+
+
+def build_poc_tx_request(*, bridge, burst_id: str, channel_name: str, transmit_at_hw_ns: int,
+                         samples: bytes, transmit_at_utc_ns=None):
+    """PoC group TX를 권위 `radio_adapter.schedule_tx`에 낼 `RadioTxRequest`를 만든다.
+
+    launcher 경로(`Stage7PocDeviceSeam.schedule_group_tx`)와 RF-off 세션의 in-process sink
+    (`apps/stage8_stage7_seams.Stage7AuthoritativeRadioSink`)가 **같은** 구성을 쓴다. 시각 변환
+    (hardware→UTC label)과 UTC label 축의 clock id는 bridge가 소유한다 — 임의 문자열로 채우면 요청이
+    갖지 않은 clock 정체를 주장하게 된다(`schedule_tx`는 이 필드를 검증하지 않아 조용히 통과한다).
+    표본은 device-rate cf32le 한 slot(8,192)이어야 한다. 파형을 만들지도 값을 해석하지도 않는다.
+    `transmit_at_utc_ns`를 주면(호출자가 route 결속 **전에** 미리 변환해 fail-fast한 경우) 그 값을 쓴다.
+    반환 ``(request, transmit_at_utc_ns)``.
+    """
+
+    if channel_name not in CHANNEL_NAMES:
+        raise ValueError(f"허용되지 않은 채널 이름: {channel_name!r}")
+    data = bytes(samples)
+    if len(data) != DEVICE_SLOT_SAMPLES * _CF32LE_BYTES_PER_SAMPLE:
+        raise ValueError(
+            f"device burst 크기 위반: {len(data)}B "
+            f"!= {DEVICE_SLOT_SAMPLES * _CF32LE_BYTES_PER_SAMPLE}B")
+    utc_ns = (utc_label_for_hardware_ns(bridge, transmit_at_hw_ns)
+              if transmit_at_utc_ns is None else int(transmit_at_utc_ns))
+    clock_id = getattr(bridge, "clock_id", None)
+    if not clock_id:
+        raise PocDeviceUnavailable("bridge clock_id가 없습니다 — TX 시각을 결속할 수 없습니다")
+    transmit_at = TimePoint(
+        seconds=utc_ns // 1_000_000_000,
+        nanoseconds=utc_ns % 1_000_000_000,
+        clock_domain=ClockDomain.UTC,
+        clock_id=str(clock_id),
+    )
+    block = SampleBlock(
+        sample_format="cf32le",
+        sample_rate_hz=DEVICE_SAMPLE_RATE_HZ,
+        sample_count=DEVICE_SLOT_SAMPLES,
+        data=data,
+        first_sample_at=transmit_at,
+    )
+    request = RadioTxRequest(
+        burst_id=BurstId(str(burst_id)),
+        channel=PhysicalChannel(channel_name),
+        transmit_at=transmit_at,
+        samples=block,
+    )
+    return request, utc_ns
+
+
 class Stage7PocDeviceSeam:
     """launcher 프로세스 안에서 radio adapter/worker/route sidecar를 감싸는 TEST-only seam."""
 
@@ -349,11 +407,8 @@ class Stage7PocDeviceSeam:
             raise PocDeviceUnavailable("route sidecar가 공유매체 fan-out 결속을 제공하지 않습니다")
 
         bridge = getattr(radio, "bridge", None)
-        to_utc = getattr(bridge, "hardware_ns_to_utc_label", None)
-        utc_ns = to_utc(int(transmit_at_hw_ns)) if callable(to_utc) else None
-        if utc_ns is None:
-            raise PocDeviceUnavailable(
-                "host time bridge가 잠겨 있지 않아 TX 시각을 UTC로 변환할 수 없습니다")
+        # route 결속 **전에** bridge를 확인한다(bridge 미잠금이면 route를 결속하지 않고 거부).
+        utc_ns = utc_label_for_hardware_ns(bridge, transmit_at_hw_ns)
 
         source_station = self._station_id_by_endpoint.get(self.endpoint_id)
         if source_station is None:
@@ -370,30 +425,11 @@ class Stage7PocDeviceSeam:
                     "reason": "ROUTE_BIND_REJECTED",
                     "detail": str(getattr(bound, "error", bound))[:200]}
 
-        # UTC label 축의 clock id는 **bridge가 소유한다**. 임의 문자열로 채우면 요청이 갖지 않은
-        # clock 정체를 주장하게 된다(`schedule_tx`는 이 필드를 검증하지 않으므로 조용히 통과한다).
-        clock_id = getattr(bridge, "clock_id", None)
-        if not clock_id:
-            raise PocDeviceUnavailable("bridge clock_id가 없습니다 — TX 시각을 결속할 수 없습니다")
-        transmit_at = TimePoint(
-            seconds=int(utc_ns) // 1_000_000_000,
-            nanoseconds=int(utc_ns) % 1_000_000_000,
-            clock_domain=ClockDomain.UTC,
-            clock_id=str(clock_id),
-        )
-        block = SampleBlock(
-            sample_format="cf32le",
-            sample_rate_hz=DEVICE_SAMPLE_RATE_HZ,
-            sample_count=DEVICE_SLOT_SAMPLES,
-            data=data,
-            first_sample_at=transmit_at,
-        )
-        request = RadioTxRequest(
-            burst_id=BurstId(str(burst_id)),
-            channel=PhysicalChannel(channel_name),
-            transmit_at=transmit_at,
-            samples=block,
-        )
+        # 요청 구성은 RF-off 세션 sink와 같은 조립기(`build_poc_tx_request`)를 쓴다 — clock id는
+        # bridge 소유, 표본은 device-rate 한 slot. 위에서 미리 변환한 UTC label을 그대로 싣는다.
+        request, _utc = build_poc_tx_request(
+            bridge=bridge, burst_id=burst_id, channel_name=channel_name,
+            transmit_at_hw_ns=transmit_at_hw_ns, samples=data, transmit_at_utc_ns=utc_ns)
         result = radio.schedule_tx(request)      # 권위 경로(lead·retune·충돌·원장)
         if getattr(result, "is_err", False):
             error = getattr(result, "error", None)

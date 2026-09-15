@@ -44,7 +44,7 @@ class RealStage7SeamsTest(unittest.TestCase):
             members, station_id_by_endpoint=STATION_BY_ENDPOINT)
 
     def test_poc_action_flows_through_real_mac_phy_group_tx_and_receive(self):
-        from apps.stage8_stage7_seams import stage7_target_response, stage7_terminal_source
+        from apps.stage8_stage7_seams import stage7_target_response, Stage7TxTerminalSource
         from tests.support.stage7 import drive_stage7_group
         from vdeter.phy.transmitter import Phy11Transmitter
         from vdeter.stage8.poc_api.types import ActionDescriptor, ActionKind, PhysicalChannel
@@ -199,7 +199,7 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
         from vdeter.stage8.testing.execution_fakes import write_poc_package
         from vdeter.stage8.testing.fakes import make_observation
         from apps.stage8_stage7_seams import (
-            assemble_stage7_provider, stage7_target_response, stage7_terminal_source)
+            assemble_stage7_provider, stage7_target_response, Stage7TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
@@ -227,7 +227,7 @@ class RealSeamsWithRealChildTest(unittest.TestCase):
             server_config=ServerCapabilityConfig(), clock=RealMonotonicClock(),
             socket_root=os.path.join(self.sock_root, "w1"))
         # tx terminal·target을 **실 conducted 매질 delivery**에서 공급(합성 아님).
-        terminal_source = stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+        terminal_source = Stage7TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
                                    pump=lambda: drive_stage7_group(clock, members, 4))
         target_response = stage7_target_response(members)
         runner = WorkloadRunner(conn, MassBLease(), run_id="r1", workload_id="w1",
@@ -307,7 +307,7 @@ class RealScenarioObservationTest(unittest.TestCase):
         from vdeter.stage8.shared_medium import constants
         from vdeter.stage8.testing.execution_fakes import write_poc_package
         from apps.stage8_stage7_seams import (assemble_stage7_provider, stage7_target_response,
-                                              stage7_terminal_source)
+                                              Stage7TxTerminalSource)
 
         clock, medium, plan, coordinator, members, resolved = build_stage7_software_group()
         start_stage7_group(clock, medium, coordinator, members, resolved)
@@ -352,7 +352,7 @@ class RealScenarioObservationTest(unittest.TestCase):
                                 scenario_id="SC-VDE-006", snapshot=snap,
                                 tx_executor=ProductionTxExecutor(
                                     provider,
-                                    terminal_source=stage7_terminal_source(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
+                                    terminal_source=Stage7TxTerminalSource(members["MASS-B"].endpoint.dependencies.radio.lease.worker,
                                    pump=lambda: drive_stage7_group(clock, members, 4)),
                                     target_response=stage7_target_response(members)))
         observation = ObservationRecord(

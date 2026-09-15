@@ -7,7 +7,9 @@
 핵심 설계: **검증된 seam 로직을 다시 쓰지 않는다.** `_RemoteWorker`가 실 worker와 같은 속성 표면을
 `poc_radio_state` 응답으로 채워 주므로, 이미 시험된 `Stage7HwTimeScheduler`(P03)·
 `Stage7WorkerArbiter`(P04)·`Stage7ReceiverReadiness`(P06)를 **그대로** 쓴다. 새로 만드는 것은 프로세스
-경계를 실제로 건너가는 두 가지 — 송신 sink와 TX 원장 terminal source — 뿐이다.
+경계를 실제로 건너가는 두 가지 — 송신 sink와 TX 원장 terminal source — 뿐이다. 그 둘 안에서도 fan-out
+child 검증·논리 목적지 해석(`device_boundary`)·채널 이름 변환·원장 terminal 분류(`stage8_stage7_seams`)는
+RF-off sink와 **같은 함수**를 쓴다 — 두 경로가 다른 것은 경계를 건너는 방식(RPC vs 직접 호출)뿐이다.
 
 송신은 launcher 쪽에서 권위 `radio_adapter.schedule_tx` 하나로만 나간다(여기서 우회 경로를 만들지
 않는다). 조회는 장치·원장이 이미 가진 것만 돌려받고, 모르면 `None`으로 보존한다.
@@ -22,11 +24,18 @@ import uuid
 
 from vdeter.stage7.testing.controller import PocDeviceCallError, Stage7ScenarioController
 
+from vdeter.stage8.integration.device_boundary import (
+    logical_destination_station_id,
+    validate_fanout_children,
+)
+
 from apps.stage8_stage7_seams import (
     Link11WaveformFactory,
     Stage7HwTimeScheduler,
     Stage7ReceiverReadiness,
     Stage7WorkerArbiter,
+    child_terminals_from_ledger,
+    stage7_channel_name,
 )
 
 #: 장치 상태 조회 캐시 수명(초). 한 번의 scheduler/arbiter/readiness 판정 안에서 같은 상태를 쓰되,
@@ -133,8 +142,8 @@ class LauncherRadioSink:
     "예약만 되고 송신은 안 된" 중간 상태가 프로세스 경계에 걸쳐 남지 않는다.
     """
 
-    def __init__(self, client: LauncherDeviceClient, *, channel_name_of,
-                 station_id_by_endpoint: dict) -> None:
+    def __init__(self, client: LauncherDeviceClient, *, station_id_by_endpoint: dict,
+                 channel_name_of=stage7_channel_name) -> None:
         self._client = client
         self._channel_name_of = channel_name_of
         self._station_id = dict(station_id_by_endpoint)
@@ -142,21 +151,10 @@ class LauncherRadioSink:
         self.burst_by_group: dict = {}
         self.receipt_by_group: dict = {}
 
-    @staticmethod
-    def _validate(children) -> tuple:
-        children = tuple(children)
-        if len(children) != 2:
-            raise RuntimeError("group에는 정확히 두 fan-out child가 있어야 합니다")
-        if len({c.scheduled_hw_timestamp_ns for c in children}) != 1:
-            raise RuntimeError("fan-out child는 같은 hardware timestamp를 공유해야 합니다")
-        if len({c.channel for c in children}) != 1:
-            raise RuntimeError("fan-out child는 같은 선택 채널을 공유해야 합니다(공유 TX LO)")
-        return children
-
     def prepare_group(self, *, group_id: str, children):
         from vdeter.stage8.shared_medium.radiation import GroupAdmission
 
-        children = self._validate(children)
+        children = validate_fanout_children(children)
         self.burst_by_group[group_id] = str(uuid.uuid4())
         return GroupAdmission(group_id=group_id, children=children)
 
@@ -168,16 +166,9 @@ class LauncherRadioSink:
         burst_id = self.burst_by_group.get(admission.group_id)
         if burst_id is None:
             raise RuntimeError("commit 전에 prepare_group이 필요합니다(예약 없음)")
-        # 장치에 싣는 목적지는 parent의 **논리** 목적지다. child의 `rx_station`은 그 child가
-        # 도달하는 물리 수신자이고, fan-out의 첫 child는 논리 target이 아닐 수 있다
-        # (MASS-B의 fan-out은 C4=ROC가 먼저다). 물리 수신자를 실으면 권위 route가
-        # canonical 표에서 다른 기대 채널을 골라 LANE_ROUTE_INVALID로 거부한다.
-        destination = getattr(children[0], "addressed_destination", None)
-        target = self._station_id.get(destination)
-        if target is None:
-            raise RuntimeError(
-                f"논리 목적지 station id를 알 수 없습니다: {destination!r} "
-                "(물리 수신자 rx_station으로 대체하지 않는다)")
+        # 장치에 싣는 목적지는 parent의 **논리** 목적지다(RF-off sink와 같은 규칙
+        # `logical_destination_station_id`; 첫 child의 물리 수신자로 대체하지 않는다).
+        target = logical_destination_station_id(children, self._station_id)
         # 미리 만들어 둔 직렬화가 있으면 그대로 쓴다. 이 지점은 권위 lead 재확인 **이후**라
         # 여기서 8,192 표본을 다시 pack하는 시간이 곧 lead 소진이다(없으면 종전대로 계산).
         samples = children[0].samples_cf32le or to_cf32le(children[0].samples)
@@ -187,7 +178,7 @@ class LauncherRadioSink:
             "transmit_at_hw_ns": int(children[0].scheduled_hw_timestamp_ns),
             "samples_base64": base64.b64encode(samples).decode("ascii"),
             "samples_sha256": hashlib.sha256(samples).hexdigest(),
-            "destination_station_id": int(target),
+            "destination_station_id": target,
             "request_digest": str(getattr(children[0], "payload_digest", "") or ""),
             "wire_packet_digest": children[0].wire_packet_digest,
         })
@@ -227,12 +218,9 @@ class LauncherLedgerTerminalSource:
         self._guard = guard
 
     def __call__(self, action, result, parent) -> dict:
-        from vdeter.stage8.shared_medium.radiation import ChildTerminal
-
         burst_id = self._sink.burst_by_group.get(parent.parent_id)
-        lanes = {child.child_id: getattr(child, "tx_lane", None) for child in parent.children}
         if burst_id is None:
-            return {cid: ChildTerminal.UNKNOWN.value for cid in lanes}
+            return child_terminals_from_ledger(None, parent)
         snapshot = None
         for _ in range(self._max_polls):
             if self._guard is not None:
@@ -244,17 +232,8 @@ class LauncherLedgerTerminalSource:
             if snapshot is not None and snapshot.get("terminal"):
                 break
             time.sleep(self._interval)
-        states = (snapshot or {}).get("children") or {}
-        out = {}
-        for child_id, lane in lanes.items():
-            state = states.get(str(lane), states.get(lane))
-            if state == "COMPLETED":
-                out[child_id] = ChildTerminal.COMPLETED.value
-            elif state == "FAILED":
-                out[child_id] = ChildTerminal.FAILED.value
-            else:
-                out[child_id] = ChildTerminal.UNKNOWN.value   # 진행 중·미기록은 미확정 보존
-        return out
+        # 분류 규칙은 in-process 원장 조회(`Stage7LedgerTerminalSource`)와 같다(wire lane 키는 str).
+        return child_terminals_from_ledger(snapshot, parent)
 
 
 class MacSlotScheduler(Stage7HwTimeScheduler):
@@ -352,20 +331,6 @@ class MacSlotScheduler(Stage7HwTimeScheduler):
         )
 
 
-def stage7_channel_name(stage8_channel) -> str:
-    """Stage 8 `PhysicalChannel` → 권위 Stage 7 canonical 채널 **이름**."""
-
-    from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
-    from vdeter.stage8.poc_api.types import PhysicalChannel as Stage8Channel
-
-    mapping = {Stage8Channel.LOWER: LOWER_CHANNEL_NAME,
-               Stage8Channel.UPPER: UPPER_CHANNEL_NAME}
-    name = mapping.get(stage8_channel)
-    if name is None:
-        raise RuntimeError(f"알 수 없는 Physical Channel: {stage8_channel!r}")
-    return name
-
-
 def assemble_launcher_provider(controller, *, actor_endpoint: str,
                                endpoint_ids, station_id_by_endpoint: dict,
                                channel_center_hz=None, dual_channel_installed: bool = False,
@@ -383,8 +348,7 @@ def assemble_launcher_provider(controller, *, actor_endpoint: str,
     clients = {endpoint: LauncherDeviceClient(controller, endpoint) for endpoint in endpoint_ids}
     actor = clients[actor_endpoint]
     workers = {endpoint: _RemoteWorker(client) for endpoint, client in clients.items()}
-    sink = LauncherRadioSink(actor, channel_name_of=stage7_channel_name,
-                             station_id_by_endpoint=station_id_by_endpoint)
+    sink = LauncherRadioSink(actor, station_id_by_endpoint=station_id_by_endpoint)
     # Always use the real MAC query (including heard reservations). The default
     # production path must not silently fall back to the device sample grid.
     readiness = Stage7ReceiverReadiness(workers, center, source_worker=workers[actor_endpoint])

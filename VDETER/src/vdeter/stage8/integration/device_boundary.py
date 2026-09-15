@@ -29,6 +29,44 @@ from ..shared_medium.radiation import GroupAdmission
 RETUNE_LEAD_NS = 200_000_000
 
 
+def validate_fanout_children(children, *, require_distinct_lanes: bool = False) -> tuple:
+    """fan-out child 계약 검증 — 모든 radio sink(worker 직접·권위 `schedule_tx`·launcher RPC)가 같은 검사를 쓴다.
+
+    정확히 두 child, 같은 hardware timestamp, 같은 선택 채널(공유 TX LO). `require_distinct_lanes`면
+    두 child의 TX lane이 서로 달라야 한다 — worker 직접 제출 경계(`Stage7GroupTxRadioSink`)는 lane별
+    burst를 한 group으로 싣기 때문이다. 권위 `schedule_tx` 경계(launcher·RF-off sink)는 한 요청으로 두
+    lane에 방사하므로 lane 구분을 요구하지 않는다. 위반은 RuntimeError이고 상위 radiation이 방사 전
+    거부(`BroadcastNotAdmitted`, TX 0)로 처리한다.
+    """
+    children = tuple(children)
+    if len(children) != 2:
+        raise RuntimeError("group에는 정확히 두 fan-out child가 있어야 합니다")
+    if len({c.scheduled_hw_timestamp_ns for c in children}) != 1:
+        raise RuntimeError("fan-out child는 같은 hardware timestamp를 공유해야 합니다")
+    if require_distinct_lanes and len({c.tx_lane for c in children}) != 2:
+        raise RuntimeError("fan-out child는 서로 다른 두 TX lane이어야 합니다")
+    if len({c.channel for c in children}) != 1:
+        raise RuntimeError("fan-out child는 같은 선택 채널을 공유해야 합니다(공유 TX LO)")
+    return children
+
+
+def logical_destination_station_id(children, station_id_by_endpoint) -> int:
+    """장치 경계에 실을 목적지 station id = parent의 **논리** 목적지(`addressed_destination`).
+
+    child의 `rx_station`은 그 child가 도달하는 **물리** 수신자라서 둘은 다르다 — MASS-B fan-out의 첫
+    child는 C4=ROC이므로 논리 target이 MASS-A(upper)여도 물리 수신자를 실으면 권위 route가 canonical
+    표에서 다른 기대 채널(lower)을 골라 LANE_ROUTE_INVALID로 거부한다(실물 C 재검증 결함). 목적지를
+    모르면 물리 수신자로 대체하지 않고 거부한다(fail-closed). 양 경로(launcher·RF-off)가 같은 규칙을 쓴다.
+    """
+    destination = getattr(children[0], "addressed_destination", None)
+    target = dict(station_id_by_endpoint).get(destination)
+    if target is None:
+        raise RuntimeError(
+            f"논리 목적지 station id를 알 수 없습니다: {destination!r} "
+            "(물리 수신자 rx_station으로 대체하지 않는다)")
+    return int(target)
+
+
 class Stage7GroupTxRadioSink:
     """production `RadioBurstSink`. **실 Stage 7 worker의 group TX 계약**에 결속한다(§6.1, WSM-REQ-01/03).
 
@@ -52,21 +90,8 @@ class Stage7GroupTxRadioSink:
                 )
         self._group_tx = group_tx
 
-    @staticmethod
-    def _validate(children) -> tuple:
-        children = tuple(children)
-        if len(children) != 2:
-            raise RuntimeError("group에는 정확히 두 fan-out child가 있어야 합니다")
-        if len({c.scheduled_hw_timestamp_ns for c in children}) != 1:
-            raise RuntimeError("fan-out child는 같은 hardware timestamp를 공유해야 합니다")
-        if len({c.tx_lane for c in children}) != 2:
-            raise RuntimeError("fan-out child는 서로 다른 두 TX lane이어야 합니다")
-        if len({c.channel for c in children}) != 1:
-            raise RuntimeError("fan-out child는 같은 선택 채널을 공유해야 합니다(공유 TX LO)")
-        return children
-
     def prepare_group(self, *, group_id: str, children) -> GroupAdmission:
-        children = self._validate(children)
+        children = validate_fanout_children(children, require_distinct_lanes=True)
         channel = children[0].channel
         tx_time_ns = children[0].scheduled_hw_timestamp_ns
         target_hz = constants.CHANNEL_EFFECTIVE_CENTER_HZ[channel]
@@ -157,4 +182,5 @@ class SoftwareGroupTx:
         return tuple(out)
 
 
-__all__ = ("Stage7GroupTxRadioSink", "SoftwareGroupTx")
+__all__ = ("Stage7GroupTxRadioSink", "SoftwareGroupTx", "validate_fanout_children",
+           "logical_destination_station_id")
