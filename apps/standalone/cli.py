@@ -276,8 +276,12 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     from apps.standalone import progress as progress_module
     from apps.standalone import qualify_cmd
     out("vdeter qualify — RR qualification ladder (RF transmission)")
-    out("  steps: RR-P0 -> RR-P1 (+gain) -> candidate -> RR-P2-17 -> "
-        "RR-P3-fault -> verification bundle -> final builder -> promote")
+    out("  steps: verification bundle -> RR-P0 -> RR-P1 (+gain) -> "
+        "candidate -> RR-P2-17 -> RR-P3-fault -> bundle re-check -> "
+        "final builder -> promote")
+    out("  the software bundle runs first: if it fails, no RF phase is "
+        "run and nothing is promoted. It runs exactly once per "
+        "qualification and the final builder reuses that same bundle.")
     out("  scope: Link 19 implementation present, not exercised by this "
         "qualification, hardware performance not guaranteed; operational "
         "scenarios use Link 11/17 only")
