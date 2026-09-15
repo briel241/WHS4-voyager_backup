@@ -463,6 +463,160 @@ def write_verification_bundle(repo_root: Path, out_dir: Path,
             "root": out_dir}
 
 
+# --------------------------------------------- 묶음 결속 (같은 실행 안 재사용)
+
+#: 묶음이 **이 실행에서** 만들어졌고 아직 유효함을 증명하는 기록.
+BUNDLE_BINDING_BASENAME = "bundle-binding.json"
+BUNDLE_BINDING_TYPE = "STAGE7_STANDALONE_BUNDLE_BINDING_V1"
+
+#: 묶음이 반드시 남기는 파일. 누락·손상은 PASS로 해석하지 않는다.
+BUNDLE_REQUIRED_ARTIFACTS = (
+    "frozen-hash-audit.json",
+    "governance-deselected.json",
+    "unit-contract.log",
+    "integration-stage7.log",
+)
+
+#: 결속 기록에 반드시 있어야 하는 최상위 필드 (부분 기록 거부).
+BUNDLE_BINDING_REQUIRED_FIELDS = (
+    "artifact_type", "ladder_id", "installation_sha256", "domain_sha256",
+    "environment_manifest_sha256", "python_executable", "selection_policy",
+    "result", "artifacts",
+)
+
+
+def bundle_selection_policy() -> dict:
+    """묶음이 무엇을 돌리는지 — 재사용하려면 같아야 하는 시험 선택 조건."""
+    return {
+        "unit_contract_targets": list(UNIT_CONTRACT_TARGETS),
+        "integration_targets": list(INTEGRATION_TARGETS),
+        "integration_k": "stage7",
+        "governance_deselect": sorted(nodeid for nodeid, _ in GOVERNANCE_DESELECT),
+    }
+
+
+def write_bundle_binding(verification_root: Path, *, ladder_id: str,
+                         installation: dict,
+                         environment_manifest_sha256: str,
+                         python_executable: str, bundle: dict) -> dict:
+    """이 묶음의 결속 입력을 기록한다 (RF 뒤 재사용 근거).
+
+    새 캐시가 아니다 — 같은 실행에서 방금 만든 산출물이 그 사이 바뀌지 않았음을
+    확인하기 위한 기록이며, 다른 run·과거 자격·수동 사전점검의 묶음은 `ladder_id`
+    불일치로 거부된다.
+    """
+    record = {
+        "artifact_type": BUNDLE_BINDING_TYPE,
+        "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ladder_id": ladder_id,
+        "installation_sha256": installation["installation_sha256"],
+        "domain_sha256": {d: installation["domains"][d]["sha256"]
+                          for d in domains.BOUND_DOMAINS},
+        "environment_manifest_sha256": environment_manifest_sha256,
+        "python_executable": python_executable,
+        "selection_policy": bundle_selection_policy(),
+        "result": {key: bool(value) for key, value in bundle.items()
+                   if key != "root"},
+        "artifacts": {name: _sha256_file(verification_root / name)
+                      for name in BUNDLE_REQUIRED_ARTIFACTS
+                      if (verification_root / name).is_file()},
+    }
+    write_json_atomic(verification_root / BUNDLE_BINDING_BASENAME, record)
+    return record
+
+
+def verify_bundle_binding(paths: StatePaths, repo_root: Path,
+                          verification_root: Path, *, ladder_id: str,
+                          environment_manifest_sha256: str,
+                          python_executable: str, stage: str) -> dict:
+    """같은 실행의 묶음이 아직 유효한지 다시 확인한다 (fail-closed).
+
+    `stage`는 확인 시점("before-rf"·"before-promotion")이며 evidence에 남는다.
+    문제가 하나라도 있으면 pass=False — 호출자는 RF를 시작하지도, 승격하지도
+    않는다. 여기서 묶음을 **조용히 다시 돌리지 않는다**.
+    """
+    problems = []
+    binding_path = verification_root / BUNDLE_BINDING_BASENAME
+    record = None
+    try:
+        record = json.loads(binding_path.read_bytes())
+    except (OSError, ValueError) as exc:
+        problems.append(f"bundle binding unreadable: {type(exc).__name__}: {exc}")
+    if record is not None and not isinstance(record, dict):
+        problems.append("bundle binding is not a JSON object")
+        record = None
+    if record is not None:
+        missing = [field for field in BUNDLE_BINDING_REQUIRED_FIELDS
+                   if field not in record]
+        if missing:
+            problems.append(f"bundle binding missing fields: {sorted(missing)}")
+        if record.get("artifact_type") != BUNDLE_BINDING_TYPE:
+            problems.append(
+                f"bundle binding artifact_type {record.get('artifact_type')!r}")
+        if record.get("ladder_id") != ladder_id:
+            problems.append(
+                "bundle was not produced by this qualification run "
+                f"({record.get('ladder_id')!r} != {ladder_id!r})")
+        result = record.get("result") or {}
+        if not (result.get("software_ok") and result.get("frozen_ok")):
+            problems.append(f"bundle result is not a pass: {result}")
+        if record.get("selection_policy") != bundle_selection_policy():
+            problems.append("test selection policy changed since the bundle ran")
+        if record.get("python_executable") != python_executable:
+            problems.append("python executable changed since the bundle ran")
+        if record.get("environment_manifest_sha256") != environment_manifest_sha256:
+            problems.append("environment manifest changed since the bundle ran")
+        artifacts = record.get("artifacts")
+        if not isinstance(artifacts, dict) or sorted(artifacts) != sorted(
+                BUNDLE_REQUIRED_ARTIFACTS):
+            problems.append(
+                "bundle artifact list incomplete "
+                f"({sorted(artifacts) if isinstance(artifacts, dict) else artifacts!r})")
+            artifacts = artifacts if isinstance(artifacts, dict) else {}
+        for name, recorded in sorted(artifacts.items()):
+            path = verification_root / name
+            if not path.is_file():
+                problems.append(f"bundle artifact missing: {name}")
+                continue
+            actual = _sha256_file(path)
+            if actual != recorded:
+                problems.append(
+                    f"bundle artifact changed: {name} "
+                    f"({recorded[:12] if isinstance(recorded, str) else recorded!r}"
+                    f" != {actual[:12]})")
+
+    # 설치 재측정 — RF 중에 결속 입력이 바뀌었으면 여기서 닫힌다.
+    installation_sha256 = None
+    try:
+        fresh = installation_manifest.load_installation(paths)
+        installation_sha256 = fresh["installation_sha256"]
+        if record is not None:
+            if installation_sha256 != record.get("installation_sha256"):
+                problems.append(
+                    "installation manifest was re-issued since the bundle ran")
+            fresh_domains = {d: fresh["domains"][d]["sha256"]
+                             for d in domains.BOUND_DOMAINS}
+            if fresh_domains != record.get("domain_sha256"):
+                problems.append("domain digests changed since the bundle ran")
+        check = installation_manifest.verify_installation(repo_root, fresh)
+        if not check["pass"]:
+            problems.append(
+                "installation files changed since the bundle ran: "
+                + installation_manifest.describe_mismatch(check))
+    except installation_manifest.InstallationError as exc:
+        problems.append(f"installation manifest unreadable: {exc}")
+
+    return {
+        "stage": stage,
+        "pass": not problems,
+        "problems": problems,
+        "checked_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "installation_sha256": installation_sha256,
+        "ladder_id": ladder_id,
+    }
+
+
+
 # ------------------------------------------------------------ reference
 
 #: critical endpoint 스키마의 speed_class 허용값. 출처는
@@ -1018,7 +1172,56 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
         phase_run_ids = {}
         resolved_config_sha256 = {}
         evidence_sha256 = {}
-        environment_manifest_sha256 = None
+        environment_manifest_sha256 = local_config.environment_manifest_digest(
+            environment_manifest)
+
+        # --- 2단계: software 묶음 (RF 사다리 **앞**) ------------------
+        # 소프트웨어가 이미 실패한 후보가 RF 사다리를 소진하지 않게 한다.
+        # 통과한 실행에서는 여기서 만든 묶음 하나를 final builder 가 그대로
+        # 쓴다 — 같은 자격 실행에서 묶음을 두 번 돌리지 않는다.
+        verification_root = paths.qualification_candidate / "verification"
+        if progress is not None:
+            progress.bundle_started()
+        bundle = write_verification_bundle(
+            repo_root, verification_root, installation,
+            verify_report=install_check, runner=suite_runner,
+            progress=progress)
+        bundle_binding = write_bundle_binding(
+            verification_root, ladder_id=ladder_id,
+            installation=installation,
+            environment_manifest_sha256=environment_manifest_sha256,
+            python_executable=sys.executable, bundle=bundle)
+        report["verification"] = {key: value for key, value in bundle.items()
+                                  if key != "root"}
+        report["verification"].update({
+            "order": "software-first",
+            "runs": 1,
+            "binding_sha256": _sha256_file(
+                verification_root / BUNDLE_BINDING_BASENAME),
+            "ladder_id": bundle_binding["ladder_id"],
+            "revalidations": [],
+        })
+        if not (bundle["software_ok"] and bundle["frozen_ok"]):
+            report["errors"].append(
+                "software verification bundle failed "
+                f"(software_ok={bundle['software_ok']}, "
+                f"frozen_ok={bundle['frozen_ok']}) — no RF phase was run, "
+                "candidate not promoted, existing active reference kept")
+            return report
+
+        # RF 진입 직전 재확인 — 여기서 실패하면 RF 를 시작하지 않는다.
+        gate = verify_bundle_binding(
+            paths, repo_root, verification_root, ladder_id=ladder_id,
+            environment_manifest_sha256=environment_manifest_sha256,
+            python_executable=sys.executable, stage="before-rf")
+        report["verification"]["revalidations"].append(gate)
+        if not gate["pass"]:
+            report["errors"].append(
+                "qualification inputs changed after the software bundle: "
+                + "; ".join(gate["problems"])
+                + " — no RF phase was run, candidate not promoted, "
+                "existing active reference kept")
+            return report
 
         for phase_index, phase in enumerate(LADDER_PHASES, 1):
             run_id = f"{ladder_id}-{phase}"
@@ -1051,8 +1254,15 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                 gain_input=gain_input,
                 environment_manifest=environment_manifest,
                 usb_paths=usb_paths)
-            environment_manifest_sha256 = generated[
-                "environment_manifest_sha256"]
+            if (generated["environment_manifest_sha256"]
+                    != environment_manifest_sha256):
+                # 묶음을 결속한 값과 config 에 심긴 값이 다르면 재사용 근거가
+                # 무너진다. 조용히 따라가지 않고 닫는다.
+                report["errors"].append(
+                    f"{phase}: environment manifest digest differs from the "
+                    "bundle binding — candidate not promoted, existing "
+                    "active reference kept")
+                return report
             resolved_config_sha256[phase] = dict(generated["resolved_sha256"])
 
             timeout_s = (local_config.PHASE_DEADLINES_S[phase]
@@ -1164,16 +1374,20 @@ def run_qualify(paths: StatePaths, *, hardware_path: Path | str | None = None,
                     "path": str(candidate_info["path"]),
                 }
 
-        # --- 7단계: verification bundle + final builder -------------------
-        if progress is not None:
-            progress.bundle_started()
-        verification_root = paths.qualification_candidate / "verification"
-        bundle = write_verification_bundle(
-            repo_root, verification_root, installation,
-            verify_report=install_check, runner=suite_runner,
-            progress=progress)
-        report["verification"] = {k: v for k, v in bundle.items()
-                                  if k != "root"}
+        # --- 7단계: 승격 직전 재확인 + final builder ----------------------
+        # 묶음은 사다리 앞에서 이미 만들었다. 여기서 다시 돌리지 않고, 그
+        # 사이 결속 입력이 바뀌지 않았는지만 확인한 뒤 같은 값을 쓴다.
+        gate = verify_bundle_binding(
+            paths, repo_root, verification_root, ladder_id=ladder_id,
+            environment_manifest_sha256=environment_manifest_sha256,
+            python_executable=sys.executable, stage="before-promotion")
+        report["verification"]["revalidations"].append(gate)
+        if not gate["pass"]:
+            report["errors"].append(
+                "qualification inputs changed after the software bundle: "
+                + "; ".join(gate["problems"])
+                + " — candidate not promoted, existing active reference kept")
+            return report
         if final_builder_module is None:
             final_builder_module = _load_module(
                 repo_root / "VDETER" / "tools" / "stage7_rr_final_builder.py",

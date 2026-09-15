@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ import standalone_v2_fixtures as fx  # noqa: E402
 from apps.standalone import (  # noqa: E402
     identity,
     installation_manifest,
+    local_config,
     provenance,
     qualify_cmd,
     state,
@@ -743,6 +745,294 @@ def _fake_builder(status="RESEARCH_READY"):
         return result
     module.build = build
     return module
+
+
+# ------------------------------------ 3-2: software 묶음 선행·동일 실행 재사용
+
+def _bundle_counting_runner(seen):
+    """묶음 suite 실행을 세는 runner (suite 2개 = 묶음 1회)."""
+
+    def runner(argv, **kwargs):
+        seen.append(list(argv))
+        return Done(0)
+
+    return runner
+
+
+def _order_recording_run(tmp, paths, *, suite_rc=0, **overrides):
+    """묶음 suite 와 RF phase 의 **호출 순서**를 한 목록에 기록하며 사다리를 돈다."""
+    order = []
+
+    def suite_runner(argv, **kwargs):
+        order.append("suite")
+        return Done(suite_rc)
+
+    def phase_runner(context):
+        order.append("phase:" + context["phase"])
+        return fabricating_phase_runner(context)
+
+    report = run(paths, tmp, suite_runner=suite_runner,
+                 phase_runner=phase_runner, **overrides)
+    return report, order
+
+
+def _verification_root(paths):
+    return paths.qualification_candidate / "verification"
+
+
+def test_software_bundle_runs_before_any_rf_phase():
+    """정상 사다리에서 묶음이 **첫 RF 단계보다 먼저** 돌고 정확히 1회만 돈다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report, order = _order_recording_run(tmp, paths)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        # suite 2개(unit-contract, integration) = 묶음 1회, 그리고 그 뒤에 RF.
+        assert order[:2] == ["suite", "suite"], order
+        assert order.count("suite") == 2, order
+        assert [item for item in order if item.startswith("phase:")] == [
+            "phase:" + phase for phase in qualify_cmd.LADDER_PHASES], order
+        assert report["verification"]["runs"] == 1
+        assert report["verification"]["order"] == "software-first"
+
+
+def test_software_bundle_failure_runs_no_rf_phase_and_promotes_nothing():
+    """묶음이 실패하면 RF 호출 0 · 승격 0 · 기존 active 불변."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        before = paths.active_pointer.read_bytes() if paths.active_pointer.exists() else None
+        report, order = _order_recording_run(tmp, paths, suite_rc=1)
+        assert report["status"] == "FAIL"
+        assert not any(item.startswith("phase:") for item in order), order
+        assert "no RF phase was run" in " ".join(report["errors"])
+        assert "candidate" not in report and "reference" not in report
+        after = paths.active_pointer.read_bytes() if paths.active_pointer.exists() else None
+        assert after == before
+        # 실패한 묶음과 원인은 evidence 로 남는다.
+        assert report["verification"]["software_ok"] is False
+        root = _verification_root(paths)
+        assert (root / "unit-contract.log").exists()
+        binding = json.loads(
+            (root / qualify_cmd.BUNDLE_BINDING_BASENAME).read_bytes())
+        assert binding["result"]["software_ok"] is False
+
+
+def _reissue_manifest_with_a_bound_file_changed(paths):
+    """결속(rf) 파일 하나의 기록 sha 를 바꾼 **자기 정합 manifest** 를 다시 쓴다.
+
+    저장소의 실제 파일은 건드리지 않는다. `load_installation` 의 자기 정합 검사는
+    통과하지만 현재 파일 재측정과는 어긋나므로, "묶음 뒤 결속 입력이 바뀐" 상황과
+    같다 (setup 재발급 + 파일 변경을 한 번에 모사).
+    """
+    record = installation_manifest.load_installation(paths)
+    target = next(rel for rel, entry in sorted(record["files"].items())
+                  if qualify_cmd.domains.RF in entry["domains"])
+    record["files"][target]["sha256"] = "0" * 64
+    domain_sha = {}
+    for domain in qualify_cmd.domains.BOUND_DOMAINS:
+        files_map = qualify_cmd.domains.domain_files_v2(record["files"], domain)
+        domain_sha[domain] = installation_manifest._domain_sha256(
+            files_map,
+            record["rf_critical_symbols"]
+            if domain == qualify_cmd.domains.RF else None)
+        record["domains"][domain]["sha256"] = domain_sha[domain]
+    record["installation_sha256"] = installation_manifest._installation_sha256(
+        domain_sha)
+    installation_manifest.write_installation(paths, record)
+    return target
+
+
+def test_binding_input_change_after_bundle_is_refused_before_rf():
+    """묶음 뒤 결속 입력이 바뀌면 RF 를 시작하지 않는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        order = []
+
+        def suite_runner(argv, **kwargs):
+            order.append("suite")
+            # 묶음이 끝난 직후 결속 입력을 바꾼다.
+            _reissue_manifest_with_a_bound_file_changed(paths)
+            return Done(0)
+
+        def phase_runner(context):
+            order.append("phase")
+            return fabricating_phase_runner(context)
+
+        report = run(paths, tmp, suite_runner=suite_runner,
+                     phase_runner=phase_runner)
+        assert report["status"] == "FAIL"
+        assert "phase" not in order, order
+        joined = " ".join(report["errors"])
+        assert "changed after the software bundle" in joined, joined
+        gate = report["verification"]["revalidations"][-1]
+        assert gate["stage"] == "before-rf" and gate["pass"] is False
+        assert gate["problems"]
+
+
+def test_rf_phase_failure_promotes_nothing_even_after_a_passing_bundle():
+    """묶음이 통과해도 RF phase 가 실패하면 승격 0 · 기존 active 불변."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        before = paths.active_pointer.read_bytes() if paths.active_pointer.exists() else None
+        suites = []
+
+        def failing_runner(context):
+            if context["phase"] == "rr-p2-17":
+                return 1
+            return fabricating_phase_runner(context)
+
+        report = run(paths, tmp, phase_runner=failing_runner,
+                     suite_runner=_bundle_counting_runner(suites))
+        assert report["status"] == "FAIL"
+        assert "reference" not in report
+        assert len(suites) == 2          # 묶음은 그래도 1회만 돌았다
+        after = paths.active_pointer.read_bytes() if paths.active_pointer.exists() else None
+        assert after == before
+
+
+def test_corrupt_or_partial_bundle_record_is_not_a_pass():
+    """손상·부분 기록·필수 필드 누락·산출물 변조는 재사용되지 않는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        # 승격 뒤 release 안의 묶음을 재료로 각 손상을 만든다.
+        release = paths.qualification_releases / "qual-20260904-000000" / "verification"
+        good = json.loads(
+            (release / qualify_cmd.BUNDLE_BINDING_BASENAME).read_bytes())
+
+        def check(mutate_binding=None, mutate_files=None):
+            root = Path(tmp) / ("probe-%d" % len(seen_probes))
+            seen_probes.append(root)
+            shutil.copytree(release, root)
+            record = json.loads(json.dumps(good))
+            if mutate_binding is not None:
+                mutate_binding(record)
+                (root / qualify_cmd.BUNDLE_BINDING_BASENAME).write_bytes(
+                    json.dumps(record).encode("utf-8"))
+            if mutate_files is not None:
+                mutate_files(root)
+            return qualify_cmd.verify_bundle_binding(
+                paths, Path(_REPO), root, ladder_id=good["ladder_id"],
+                environment_manifest_sha256=good["environment_manifest_sha256"],
+                python_executable=good["python_executable"], stage="probe")
+
+        seen_probes = []
+        assert check()["pass"] is True                      # 사본 그대로는 통과
+
+        broken = check(mutate_files=lambda root: (
+            root / qualify_cmd.BUNDLE_BINDING_BASENAME).write_bytes(b"{ not json"))
+        assert broken["pass"] is False and broken["problems"]
+
+        for field in ("result", "artifacts", "selection_policy",
+                      "installation_sha256"):
+            missing = check(mutate_binding=lambda r, f=field: r.pop(f))
+            assert missing["pass"] is False, field
+            assert any("missing fields" in p or field in p
+                       for p in missing["problems"]), (field, missing)
+
+        truncated = check(mutate_files=lambda root: (
+            root / "unit-contract.log").write_bytes(b"truncated"))
+        assert truncated["pass"] is False
+        assert any("artifact changed" in p for p in truncated["problems"])
+
+        removed = check(mutate_files=lambda root: (
+            root / "integration-stage7.log").unlink())
+        assert removed["pass"] is False
+        assert any("artifact missing" in p for p in removed["problems"])
+
+        not_a_pass = check(
+            mutate_binding=lambda r: r["result"].update({"software_ok": False}))
+        assert not_a_pass["pass"] is False
+
+
+def test_bundle_from_another_run_or_a_manual_precheck_is_not_reused():
+    """다른 run·수동 사전점검의 묶음은 재사용되지 않는다 (인터럽트 잔재 포함)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        release = paths.qualification_releases / "qual-20260904-000000" / "verification"
+        record = json.loads(
+            (release / qualify_cmd.BUNDLE_BINDING_BASENAME).read_bytes())
+
+        # 같은 묶음이라도 ladder_id 가 다르면 거부된다.
+        other = qualify_cmd.verify_bundle_binding(
+            paths, Path(_REPO), release, ladder_id="qual-99999999-999999",
+            environment_manifest_sha256=record["environment_manifest_sha256"],
+            python_executable=record["python_executable"], stage="probe")
+        assert other["pass"] is False
+        assert any("not produced by this qualification run" in p
+                   for p in other["problems"])
+
+        # 인터럽트로 결속 기록이 없는 묶음(suite 로그만 있는 상태)도 거부된다.
+        partial = Path(tmp) / "interrupted"
+        shutil.copytree(release, partial)
+        (partial / qualify_cmd.BUNDLE_BINDING_BASENAME).unlink()
+        interrupted = qualify_cmd.verify_bundle_binding(
+            paths, Path(_REPO), partial, ladder_id=record["ladder_id"],
+            environment_manifest_sha256=record["environment_manifest_sha256"],
+            python_executable=record["python_executable"], stage="probe")
+        assert interrupted["pass"] is False
+        assert any("unreadable" in p for p in interrupted["problems"])
+
+
+def test_final_builder_consumes_the_same_run_bundle():
+    """final builder 가 **같은 실행에서 만든 그 묶음**을 소비한다."""
+    seen = {}
+    real_build = None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        module = qualify_cmd._load_module(
+            Path(_REPO) / "VDETER" / "tools" / "stage7_rr_final_builder.py",
+            "stage7_rr_final_builder_for_bundle_test")
+        real_build = module.build
+
+        def recording_build(evidence_roots, out_path, **kwargs):
+            seen.update(kwargs)
+            seen["verification_files"] = sorted(
+                p.name for p in Path(kwargs["verification_root"]).iterdir())
+            return real_build(evidence_roots, out_path, **kwargs)
+
+        module.build = recording_build
+        report = run(paths, tmp, final_builder_module=module)
+        assert report["status"] == "QUALIFIED", report["errors"]
+
+        root = paths.qualification_releases / "qual-20260904-000000" / "verification"
+        record = json.loads(
+            (root / qualify_cmd.BUNDLE_BINDING_BASENAME).read_bytes())
+        # builder 가 본 root 는 이 실행의 candidate 묶음이다.
+        assert Path(seen["verification_root"]).name == "verification"
+        assert qualify_cmd.BUNDLE_BINDING_BASENAME in seen["verification_files"]
+        assert seen["software_ok"] is True and seen["frozen_hash_ok"] is True
+        assert record["ladder_id"] == "qual-20260904-000000"
+        assert record["result"]["software_ok"] is True
+        # 승격 직전 재확인이 통과로 남아 있다.
+        stages = [g["stage"] for g in report["verification"]["revalidations"]]
+        assert stages == ["before-rf", "before-promotion"], stages
+        assert all(g["pass"] for g in report["verification"]["revalidations"])
+
+
+def test_bundle_binding_records_the_bound_inputs_and_selection_policy():
+    """재사용 근거가 이미 자격에 결속된 값과 시험 선택 조건을 담는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = prepare_environment(tmp)
+        report = run(paths, tmp)
+        assert report["status"] == "QUALIFIED", report["errors"]
+        root = paths.qualification_releases / "qual-20260904-000000" / "verification"
+        record = json.loads(
+            (root / qualify_cmd.BUNDLE_BINDING_BASENAME).read_bytes())
+        installation = installation_manifest.load_installation(paths)
+        assert record["installation_sha256"] == installation["installation_sha256"]
+        assert record["domain_sha256"] == {
+            d: installation["domains"][d]["sha256"]
+            for d in qualify_cmd.domains.BOUND_DOMAINS}
+        assert record["environment_manifest_sha256"] == (
+            local_config.environment_manifest_digest(dict(ENV_MANIFEST)))
+        assert record["selection_policy"] == qualify_cmd.bundle_selection_policy()
+        assert sorted(record["artifacts"]) == sorted(
+            qualify_cmd.BUNDLE_REQUIRED_ARTIFACTS)
+        assert record["python_executable"] == sys.executable
 
 
 def _reuse(paths, tmp, prior_release_id, **overrides):
