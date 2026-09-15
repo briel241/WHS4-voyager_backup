@@ -47,6 +47,7 @@ def test_known_files_classify_to_expected_domain():
         "apps/standalone/qualify_cmd.py": qd.TOOLING,
         "apps/standalone/qualification_domains.py": qd.TOOLING,
         "apps/standalone/setup_cmd.py": qd.TOOLING,
+        "apps/standalone/hardware_draft.py": qd.TOOLING,
         "VDETER/tools/stage7_rr_final_builder.py": qd.TOOLING,
         "apps/standalone/templates/hardware.toml.example": qd.TOOLING,
         "tools/check_docs.py": qd.TOOLING,

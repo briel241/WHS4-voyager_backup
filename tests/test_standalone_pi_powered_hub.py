@@ -643,9 +643,18 @@ def test_setup_draft_selects_profile_from_observed_topology_and_stays_fail_close
                 assert 'hardware_profile = "%s"' % HUB in text
                 assert 'vid_pid = "2109:0817"' in text
                 assert "self_powered = false" in text and "individual_b210_dc = true" in text
-                assert 'asset_id = "REQUIRED_FILL"' in text
+                # HW-01 (2026-09-15): this fixture IS the lab default topology
+                # (expected serials + hub 2109:0817 observed), so the draft
+                # prefills the expected role mapping and hub asset as
+                # *expected* values; approval/attestations stay unwritten.
+                assert 'asset_id = "HUB-VIA-2109-0817-01"' in text
+                assert 'serial = "34D03DD"' in text.split("[endpoints.MASS-A]")[1].split("[endpoints.MASS-B]")[0]
+                assert 'serial = "3515425"' in text.split("[endpoints.MASS-B]")[1].split("[endpoints.ROC]")[0]
+                assert 'serial = "34D03E8"' in text.split("[endpoints.ROC]")[1].split("[wiring]")[0]
+                assert "NOT approved" in text and "approved = false" in text
+                assert draft["mismatches"] == [] and draft["expected_label"] == "lab-default"
                 assert "hub port 1 / 5-1.1: serial 3515425 5000M" in text
-                assert "external_power_asset" not in text.split("[endpoints.MASS-A]")[1].split("[wiring]")[0].replace("# 5000M on the hub — no external_power_asset here", "")
+                assert "external_power_asset" not in text.split("[endpoints.MASS-A]")[1].split("[wiring]")[0].replace("5000M on the hub — no external_power_asset here", "")
             else:
                 assert "schema_version = 1" in text
                 assert 'external_power_asset = "REQUIRED_FILL"' in text

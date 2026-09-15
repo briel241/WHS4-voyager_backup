@@ -234,7 +234,20 @@ def _cmd_setup(args, paths: StatePaths, out) -> int:
     out("  hardware:   %s %s" % (
         "draft written to" if draft["created"] else "existing", draft["path"]))
     if draft["created"]:
-        out("              edit serial/role mapping and set wiring.approved="
+        label = draft.get("expected_label")
+        if label:
+            applied = draft.get("expected_applied") or {}
+            roles = applied.get("endpoints") or {}
+            out("              expected profile %s: %s; hub asset %s (expected values, "
+                "not confirmed)" % (
+                    label,
+                    ", ".join("%s=%s" % (role, roles.get(role) or "REQUIRED_FILL")
+                              for role in ("MASS-A", "MASS-B", "ROC")),
+                    applied.get("usb_hub.asset_id") or "REQUIRED_FILL"))
+            for note in draft.get("mismatches") or []:
+                out("              mismatch: " + note)
+        out("              review the values, fill REQUIRED_FILL, record the power "
+            "attestations only after a physical check, then set wiring.approved="
             "true before `vdeter qualify`")
     inst = steps["installation"]
     out("  install:    installation %s (%d files; rf %s · operation %s · "

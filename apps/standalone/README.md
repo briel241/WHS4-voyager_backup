@@ -209,6 +209,14 @@ approved = true                    # "현재 배선이 선언대로"를 사용�
 
 - `vdeter setup`이 장비 탐지 결과로 **초안**을 만들 수 있으나, `approved =
   true`는 사용자만 기록한다. 초안 자동 승인 금지 (결정 1·7).
+- (2026-09-15 HW-01) 초안 생성은 `apps/standalone/hardware_draft.py` 한곳이다.
+  기대 프로필(기본 실험실 프로필 `LAB_DEFAULT`: MASS-A 34D03DD / MASS-B 3515425 /
+  ROC 34D03E8, hub `HUB-VIA-2109-0817-01` `2109:0817`, wiring `C1-C6-STANDARD`)을
+  관측과 대조해, **관측된 기대 serial만** 역할별 기대 매핑으로 채우고 hub asset은
+  VID:PID 일치 + 세 serial 관측일 때만 기대값으로 채운다. 누락·불일치는 REQUIRED_FILL
+  + 사유(초안 주석·`var/setup-usb-topology.json`·setup 출력)로 남기고 다른 장비를
+  배정하지 않는다. 채워진 값은 기대값이며 배선·전원 확인이 아니다 — `approved`와
+  전원 증언은 초안이 쓰지 않고(`*_source` 줄은 주석 처리), 기존 파일은 손대지 않는다.
 - station identity·주파수·sample-rate·channel·판정 기준은 ②에 고정 — ①로
   변경 불가(치환 대상 필드가 아님). ② 변경은 manifest 검증이 fail-closed.
 - (2026-09-10 additive) `schema_version = 2`는 Pi powered-USB3-hub host
@@ -706,9 +714,11 @@ approved = true
 ```
 
 `vdeter setup`은 정확히 세 B210이 하나의 self-powered SuperSpeed hub 아래에
-5000M로 관측될 때 이 schema의 초안(asset REQUIRED_FILL, attestation은 거부되는
-기본값)을 쓰고, 그 밖에는 legacy 초안을 쓴다(`var/setup-usb-topology.json`에
-관측 topology 기록). `vdeter run`은 close 뒤 sysfs를 재관측해 세 장치가 같은 hub
+5000M로 관측될 때 이 schema의 초안을 쓰고, 그 밖에는 legacy 초안을 쓴다
+(`var/setup-usb-topology.json`에 관측 topology와 초안 결정 기록). 초안은 기대
+프로필(§4, 기본 실험실 프로필)과 관측을 대조해 관측된 기대 serial·hub asset을
+**기대값**으로 채우되 attestation은 거부되는 기본값(`self_powered=false`,
+`individual_b210_dc=true`, `*_source` 줄 주석 처리)과 `approved=false`를 유지한다. `vdeter run`은 close 뒤 sysfs를 재관측해 세 장치가 같은 hub
 아래 5000M로 돌아왔는지 기록·판정한다(`usb_topology_after_close`).
 
 fail-closed 목록(전부 RF 전 거부): 어느 장치든 480M, 다른 hub/root 아래, hub

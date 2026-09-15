@@ -68,6 +68,7 @@ _TOOLING_ONLY_FILES = frozenset({
     "apps/standalone/qualify_cmd.py",
     "apps/standalone/qualification_domains.py",
     "apps/standalone/setup_cmd.py",
+    "apps/standalone/hardware_draft.py",         # setup 전용 hardware.toml 초안 생성
     "apps/standalone/deploy_manifest.py",
 })
 #: tooling이면서 일반 실행도 쓰는 파일(교차영향 → 두 영역).

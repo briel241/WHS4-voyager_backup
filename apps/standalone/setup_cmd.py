@@ -9,8 +9,11 @@
     3. wrapper: `var/venv/bin/vdeter` 한 단어 명령.
     4. identity: 부재 시에만 자동 생성 (`--new-identity`는 명시 재생성 —
        identity 모듈 정책, 결정 11).
-    5. hardware.toml 초안: 부재 시에만 생성 — 관측된 B210 목록을 주석으로
-       제공하되 **역할 배정은 하지 않는다** (결정 1). 승인은 사용자 몫.
+    5. hardware.toml 초안: 부재 시에만 생성 — 기대 프로필(기본: 실험실
+       프로필 `hardware_draft.LAB_DEFAULT`)과 관측을 대조해 관측된 기대
+       serial만 역할별 기대 매핑으로 채우고, 누락·불일치는 사유와 함께
+       REQUIRED_FILL로 둔다. 다른 장비를 대신 배정하지 않으며 전원 증언·
+       배선 승인은 쓰지 않는다 (결정 1, R6). 승인은 사용자 몫.
     6. 설치 manifest 실측 (v2) → `var/installation/{installation,rf,operation,
        tooling}-manifest.json` (run/qualify 결속의 기준 — installation_manifest
        모듈). 결속 digest가 이전과 다르면 기존 자격 무효화를 보고한다.
@@ -32,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from apps.standalone import hardware_profiles
+from apps.standalone import hardware_draft, hardware_profiles
 from apps.standalone import identity, installation_manifest, local_config
 from apps.standalone.state import StatePaths, write_json_atomic
 
@@ -244,69 +247,42 @@ def install_user_launcher(paths: StatePaths, *, home: Path | str | None = None,
 # ------------------------------------------------------------ hardware 초안
 
 def draft_hardware_declaration(paths: StatePaths, observed: dict,
-                               topology: dict | None = None) -> dict:
-    """hardware.toml 초안 — 부재 시에만. 역할 자동 배정은 하지 않는다.
+                               topology: dict | None = None, *,
+                               candidate: dict | None = None,
+                               expected=hardware_draft.LAB_DEFAULT) -> dict:
+    """hardware.toml 초안 — 부재 시에만. 생성 로직은 `hardware_draft` 한곳이다.
 
     observed: local_preflight.probe_usb_serials() 결과 (serial→경로·속도).
-    topology(2026-09-10 additive): host_profiles.probe_usb_topology() 스냅샷.
-    정확히 세 B210이 하나의 self-powered SuperSpeed hub 아래에 5000M로 관측되면
-    Pi powered-USB3-hub profile(schema 2) 초안을, 그 밖에는 종전 legacy(Pi)
-    초안을 그대로 쓴다. 어느 초안도 attestation·승인 없이는 검증을 통과하지
-    않는다 (fail-closed).
+    topology: host_profiles.probe_usb_topology() 스냅샷 — `candidate`(hub
+    후보 판정)를 직접 주면 다시 판정하지 않는다.
+    expected: 기대 프로필(기본 실험실 프로필). None이면 기대값 없이 종전
+    형태의 초안을 쓴다(다른 환경). 기대값은 관측이 뒷받침하는 항목에만 채우고
+    나머지는 REQUIRED_FILL + 사유로 남긴다. 기존 파일은 읽지도 쓰지도 않는다.
+    어느 초안도 승인·증언 없이는 검증을 통과하지 않는다 (fail-closed).
     """
     target = paths.root / "hardware.toml"
     if target.is_file():
-        return {"created": False, "path": str(target), "profile": None}
-    candidate = (hardware_profiles.hub_draft_candidate(topology)
-                 if topology else {"candidate": False})
-    if candidate.get("candidate"):
-        target.write_text(hardware_profiles.render_pi_powered_hub_draft(candidate),
-                          encoding="utf-8", newline="\n")
-        return {"created": True, "path": str(target),
-                "profile": hardware_profiles.PI_POWERED_HUB_PROFILE}
-    observed_lines = [
-        f"#   serial {serial}: usb_path={info.get('usb_path')} "
-        f"speed={info.get('speed_mbps')}M"
-        for serial, info in sorted(observed.items())
-    ] or ["#   (no USB serial detected — connect the devices and rerun setup)"]
-    body = "\n".join([
-        "# VDETER standalone hardware declaration — edited and approved by the operator.",
-        "# The role (MASS-A/MASS-B/ROC) to serial mapping cannot be decided automatically:",
-        "# the operator who knows the physical wiring and power setup must fill it in.",
-        "# Detected devices (for reference):",
-        *observed_lines,
-        "",
-        "schema_version = 1",
-        'platform_profile = "pi"   # "pi" | "generic-pc"',
-        "",
-        '[endpoints.MASS-A]',
-        'serial = "REQUIRED_FILL"',
-        "",
-        '[endpoints.MASS-B]',
-        'serial = "REQUIRED_FILL"',
-        'external_power_asset = "REQUIRED_FILL"',
-        "",
-        '[endpoints.ROC]',
-        'serial = "REQUIRED_FILL"',
-        "",
-        "[wiring]",
-        'profile = "C1-C6-STANDARD"',
-        "approved = false   # set to true after verifying the wiring; required to run",
-        "",
-    ])
-    target.write_text(body, encoding="utf-8", newline="\n")
-    return {"created": True, "path": str(target),
-            "profile": hardware_profiles.LEGACY_PI_PROFILE}
+        return {"created": False, "path": str(target), "profile": None,
+                "expected_label": None, "expected_applied": {}, "mismatches": []}
+    if candidate is None:
+        candidate = (hardware_draft.hub_draft_candidate(topology)
+                     if topology else {"candidate": False, "reasons": [], "devices": []})
+    draft = hardware_draft.build_hardware_draft(
+        observed=observed, candidate=candidate, expected=expected)
+    target.write_text(draft.text, encoding="utf-8", newline="\n")
+    return {"created": True, "path": str(target), "profile": draft.profile,
+            "expected_label": draft.expected_label,
+            "expected_applied": draft.expected_applied,
+            "mismatches": list(draft.mismatches)}
 
-
-# ------------------------------------------------------------ 본체
 
 def run_setup(paths: StatePaths, *, runner=subprocess.run,
               usb_probe=None, apt_install: bool = True,
               make_venv: bool = True, regenerate_identity: bool = False,
               now=None, crypto_available=_cryptography_available,
               install_launcher: bool = True, home: Path | str | None = None,
-              progress=None, topology_probe=None) -> dict:
+              progress=None, topology_probe=None,
+              expected_hardware=hardware_draft.LAB_DEFAULT) -> dict:
     """setup 전체 — 단계별 결과를 모아 report로 돌려준다.
 
     실패한 단계에서 중단한다 (부분 성공 상태도 멱등 재실행으로 이어진다).
@@ -371,15 +347,7 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 setup을 막지 않는다
         topology = {"devices": {}, "roots": {},
                     "error": f"{type(exc).__name__}: {exc}"}
-    hub_candidate = hardware_profiles.hub_draft_candidate(topology)
-    write_json_atomic(paths.var_dir / "setup-usb-topology.json", {
-        "artifact_type": "STAGE7_STANDALONE_SETUP_USB_TOPOLOGY_V1",
-        "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "note": ("sysfs physical topology at setup time; paths/ports/device "
-                 "numbers are recorded for reference and never bound"),
-        "topology": topology,
-        "hub_candidate": hub_candidate,
-    })
+    hub_candidate = hardware_draft.hub_draft_candidate(topology)
     report["steps"]["b210_discovery"] = {
         "observed": {serial: {"usb_path": info.get("usb_path"),
                               "speed_mbps": info.get("speed_mbps")}
@@ -388,8 +356,28 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
         "hub_candidate": hub_candidate,
     }
     step("hardware.toml draft", b210=f"{len(observed)}/3")
-    report["steps"]["hardware_draft"] = draft_hardware_declaration(
-        paths, observed, topology=topology)
+    draft = draft_hardware_declaration(
+        paths, observed, candidate=hub_candidate, expected=expected_hardware)
+    report["steps"]["hardware_draft"] = draft
+    # 관측 스냅샷과 초안 결정(기대값 적용·불일치)을 함께 기록한다 — 값은
+    # 기록용이며 결속하지 않는다.
+    write_json_atomic(paths.var_dir / "setup-usb-topology.json", {
+        "artifact_type": "STAGE7_STANDALONE_SETUP_USB_TOPOLOGY_V1",
+        "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "note": ("sysfs physical topology at setup time; paths/ports/device "
+                 "numbers are recorded for reference and never bound"),
+        "topology": topology,
+        "hub_candidate": hub_candidate,
+        "hardware_draft": {
+            "created": draft["created"], "profile": draft["profile"],
+            "expected_label": draft["expected_label"],
+            "expected_applied": draft["expected_applied"],
+            "mismatches": draft["mismatches"],
+            "note": ("expected values are expectations from the expected profile, "
+                     "filled only where the observation supports them; approval and "
+                     "attestations are never written by setup"),
+        },
+    })
 
     # 설치 manifest (v2): 실측 → var/installation/*. 결속 digest(rf/operation/
     # tooling)가 이전 기록과 같으면 파일을 다시 쓰지 않는다(멱등 — 재실행이

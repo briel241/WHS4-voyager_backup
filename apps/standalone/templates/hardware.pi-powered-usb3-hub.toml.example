@@ -8,9 +8,12 @@
 # external DC asset) keeps schema_version 1 — see hardware.toml.example.
 #
 # `vdeter setup` writes a draft of this file when it observes that topology, with
-# the hub VID:PID and the detected serials in comments. Only the operator can
-# record the hub asset ID, the role→serial mapping, the two attestations and
-# wiring.approved = true; until then qualify/run refuse to start.
+# the hub VID:PID and the detected serials in comments. The draft fills the
+# role→serial mapping and the hub asset ID from the expected lab profile only
+# where the observation supports them, marked as expected values; the two
+# attestations stay at their fail-closed values with their source lines
+# commented out, and wiring.approved stays false. Only the operator records
+# the attestations and the approval; until then qualify/run refuse to start.
 #
 # Software observes and records (never declares or binds): USB paths, hub ports,
 # link speeds and device numbers, and the hub descriptor "self-powered" bit.
@@ -24,11 +27,13 @@ hardware_profile = "STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1"
 
 [usb_hub]
 # Physical asset ID of the powered hub (the operator's inventory ID; probe-impossible).
-asset_id = "HUB-EXAMPLE-01"
+# The lab default expects HUB-VIA-2109-0817-01; confirm it against the label on the hub.
+asset_id = "HUB-VIA-2109-0817-01"
 # USB VID:PID of the hub as observed in sysfs (lowercase hex); must match the hub
 # that is the common parent of the three B210s.
 vid_pid = "2109:0817"
-# Operator attestation: the hub's external power supply is connected.
+# Operator attestation: the hub's external power supply is connected. Shown here in
+# the completed form; a fresh setup draft writes false with the source line commented.
 self_powered = true
 self_powered_source = "operator_attested"
 # Operator attestation: no B210 has its own external DC supply.
