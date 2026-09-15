@@ -300,17 +300,36 @@ canonical JSON으로 로컬 생성한다.
 
 ## 7. vdeter qualify — RR 사다리와 reference 발급 (결정 20, 승인 조건 2·3)
 
-사다리 (사용자 확정 순서):
+사다리 (사용자 확정 순서 · 2026-09-16 묶음 선행으로 개정):
 
 ```
+0. verification bundle         # RF 앞. 실패하면 RF phase 0건·승격 0건
 1. RR-P0                      → TC-STAGE7-RR-001
 2. RR-P1 (+gain 측정)         → TC-STAGE7-RR-002·003·004 + gain artifact
 3. candidate reference 생성    # 이후 단계·향후 run이 쓸 결속값 확정
 4. RR-P2-17                   → TC-STAGE7-RR-005
 5. RR-P3-fault                → TC-STAGE7-RR-007 (판정 필수)
-6. verification bundle → final builder 검증
+6. 0단계 묶음 재확인 → final builder 검증   # 묶음을 다시 돌리지 않는다
 7. 전체 PASS → candidate를 releases/<id>로 이동 후 active 포인터 원자 교체
 ```
+
+**묶음 선행(2026-09-16)**: 소프트웨어가 이미 실패한 후보가 RF 사다리를 다
+쓰고 나서야 그 사실을 알게 되던 구조를 바꿨다(09-13 사다리 실측: RF 94.7분
+뒤 묶음 FAIL). 실무가 이를 수동 사전 점검으로 막고 있었으므로 성공한 자격은
+같은 묶음을 두 번 돌리고 있었다 — 이제 **한 실행에 정확히 1회**다.
+
+재사용은 새 캐시가 아니다. 묶음 옆 `verification/bundle-binding.json`에
+`ladder_id`·installation digest·영역별 digest·환경 manifest digest·python
+실행파일·시험 선택 조건(`UNIT_CONTRACT_TARGETS`·`INTEGRATION_TARGETS`·
+`GOVERNANCE_DESELECT`)·묶음 판정·산출물 4개의 SHA-256을 남기고, **RF 진입
+직전**과 **승격 직전**에 설치 manifest 를 다시 적재·재측정해 대조한다.
+하나라도 어긋나면 묶음을 조용히 다시 돌리지 않고 fail-closed 로 끝낸다
+(RF 미시작 또는 미승격, 기존 active 유지). 다른 run·과거 자격·수동 사전
+점검의 묶음은 `ladder_id` 불일치로 거부되고, 손상·부분 기록·산출물 누락도
+PASS 로 해석하지 않는다. `vdeter qualify --reuse` 경로는 종전 그대로다.
+
+이 변경의 주효과는 **software 실패를 RF 앞에서 차단하고 수동 사전 점검
+중복을 없애는 것**이다. 성공 경로의 RF 시간은 줄지 않는다.
 
 **Link 19 제외 (2026-09-04 정책 변경, 사용자 지시)**: RR-P2-19(TC-RR-006)는
 standalone 자격 사다리에서 제거했다. 근거 — 현재 프로젝트의 운용 시나리오
@@ -494,6 +513,35 @@ IQ 원파형 덤프(`evidence/iq_debug/`)는 이번에 **손대지 않았다** �
 `tests/fixtures/stage7_diagnostics_gating_function_bindings.json` 에 **고정 해시**로 재결속했다
 (이름 허용목록이 아니므로 이후 추가 변경은 다시 거부된다). 비용 절감은 **측정하지 않았고**
 수치로 주장하지 않는다 — 근거는 구조 일관성(적재와 소비가 같은 조건)이다.
+
+### 7C. launcher 종료 대기 — 공통 마감시각 동시 관찰 (2026-09-16, 3-3)
+
+같은 phase 의 launcher 종료를 endpoint 별로 **직렬** 대기하던 네 경로
+(`run_rr_p0`·`run_mass_roc_service`·`run_mass_roc_session` finally·`main`
+teardown)를, 하나의 monotonic 마감시각까지 **함께 관찰**하도록 바꿨다.
+
+```
+기존: MASS-A 60초 → MASS-B 60초 → ROC 60초   (최악 180초)
+변경: 세 endpoint 를 함께 관찰, 공통 마감시각까지 최대 60초
+```
+
+| 유지 | 내용 |
+| --- | --- |
+| 상한 값 | 60 s(세 경로)·30 s(`main` teardown) 그대로. 낮추지 않았다 |
+| 종료 요청 순서 | STOP barrier·start 대행 회수 순서 불변 |
+| 자연 종료 판정 | `poll()` 기준 불변. 마감시각에 딱 끝난 것도 종료로 본다 |
+| escalation | 마감 뒤 **남은 프로세스에만** 기존 정책 적용 — `run_mass_roc_session` 은 `_terminate_process_bounded`(TERM→KILL), `main` 은 terminate. 원래 강제 종료가 없던 두 경로에는 새로 넣지 않았다 |
+| 합격 기준 | `launcher_clean_exit`·cleanup·소유권·inhibit 판정 불변. 종료되지 않은 endpoint 를 성공으로 합성하지 않는다 |
+
+endpoint 별 종료 상태를 `launcher_exits`(자연 종료 여부·exit code·대기 시간,
+강제 종료 시 `cleanup`)로 evidence 에 남긴다 — 먼저 끝난 endpoint 의 결과가
+나중 것 때문에 유실되지 않는다. 관찰기는 신호를 보내지 않고 아무것도 제출하지
+않는다. 새 async framework·thread pool·scheduler 는 만들지 않았고 상한 값과
+마감 뒤 정책은 호출자가 명시한다(경로마다 의미가 다르다).
+
+**시간 효과는 최악 경로에서만 주장한다.** 정상 경로(launcher 가 곧바로
+종료)는 종전에도 몇 초였고 이번 변경으로 줄지 않는다. 취소·무응답처럼 실제로
+기다리던 경로에서만 줄며, 그 값은 실측으로만 보고한다.
 
 ## 8. qualification-critical 경계 (결정 13·14 정합 정의)
 

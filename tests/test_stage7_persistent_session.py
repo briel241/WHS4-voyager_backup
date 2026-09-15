@@ -757,8 +757,13 @@ def test_session_cleanup_measured_after_launcher_teardown():
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                 and n.name == "run_mass_roc_session")
     body = ast.unparse(node)
-    terminate_at = body.index("_terminate_process_bounded(process)")
+    # 3-3 이후 teardown 은 공통 마감시각 관찰 뒤 **남은 것만** 강제 종료한다.
+    # 계측 순서 계약은 그대로다: launcher 를 내린 뒤에 worker 수를 재야 한다.
+    teardown_at = body.index("_await_launcher_exits(")
+    terminate_at = body.index("_terminate_process_bounded(")
     workers_at = body.index("'workers_after_stop'")
+    assert teardown_at < workers_at, (
+        "launcher 종료를 관찰하기 전에 worker 수를 재고 있다")
     assert terminate_at < workers_at, (
         "launcher teardown 전에 worker 수를 재고 있다")
 

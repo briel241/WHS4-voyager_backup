@@ -17,6 +17,8 @@ _RENAME_FIXTURE = (_ROOT /
                    "tests/fixtures/stage7_approved_rename_function_bindings.json")
 _DIAG_FIXTURE = (_ROOT /
                  "tests/fixtures/stage7_diagnostics_gating_function_bindings.json")
+_SHUTDOWN_FIXTURE = (_ROOT /
+                     "tests/fixtures/stage7_launcher_shutdown_function_bindings.json")
 _SOURCE = _ROOT / "VDETER/apps/coordinator_main.py"
 
 #: 과거 자격 기록(phase-g reference·profile)의 **당시 경로** -> 현재 경로.
@@ -104,4 +106,20 @@ def diagnostics_gating_pins(*, bindings=None):
         bindings = _json.loads(_DIAG_FIXTURE.read_text(encoding="utf-8"))
     if bindings.get("artifact_type") != "STAGE7_DIAGNOSTICS_GATING_FUNCTION_HASHES_V1":
         raise ValueError("unsupported diagnostics-gating hash contract")
+    return {name: dict(spec) for name, spec in bindings["functions"].items()}
+
+
+def launcher_shutdown_pins(*, bindings=None):
+    """3-3 종료 대기 구조 변경으로 해시가 바뀐 자격 함수의 **고정 해시**.
+
+    진단 게이트 기록과 별개다 — 근거 문서가 다르고(종료 대기 범위 증명) 승인 시점도
+    다르다. 이름 allow-list 가 아니라 고정 해시이므로 이 기록 이후의 추가 변경은 다시
+    검출된다. phase-I fixture 가 이미 고정하는 함수는 여기 담지 않는다.
+    """
+    import json as _json
+
+    if bindings is None:
+        bindings = _json.loads(_SHUTDOWN_FIXTURE.read_text(encoding="utf-8"))
+    if bindings.get("artifact_type") != "STAGE7_LAUNCHER_SHUTDOWN_FUNCTION_HASHES_V1":
+        raise ValueError("unsupported launcher-shutdown hash contract")
     return {name: dict(spec) for name, spec in bindings["functions"].items()}

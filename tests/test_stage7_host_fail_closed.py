@@ -18,6 +18,7 @@ from apps import service_layer, service_session
 from apps.service_trace import NullTrace
 from stage7_binding_fixtures import (approved_rename_pins,
                                      diagnostics_gating_pins,
+                                     launcher_shutdown_pins,
                                      legacy_phase_i_pins)
 
 
@@ -186,6 +187,10 @@ def _rebind_for_phase_i(profile: dict, source: str, *,
     # 3-1 진단 게이트(제한적 동작 변경)로 바뀐 자격 함수의 고정 해시.
     # rename 핀 뒤에 적용한다 — 같은 함수가 두 기록에 걸치면 나중 승인이 이긴다.
     for _name, _pinned in diagnostics_gating_pins().items():
+        if _name in spec["qualified_functions"]:
+            spec["qualified_functions"][_name] = dict(_pinned)
+    # 3-3 종료 대기 구조 변경(제한적 동작 변경)으로 바뀐 자격 함수의 고정 해시.
+    for _name, _pinned in launcher_shutdown_pins().items():
         if _name in spec["qualified_functions"]:
             spec["qualified_functions"][_name] = dict(_pinned)
     if pin_run_rr_p3_fault:
@@ -497,6 +502,29 @@ def test_close_shutdown_or_evidence_failure_is_explicit_fail():
         assert session.evidence_collection["pass"] is False
         assert "evidence 수집 실패" in result["error"]
         assert session.summary()["status"] == "FAIL"
+
+
+def test_launcher_shutdown_rebinding_is_hash_pinned_not_a_name_allowlist():
+    """3-3 으로 재결속한 함수라도 **그 뒤의 추가 변경**은 다시 거부된다."""
+    pinned_names = sorted(launcher_shutdown_pins())
+    assert pinned_names, "종료 대기 재결속 기록이 비어 있다"
+    target = "run_mass_roc_service"
+    assert target in pinned_names, pinned_names
+
+    source = _current_coordinator_source()
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
+    mutated = _mutate_function(source, target)
+    spec = profile["_reference"]["qualification_critical_manifest"][
+        "function_bound_files"][_COORDINATOR_REL_AT_QUALIFIED_COMMIT]
+    spec["phase_g_file_sha256"] = hashlib.sha256(
+        mutated.encode("utf-8")).hexdigest()
+    try:
+        service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _serving_runner(mutated))
+        raise AssertionError(
+            "재결속 대상 함수의 추가 변경이 통과했다 — 고정 해시가 아니라 이름 허용목록이 됐다")
+    except service_layer.ServiceSessionError as exc:
+        assert target in str(exc), str(exc)
 
 
 def test_diagnostics_gating_rebinding_is_hash_pinned_not_a_name_allowlist():

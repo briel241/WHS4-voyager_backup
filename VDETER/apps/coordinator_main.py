@@ -710,13 +710,15 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
         # cleanup 검증: launcher가 terminate 없이 스스로 종료, worker 0,
         # B210 재-discovery 3/3.
         clean_exit = True
+        launcher_exits = {}
         if processes:
-            for endpoint_id, process in processes.items():
-                deadline = time.monotonic() + 60.0
-                while process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.5)
-                if process.poll() is None:
-                    clean_exit = False
+            # 세 endpoint 를 **공통 마감시각**까지 함께 관찰한다 (상한 60 s
+            # 그대로; endpoint 수만큼 직렬로 곱하지 않는다). 이 경로는
+            # 예전부터 강제 종료를 하지 않는다 — 판정만 기록한다.
+            launcher_exits = _await_launcher_exits(processes,
+                                                   timeout_s=60.0)
+            clean_exit = all(entry["exited"]
+                             for entry in launcher_exits.values())
         guard.progress("launcher-exit")
         workers_after = _worker_process_count()
         rediscovery = _rediscover_b210(sorted(serial_by_endpoint.values()))
@@ -744,6 +746,7 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
             "workers_running": workers_running,
             "launchers_alive_during_run": launchers_alive,
             "launcher_clean_exit": clean_exit,
+            "launcher_exits": launcher_exits,
             "workers_after_stop": workers_after,
             "rediscovery": rediscovery,
             "rf_tx_commands": len(tx_commands),
@@ -1503,13 +1506,13 @@ def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
 
         # --- 9. cleanup 확인 (launcher 자진 종료·worker 0·B210 3/3) ------------
         clean_exit = True
+        launcher_exits = {}
         if processes:
-            for _endpoint_id, process in processes.items():
-                deadline = time.monotonic() + 60.0
-                while process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.5)
-                if process.poll() is None:
-                    clean_exit = False
+            # 공통 마감시각까지 함께 관찰한다 (상한 60 s 그대로).
+            launcher_exits = _await_launcher_exits(processes,
+                                                   timeout_s=60.0)
+            clean_exit = all(entry["exited"]
+                             for entry in launcher_exits.values())
         workers_after = _worker_process_count()
         rediscovery = _rediscover_b210(sorted(serial_by_endpoint.values()))
         speed_map = _live_b210_speed_map()
@@ -1518,6 +1521,7 @@ def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
         ).stdout.strip()
         cleanup = {
             "launcher_clean_exit": clean_exit,
+            "launcher_exits": launcher_exits,
             "workers_after_stop": workers_after,
             "rediscovery": rediscovery,
             "live_speed_map": {k: v for k, v in speed_map.items()
@@ -1653,6 +1657,50 @@ def _terminate_process_bounded(process, *, terminate_timeout_s=None,
         outcome["error"] = f"{type(exc).__name__}: {exc}"
     outcome["exit_code"] = process.poll()
     return outcome
+
+
+def _await_launcher_exits(processes, *, timeout_s, poll_s=0.5,
+                          now=time.monotonic, sleep=time.sleep):
+    """같은 phase 의 launcher 들을 **하나의 공통 마감시각**까지 함께 관찰한다.
+
+    endpoint 수만큼 상한을 곱하지 않는다(직렬 60 s×3 대신 공통 60 s). 상한 값과
+    마감 뒤 남은 프로세스 처리는 **호출자 정책**이다 — 경로마다 의미가 달라
+    여기서 하나로 합치지 않는다. 이 함수는 관찰만 한다: 신호를 보내지 않고,
+    프로세스를 죽이지 않으며, 아무것도 제출하지 않는다.
+
+    먼저 끝난 endpoint 의 결과는 그 자리에서 확정되므로 뒤늦게 끝난 endpoint
+    때문에 유실되지 않는다. 마감시각 뒤에 **한 번 더** 확인하는 것은 기존 경로
+    (`while poll() is None and now() < deadline` 뒤의 재확인)와 같은 의미다.
+
+    반환: {endpoint_id: {"exited": bool, "exit_code": int|None,
+                         "waited_s": float}}
+    """
+    started = now()
+    deadline = started + timeout_s
+    results = {}
+    while True:
+        for endpoint_id, process in processes.items():
+            if endpoint_id in results:
+                continue
+            code = process.poll()
+            if code is not None:
+                results[endpoint_id] = {
+                    "exited": True, "exit_code": code,
+                    "waited_s": round(now() - started, 3)}
+        if len(results) == len(processes):
+            break
+        remaining = deadline - now()
+        if remaining <= 0:
+            break
+        sleep(min(poll_s, remaining))
+    for endpoint_id, process in processes.items():
+        if endpoint_id in results:
+            continue
+        code = process.poll()
+        results[endpoint_id] = {
+            "exited": code is not None, "exit_code": code,
+            "waited_s": round(now() - started, 3)}
+    return {endpoint_id: results[endpoint_id] for endpoint_id in processes}
 
 
 def _service_session_terminal_status(workloads, service_stop_rc,
@@ -2375,21 +2423,30 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         # main()의 teardown보다 먼저 재보아 정상 종료 중에도 worker 3·재발견
         # 실패로 기록됐다 — 장치 상태가 아니라 계측 순서 결함이었다.
         clean_exit = True
+        launcher_exits = {}
         if processes:
-            for endpoint_id, process in processes.items():
-                deadline = time.monotonic() + 60.0
-                while process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.5)
-                if process.poll() is None:
-                    launcher_cleanup = _terminate_process_bounded(process)
-                    emit("launcher_cleanup", endpoint_id=endpoint_id,
-                         child_cleanup=launcher_cleanup)
-                    # 자발 종료하지 않았다는 사실 자체는 그대로 남긴다.
-                    clean_exit = False
-                    print(f"[coordinator] {endpoint_id} launcher 강제 종료",
-                          flush=True)
+            # 공통 마감시각까지 함께 관찰하고(상한 60 s 그대로), 마감 뒤에도
+            # 남은 것에만 기존 escalation 을 적용한다. 먼저 끝난 endpoint 의
+            # 결과는 그대로 남는다.
+            launcher_exits = _await_launcher_exits(processes,
+                                                   timeout_s=60.0)
+            for endpoint_id in processes:
+                entry = launcher_exits[endpoint_id]
+                if entry["exited"]:
+                    continue
+                launcher_cleanup = _terminate_process_bounded(
+                    processes[endpoint_id])
+                entry["cleanup"] = launcher_cleanup
+                entry["exit_code"] = launcher_cleanup["exit_code"]
+                emit("launcher_cleanup", endpoint_id=endpoint_id,
+                     child_cleanup=launcher_cleanup)
+                # 자발 종료하지 않았다는 사실 자체는 그대로 남긴다.
+                clean_exit = False
+                print(f"[coordinator] {endpoint_id} launcher 강제 종료",
+                      flush=True)
         cleanup = {
             "launcher_clean_exit": clean_exit,
+            "launcher_exits": launcher_exits,
             "workers_after_stop": _worker_process_count(),
             "rediscovery": _rediscover_b210(sorted(serial_by_endpoint.values())),
             "usb_speed": {k: v for k, v in _live_b210_speed_map().items()
@@ -3518,12 +3575,14 @@ def main(argv=None) -> int:
         )
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(summary, handle, ensure_ascii=True, sort_keys=True, indent=1)
-        for endpoint_id, process in processes.items():
-            try:
-                process.wait(timeout=30.0)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                print(f"[coordinator] {endpoint_id} launcher terminate", flush=True)
+        # teardown 도 공통 마감시각까지 함께 관찰한다 (상한 30 s 그대로;
+        # endpoint 수만큼 직렬로 곱하지 않는다). 남은 것에만 기존 terminate.
+        teardown_exits = _await_launcher_exits(processes, timeout_s=30.0)
+        for endpoint_id in processes:
+            if teardown_exits[endpoint_id]["exited"]:
+                continue
+            processes[endpoint_id].terminate()
+            print(f"[coordinator] {endpoint_id} launcher terminate", flush=True)
         print(f"[coordinator] evidence: {path}", flush=True)
     return exit_code
 
