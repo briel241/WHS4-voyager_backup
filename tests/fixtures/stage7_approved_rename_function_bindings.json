@@ -1,0 +1,108 @@
+{
+ "artifact_type": "STAGE7_APPROVED_RENAME_FUNCTION_HASHES_V1",
+ "reason": "Stage 8 2-3 구조 정리 — 승인된 이름·경로 치환에 한정된 변경",
+ "evidence": "step2-3-impl-20260915/rename-only-proof.json (직전 커밋 원문 + 승인 대응표 == 현재 파일, byte-identical)",
+ "base_commit_before_rename": "93bebbd4ce6bfd314be964c25c6b56f52f9b599f",
+ "hash_method": "service_layer._verify_function_bound (ast.dump / ast.unparse, SHA-256)",
+ "note": "이름 allow-list 가 아니라 고정 해시다. 이후 추가 변경은 다시 검출된다.",
+ "functions": {
+  "_open_session_trace": {
+   "ast_sha256": "34283644376bae9e3e5dd0dadee9a40fb0e5df08934176e96f2a7d6889467eb2",
+   "source_sha256": "d0148f94d8f4ee07a38a647b8d4e06930156767bd471a1bfae273139590ceba6"
+  },
+  "_run_rf_qualification": {
+   "ast_sha256": "e9c9d5bb66de3d0f60f653074120efcc096ea167cb96997b37659074fa15c718",
+   "source_sha256": "dea3e72c9bf73c839352b2c9205282f96bbb95c752cbf16b817e620972431dd3"
+  },
+  "_spawn_controller": {
+   "ast_sha256": "1a45adc2dbb7608662668a83479d6b7612ecc8ad1753a0e7bea7b6e0d3394297",
+   "source_sha256": "47525cc1d811dac64b4b7af06b44f8d4ed2784fc438dd5f7ad515744986cf32e"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "4f9d6f0a4333fc926d4d9375a599794fce0b497aa9a856ac7f78be40f2d7a8c6",
+   "source_sha256": "fc2584142990c6432876b05a89c7557721914ebad8c8cecea3b465628cd1f8d7"
+  },
+  "_spawn_session_lifecycle": {
+   "ast_sha256": "75ae29b875818f4dddc0b32576a884ce299b1cd68013b47dc2fb2ea1d81b59b8",
+   "source_sha256": "0a13d26aecb42a6ff0a6c57cc0a7c2174838e2a64782fa413d62e293eb73f5ad"
+  },
+  "load_group": {
+   "ast_sha256": "44edb9c6b8188c5db885f0db91c4d318abbd1b7fa1e665c1e088459f8e897852",
+   "source_sha256": "7f7bd828960b9b8ac5c0ab5093fa46da6375c7dc76e3fb1d608678f23a05ba0f"
+  },
+  "main": {
+   "ast_sha256": "4b3ebcf2a74ac747f8a373e0ea4a80479cee54006d573c06ba77d7f38634ace8",
+   "source_sha256": "febd4db5eb7c9096e7eca5235d17118b0f940bd91821edc8f31d5effb3543f7c"
+  },
+  "read_monotonic_raw_ns_local": {
+   "ast_sha256": "c1ca69048e546c29d794cd1894a773f15346eddb1c30578b59d64ef7d439d2d4",
+   "source_sha256": "4ecf03dbb7fc6b618aa34127cf0b17ebc639697793e5808333dd46a957b80fd5"
+  },
+  "run_mass_roc_service": {
+   "ast_sha256": "17f44e8bc341dc2bc74b7bb9f012ee422b2cdadd340840bca58520ae9096b102",
+   "source_sha256": "6aaef14ad2e8fd8cf6c337617b71458208762fd5a9ce6ffd7044b6b1b901e738"
+  },
+  "run_p0": {
+   "ast_sha256": "b1382c505994e7f0fc9c0a9771fbdeecc2e1f524c3f699f58da6c47fd62b7018",
+   "source_sha256": "06f2220ac5459fe53058cfcb993fa97127395d7598e5042547ce0c1431a55364"
+  },
+  "run_p0_prepare_configure_arm": {
+   "ast_sha256": "312cbd886af84c69bf056398c1584f67c17278110529ab18b41265eb2080ed54",
+   "source_sha256": "58ea30488f691e7af458c8d50047c471abf55dc1469ca6adbdbc993920e097f9"
+  },
+  "spawn_and_connect": {
+   "ast_sha256": "02346e16cadd8fce0fe3c352bb33e6891f20b460a5f2bc19fbcac140db142f6c",
+   "source_sha256": "23ad30ae6f156372c6a60cc14ebff6c8a326c684002742087a8d03a6f0735c9a"
+  }
+ },
+ "previous": {
+  "_open_session_trace": {
+   "ast_sha256": "c64e4eed68f7afc43ed50ba2537497a38690e449418132936a113c38c8698058",
+   "source_sha256": "bb8bf005e9e9016010370a68e1ebd0512e9af9b97ecfa1bc03b90e41c9e625b8"
+  },
+  "_run_rf_qualification": {
+   "ast_sha256": "e91a1bdf96f17ef10dde4d7ede6ab5b0a76780462462c5950b8249c66d068559",
+   "source_sha256": "8ff69faeab71908fbed16ab0df2c8ad7a554cce548c218222c8838df1cb55bc7"
+  },
+  "_spawn_controller": {
+   "ast_sha256": "126b93b934765aa042491fae47b99fbcf3fbc163cbe45aa518a7ab404454b4f7",
+   "source_sha256": "5940787fe6e9a1897a61f054fd727ba27081d21f58bc8f6c0aa470889aad3ca2"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "58adda7a42c1adca5c36ffc9525671e1acc470b9507c8298a68e2ebb5d00ad1e",
+   "source_sha256": "adf8de0f130de0fed2afab04613c71fc2986d78598ad0bb0631bf99d6ac97b7f"
+  },
+  "_spawn_session_lifecycle": {
+   "ast_sha256": "9c73d99108c5454d284266ad0c6c360bd613cec496af6c83ba138b31b443a67b",
+   "source_sha256": "9a694854c97dea1ebf07fd99842e4406863706f45c8f46c68aeb15efb4b5d141"
+  },
+  "load_group": {
+   "ast_sha256": "b403c96c8d2f9e0b1b5dfdf7633fc7e0a7c54e8b86920c6f58a9b04b9f497705",
+   "source_sha256": "b9096b34ea0909adb25451cacc6b36552e8c405e585dce7741b4c546220eaecf"
+  },
+  "main": {
+   "ast_sha256": "3829ba6af63761fd9e05651394444283b9550f159c24a889937e73ef05ac96d0",
+   "source_sha256": "0dcf58e5d9e8f97d72273bd98f4ccf5a359097794656da3f85eb38903be91356"
+  },
+  "read_monotonic_raw_ns_local": {
+   "ast_sha256": "2491bae8e401824a336d230a197e6f39d5f0ef5fed52a9db743c6a0bbc6c1e3a",
+   "source_sha256": "78e15ee4b72ef1a680479858f07b3d219cd032b93a6bb4942d44a0a6a726689d"
+  },
+  "run_mass_roc_service": {
+   "ast_sha256": "e5900eac9776a13eca8c16ca492a68837397d8a75e97ccee60ab583e703f853d",
+   "source_sha256": "3efb5f6431998f17e19506f3707b867c5e56e2ed0e83ce4749d4ccc53c28e966"
+  },
+  "run_p0": {
+   "ast_sha256": "40d0fe53b28008728f05d3cd8b31d1811d900c1ea0002fd14e67dee22f011825",
+   "source_sha256": "519ddc1c7a79d37f3ff946113c61f218027df35ad6e4c51e051259bb00d3cafc"
+  },
+  "run_p0_prepare_configure_arm": {
+   "ast_sha256": "f88006ee2ef60b20ff0756f0ba348eed8287a9fa0654952174579491f2e07891",
+   "source_sha256": "a886ef76887397121f247ccd792825cfd496aeb1eef01373361abc473cf5c80c"
+  },
+  "spawn_and_connect": {
+   "ast_sha256": "289867bbf51557b1a4786d94adf8b34ab183c355fbc7acebef50b3447d26f3cc",
+   "source_sha256": "f8bc5ff2d6cfbab3025832ef646c77ce5914d458a62180da247d369dae7ba34e"
+  }
+ }
+}

@@ -50,6 +50,12 @@ APPROVED_RENAMES = (
     ("Stage7BarrierFailure", "BarrierFailure"),
 )
 
+#: 경로 조각 치환(식별자 경계가 아니라 문자열 그대로). SB-6 의 config 디렉터리 이동.
+APPROVED_PATH_FRAGMENTS = (
+    ("configs/stage7", "configs/b210_system"),
+    ('"configs", "stage7"', '"configs", "b210_system"'),
+)
+
 
 def _apply_approved_renames(source: str) -> str:
     """과거 원문에 승인 대응표만 적용한다(ASCII 식별자 경계 기준)."""
@@ -57,6 +63,8 @@ def _apply_approved_renames(source: str) -> str:
     for _old, _new in APPROVED_RENAMES:
         source = _re.sub(r"(?<![A-Za-z0-9_])" + _re.escape(_old) + r"(?![A-Za-z0-9_])",
                          _new, source)
+    for _old, _new in APPROVED_PATH_FRAGMENTS:
+        source = source.replace(_old, _new)
     return source
 
 #: Phase F qualification 시점 commit (reference의 qualified_source_commit).

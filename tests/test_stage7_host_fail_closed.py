@@ -16,7 +16,7 @@ if _REPO not in sys.path:
 
 from apps import service_layer, service_session
 from apps.service_trace import NullTrace
-from stage7_binding_fixtures import legacy_phase_i_pins
+from stage7_binding_fixtures import approved_rename_pins, legacy_phase_i_pins
 
 
 class _Completed:
@@ -124,7 +124,10 @@ def test_function_bound_accepts_complete_matching_reference():
 #         qualification 함수 변조·run_rr_p3_fault 추가 변경은 다시 거부된다.
 # ---------------------------------------------------------------------------
 
+#: 현재 저장소의 coordinator 경로(파일을 읽을 때 쓴다).
 _COORDINATOR_REL = "VDETER/apps/coordinator_main.py"
+#: 자격 당시 경로 — 과거 reference 기록의 결속 **키**다(소급 수정하지 않는다).
+_COORDINATOR_REL_AT_QUALIFIED_COMMIT = "VDETER/apps/stage7_coordinator_main.py"
 
 
 def _phase_g_profile_copy():
@@ -171,9 +174,13 @@ def _rebind_for_phase_i(profile: dict, source: str, *,
                         pin_run_rr_p3_fault: bool = True) -> dict:
     """synthetic 재결속: 전체 file SHA(항상) + run_rr_p3_fault 고정 해시(선택)."""
     spec = profile["_reference"]["qualification_critical_manifest"][
-        "function_bound_files"][_COORDINATOR_REL]
+        "function_bound_files"][_COORDINATOR_REL_AT_QUALIFIED_COMMIT]
     spec["phase_g_file_sha256"] = hashlib.sha256(
         source.encode("utf-8")).hexdigest()
+    # 2-3 승인 이름·경로 치환으로 바뀐 자격 함수의 고정 해시(기록된 값).
+    for _name, _pinned in approved_rename_pins().items():
+        if _name in spec["qualified_functions"]:
+            spec["qualified_functions"][_name] = dict(_pinned)
     if pin_run_rr_p3_fault:
         for name, pinned in _phase_i_pinned().items():
             spec["qualified_functions"][name] = dict(pinned)
@@ -227,7 +234,7 @@ def test_synthetic_phase_i_rebinding_passes_and_detects_further_changes():
     profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
     report = service_layer._verify_function_bound(
         profile, "$HOME/deploy", _serving_runner(source))
-    item = report[_COORDINATOR_REL]
+    item = report[_COORDINATOR_REL_AT_QUALIFIED_COMMIT]
     assert item["pass"] is True and item["changed"] == []
 
     for target in ("run_rr_p1", "run_rr_p3_fault"):
@@ -483,3 +490,31 @@ def test_close_shutdown_or_evidence_failure_is_explicit_fail():
         assert session.evidence_collection["pass"] is False
         assert "evidence 수집 실패" in result["error"]
         assert session.summary()["status"] == "FAIL"
+
+
+def test_approved_rename_rebinding_is_hash_pinned_not_a_name_allowlist():
+    """승인 rename 으로 재결속한 함수라도 **그 뒤의 추가 변경**은 다시 거부된다.
+
+    재결속은 이름 목록이 아니라 기록된 고정 해시다. 재결속 대상 함수를 변조하면
+    gate 가 거부해야 한다 — 그렇지 않으면 "한 번 재결속하면 이후 무엇이든 통과"가 된다.
+    """
+    pinned_names = sorted(approved_rename_pins())
+    assert pinned_names, "승인 rename 재결속 기록이 비어 있다"
+    target = "_spawn_controller"
+    assert target in pinned_names, pinned_names
+
+    source = _current_coordinator_source()
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
+    mutated = _mutate_function(source, target)
+    # 전체 file SHA 는 변조본에 맞춰 둔다 — 함수 단위 검출만 격리한다.
+    spec = profile["_reference"]["qualification_critical_manifest"][
+        "function_bound_files"][_COORDINATOR_REL_AT_QUALIFIED_COMMIT]
+    spec["phase_g_file_sha256"] = hashlib.sha256(
+        mutated.encode("utf-8")).hexdigest()
+    try:
+        service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _serving_runner(mutated))
+        raise AssertionError(
+            "재결속 대상 함수의 추가 변경이 통과했다 — 고정 해시가 아니라 이름 허용목록이 됐다")
+    except service_layer.ServiceSessionError as exc:
+        assert target in str(exc), str(exc)

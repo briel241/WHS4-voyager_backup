@@ -31,7 +31,7 @@ import apps.scenario_runner as runner
 import apps.run_profile as run_profile
 import apps.service_run as service_run
 import apps.service_layer as service_layer
-from stage7_binding_fixtures import legacy_phase_i_pins
+from stage7_binding_fixtures import approved_rename_pins, current_path_for, legacy_phase_i_pins
 
 #: Phase G reference의 **tracked fixture** (phase-g-formal-20260902b 사본 —
 #: reference·sidecar는 byte-identical, profile은 host 익명화 + fixture 경로).
@@ -216,10 +216,15 @@ def test_topology_and_trust_gates():
     # tests/test_stage7_host_fail_closed.py가 별도로 증명한다.
     phase_i = legacy_phase_i_pins()
     for candidate, spec in bound_specs.items():
-        with open(os.path.join(_REPO, candidate), encoding="utf-8") as handle:
+        # 결속 키는 자격 **당시** 경로다. 현재 파일은 승인된 이동 대응표로 찾는다.
+        with open(os.path.join(_REPO, current_path_for(candidate)),
+                  encoding="utf-8") as handle:
             source = handle.read()
         spec["phase_g_file_sha256"] = hashlib.sha256(
             source.encode("utf-8")).hexdigest()
+        for name, pinned in approved_rename_pins().items():
+            if name in spec.get("qualified_functions", {}):
+                spec["qualified_functions"][name] = dict(pinned)
         for name, pinned in phase_i.items():
             if name in spec.get("qualified_functions", {}):
                 spec["qualified_functions"][name] = dict(pinned)
@@ -236,7 +241,9 @@ def test_topology_and_trust_gates():
                 # function-bound 파일은 배포본 실물을 가져와 함수 해시를 본다.
                 for candidate in bound:
                     if script.rstrip().endswith(candidate):
-                        with open(os.path.join(_REPO, candidate),
+                        # 결속 키는 당시 경로 — 현재 파일은 승인 대응표로 찾는다.
+                        with open(os.path.join(_REPO,
+                                               current_path_for(candidate)),
                                   encoding="utf-8") as handle:
                             return _FakeCompleted(handle.read())
                 return _FakeCompleted("")
