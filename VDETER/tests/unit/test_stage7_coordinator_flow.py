@@ -3,14 +3,14 @@
 import unittest
 import uuid
 
-from vdeter.stage7.coordinator import (
+from vdeter.b210_system.coordinator import (
     Stage7BarrierFailure,
     Stage7ResolvedSystemPlan,
     Stage7RuntimeCoordinator,
 )
-from vdeter.stage7.ipc import ENDPOINT_IDS, body_sha256_of
-from vdeter.stage7.records import Stage7TbbActiveRecord
-from vdeter.stage7.runtime_client import Stage7EndpointRuntimeClient
+from vdeter.b210_system.ipc import ENDPOINT_IDS, body_sha256_of
+from vdeter.b210_system.records import Stage7TbbActiveRecord
+from vdeter.b210_system.runtime_client import Stage7EndpointRuntimeClient
 
 RUN_ID = "stage7-flow-run"
 
@@ -219,7 +219,7 @@ class TC_STAGE7_COORDINATOR_FLOW(unittest.TestCase):
             self.assertEqual(client.state, "PREFLIGHT")
         # active bridge 설치 (expected_bridge_generation=null → 0).
         candidate_set = [[m, "1" * 64] for m in ENDPOINT_IDS]
-        from vdeter.stage7.ipc import body_set_sha256
+        from vdeter.b210_system.ipc import body_set_sha256
 
         bridge_body = {
             "candidate_set": candidate_set,

@@ -186,7 +186,7 @@ def worker_plan(endpoint_id: str) -> dict:
 
 
 def run_cycle(cycle_index: int) -> dict:
-    from vdeter.stage7.b210_worker import Stage7IsolatedDualLaneWorker
+    from vdeter.b210_system.b210_worker import Stage7IsolatedDualLaneWorker
 
     outcome = {"cycle": cycle_index, "devices": {}, "pass": True}
     workers = {}

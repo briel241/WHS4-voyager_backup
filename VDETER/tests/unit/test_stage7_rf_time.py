@@ -3,7 +3,7 @@
 import unittest
 from fractions import Fraction
 
-from vdeter.stage7.rf_time import (
+from vdeter.b210_system.rf_time import (
     Stage7RfTimeError,
     build_rf_time_measurement_summary,
     check_fanout_same_window,

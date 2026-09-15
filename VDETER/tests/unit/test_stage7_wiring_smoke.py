@@ -21,9 +21,9 @@ from vdeter.common.contracts.service import (
 from vdeter.common.identifiers import PayloadFormat, StationId
 from vdeter.common.time import ClockDomain, TimePoint
 from vdeter.common.addressing import Addressed
-from vdeter.stage7.configuration import Stage7ConfigurationLoader
-from vdeter.stage7.time_bridge import AffineCoefficients, HostUtcAnchor
-from vdeter.stage7.wiring import Stage7RestartFactory, build_stage7_b210_endpoint
+from vdeter.b210_system.configuration import Stage7ConfigurationLoader
+from vdeter.b210_system.time_bridge import AffineCoefficients, HostUtcAnchor
+from vdeter.b210_system.wiring import Stage7RestartFactory, build_stage7_b210_endpoint
 
 from tests.support.stage4 import (
     HAS_CRYPTO,

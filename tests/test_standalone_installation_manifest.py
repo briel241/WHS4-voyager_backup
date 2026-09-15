@@ -84,7 +84,7 @@ def test_classification_multi_domain_and_fail_safe():
     with tempfile.TemporaryDirectory() as tmp:
         record = im.measure(make_root(tmp))
         files = record["files"]
-        assert files["VDETER/src/vdeter/stage7/pi_runtime.py"]["domains"] == ["rf"]
+        assert files["VDETER/src/vdeter/b210_system/pi_runtime.py"]["domains"] == ["rf"]
         assert files["apps/standalone/local_config.py"]["domains"] == [
             "rf", "operation"]                       # 교차영향: RF config 생성
         assert files["apps/standalone/qualify_cmd.py"]["domains"] == ["tooling"]

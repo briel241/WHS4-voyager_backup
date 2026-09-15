@@ -40,8 +40,8 @@ from vdeter.common.contracts.radio import (
     SampleContinuity,
 )
 from vdeter.common.identifiers import LinkId
-from vdeter.stage7 import rx_decode_worker as W
-from vdeter.stage7.support import Stage7LaneRxDispatcher
+from vdeter.b210_system import rx_decode_worker as W
+from vdeter.b210_system.support import Stage7LaneRxDispatcher
 
 #: Link 11 native 창 = 2,048 복소 표본(= 8,192 device 표본을 4배 데시메이션).
 NATIVE_SAMPLES = 2048

@@ -257,19 +257,19 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
 
     from vdeter.common.contracts.service import ServiceRole
-    from vdeter.stage7.configuration import (
+    from vdeter.b210_system.configuration import (
         Stage7ConfigurationLoader,
         Stage7OperationalGainInput,
     )
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
-    from vdeter.stage7.pi_runtime import Stage7PiOperations
-    from vdeter.stage7.runtime_client import Stage7EndpointRuntimeClient
-    from vdeter.stage7.transport import (
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.pi_runtime import Stage7PiOperations
+    from vdeter.b210_system.runtime_client import Stage7EndpointRuntimeClient
+    from vdeter.b210_system.transport import (
         SeqPacketServer,
         ensure_socket_root,
         runtime_socket_root,
     )
-    from vdeter.stage7.wiring import build_stage7_b210_endpoint
+    from vdeter.b210_system.wiring import build_stage7_b210_endpoint
 
     with open(arguments.config, "r", encoding="utf-8") as handle:
         config_text = handle.read()
@@ -306,7 +306,7 @@ def main(argv=None) -> int:
     is_control = resolved.endpoint.role is ServiceRole.CONTROL
     crypto, expected_fingerprint = _load_trust(APP_ROOT, is_control=is_control)
 
-    from vdeter.stage7.deployment import (
+    from vdeter.b210_system.deployment import (
         build_deployment_profile,
         build_utc_day_tbb_fixture,
     )
@@ -317,7 +317,7 @@ def main(argv=None) -> int:
     # 거부된다 (rr-p2-17 run k 실측 + 로컬 재현). 세 endpoint가 동일 값을
     # 독립 계산하도록 UTC 자정 기준으로 결정적으로 정하고(48h 유효),
     # 값은 아래 evidence 로그로 남긴다. 배치 값과 그 계산은 production
-    # module `vdeter.stage7.deployment`가 소유한다(시험 package 의존 없음).
+    # module `vdeter.b210_system.deployment`가 소유한다(시험 package 의존 없음).
     fixture = build_utc_day_tbb_fixture(now_epoch_seconds=int(time.time()))
     print(
         f"[launcher] TBB fixture start_time={fixture.start_time} "
@@ -653,7 +653,7 @@ def main(argv=None) -> int:
                 if getattr(_dmod, "to_service_error", None) is _diag_orig_tse:
                     _dmod.to_service_error = _diag_tse
 
-            from vdeter.stage7.radio_adapter import (
+            from vdeter.b210_system.radio_adapter import (
                 Stage7B210RadioAdapter as _DRA,
             )
 
@@ -1285,7 +1285,7 @@ def main(argv=None) -> int:
             return _orig_fail_rollback(self_ep, error, rollback)
 
         _S5._fail_start_rollback = _fail_rollback_logged
-        from vdeter.stage7.support import Stage7LaneRxDispatcher as _D7
+        from vdeter.b210_system.support import Stage7LaneRxDispatcher as _D7
 
         # 배송 3계열은 _dispatch_lock으로 직렬화해 원본을 그대로 호출한다
         # (frozen ledger dict의 스레드 경쟁 차단 — 원인 사슬은 기준선 개정
@@ -1498,7 +1498,7 @@ def main(argv=None) -> int:
         # 경로는 Link 11(37B) 고정이라 실을 수 없어 즉사 — 실물 인증서
         # 353B가 정확히 이 사각지대. 스펙(인증서=데이터 세션 90→4→74/75/76)
         # 대로, Link 11이 실제로 싣지 못하는 단문 후보는 세션으로 승격한다.
-        from vdeter.stage7.short_data_compat import wrap_short_data_submission
+        from vdeter.b210_system.short_data_compat import wrap_short_data_submission
         _MC._submit_short_data = wrap_short_data_submission(_MC._submit_short_data)
         # F-spread (svc-run-a 실측: 76이 OPEN 왕복 완료 전 도착 → frozen
         # 3079가 무오류 폐기 — H1 확정. 수신측 명령 적체 하에서 OPEN에
@@ -2051,7 +2051,7 @@ def main(argv=None) -> int:
                 from vdeter.runtime.phy_bridge import (
                     RuntimePhyRadioBridge as _BRG_c,
                 )
-                from vdeter.stage7.phy_facade import (
+                from vdeter.b210_system.phy_facade import (
                     Stage7LaneRxIngress as _ING_c,
                 )
 
@@ -2121,7 +2121,7 @@ def main(argv=None) -> int:
 
             def __init__(self, dispatcher, stacks, lane_generation, id_kind):
                 import multiprocessing as _mp
-                from vdeter.stage7 import rx_decode_worker as _w
+                from vdeter.b210_system import rx_decode_worker as _w
 
                 self._w = _w
                 self._dispatcher = dispatcher
@@ -2136,7 +2136,7 @@ def main(argv=None) -> int:
                 self._context = _mp.get_context("forkserver")
                 try:
                     self._context.set_forkserver_preload(
-                        ["vdeter.stage7.rx_decode_worker"])
+                        ["vdeter.b210_system.rx_decode_worker"])
                 except Exception:  # noqa: BLE001
                     pass
                 self._jobs = []
@@ -2675,7 +2675,7 @@ def main(argv=None) -> int:
 
         import hashlib as _hashlib
 
-        from vdeter.stage7.records import Stage7TbbActiveRecord
+        from vdeter.b210_system.records import Stage7TbbActiveRecord
 
         state = endpoint.stage4.mac.state
         active = state.active_tbb
@@ -2712,7 +2712,7 @@ def main(argv=None) -> int:
         import glob as _glob
         import json as _json_local
 
-        from vdeter.stage7.testing.adapter import Stage7ServiceApiTestAdapter
+        from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
 
         fixtures = {}
         if arguments.fixtures_dir and os.path.isdir(arguments.fixtures_dir):
@@ -2722,8 +2722,8 @@ def main(argv=None) -> int:
         # Stage 8 PoC device 경계(§16.2 최소 확장): launcher가 단독 소유한 radio를 TEST adapter
         # op으로만 노출한다. 이 seam이 없으면 PoC op은 전부 거부된다(기본값 = 쓸 수 없음).
         # 송신은 권위 `schedule_tx` 하나로만 나가며 별도 예약 원장·우회 경로를 만들지 않는다.
-        from vdeter.stage7.configuration import CANONICAL_ROLES
-        from vdeter.stage7.testing.poc_device import Stage7PocDeviceSeam
+        from vdeter.b210_system.configuration import CANONICAL_ROLES
+        from vdeter.b210_system.control_plane.poc_device import Stage7PocDeviceSeam
 
         poc_device = Stage7PocDeviceSeam(
             endpoint_id=arguments.endpoint_id,

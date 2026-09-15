@@ -164,7 +164,7 @@ def test_local_installation_audit_honest_verdicts():
                    for f in audit["files"])         # rf 영역 파일만
         broken = json.loads(json.dumps(verify))
         broken["pass"] = False
-        broken["current_record"]["files"]["VDETER/src/vdeter/stage7/pi_runtime.py"]["sha256"] = "0" * 64
+        broken["current_record"]["files"]["VDETER/src/vdeter/b210_system/pi_runtime.py"]["sha256"] = "0" * 64
         audit2 = qualify_cmd.local_installation_audit(record, broken)
         assert audit2["all_unchanged"] is False
         assert audit2["installation_verified"] is False
@@ -304,7 +304,7 @@ def test_phase_run_mode_mapping_is_fixed():
     }
     assert set(qualify_cmd.PHASE_RUN_MODE) == set(qualify_cmd.LADDER_PHASES)
     assert qualify_cmd.GAIN_CONSUMING_PHASES == ("rr-p2-17", "rr-p3-fault")
-    from vdeter.stage7.configuration import RUN_MODES
+    from vdeter.b210_system.configuration import RUN_MODES
     assert set(qualify_cmd.PHASE_RUN_MODE.values()) <= set(RUN_MODES)
 
 
@@ -817,7 +817,7 @@ def test_evidence_reuse_refused_on_rf_core_file_change():
         paths = prepare_environment(tmp)
         prior = _seed_prior_release(
             paths, tmp, mutate=_set_prior_file_sha(
-                "VDETER/src/vdeter/stage7/pi_runtime.py"))
+                "VDETER/src/vdeter/b210_system/pi_runtime.py"))
         try:
             _reuse(paths, tmp, prior)
             raise AssertionError("rf 핵심 변경인데 재사용이 승격됐다")

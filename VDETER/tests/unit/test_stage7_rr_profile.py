@@ -123,7 +123,7 @@ class _AdaptiveStub:
 
     def _gain_rx_run(self, worker, stack, lane, path, steps, mode, digest,
                      judge_from=0, deadline_host_raw_ns=None):
-        from vdeter.stage7 import hw_operations
+        from vdeter.b210_system import hw_operations
 
         summaries = []
         for step in steps:
@@ -171,7 +171,7 @@ def _adaptive_path(deadline_ns=0):
 
 class AdaptiveGainTest(unittest.TestCase):
     def _run(self, script, deadline_ns=0):
-        from vdeter.stage7.pi_runtime import Stage7PiOperations
+        from vdeter.b210_system.pi_runtime import Stage7PiOperations
 
         stub = _AdaptiveStub(script)
         path = _adaptive_path(deadline_ns=deadline_ns)
@@ -227,7 +227,7 @@ class AdaptiveGainTest(unittest.TestCase):
         self.assertEqual(len(stub.measured), 8)
 
     def test_deadline_fail_fast_before_first_window(self):
-        from vdeter.stage7 import hw_operations
+        from vdeter.b210_system import hw_operations
 
         original = hw_operations.read_monotonic_raw_ns
         hw_operations.read_monotonic_raw_ns = lambda: 100
@@ -291,7 +291,7 @@ class RevalWindowJudgmentTest(unittest.TestCase):
     """v0.9.2 재검증 관용 판정 (사용자 승인 2026-08-27)."""
 
     def _judge(self, fails, wrong, tol):
-        from vdeter.stage7.pi_runtime import evaluate_reval_window
+        from vdeter.b210_system.pi_runtime import evaluate_reval_window
 
         return evaluate_reval_window(fails, wrong, tol)
 
@@ -400,7 +400,7 @@ class ChannelGuardTest(unittest.TestCase):
 
 class CalibrationModeEnumTest(unittest.TestCase):
     def test_adaptive_mode_in_schema(self):
-        from vdeter.stage7 import ipc
+        from vdeter.b210_system import ipc
 
         schema = dict(ipc.COMMAND_BODY_FIELDS)["calibrate_rf"]
         mode_rule = dict(schema)["calibration_mode"]

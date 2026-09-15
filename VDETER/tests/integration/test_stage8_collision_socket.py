@@ -77,7 +77,7 @@ class CollisionSocketTests(unittest.TestCase):
         from apps.workload_rx_scope import WorkloadRxScope
         from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.poc.api.types import PhysicalChannel
-        from vdeter.stage7.configuration import UPPER_CHANNEL_NAME, LOWER_CHANNEL_NAME
+        from vdeter.b210_system.configuration import UPPER_CHANNEL_NAME, LOWER_CHANNEL_NAME
         from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
@@ -231,7 +231,7 @@ class CollisionSocketTests(unittest.TestCase):
         from apps.stage7_mass_roc_controller import _AdapterChannel, PocWorkloadHost
         from apps.poc_device_seams_launcher import LauncherDeviceClient
         from apps.workload_rx_scope import WorkloadRxScope
-        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
+        from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}
@@ -313,7 +313,7 @@ class CollisionSocketTests(unittest.TestCase):
         from apps.poc_device_seams_inprocess import Link11WaveformFactory
         from vdeter.poc.api.types import PhysicalChannel
         from vdeter.poc.shared_medium.iq import to_cf32le, sha256_cf32le
-        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
+        from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
         for name, channel in tuple(self.controller._channels.items()):
             self.controller._channels[name] = _AdapterChannel(channel._client, timeout_s=3)
         clients = {s: LauncherDeviceClient(self.controller, s) for s in self.controller._channels}

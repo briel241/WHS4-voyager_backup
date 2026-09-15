@@ -19,12 +19,12 @@ from vdeter.phy import wideband
 from vdeter.phy.burst.rrc import to_cf32le
 from vdeter.phy.multilink import MultiRatePhy
 from vdeter.profiles.link_phy import build_combined_phy_profile_registry
-from vdeter.stage7.phy_facade import (
+from vdeter.b210_system.phy_facade import (
     Stage7DiagnosticPhyFacade,
     Stage7LaneRxIngress,
     Stage7PhyDiagnosticSink,
 )
-from vdeter.stage7.routing import Stage7RouteSidecar
+from vdeter.b210_system.routing import Stage7RouteSidecar
 
 UPPER = PhysicalChannel("VDETER_UPPER_100_TEST")
 UTC = TimePoint(1_700_000_000, 0, ClockDomain.UTC, "stage7-facade-utc")

@@ -33,7 +33,7 @@ class G1DerivedConstantsTest(unittest.TestCase):
 
     def test_effective_centers_match_existing_stage7_rf_tune(self):
         # 교차검증: G1 유도 effective center가 기존 Stage 7 configuration의 RF tune과 일치.
-        from vdeter.stage7 import configuration as CFG
+        from vdeter.b210_system import configuration as CFG
 
         self.assertEqual(C.LOWER_EFFECTIVE_CENTER_HZ, CFG.LOWER_RF_TUNE_HZ)
         self.assertEqual(C.UPPER_EFFECTIVE_CENTER_HZ, CFG.UPPER_RF_TUNE_HZ)

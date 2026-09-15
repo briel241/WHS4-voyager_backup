@@ -17,8 +17,8 @@ from .canonical_json import (
 )
 from .errors import Stage7PrivateErrorCode
 
-RUNTIME_PROTOCOL = "vdeter.stage7.runtime-coordinator.v1"
-TEST_PROTOCOL = "vdeter.stage7.scenario-controller.v1"
+RUNTIME_PROTOCOL = "vdeter.b210_system.runtime-coordinator.v1"
+TEST_PROTOCOL = "vdeter.b210_system.scenario-controller.v1"
 RUNTIME_BODY_SCHEMA = "STAGE7_RUNTIME_BODY_V1"
 TEST_BODY_SCHEMA = "STAGE7_SCENARIO_BODY_V1"
 MAX_RECORD_BYTES = 1_048_576

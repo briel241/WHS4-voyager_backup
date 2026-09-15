@@ -52,7 +52,7 @@ def test_known_files_classify_to_expected_domain():
         "VDETER/apps/stage7_coordinator_main.py": qd.RF,
         "VDETER/apps/stage7_endpoint_launcher.py": qd.RF,
         "VDETER/apps/stage7_scenario_controller.py": qd.RF,   # 주영역(rf+operation)
-        "VDETER/src/vdeter/stage7/pi_runtime.py": qd.RF,
+        "VDETER/src/vdeter/b210_system/pi_runtime.py": qd.RF,
         "VDETER/src/vdeter/phy/resampling.py": qd.RF,
         "VDETER/configs/stage7/system.toml": qd.RF,
         "VDETER/configs/stage7/endpoints/mass-a.toml": qd.RF,
@@ -116,7 +116,7 @@ def _files_v2(mapping):
 
 _BASE_V2 = {
     "VDETER/apps/stage7_coordinator_main.py": "rf1",
-    "VDETER/src/vdeter/stage7/pi_runtime.py": "rf2",
+    "VDETER/src/vdeter/b210_system/pi_runtime.py": "rf2",
     "VDETER/apps/stage7_scenario_controller.py": "x1",   # rf+operation
     "apps/standalone/local_config.py": "x2",              # rf+operation
     "apps/standalone/cli.py": "op1",
@@ -136,9 +136,9 @@ def test_evaluate_reuse_v2_rules():
     same = qd.evaluate_reuse_v2(base, base)
     assert same["eligible"] and not same["tooling_changed"]
     # RF 파일 변경 → RF 재자격 필요(재사용 거부).
-    cur = dict(_BASE_V2); cur["VDETER/src/vdeter/stage7/pi_runtime.py"] = "NEW"
+    cur = dict(_BASE_V2); cur["VDETER/src/vdeter/b210_system/pi_runtime.py"] = "NEW"
     r = qd.evaluate_reuse_v2(base, _files_v2(cur))
-    assert not r["eligible"] and "rf:changed:VDETER/src/vdeter/stage7/pi_runtime.py" in r["blocking_files"]
+    assert not r["eligible"] and "rf:changed:VDETER/src/vdeter/b210_system/pi_runtime.py" in r["blocking_files"]
     # 교차영향 파일(scenario controller) 변경 → rf·operation 둘 다 차단.
     cur = dict(_BASE_V2); cur["VDETER/apps/stage7_scenario_controller.py"] = "NEW"
     r = qd.evaluate_reuse_v2(base, _files_v2(cur))
@@ -203,7 +203,7 @@ def test_rf_domain_contains_core_and_tests_are_tooling():
     split = qd.split_manifest(manifest)
     rf = split[qd.RF]["files"]
     assert "VDETER/apps/stage7_coordinator_main.py" in rf
-    assert "VDETER/src/vdeter/stage7/pi_runtime.py" in rf
+    assert "VDETER/src/vdeter/b210_system/pi_runtime.py" in rf
     assert "apps/standalone/qualify_cmd.py" not in rf
     tooling = split[qd.TOOLING]["files"]
     assert "apps/standalone/qualify_cmd.py" in tooling
@@ -265,7 +265,7 @@ def test_rf_symbol_diff_empty_when_identical():
 
 _BASE = {
     "VDETER/apps/stage7_coordinator_main.py": "rf1",
-    "VDETER/src/vdeter/stage7/pi_runtime.py": "rf2",
+    "VDETER/src/vdeter/b210_system/pi_runtime.py": "rf2",
     "VDETER/configs/stage7/standalone-binding.json": "rf3",
     "apps/standalone/cli.py": "op1",
     "apps/standalone/run_cmd.py": "op2",
@@ -297,17 +297,17 @@ def test_tooling_only_change_is_eligible():
 
 
 def test_rf_change_refuses_reuse():
-    cur = dict(_BASE); cur["VDETER/src/vdeter/stage7/pi_runtime.py"] = "rf2-NEW"
+    cur = dict(_BASE); cur["VDETER/src/vdeter/b210_system/pi_runtime.py"] = "rf2-NEW"
     r = qd.evaluate_reuse(_manifest_from(_BASE), _manifest_from(cur))
     assert r["eligible"] is False
     assert r["rf_identical"] is False
-    assert any("rf:changed:VDETER/src/vdeter/stage7/pi_runtime.py" == b
+    assert any("rf:changed:VDETER/src/vdeter/b210_system/pi_runtime.py" == b
                for b in r["blocking_files"])
 
 
 def test_rf_file_removed_or_added_refuses_reuse():
     cur = dict(_BASE); del cur["VDETER/apps/stage7_coordinator_main.py"]
-    cur["VDETER/src/vdeter/stage7/new_rf.py"] = "rfX"
+    cur["VDETER/src/vdeter/b210_system/new_rf.py"] = "rfX"
     r = qd.evaluate_reuse(_manifest_from(_BASE), _manifest_from(cur))
     assert r["eligible"] is False
     assert any(b.startswith("rf:removed:") for b in r["blocking_files"])

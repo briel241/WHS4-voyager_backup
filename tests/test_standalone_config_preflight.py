@@ -261,7 +261,7 @@ def test_fixtures_match_host_canonical_bytes_and_link_binding():
         assert {"start-mass-a.json", "start-mass-b.json", "start-roc.json",
                 "stop.json"} <= names
         # host prepare와 byte 동일한 canonical JSON인지 직접 대조.
-        from vdeter.stage7.canonical_json import encode_canonical_json
+        from vdeter.b210_system.canonical_json import encode_canonical_json
         start = (out / "fixtures" / "start-mass-a.json").read_bytes()
         assert start == encode_canonical_json({
             "local_station_id": 111111111, "role": "SHIP", "config_ref": ""})

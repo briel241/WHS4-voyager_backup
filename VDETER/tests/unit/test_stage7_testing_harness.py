@@ -6,21 +6,21 @@ import tempfile
 import unittest
 
 from vdeter.common.results import Ok
-from vdeter.stage7.testing.adapter import Stage7ServiceApiTestAdapter
-from vdeter.stage7.testing.controller import Stage7ScenarioController
-from vdeter.stage7.testing.evidence import (
+from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
+from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+from vdeter.b210_system.testing.evidence import (
     ALL_TEST_CASES,
     Stage7EvidenceBundle,
     TRACEABILITY_MATRIX,
 )
-from vdeter.stage7.testing.plan import (
+from vdeter.b210_system.testing.plan import (
     P1_MEMBER_PLAN_TABLE,
     Stage7TestPlanLoader,
 )
 
 ORCHESTRATION = (
     '[controller]\n'
-    'controller_protocol = "vdeter.stage7.scenario-controller.v1"\n'
+    'controller_protocol = "vdeter.b210_system.scenario-controller.v1"\n'
     'controller_body_schema = "STAGE7_SCENARIO_BODY_V1"\n'
     'scenario_horizon_ns = 14400000000000\n'
     'evidence_root_relpath = "results/runs"\n'
@@ -185,7 +185,7 @@ class TC_STAGE7_TEST_ADAPTER(unittest.TestCase):
         fixture, digest = Stage7ScenarioController.fixture_bytes({"reason": "test"})
         adapter.register_fixture("fixtures/stop.json", fixture)
         message = {
-            "protocol": "vdeter.stage7.scenario-controller.v1",
+            "protocol": "vdeter.b210_system.scenario-controller.v1",
             "kind": "command",
             "command_name": "invoke_service_fixture",
             "run_id": "stage7-test",

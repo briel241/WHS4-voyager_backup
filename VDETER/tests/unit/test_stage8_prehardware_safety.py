@@ -72,7 +72,7 @@ class PrehardwareSafetyTests(unittest.TestCase):
                 self.assertTrue(all(0 < b <= 1 for b in client.budgets))
 
     def test_real_socket_send_applies_budget_before_first_write(self):
-        from vdeter.stage7.transport import SeqPacketClient
+        from vdeter.b210_system.transport import SeqPacketClient
         client = object.__new__(SeqPacketClient)
         client._socket = Mock()
         client.send_bounded({'version': 1}, timeout=.25)

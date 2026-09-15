@@ -99,8 +99,8 @@ class SoftwareMassRocHarness:
                 start_stage5_group,
             )
             from vdeter.service import HandlerServiceEventSink
-            from vdeter.stage7.testing.adapter import Stage7ServiceApiTestAdapter
-            from vdeter.stage7.testing.controller import Stage7ScenarioController
+            from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
+            from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
         except ImportError as exc:
             raise SoftwareHarnessUnavailable(f"VDETER import 실패: {exc}") from exc
 

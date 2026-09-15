@@ -2,7 +2,7 @@
 
 고정 `TimeSource`, seed와 ID로 3-endpoint Software Radio scenario를 재현 가능하게 만든다.
 배치 값(station ID·TBB control station·service area)과 profile 조립기는 production module
-`vdeter.stage7.deployment`의 것을 재사용하고, 여기서는 결정적 시험 기본값(고정 TBB 유효창·시험
+`vdeter.b210_system.deployment`의 것을 재사용하고, 여기서는 결정적 시험 기본값(고정 TBB 유효창·시험
 fingerprint·Type 0 override·signer·trust store)만 주입한다. 인증서는 시험용 값이며 규범 값이 아니다.
 """
 
@@ -22,7 +22,7 @@ from vdeter.mac.deployment import (
     Type0OverrideProfile,
 )
 from vdeter.mac.tbb import TBB_START_TIME_EPOCH_SECONDS
-from vdeter.stage7.deployment import (
+from vdeter.b210_system.deployment import (
     MASS_A_STATION_ID,
     MASS_B_STATION_ID,
     MEMBER_STATION_IDS,
@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - optional dependency
     HAS_CRYPTO = False
 
 #: 구성원 station ID(MASS_A/ROC/MASS_B, MEMBER_STATION_IDS)·TBB_CONTROL_STATION_ID·SERVICE_AREA는
-#: production 배치 module `vdeter.stage7.deployment`에서 import한 같은 객체다(위). 시험 전용 값은
+#: production 배치 module `vdeter.b210_system.deployment`에서 import한 같은 객체다(위). 시험 전용 값은
 #: 아래 고정 유효창·시험 fingerprint·Type 0 override·signer·trust store다.
 
 #: 2000-01-01 이후 초. 아래 `RUN_START_UTC_NANOSECONDS`가 이 구간 안에 있다.

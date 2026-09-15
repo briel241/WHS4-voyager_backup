@@ -27,9 +27,9 @@ from vdeter.common.errors import Details
 from vdeter.common.identifiers import BurstId
 from vdeter.common.identifiers import PhysicalChannel as Stage7Channel
 from vdeter.common.results import Err, Ok
-from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
-from vdeter.stage7.testing.controller import PocDeviceCallError
-from vdeter.stage7.testing.poc_device import PocDeviceUnavailable, Stage7PocDeviceSeam
+from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
+from vdeter.b210_system.control_plane.controller import PocDeviceCallError
+from vdeter.b210_system.control_plane.poc_device import PocDeviceUnavailable, Stage7PocDeviceSeam
 from vdeter.poc.integration.device_boundary import (
     SoftwareGroupTx,
     GroupTxRadioSink,

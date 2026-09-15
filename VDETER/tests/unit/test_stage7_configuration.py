@@ -9,7 +9,7 @@ import unittest
 
 from vdeter.common.errors import ErrorCode
 from vdeter.config.loader import load_configuration
-from vdeter.stage7.configuration import (
+from vdeter.b210_system.configuration import (
     Stage7ConfigurationLoader,
     Stage7OperationalGainInput,
     load_data_profile,
@@ -638,7 +638,7 @@ class TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB(unittest.TestCase):
     """host_execution.profile STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1 (additive) — the
     legacy Pi profile keeps its exact MASS-B USB2/DC-asset rules; the powered-hub
     profile requires POWERED_USB3_HUB_5000M + POWERED_USB3_HUB_BUS_POWER on every
-    endpoint. Both rule sets come from vdeter.stage7.host_profiles."""
+    endpoint. Both rule sets come from vdeter.b210_system.host_profiles."""
 
     def setUp(self):
         self.loader = Stage7ConfigurationLoader()
@@ -654,7 +654,7 @@ class TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB(unittest.TestCase):
         self.assertIn(needle, str(result.error))
 
     def test_profiles_and_transports_come_from_single_definition(self):
-        from vdeter.stage7 import configuration, host_profiles
+        from vdeter.b210_system import configuration, host_profiles
         self.assertEqual(configuration.STAGE7_HOST_PROFILES, host_profiles.HOST_PROFILES)
         self.assertEqual(configuration.STAGE7_HOST_PROFILE, host_profiles.LEGACY_PI_PROFILE)
         self.assertEqual(configuration.STAGE7_HOST_PROFILE_PI_POWERED_HUB,

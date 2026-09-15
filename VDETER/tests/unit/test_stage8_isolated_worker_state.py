@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import patch, Mock
 from types import SimpleNamespace as NS
 from threading import RLock
-from vdeter.stage7.b210_worker import Stage7IsolatedDualLaneWorker, Stage7DualLaneFlowgraphBackend
-from vdeter.stage7.testing.poc_device import Stage7PocDeviceSeam, PocDeviceUnavailable
+from vdeter.b210_system.b210_worker import Stage7IsolatedDualLaneWorker, Stage7DualLaneFlowgraphBackend
+from vdeter.b210_system.control_plane.poc_device import Stage7PocDeviceSeam, PocDeviceUnavailable
 
 
 class IsolatedWorkerStateTests(unittest.TestCase):

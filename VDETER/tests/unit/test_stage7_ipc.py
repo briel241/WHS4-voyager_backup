@@ -3,7 +3,7 @@
 import unittest
 import uuid
 
-from vdeter.stage7.ipc import (
+from vdeter.b210_system.ipc import (
     RUNTIME_PROTOCOL,
     Stage7IpcError,
     body_set_sha256,

@@ -78,12 +78,12 @@ def cmd_profile(cf32_path, meta_path):
 
 
 def _reference_device_burst():
-    from vdeter.stage7.hw_operations import link11_calibration_burst_device_bytes
+    from vdeter.b210_system.hw_operations import link11_calibration_burst_device_bytes
     return load_cf32.__wrapped__ if False else None
 
 
 def reference_burst():
-    from vdeter.stage7.hw_operations import link11_calibration_burst_device_bytes
+    from vdeter.b210_system.hw_operations import link11_calibration_burst_device_bytes
     data = link11_calibration_burst_device_bytes()
     count = len(data) // 8
     values = struct.unpack(f"<{count * 2}f", data[: count * 8])
@@ -158,7 +158,7 @@ def cmd_decode(cf32_path, meta_path, shift=0, cfo_hz=0.0):
             for k, s in enumerate(samples)
         ]
     data = b"".join(struct.pack("<2f", s.real, s.imag) for s in samples[:slot_samples])
-    from vdeter.stage7.testing.software_graph import build_software_lane_stack  # type: ignore
+    from vdeter.b210_system.testing.software_graph import build_software_lane_stack  # type: ignore
 
     print("(decode replay는 software graph 헬퍼 확인 후 연결)")
 

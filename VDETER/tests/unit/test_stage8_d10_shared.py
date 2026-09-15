@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock
-from vdeter.stage7.short_data_compat import wrap_short_data_submission, PROMOTION_PRESENTATION_LIMIT
+from vdeter.b210_system.short_data_compat import wrap_short_data_submission, PROMOTION_PRESENTATION_LIMIT
 
 
 class D10SharedTest(unittest.TestCase):
@@ -45,7 +45,7 @@ class D10SharedTest(unittest.TestCase):
                      repo/'apps/rf_off_software_session.py'):
             with self.subTest(path=str(path)):
                 tree = ast.parse(path.read_text(encoding='utf-8'))
-                self.assertTrue(any(isinstance(n, ast.ImportFrom) and n.module == 'vdeter.stage7.short_data_compat'
+                self.assertTrue(any(isinstance(n, ast.ImportFrom) and n.module == 'vdeter.b210_system.short_data_compat'
                                     for n in ast.walk(tree)))
                 calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                          and isinstance(n.func, ast.Name) and n.func.id == 'wrap_short_data_submission']

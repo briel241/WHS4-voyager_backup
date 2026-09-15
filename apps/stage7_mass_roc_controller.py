@@ -160,7 +160,7 @@ class MassRocScenarioController:
     ``events``: launcher event JSONL 소스 — ``poll()``·``records``·
     ``wait(predicate, timeout)``. in-process 하네스에서는 poll()이 시계를
     진행시키며 DATA_RECEIVED를 수집한다.
-    ``controller``: ``vdeter.stage7.testing.controller.Stage7ScenarioController``
+    ``controller``: ``vdeter.b210_system.control_plane.controller.Stage7ScenarioController``
     (inline SUBMIT/STATUS 명령 발행자).
     """
 
@@ -1018,7 +1018,7 @@ class PocWorkloadHost:
     def new_observations(self):
         """Only the actor's actual, pre-MAC-policy-cleared PHY observations."""
         from vdeter.poc.api.types import ObservationRecord, TuningState, PhysicalChannel
-        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
+        from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME
         out = []
         for record in self._exchange.observations() if self._exchange is not None else ():
             out.append(ObservationRecord(
@@ -1078,8 +1078,8 @@ class _AdapterChannel:
 
 
 def _connect_channels(run_id: str):
-    from vdeter.stage7.testing.controller import Stage7ScenarioController  # noqa: F401
-    from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
+    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController  # noqa: F401
+    from vdeter.b210_system.transport import SeqPacketClient, runtime_socket_root
 
     root = runtime_socket_root(run_id)
     channels = {}
@@ -1182,8 +1182,8 @@ def main(argv=None) -> int:
     arguments = parser.parse_args(argv)
     workload_id = arguments.workload_id or "single"
 
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
-    from vdeter.stage7.testing.controller import Stage7ScenarioController
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
 
     # START/STOP은 기존 access-controlled fixture 경로를 그대로 쓴다 (§16.2).
     fixtures = {}

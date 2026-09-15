@@ -6,14 +6,14 @@ from tests.support.stage4 import deployment_profile
 from vdeter.mac.models import LcAllocation, LcState
 from vdeter.mac.tbb import build_wideband_canonical_tbb_profile
 from vdeter.mac.tdma import EPOCH_2000_UTC_NANOSECONDS
-from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
-from vdeter.stage7.testing.poc_device import Stage7PocDeviceSeam
+from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME
+from vdeter.b210_system.control_plane.poc_device import Stage7PocDeviceSeam
 
 
 class UseMapSchedulerTests(unittest.TestCase):
     def test_default_scheduler_queries_each_logical_targets_channel(self):
         from apps.poc_device_seams_launcher import MacSlotScheduler
-        from vdeter.stage7.configuration import UPPER_CHANNEL_NAME
+        from vdeter.b210_system.configuration import UPPER_CHANNEL_NAME
         from vdeter.poc.api.types import ActionDescriptor, ActionKind
 
         class Query(MacSlotScheduler):

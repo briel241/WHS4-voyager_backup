@@ -371,8 +371,8 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     provenance = provenance or {}
 
     _ensure_vdeter_importable(repo_root)
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.configuration import (
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.configuration import (
         Stage7ConfigurationLoader,
         Stage7OperationalGainInput,
     )

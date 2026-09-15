@@ -2,7 +2,7 @@
 
 hardware.toml carries only the operator-approved environment intent. Its
 schema selects the host profile whose rules are defined **once** in
-`vdeter.stage7.host_profiles` (speed class per role, canonical usb_transport,
+`vdeter.b210_system.host_profiles` (speed class per role, canonical usb_transport,
 power source, shared-hub contract):
 
   schema_version = 1   STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1 (legacy Pi profile)
@@ -40,7 +40,7 @@ for _entry in (_REPO_ROOT / "VDETER", _REPO_ROOT / "VDETER" / "src"):
     if str(_entry) not in sys.path:
         sys.path.insert(0, str(_entry))
 
-from vdeter.stage7 import host_profiles  # noqa: E402
+from vdeter.b210_system import host_profiles  # noqa: E402
 
 LEGACY_PI_PROFILE = host_profiles.LEGACY_PI_PROFILE
 PI_POWERED_HUB_PROFILE = host_profiles.PI_POWERED_HUB_PROFILE

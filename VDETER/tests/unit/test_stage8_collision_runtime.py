@@ -1,7 +1,7 @@
 """Receiver-local policy, including the intentionally limited observability model."""
 import unittest
 from types import SimpleNamespace as NS
-from vdeter.stage7.collision_runtime import RxCollisionGate, overlapping_indices, MAX_OBSERVATIONS
+from vdeter.b210_system.collision_runtime import RxCollisionGate, overlapping_indices, MAX_OBSERVATIONS
 
 
 class LocalRxTests(unittest.TestCase):

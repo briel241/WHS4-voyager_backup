@@ -28,7 +28,7 @@ from apps.standalone import state as state_module
 
 #: 역할별 요구 USB 속도 등급 (README §8). super=USB3(5000+), high=480.
 #: legacy Pi profile 값 — MASS-A super / MASS-B high / ROC super. 2026-09-10부터
-#: 단일 정의(vdeter.stage7.host_profiles.LEGACY_PI)에서 유도하며 값은 종전과
+#: 단일 정의(vdeter.b210_system.host_profiles.LEGACY_PI)에서 유도하며 값은 종전과
 #: 동일하다; 다른 profile(Pi powered-USB3-hub = super/super/super)은
 #: run_required_preflight가 hardware.toml의 profile 정의에서 가져온다.
 ROLE_SPEED_CLASS = dict(hardware_profiles.host_profiles.LEGACY_PI.speed_classes)
@@ -239,7 +239,7 @@ def run_required_preflight(*, hardware: dict, paths, key_path=None,
     reference 적재기가 있는 계층(run_cmd, W5/W6)에서 이 report와 결합한다.
 
     host profile(2026-09-10 additive): 역할별 요구 속도 등급은 hardware.toml이
-    가리키는 profile 정의(vdeter.stage7.host_profiles)에서 가져온다 — legacy
+    가리키는 profile 정의(vdeter.b210_system.host_profiles)에서 가져온다 — legacy
     Pi = super/high/super(종전과 동일), Pi powered-USB3-hub = super/super/super
     + 같은 self-powered USB3 hub 아래 topology 검사(`checks.usb_topology`,
     fail-closed; `topology_probe`는 시험 주입용 sysfs 스냅샷).

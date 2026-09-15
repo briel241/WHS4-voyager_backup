@@ -1,4 +1,4 @@
-"""`vdeter.stage7.deployment` — launcher 배치 profile의 단일 production 구현 (STR-07, 묶음 1-3).
+"""`vdeter.b210_system.deployment` — launcher 배치 profile의 단일 production 구현 (STR-07, 묶음 1-3).
 
 1-3 이전 launcher(`stage7_endpoint_launcher.py:309-334`)는 시험 fixture module `tests.support.stage4`의
 `tbb_fixture()`를 `dataclasses.replace(start_time=UTC 자정, validity=2880)`로 고쳐 쓰고
@@ -30,7 +30,7 @@ from vdeter.mac.tbb import (
     build_canonical_tbb_profile,
     build_wideband_canonical_tbb_profile,
 )
-from vdeter.stage7 import deployment as prod
+from vdeter.b210_system import deployment as prod
 
 FP_A = bytes.fromhex("0a1b2c3d4e5f")
 FP_B = bytes.fromhex("a1b2c3d4e5f6")
@@ -95,7 +95,7 @@ def _legacy_launcher_profile(now_epoch: int, fingerprint: bytes) -> MacDeploymen
 
 
 def _launcher_profile(now_epoch: int, fingerprint: bytes) -> MacDeploymentProfile:
-    """launcher `main()`이 지금 하는 조합(`vdeter.stage7.deployment`만 사용)."""
+    """launcher `main()`이 지금 하는 조합(`vdeter.b210_system.deployment`만 사용)."""
     fixture = prod.build_utc_day_tbb_fixture(now_epoch_seconds=now_epoch)
     return prod.build_deployment_profile(expected_fingerprint=fingerprint, tbb_fixture=fixture)
 

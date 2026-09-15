@@ -2,9 +2,9 @@ import unittest
 from types import SimpleNamespace as NS
 from threading import RLock
 from unittest.mock import Mock
-from vdeter.stage7.rx_scope import WorkloadRxScope
-from vdeter.stage7.collision_runtime import CollisionRuntimeError
-from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
+from vdeter.b210_system.rx_scope import WorkloadRxScope
+from vdeter.b210_system.collision_runtime import CollisionRuntimeError
+from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME, LOWER_RF_TUNE_HZ, UPPER_RF_TUNE_HZ
 
 
 class RxScopeFaultTests(unittest.TestCase):

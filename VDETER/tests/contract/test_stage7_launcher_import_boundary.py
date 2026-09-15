@@ -2,7 +2,7 @@
 
 `VDETER/apps/stage7_endpoint_launcher.py`는 실장비 endpoint 프로세스다. 1-3 이전에는 `main()` 안에서
 `tests.support.stage4`(시험 fixture)를 import해 배치 profile을 얻었다. 이제 배치 값·계산은 production module
-`vdeter.stage7.deployment`가 소유하며, launcher와 그 module의 전이 import 폐포 어디에도 `tests`·`apps`
+`vdeter.b210_system.deployment`가 소유하며, launcher와 그 module의 전이 import 폐포 어디에도 `tests`·`apps`
 package가 없어야 한다. 정적(AST; 함수 안 lazy import 포함) + 실행(subprocess, `tests`가 import 불가능한
 PYTHONPATH) + 부정 대조(in-memory AST 변조)로 검사한다. 플랫폼 무관.
 """
@@ -22,7 +22,7 @@ _VDETER = os.path.normpath(os.path.join(_HERE, "..", ".."))
 _PROJECT_ROOT = os.path.normpath(os.path.join(_VDETER, ".."))
 _SRC = os.path.join(_VDETER, "src")
 _LAUNCHER = os.path.join(_VDETER, "apps", "stage7_endpoint_launcher.py")
-_DEPLOYMENT_MODULE = "vdeter.stage7.deployment"
+_DEPLOYMENT_MODULE = "vdeter.b210_system.deployment"
 #: production이 import하면 안 되는 최상위 package(시험 support·시험 fixture).
 _TEST_PACKAGES = ("tests",)
 
@@ -113,7 +113,7 @@ class LauncherImportBoundaryTest(unittest.TestCase):
         self.assertEqual(offenders, [], f"launcher가 시험 package를 import함: {offenders}")
 
     def test_launcher_takes_deployment_from_the_production_module(self):
-        """배치 profile은 `vdeter.stage7.deployment`에서 온다(시험 fixture 우회 없음)."""
+        """배치 profile은 `vdeter.b210_system.deployment`에서 온다(시험 fixture 우회 없음)."""
         imports = {module for module, _ in _imports_of(_parse(_LAUNCHER))}
         self.assertIn(_DEPLOYMENT_MODULE, imports)
         self.assertIn(f"{_DEPLOYMENT_MODULE}.build_deployment_profile", imports)
@@ -121,7 +121,7 @@ class LauncherImportBoundaryTest(unittest.TestCase):
         self.assertNotIn("tests.support.stage4", imports)
 
     def test_deployment_module_closure_is_free_of_test_and_app_packages(self):
-        """`vdeter.stage7.deployment`의 전이 import 폐포(vdeter 안)는 `tests`·`apps`를 import하지 않는다."""
+        """`vdeter.b210_system.deployment`의 전이 import 폐포(vdeter 안)는 `tests`·`apps`를 import하지 않는다."""
         closure = _vdeter_closure(_DEPLOYMENT_MODULE)
         self.assertIn(_DEPLOYMENT_MODULE, closure)
         self.assertIn("vdeter.mac.deployment", closure)
@@ -184,11 +184,11 @@ class LauncherImportBoundaryTest(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertTrue(_test_package_imports(ast.parse(source)), source)
 
-        # (3) 상대 import 해석: vdeter.stage7.x 안의 `from ..mac import tbb`는 vdeter로 해석돼 잡히지 않고,
+        # (3) 상대 import 해석: vdeter.b210_system.x 안의 `from ..mac import tbb`는 vdeter로 해석돼 잡히지 않고,
         #     production 이름이 `tests`로 시작하는 다른 module(`testsuite`)도 오탐하지 않는다.
         relative = ast.parse("from ..mac import tbb\nimport testsuite.things\n")
-        self.assertEqual(_test_package_imports(relative, "vdeter.stage7.deployment", False), [])
-        resolved = {m for m, _ in _imports_of(relative, "vdeter.stage7.deployment", False)}
+        self.assertEqual(_test_package_imports(relative, "vdeter.b210_system.deployment", False), [])
+        resolved = {m for m, _ in _imports_of(relative, "vdeter.b210_system.deployment", False)}
         self.assertIn("vdeter.mac", resolved)
         self.assertIn("vdeter.mac.tbb", resolved)
 

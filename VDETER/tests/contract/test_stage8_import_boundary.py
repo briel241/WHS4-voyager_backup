@@ -45,7 +45,7 @@ _SANCTIONED_RF_OFF_SESSION = frozenset({
 
 # 일반 운용 경로의 PoC device 결선 adapter. 장치는 launcher가 단독 소유하므로 supervisor(workload를
 # 소유한 scenario controller 프로세스)는 §16.2 TEST adapter op으로만 장치에 닿는다. 이 파일이 그
-# 경계를 조립하며, launcher **쪽** 구현(vdeter/stage7/testing/poc_device.py)은 PoC 계층을 참조하지
+# 경계를 조립하며, launcher **쪽** 구현(vdeter/b210_system/control_plane/poc_device.py)은 PoC 계층을 참조하지
 # 않으므로 여기 목록에 없다(그 성질은 아래 규칙이 정적으로 강제한다).
 _SANCTIONED_LAUNCHER_SEAMS = frozenset({
     os.path.normpath(os.path.join(_PROJECT_ROOT, "apps", "poc_device_seams_launcher.py")),

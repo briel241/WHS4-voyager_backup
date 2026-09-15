@@ -45,7 +45,7 @@ from apps.standalone import (  # noqa: E402
     setup_cmd,
     state,
 )
-from vdeter.stage7 import host_profiles  # noqa: E402
+from vdeter.b210_system import host_profiles  # noqa: E402
 from test_standalone_pi_powered_hub import make_topology  # noqa: E402
 
 ROLES = ("MASS-A", "MASS-B", "ROC")

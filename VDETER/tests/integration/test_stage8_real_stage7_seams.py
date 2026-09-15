@@ -491,7 +491,7 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
     """P08: 공유매체 opt-in에서만 송신자별 두 물리 경로로 fan-out한다(legacy 보존)."""
 
     def _context(self, *, shared):
-        from vdeter.stage7.routing import Stage7RouteContext
+        from vdeter.b210_system.routing import Stage7RouteContext
         return Stage7RouteContext(
             method_kind="TEST", source_station_id=333333333,       # MASS-B
             destination_kind="ADDRESSED", destination_station_id=222222222,  # ROC
@@ -500,8 +500,8 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
             broadcast_fanout_optin=shared)
 
     def test_legacy_addressed_route_is_single_child(self):
-        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
-        from vdeter.stage7.routing import resolve_lane_plan_route
+        from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME
+        from vdeter.b210_system.routing import resolve_lane_plan_route
         resolved, error = resolve_lane_plan_route(
             "MASS-B", self._context(shared=False), LOWER_CHANNEL_NAME)
         self.assertIsNone(error, error)
@@ -510,8 +510,8 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
         self.assertEqual(scope, "SINGLE_CHILD")
 
     def test_shared_medium_optin_fans_out_to_two_paths(self):
-        from vdeter.stage7.configuration import LOWER_CHANNEL_NAME
-        from vdeter.stage7.routing import resolve_lane_plan_route
+        from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME
+        from vdeter.b210_system.routing import resolve_lane_plan_route
         resolved, error = resolve_lane_plan_route(
             "MASS-B", self._context(shared=True), LOWER_CHANNEL_NAME)
         self.assertIsNone(error, error)
@@ -520,7 +520,7 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
         self.assertEqual(scope, "OPTIN_TWO_CHILD_FANOUT")
 
     def test_every_sender_fanout_matches_fixed_cabling(self):
-        from vdeter.stage7.routing import BROADCAST_FANOUT_CHILDREN
+        from vdeter.b210_system.routing import BROADCAST_FANOUT_CHILDREN
         # §5.1 고정 배선: ROC=C1+C3, MASS-A=C2+C5, MASS-B=C4+C6.
         self.assertEqual(BROADCAST_FANOUT_CHILDREN["ROC"], ((0, "C1"), (1, "C3")))
         self.assertEqual(BROADCAST_FANOUT_CHILDREN["MASS-A"], ((0, "C2"), (1, "C5")))
@@ -528,8 +528,8 @@ class SharedMediumRouteFanOutTest(unittest.TestCase):
 
     def test_broadcast_route_is_unchanged_by_optin(self):
         # BROADCAST는 기존 표(C1+C3)를 그대로 쓰고 opt-in 분기를 타지 않는다.
-        from vdeter.stage7.configuration import UPPER_CHANNEL_NAME
-        from vdeter.stage7.routing import Stage7RouteContext, resolve_lane_plan_route
+        from vdeter.b210_system.configuration import UPPER_CHANNEL_NAME
+        from vdeter.b210_system.routing import Stage7RouteContext, resolve_lane_plan_route
         ctx = Stage7RouteContext(
             method_kind="TEST", source_station_id=222222222, destination_kind="BROADCAST",
             destination_station_id=None, original_source_station_id=None,
@@ -660,7 +660,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
         RF/DSP policy를 둘 다 MANUAL로 두지 않으면 UHD가 lane마다 RF LO를 다시 잡아 공통 LO가
         깨진다. 장치는 열지 않고 UHD 경계 객체만 대체한다.
         """
-        from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.b210_system.b210_worker import Stage7DualLaneFlowgraphBackend
         from vdeter.poc.shared_medium import constants
 
         class _TuneRequest:
@@ -730,7 +730,7 @@ class CommonLoTuningApplyTest(unittest.TestCase):
 
     def test_real_backend_refuses_when_uhd_lacks_manual_tune_policy(self):
         """UHD가 manual policy를 제공하지 않으면 **추정하지 않고 거부**한다(fail-closed)."""
-        from vdeter.stage7.b210_worker import Stage7DualLaneFlowgraphBackend
+        from vdeter.b210_system.b210_worker import Stage7DualLaneFlowgraphBackend
         from vdeter.poc.shared_medium import constants
 
         class _Uhd:

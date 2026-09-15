@@ -3,7 +3,7 @@
 import unittest
 from fractions import Fraction
 
-from vdeter.stage7.time_bridge import (
+from vdeter.b210_system.time_bridge import (
     BracketObservation,
     Stage7TimeBridgeError,
     ceil_pos,

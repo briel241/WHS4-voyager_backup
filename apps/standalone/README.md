@@ -674,7 +674,7 @@ Pi SuperSpeed root 포트) 아래에 두는 topology를 위한 두 번째 host p
 | endpoint template | `VDETER/configs/stage7/endpoints/` | `VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/` (serial·usb_physical_path·host_machine_id provisioning) |
 | reference 결속 | 종전 critical subset | + `standalone_critical.host_profile`, `standalone_critical.usb_topology`(hub asset/VID:PID·역할별 serial/speed_class/transport·전원 출처), `hardware_observations`(기록만) |
 
-규칙의 단일 출처는 `VDETER/src/vdeter/stage7/host_profiles.py`다. `local_preflight.
+규칙의 단일 출처는 `VDETER/src/vdeter/b210_system/host_profiles.py`다. `local_preflight.
 ROLE_SPEED_CLASS`·coordinator `_EXPECTED_USB_SPEED`는 legacy 표 값 그대로이며
 (시험이 정의와의 동일성을 고정), preflight·config loader·RR-P0는 hardware.toml /
 resolved config의 profile에서 기대값을 가져온다. RR-P0는 powered-hub profile일 때

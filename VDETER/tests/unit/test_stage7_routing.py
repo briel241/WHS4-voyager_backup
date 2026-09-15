@@ -42,8 +42,8 @@ from vdeter.common.identifiers import (
 )
 from vdeter.common.results import Err, Ok, internal_error
 from vdeter.common.time import ClockDomain, TimePoint
-from vdeter.stage7.canonical_json import sha256_hex
-from vdeter.stage7.routing import (
+from vdeter.b210_system.canonical_json import sha256_hex
+from vdeter.b210_system.routing import (
     Stage7QualificationPhyRequest,
     Stage7QualificationRouteSeeder,
     Stage7RouteAwareLinkPort,
@@ -461,7 +461,7 @@ def _bulletin_board():
 
 class TC_STAGE7_LANE_PLAN(unittest.TestCase):
     def _context(self, source, destination_kind, destination=None, method="build_packet"):
-        from vdeter.stage7.routing import Stage7RouteContext
+        from vdeter.b210_system.routing import Stage7RouteContext
 
         return Stage7RouteContext(
             method_kind=method,

@@ -35,8 +35,8 @@ def main() -> int:
     arguments = parser.parse_args()
 
     import stage7_coordinator_main as app
-    from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.coordinator import Stage7RuntimeCoordinator
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     os.makedirs(os.path.join(arguments.run_root, "evidence"), exist_ok=True)
     resolved, plan = app.load_group(arguments.run_id, arguments.configs_dir, arguments.gain_artifact)
@@ -65,8 +65,8 @@ def main() -> int:
         # bridge를 요구한다 (svcdbg13 실측: 'active host bridge 없이 adoption
         # 불가'). rf_time 검증은 생략(디버그 전용).
         import hashlib as _hashlib
-        from vdeter.stage7.canonical_json import encode_canonical_json as _ecj
-        from vdeter.stage7.ipc import body_set_sha256 as _bss
+        from vdeter.b210_system.canonical_json import encode_canonical_json as _ecj
+        from vdeter.b210_system.ipc import body_set_sha256 as _bss
         acquire = coordinator.run_barrier(
             "acquire_host_time",
             {m: {"profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1",

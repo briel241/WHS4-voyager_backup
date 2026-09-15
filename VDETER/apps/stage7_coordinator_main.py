@@ -98,11 +98,11 @@ class SocketChannel:
 def load_group(run_id: str, configs_dir: str, gain_artifact_path):
     """세 resolved config와 system plan을 적재한다."""
 
-    from vdeter.stage7.configuration import (
+    from vdeter.b210_system.configuration import (
         Stage7ConfigurationLoader,
         Stage7OperationalGainInput,
     )
-    from vdeter.stage7.coordinator import Stage7SystemPlanLoader
+    from vdeter.b210_system.coordinator import Stage7SystemPlanLoader
 
     gain_input_data = None
     if gain_artifact_path is not None:
@@ -158,7 +158,7 @@ def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_a
                       *, test_plan_sha=None, lifecycle_generation=1):
     """launcher process 셋을 spawn하고 socket 연결까지 마친다."""
 
-    from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
+    from vdeter.b210_system.transport import SeqPacketClient, runtime_socket_root
 
     root = runtime_socket_root(run_id)
     processes = {}
@@ -220,8 +220,8 @@ def spawn_and_connect(run_id: str, run_root: str, configs_dir: str, plan, gain_a
 def run_p0(coordinator, resolved, plan, run_root: str):
     """§10 P0 RF-off lifecycle barrier 시퀀스."""
 
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
     time.sleep(3.0)
@@ -585,7 +585,7 @@ RR_CFO_PATHS = (
 #: §3 canonical transport 기대 속도 (Mbps).
 _EXPECTED_USB_SPEED = {"MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
 #: 2026-09-10 (Pi powered-USB3-hub profile): RR-P0의 승인 link speed는 resolved
-#: config의 `host_execution.usb_transport`에서 단일 정의(vdeter.stage7.host_profiles)
+#: config의 `host_execution.usb_transport`에서 단일 정의(vdeter.b210_system.host_profiles)
 #: 로 유도한다. 위 legacy Pi 고정표는 값 그대로 보존되며(legacy profile의 유도값과
 #: 동일), powered-hub profile은 세 endpoint 전부 5000 + 실시간 공유 hub topology.
 
@@ -593,7 +593,7 @@ _EXPECTED_USB_SPEED = {"MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
 def _expected_usb_speed(resolved, endpoint_id) -> str:
     """resolved config → 승인 sysfs `speed` 문자열 ("5000"/"480")."""
 
-    from vdeter.stage7.host_profiles import expected_sysfs_speed
+    from vdeter.b210_system.host_profiles import expected_sysfs_speed
 
     return expected_sysfs_speed(resolved[endpoint_id].host_execution.usb_transport)
 
@@ -602,7 +602,7 @@ def _shared_hub_topology_check(resolved, serial_by_endpoint):
     """resolved host profile이 공유 powered hub를 요구하면 sysfs 실측 검사
     (host_profiles.check_shared_powered_hub) 결과, 아니면 None (legacy Pi)."""
 
-    from vdeter.stage7.host_profiles import (
+    from vdeter.b210_system.host_profiles import (
         check_shared_powered_hub,
         probe_usb_topology,
         profile,
@@ -694,7 +694,7 @@ def run_rr_p0(coordinator, resolved, plan, run_root: str, *, run_id, metadata,
         guard.progress("live-checks")
 
         time.sleep(2.0)
-        from vdeter.stage7.hw_operations import read_monotonic_raw_ns as _now_ns
+        from vdeter.b210_system.hw_operations import read_monotonic_raw_ns as _now_ns
 
         stop_now = int(_now_ns())
         coordinator.run_barrier(
@@ -1228,10 +1228,10 @@ def run_mass_roc_service(coordinator, resolved, plan, run_root: str, *, run_id,
     evidence는 `evidence/operational_service/`에 별도 형식으로만 남는다.
     """
 
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
-    from vdeter.stage7.ipc import body_set_sha256
-    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.ipc import body_set_sha256
+    from vdeter.b210_system.rf_time import evaluate_pre_correction_set
 
     # 서비스 구간 전용 guard. qualification 사다리를 돌지 않으므로 RR phase
     # deadline(70분)이 아니라 서비스 구간 예산을 쓴다.
@@ -1670,10 +1670,10 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     adaptive gain 탐색, raw-PHY qualification, RR/RESEARCH_READY 판정.
     """
 
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
-    from vdeter.stage7.ipc import body_set_sha256
-    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.ipc import body_set_sha256
+    from vdeter.b210_system.rf_time import evaluate_pre_correction_set
 
     guard = PhaseGuard("MASS-ROC-SESSION", deadline_s=SESSION_DEADLINE_S,
                        stall_s=SESSION_IDLE_TIMEOUT_S)
@@ -2558,7 +2558,7 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
         try:
             saved = coordinator._lifecycle_generation
             coordinator._lifecycle_generation = saved + 99
-            from vdeter.stage7.coordinator import Stage7BarrierFailure
+            from vdeter.b210_system.coordinator import Stage7BarrierFailure
 
             rejected = False
             try:
@@ -2643,7 +2643,7 @@ def run_rr_p3_fault(coordinator, resolved, plan, run_root: str, *, run_id,
 
 
 def read_monotonic_raw_ns_local() -> int:
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     return read_monotonic_raw_ns()
 
@@ -2742,10 +2742,10 @@ def _run_rf_qualification(
             guard.progress(name)
         if phase_marks is not None:
             phase_marks[name] = time.monotonic()
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.hw_operations import probe_vector_sha256, read_monotonic_raw_ns
-    from vdeter.stage7.ipc import body_set_sha256
-    from vdeter.stage7.rf_time import evaluate_pre_correction_set
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.hw_operations import probe_vector_sha256, read_monotonic_raw_ns
+    from vdeter.b210_system.ipc import body_set_sha256
+    from vdeter.b210_system.rf_time import evaluate_pre_correction_set
 
     run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
 
@@ -3228,8 +3228,8 @@ def _run_rf_qualification(
 def run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root: str):
     """prepare→configure→arm_rx 공통 도입부 (P0/P1 공용)."""
 
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     member_set_sha = hashlib.sha256(
         encode_canonical_json([[m, plan.member_config_sha(m)] for m in ENDPOINT_IDS])
@@ -3339,8 +3339,8 @@ def main(argv=None) -> int:
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
     validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
 
-    from vdeter.stage7.coordinator import Stage7RuntimeCoordinator
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.coordinator import Stage7RuntimeCoordinator
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
 
     os.makedirs(os.path.join(arguments.run_root, "evidence"), exist_ok=True)
     resolved, plan = load_group(

@@ -119,9 +119,9 @@ def main(argv=None) -> int:
     parser.add_argument("--min-transfers", type=int, default=10)
     arguments = parser.parse_args(argv)
 
-    from vdeter.stage7.hw_operations import read_monotonic_raw_ns
-    from vdeter.stage7.testing.controller import Stage7ScenarioController
-    from vdeter.stage7.transport import SeqPacketClient, runtime_socket_root
+    from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
+    from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
+    from vdeter.b210_system.transport import SeqPacketClient, runtime_socket_root
 
     fixtures = {}
     for name in sorted(os.listdir(arguments.fixtures_dir)):

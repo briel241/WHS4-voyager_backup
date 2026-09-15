@@ -19,7 +19,7 @@ from __future__ import annotations
 import unittest
 
 from apps.poc_device_seams_launcher import LauncherRadioSink
-from vdeter.stage7.testing.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
 from vdeter.poc.api.types import PhysicalChannel
 from vdeter.poc.shared_medium.radiation import BroadcastCommitRefused, ChildPath
 

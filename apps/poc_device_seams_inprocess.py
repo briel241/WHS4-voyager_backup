@@ -24,7 +24,7 @@ import uuid
 from vdeter.phy import resampling
 from vdeter.phy.burst.rrc import validate_cf32le_full_scale
 from vdeter.phy.transmitter import Phy11Transmitter
-from vdeter.stage7.testing.poc_device import build_poc_tx_request
+from vdeter.b210_system.control_plane.poc_device import build_poc_tx_request
 from vdeter.poc.integration.device_boundary import (
     GroupTxRadioSink,
     logical_destination_station_id,
@@ -72,7 +72,7 @@ def first_slot_at_or_after(hw_timestamp_ns: int) -> int:
     return -(-ns * _SLOT_NS_DEN // _SLOT_NS_NUM)
 
 #: P03 권위 lead: 기존 radio_adapter가 강제하는 최소 TX lead와 채널 전환(retune) lead.
-#: 값을 완화하지 않고 그대로 인용한다(vdeter/stage7/radio_adapter.py `_LEAD_NS`/`_RETUNE_LEAD_NS`).
+#: 값을 완화하지 않고 그대로 인용한다(vdeter/b210_system/radio_adapter.py `_LEAD_NS`/`_RETUNE_LEAD_NS`).
 _TX_LEAD_NS = 100_000_000
 _RETUNE_LEAD_NS = 200_000_000
 
@@ -85,7 +85,7 @@ def stage7_channel_name(stage8_channel) -> str:
     경로가 각자 매핑을 갖지 않는다).
     """
 
-    from vdeter.stage7.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
+    from vdeter.b210_system.configuration import LOWER_CHANNEL_NAME, UPPER_CHANNEL_NAME
     from vdeter.poc.api.types import PhysicalChannel as Stage8Channel
 
     mapping = {Stage8Channel.LOWER: LOWER_CHANNEL_NAME,

@@ -3,7 +3,7 @@
 
 [system]
 profile = "STAGE7_PI5_THREE_ENDPOINT_V1"
-runtime_coordinator_protocol = "vdeter.stage7.runtime-coordinator.v1"
+runtime_coordinator_protocol = "vdeter.b210_system.runtime-coordinator.v1"
 runtime_body_schema = "STAGE7_RUNTIME_BODY_V1"
 socket_root = "/run/user/<uid>/vdeter-stage7/runtime"
 member_count = 3

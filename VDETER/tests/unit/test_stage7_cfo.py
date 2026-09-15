@@ -16,7 +16,7 @@ try:
 except Exception:  # pragma: no cover - 환경 의존
     HAS_NUMPY = False
 
-from vdeter.stage7.cfo import (
+from vdeter.b210_system.cfo import (
     BLOCK_SAMPLES,
     BLOCKS_PER_BURST,
     PROBE_AMPLITUDE,
@@ -94,7 +94,7 @@ class TC_STAGE7_CFO_ESTIMATOR(unittest.TestCase):
 @unittest.skipUnless(HAS_NUMPY, "NumPy 결속 환경(Pi)에서 실행")
 class TC_STAGE7_CFO_FIT(unittest.TestCase):
     def _estimates(self, a=100.0, b=0.5, u=10.0):
-        from vdeter.stage7.cfo import BurstEstimate
+        from vdeter.b210_system.cfo import BurstEstimate
 
         t_values = [-63.0 + 7.0 * i for i in range(10)]
         estimates = [
@@ -124,7 +124,7 @@ class TC_STAGE7_CFO_FIT(unittest.TestCase):
         self.assertFalse(fit.passed)
 
     def test_short_span_rejected(self):
-        from vdeter.stage7.cfo import BurstEstimate
+        from vdeter.b210_system.cfo import BurstEstimate
 
         t_values = [-45.0 + 5.0 * i for i in range(10)]
         estimates = [

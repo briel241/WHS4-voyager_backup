@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock
 from apps.workload_rx_scope import WorkloadRxScope
-from vdeter.stage7.collision_runtime import ENDPOINTS
+from vdeter.b210_system.collision_runtime import ENDPOINTS
 
 
 class ScopeControlTests(unittest.TestCase):

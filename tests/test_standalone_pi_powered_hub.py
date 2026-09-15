@@ -2,7 +2,7 @@
 
 증명하는 것 (apps/standalone/README.md §4·§8·§9·§15)
   단일 정의  : legacy Pi 상수(ROLE_SPEED_CLASS·coordinator _EXPECTED_USB_SPEED·
-               USB_TRANSPORTS)가 vdeter.stage7.host_profiles의 legacy 정의와
+               USB_TRANSPORTS)가 vdeter.b210_system.host_profiles의 legacy 정의와
                값 동일 — 규칙은 한 곳에서만 나온다.
   legacy 보존: schema 1 선언·preflight·loader가 종전과 같이 MASS-B 480M +
                외부 DC asset을 요구하고, 5000M·asset 누락·powered-hub 키 혼입은
@@ -51,7 +51,7 @@ from apps.standalone import (  # noqa: E402
     setup_cmd,
     state,
 )
-from vdeter.stage7 import configuration, host_profiles  # noqa: E402
+from vdeter.b210_system import configuration, host_profiles  # noqa: E402
 
 REPO = Path(_REPO)
 HUB = host_profiles.PI_POWERED_HUB_PROFILE
@@ -851,7 +851,7 @@ def test_run_topology_after_close_is_recorded_and_fail_closed():
 # ---------------------------------------------------------------- 14. manifest 영역·digest
 
 def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
-    assert qd.classify_domains("VDETER/src/vdeter/stage7/host_profiles.py") == (qd.RF,)
+    assert qd.classify_domains("VDETER/src/vdeter/b210_system/host_profiles.py") == (qd.RF,)
     for endpoint in ("mass-a", "mass-b", "roc"):
         assert qd.classify_domains(
             f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml") == (qd.RF,)
@@ -863,14 +863,14 @@ def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
     second = installation_manifest.measure(REPO, now="T1")
     assert installation_manifest.digests_of(first) == installation_manifest.digests_of(second)
     files = first["files"]
-    assert files["VDETER/src/vdeter/stage7/host_profiles.py"]["domains"] == ["rf"]
+    assert files["VDETER/src/vdeter/b210_system/host_profiles.py"]["domains"] == ["rf"]
     assert files["apps/standalone/hardware_profiles.py"]["domains"] == ["rf", "operation"]
     for endpoint in ("mass-a", "mass-b", "roc"):
         path = f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml"
         assert files[path]["domains"] == ["rf"]
         assert files[f"VDETER/configs/stage7/endpoints/{endpoint}.toml"]["domains"] == ["rf"]
     rf_files = installation_manifest.domain_manifest(first, qd.RF)["files"]
-    assert "VDETER/src/vdeter/stage7/host_profiles.py" in rf_files
+    assert "VDETER/src/vdeter/b210_system/host_profiles.py" in rf_files
     assert "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/mass-b.toml" in rf_files
 
 

@@ -24,12 +24,12 @@ from vdeter.phy import resampling
 from vdeter.phy.multilink import MultiRatePhy
 from vdeter.profiles.link_phy import build_combined_phy_profile_registry
 from vdeter.runtime.phy_bridge import RuntimePhyRadioBridge
-from vdeter.stage7 import rx_decode_worker as W
-from vdeter.stage7.phy_facade import (
+from vdeter.b210_system import rx_decode_worker as W
+from vdeter.b210_system.phy_facade import (
     Stage7DiagnosticPhyFacade,
     Stage7PhyDiagnosticSink,
 )
-from vdeter.stage7.support import Stage7LaneRxDispatcher
+from vdeter.b210_system.support import Stage7LaneRxDispatcher
 
 RX_KEY = (CHANNEL.name, FIRST_SAMPLE_AT.clock_id, 1_000, 26_666_666)
 

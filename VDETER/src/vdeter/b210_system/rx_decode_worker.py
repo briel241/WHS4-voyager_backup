@@ -66,11 +66,11 @@ class LaneDecoder:
         from vdeter.common.time import SystemTimeSource
         from vdeter.profiles.link_phy import build_combined_phy_profile_registry
         from vdeter.runtime.phy_bridge import RuntimePhyRadioBridge
-        from vdeter.stage7.phy_facade import (
+        from vdeter.b210_system.phy_facade import (
             Stage7DiagnosticPhyFacade,
             Stage7PhyDiagnosticSink,
         )
-        from vdeter.stage7.support import Stage7LaneRxDispatcher
+        from vdeter.b210_system.support import Stage7LaneRxDispatcher
 
         if id_source_kind != "UUID4":
             # DETERMINISTIC은 단일 계열을 전제로 하므로 lane별 워커로 나누면

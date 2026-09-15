@@ -53,8 +53,8 @@ from vdeter.common.identifiers import PayloadFormat, StationId, TransferId
 from vdeter.common.results import Ok
 from vdeter.common.time import ClockDomain, TimePoint
 
-from vdeter.stage7.testing.adapter import Stage7ServiceApiTestAdapter
-from vdeter.stage7.testing.controller import Stage7ScenarioController
+from vdeter.b210_system.control_plane.adapter import Stage7ServiceApiTestAdapter
+from vdeter.b210_system.control_plane.controller import Stage7ScenarioController
 
 from apps.stage7_endpoint_launcher import service_event_record
 from apps.stage7_mass_roc_controller import (

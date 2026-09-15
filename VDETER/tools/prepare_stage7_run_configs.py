@@ -104,7 +104,7 @@ def main(argv=None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    from vdeter.stage7.configuration import (
+    from vdeter.b210_system.configuration import (
         Stage7ConfigurationLoader,
         Stage7OperationalGainInput,
     )
@@ -282,7 +282,7 @@ def main(argv=None) -> int:
     if needs_fixtures:
         import base64
 
-        from vdeter.stage7.canonical_json import encode_canonical_json
+        from vdeter.b210_system.canonical_json import encode_canonical_json
 
         def payload_bytes(length, seed):
             return bytes((i * 7 + seed) % 256 for i in range(length))

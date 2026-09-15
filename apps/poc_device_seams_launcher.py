@@ -22,7 +22,7 @@ import hashlib
 import time
 import uuid
 
-from vdeter.stage7.testing.controller import PocDeviceCallError, Stage7ScenarioController
+from vdeter.b210_system.control_plane.controller import PocDeviceCallError, Stage7ScenarioController
 
 from vdeter.poc.integration.device_boundary import (
     logical_destination_station_id,

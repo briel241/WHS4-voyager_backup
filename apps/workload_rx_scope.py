@@ -17,7 +17,7 @@ exchanges NO transmitter records. Normal RX never waits for these polls.
 from collections import deque
 import time
 import uuid
-from vdeter.stage7.collision_runtime import ENDPOINTS, MAX_OBSERVATIONS, MODEL
+from vdeter.b210_system.collision_runtime import ENDPOINTS, MAX_OBSERVATIONS, MODEL
 
 
 def _unavailable(message, *, ownership=False):
