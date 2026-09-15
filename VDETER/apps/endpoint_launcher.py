@@ -311,6 +311,12 @@ def main(argv=None) -> int:
         build_utc_day_tbb_fixture,
     )
 
+    # `_time` 은 아래 pump·drain·계측 경로가 쓰는 monotonic 별칭이다. 1-3(STR-07)이
+    # TBB fixture 계산을 production module 로 옮기면서 그 블록에 같이 있던
+    # `import time as _time` 까지 지워, 그 뒤로 launcher `main()` 은 첫 `_time` 사용
+    # 지점에서 NameError 로 죽었다(2026-09-15 실물 RR-P0 에서 검출). 되살린다.
+    import time as _time
+
     # TBB 유효창을 실제 UTC로 결속한다 — 시험 fixture 기본값(2000-epoch
     # 800,000,000s ≈ 2025-05, validity 60분)은 실물 UTC에서 만료 상태라
     # CONTROL start가 MAC_RESOURCE_UNAVAILABLE("활성 TBB 유효기간")로
