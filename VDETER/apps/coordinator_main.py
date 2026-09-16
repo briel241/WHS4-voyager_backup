@@ -427,6 +427,16 @@ def validate_rr_binding(arguments, metadata: dict) -> None:
             )
 
 
+def _binding_gate_arguments(arguments):
+    """readiness cold phase(`mass-roc-session-cold`)는 binding gate(`validate_rr_binding`)에서
+    `mass-roc-session`과 **같은** service 결속 규칙(RESEARCH_READY profile·rr-p2-17 config·run id·
+    baseline SHA·implicit_retry 0·debug 스위치 금지)을 받는다. qualified `validate_rr_binding`을
+    바꾸지 않기 위해 phase 이름만 별칭한 사본을 넘긴다 — 규칙 자체는 조금도 완화되지 않는다."""
+    if getattr(arguments, "phase", None) != "mass-roc-session-cold":
+        return arguments
+    return argparse.Namespace(**{**vars(arguments), "phase": "mass-roc-session"})
+
+
 def _load_run_metadata(configs_dir: str, gain_artifact_path=None) -> dict:
     """prepare 도구가 결속한 git/baseline metadata (없으면 null 유지)."""
 
@@ -1619,6 +1629,12 @@ SESSION_DEADLINE_S = 2 * 60 * 60
 #: child가 살아 남아 B210 cleanup을 막을 수 있다.
 SESSION_WORKLOAD_TIMEOUT_S = 900.0
 
+#: readiness cold path 전용 lifecycle deadline (operational_readiness_and_bringup_spec §5.1.1):
+#: CALIBRATION_PREPARATION 시작부터 READY까지 coordinator 측 guard. 기본 warm bring-up 상한
+#: (local session 2700 s)·SESSION_DEADLINE_S(7200)·workload/close 상한은 바꾸지 않는다.
+#: implicit retry 0 — 초과 시 새 TX 예약을 만들지 않고 기존 timeout cleanup으로 전이한다.
+READINESS_COLD_PREPARATION_S = 3900.0
+
 #: workload/lifecycle child의 bounded process cleanup 상한.
 CHILD_TERMINATE_TIMEOUT_S = 30.0
 CHILD_KILL_TIMEOUT_S = 10.0
@@ -1718,9 +1734,158 @@ def _service_session_terminal_status(workloads, service_stop_rc,
     return ("FAIL", "; ".join(failures)) if failures else ("PASS", None)
 
 
+def _run_readiness_cold_calibration(coordinator, resolved, plan, run_root: str, *,
+                                    present, paths, channel_by_role, mark, emit):
+    """readiness cold path §5.1.1 3~7단계 — 같은 B210-open session 안에서 수행한다.
+
+    CFO_SESSION_VERIFIED(RR_CFO_PATHS, RR-P1과 같은 plan) → CALIBRATION_HOST_FIT(attempt 1) →
+    GAIN_SEARCHED_AND_SEALED(ADAPTIVE_SEARCH_AND_SEAL + 공통 gain 재검증, `_run_rf_qualification`과
+    같은 schedule·deadline 1200 s) → CALIBRATION_CANDIDATE_DURABLE(gain artifact/input fsync) →
+    CALIBRATION_TO_SERVICE_QUIESCENT(inhibit 0·fault 0·세 endpoint passed·공통 gain 3/3).
+    qualification evidence(RR-002/003/004)는 만들지 않는다 — candidate는 readiness namespace용이다.
+    반환: ready.json에 실을 calibration summary."""
+    from vdeter.b210_system.hw_operations import probe_vector_sha256, read_monotonic_raw_ns
+
+    def now() -> int:
+        return int(read_monotonic_raw_ns())
+
+    all_path_ids = [p[0] for p in paths]
+    # --- start_cfo (§9.3, RR_CFO_PATHS 3 path × 10 burst, 40 dB, deadline 420 s) ----------
+    base = now() + 20_000_000_000
+    cfo_paths = []
+    for index, (path_id, tx_ep, rx_ep, tx_lane, rx_lane) in enumerate(RR_CFO_PATHS):
+        start = base + index * 75_000_000_000
+        cfo_paths.append({
+            "path_id": path_id, "tx_endpoint_id": tx_ep, "rx_endpoint_id": rx_ep,
+            "tx_lane_index": tx_lane, "rx_lane_index": rx_lane,
+            "scheduled_host_raw_ns": [start + k * 6_800_000_000 for k in range(10)],
+        })
+    cfo_sha = _write_plan(run_root, "cfo_plan.json", {
+        "probe_vector_sha256": probe_vector_sha256(),
+        "probe_tx_gain_db": 40, "probe_rx_gain_db": 40, "paths": cfo_paths,
+    })
+    coordinator.run_barrier(
+        "start_cfo",
+        {m: {"cfo_plan_sha256": cfo_sha,
+             "path_ids": [entry["path_id"] for entry in cfo_paths],
+             "operation_deadline_host_raw_ns": now() + 420_000_000_000} for m in present},
+        members=present, concurrent_commit=True,
+    )
+    print("[coordinator] start_cfo COMPLETED (readiness cold)", flush=True)
+    mark("start_cfo")
+
+    # --- CALIBRATION_HOST_FIT: attempt 1 — readiness host-time PASS로 재사용하지 않는다 ------
+    acquire = coordinator.run_barrier(
+        "acquire_host_time",
+        {m: {"profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1", "acquisition_attempt": 1,
+             "max_acquisition_ns": 600_000_000_000} for m in present},
+        members=present, concurrent_commit=True,
+    )
+    for m in present:
+        fit = acquire[m]["body"]["result"]
+        if fit is None or fit.get("outcome") != "PASS":
+            raise RuntimeError(f"{m} calibration host affine fit FAIL")
+    print("[coordinator] acquire_host_time COMPLETED (calibration fit, attempt 1)", flush=True)
+    mark("calibration_host_time")
+
+    # --- calibrate_rf ADAPTIVE_SEARCH_AND_SEAL + 공통 gain 재검증 (RR-P1 schedule 그대로) ------
+    gain_warmup = 3
+    base = now() + 20_000_000_000
+    gain_deadline_ns = now() + 20 * 60_000_000_000  # gain phase 20분 (§9.2.1/§17A.2)
+    gain_paths, path_start = build_adaptive_gain_paths(
+        paths, base, gain_warmup, gain_deadline_ns, channel_by_role
+    )
+    reval_paths = []
+    reval_start = path_start + 10_000_000_000
+    reval_warmup = 3
+    for path_id, tx_ep, rx_ep, tx_lane, rx_lane in paths:
+        burst_spacing_ns = 240_000_000 if tx_ep == "MASS-B" else 120_000_000
+        reval_paths.append({
+            "path_id": path_id, "tx_endpoint_id": tx_ep, "rx_endpoint_id": rx_ep,
+            "tx_lane_index": tx_lane, "rx_lane_index": rx_lane,
+            "channel": channel_by_role[PATH_CHANNEL_ROLE[path_id]],
+            "warmup_count": reval_warmup,
+            "deadline_host_raw_ns": gain_deadline_ns,
+            "reval_max_no_decode": REVAL_MAX_NO_DECODE,
+            "reval_max_metrics_transient": 2,
+            "scheduled_host_raw_ns": [reval_start + k * burst_spacing_ns
+                                      for k in range(100 + reval_warmup)],
+        })
+        reval_start += 100 * burst_spacing_ns + 75_000_000_000
+    gain_sha = _write_plan(run_root, "gain_plan.json",
+                           {"paths": gain_paths, "revalidation_paths": reval_paths})
+    calibrate = coordinator.run_barrier(
+        "calibrate_rf",
+        {m: {"calibration_mode": "ADAPTIVE_SEARCH_AND_SEAL", "gain_plan_sha256": gain_sha,
+             "source_gain_artifact_sha256": resolved[m].source_gain_artifact_sha256,
+             "operational_config_sha256": None, "path_ids": all_path_ids} for m in present},
+        members=present, concurrent_commit=True,
+    )
+    common_gains = {}
+    lane_candidates = {}
+    passed_all = True
+    for m in present:
+        result = calibrate[m]["body"].get("result") or {}
+        passed_all = passed_all and bool(result.get("passed"))
+        if result.get("endpoint_common_rx_gain_db") is not None:
+            common_gains[m] = int(result["endpoint_common_rx_gain_db"])
+        lane_candidates[m] = result.get("lane_candidates", {})
+    print(f"[coordinator] calibrate_rf(ADAPTIVE_SEARCH_AND_SEAL) COMPLETED "
+          f"common={common_gains} candidates={lane_candidates}", flush=True)
+    mark("calibrate_rf")
+    if not passed_all or len(common_gains) != len(present):
+        raise RuntimeError(f"readiness cold calibration FAIL (passed={passed_all}, "
+                           f"common={common_gains}) — no workload, new run only")
+
+    # --- CALIBRATION_CANDIDATE_DURABLE: artifact/input fsync (schema = RR-P1 gain artifact) --
+    artifact = {
+        "artifact_type": "STAGE7_GAIN_ARTIFACT_V1",
+        "run_id": coordinator._run_id,
+        "endpoint_common_rx_gain_db": common_gains,
+        "lane_candidates": lane_candidates,
+        "gain_plan_sha256": gain_sha,
+        "readiness_calibration_candidate": True,
+    }
+    artifact_bytes = json.dumps(artifact, ensure_ascii=True, sort_keys=True, indent=1).encode()
+    evidence_dir = os.path.join(run_root, "evidence")
+    os.makedirs(evidence_dir, exist_ok=True)
+    artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
+    gain_input = {"endpoint_common_rx_gain_db": common_gains,
+                  "source_gain_artifact_sha256": artifact_sha}
+    input_bytes = json.dumps(gain_input, ensure_ascii=True, sort_keys=True, indent=1).encode()
+    for name, data in (("gain_artifact.json", artifact_bytes),
+                       ("gain_artifact_input.json", input_bytes)):
+        with open(os.path.join(evidence_dir, name), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    input_sha = hashlib.sha256(input_bytes).hexdigest()
+    print(f"[coordinator] readiness calibration candidate sealed sha256={artifact_sha}", flush=True)
+    mark("calibration_sealed")
+
+    # --- CALIBRATION_TO_SERVICE_QUIESCENT: pending 0·inhibit 0·fault 0·ownership 동일 ---------
+    faults = len(list(coordinator.faults()))
+    quiescent = (not coordinator.inhibited and faults == 0
+                 and set(common_gains) == set(present))
+    emit("calibration_quiescence", inhibited=coordinator.inhibited, faults=faults,
+         common=common_gains, quiescent=quiescent)
+    if not quiescent:
+        raise RuntimeError(f"CALIBRATION_TO_SERVICE_QUIESCENT not established "
+                           f"(inhibited={coordinator.inhibited}, faults={faults})")
+    print("[coordinator] calibration -> service QUIESCENT", flush=True)
+    mark("calibration_quiescent")
+    return {
+        "calibration_mode": "ADAPTIVE_SEARCH_AND_SEAL",
+        "artifact_sha256": artifact_sha, "artifact_input_sha256": input_sha,
+        "endpoint_common_rx_gain_db": common_gains, "lane_candidates": lane_candidates,
+        "gain_plan_sha256": gain_sha, "cfo_plan_sha256": cfo_sha,
+        "quiescent": True, "host_time_attempts": 2,
+    }
+
+
 def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                          metadata, configs_dir, gain_artifact_path,
-                         test_plan_sha, processes=None):
+                         test_plan_sha, processes=None, readiness_cold=False):
     """`OPERATIONAL_SERVICE` bounded persistent session (Phase G 최종 모델).
 
     하드웨어 service session을 **한 번** 세우고(B210 acquire·endpoint START·
@@ -1731,8 +1896,13 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
     workload 사이에는 quiescence를 기계로 확인하고, `q`(shutdown 마커) 또는
     fault에서 한 번만 전체 cleanup을 수행한다.
 
-    **실행하지 않는 것**: `_run_rf_qualification`, CFO qualification,
-    adaptive gain 탐색, raw-PHY qualification, RR/RESEARCH_READY 판정.
+    **실행하지 않는 것**: `_run_rf_qualification`, raw-PHY qualification, RR/RESEARCH_READY 판정.
+
+    `readiness_cold=True`(phase `mass-roc-session-cold`, GAIN_CALIBRATION config, gain artifact
+    없음)는 bring-up 앞에 `_run_readiness_cold_calibration`(CFO → calibration host fit → ADAPTIVE
+    seal → candidate durable → quiescent)을 같은 B210-open session에서 수행한 뒤 **새 host fit**
+    (attempt 2)으로 PRE/bridge/POST를 진행한다. cold 전용 guard 3900 s는 READY까지 적용하고,
+    session absolute 7200 s·workload 900 s·close 상한은 그대로다. implicit retry 0.
     """
 
     from vdeter.b210_system.canonical_json import encode_canonical_json
@@ -1744,6 +1914,15 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                        stall_s=SESSION_IDLE_TIMEOUT_S)
     for channel in coordinator._channels.values():
         channel.attach_guard(guard)
+    # cold 전용 lifecycle deadline — stall 판정은 session guard가 맡으므로 여기서는 절대 deadline만
+    # 둔다(stall_s = deadline). channel에 attach하면 모든 barrier 요청/대기가 이 deadline을 검사한다.
+    cold_guard = (PhaseGuard("READINESS_COLD_PREPARATION",
+                             deadline_s=READINESS_COLD_PREPARATION_S,
+                             stall_s=READINESS_COLD_PREPARATION_S)
+                  if readiness_cold else None)
+    if cold_guard is not None:
+        for channel in coordinator._channels.values():
+            channel.attach_guard(cold_guard)
 
     present = list(ENDPOINT_IDS)
     paths = SERVICE_RF_TIME_PATHS
@@ -1811,10 +1990,24 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
         run_p0_prepare_configure_arm(coordinator, resolved, plan, run_root)
         mark("prepare_configure_arm")
 
+        host_time_attempt = 1
+        calibration_summary = None
+        if readiness_cold:
+            def cold_mark(name):
+                cold_guard.check()
+                cold_guard.progress(name)
+                mark(name)
+
+            calibration_summary = _run_readiness_cold_calibration(
+                coordinator, resolved, plan, run_root, present=present, paths=paths,
+                channel_by_role=channel_by_role, mark=cold_mark, emit=emit)
+            # READINESS_HOST_FIT: gain 탐색 뒤 **새** host fit만 readiness PRE/bridge 입력이다.
+            host_time_attempt = 2
+
         acquire = coordinator.run_barrier(
             "acquire_host_time",
             {m: {"profile_id": "STAGE7_PI_HOST_AFFINE_TIME_V1",
-                 "acquisition_attempt": 1,
+                 "acquisition_attempt": host_time_attempt,
                  "max_acquisition_ns": 600_000_000_000} for m in present},
             members=present, concurrent_commit=True,
         )
@@ -1842,7 +2035,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                                {"phase": phase_tag, "paths": entries})
 
         provisional_clock = (
-            f"stage7-pi-host-affine-provisional-v1:{coordinator._run_id}:1")
+            f"stage7-pi-host-affine-provisional-v1:{coordinator._run_id}:{host_time_attempt}")
         rf_sha = rf_time_plan("PRE_CORRECTION")
         pre = coordinator.run_barrier(
             "validate_rf_time",
@@ -2069,9 +2262,22 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             "phase_elapsed_s": dict(marks),
             "rf_time_paths": all_path_ids,
             "health_baseline": baseline_health,
+            # readiness (operational_readiness_and_bringup_spec §5.1.1/§7): CLI가 workload admission
+            # reserve(1600 s)를 같은 monotonic 시계로 계산할 수 있게 절대 deadline을 싣는다.
+            "session_absolute_deadline_monotonic_s": guard._deadline,
+            "readiness_mode": "cold" if readiness_cold else "warm",
+            "host_time_attempts": host_time_attempt,
+            "calibration": calibration_summary,
             "note": ("하드웨어 bring-up은 이 session에서 한 번만 수행됐다. "
                      "이후 workload는 application state만 새로 만든다."),
         })
+        # cold guard는 READY까지다 — 이후 Link 17 probe 잔여 예산은 CLI(run owner)가 강제하고,
+        # channel은 session guard(absolute 7200)로 되돌린다.
+        if cold_guard is not None:
+            cold_guard.check()
+            for channel in coordinator._channels.values():
+                channel.attach_guard(guard)
+            cold_guard = None
         print("[coordinator] SESSION READY — workload 요청 대기", flush=True)
         emit("session_ready", phase_elapsed_s=dict(marks),
              health_baseline=baseline_health, rf_time_paths=all_path_ids)
@@ -2100,6 +2306,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             workload_id = request["workload_id"]
             scenario_id = request["scenario_id"]
             certificate_case = request.get("certificate_case", "normal")
+            workload_kind = request.get("workload_kind", "user")
             # Stage 8 opt-in: workload를 소유한 controller child가 PoC 수명주기를 실행한다
             # (§3.1 supervisor는 workload 소유 프로세스). 요청이 없으면 아무것도 바뀌지 않는다.
             poc_request = request.get("poc")
@@ -2251,6 +2458,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                     "judgement_scope": "OPERATIONAL_SERVICE",
                     "workload_id": workload_id, "scenario_id": scenario_id,
                     "certificate_case": certificate_case,
+                    "workload_kind": workload_kind,
                     "session_run_id": run_id,
                     "child_exit_code": child.returncode,
                     "duration_s": round(time.monotonic() - workload_started, 1),
@@ -2263,7 +2471,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 write_json(os.path.join(results_dir, request_name), record)
                 workloads.append({k: record[k] for k in
                                   ("workload_id", "scenario_id",
-                                   "certificate_case", "status", "duration_s")})
+                                   "certificate_case", "workload_kind", "status", "duration_s")})
                 emit("workload_result", workload=workload_id,
                      scenario_id=scenario_id, status="FAIL",
                      duration_s=record["duration_s"], quiescence=quiescence)
@@ -2339,6 +2547,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
                 "judgement_scope": "OPERATIONAL_SERVICE",
                 "workload_id": workload_id, "scenario_id": scenario_id,
                 "certificate_case": certificate_case,
+                "workload_kind": workload_kind,
                 "session_run_id": run_id,
                 "child_exit_code": child.returncode,
                 "duration_s": round(time.monotonic() - workload_started, 1),
@@ -2357,7 +2566,7 @@ def run_mass_roc_session(coordinator, resolved, plan, run_root: str, *, run_id,
             write_json(os.path.join(results_dir, request_name), record)
             workloads.append({k: record[k] for k in
                               ("workload_id", "scenario_id", "certificate_case",
-                               "status", "duration_s")})
+                               "workload_kind", "status", "duration_s")})
             print(f"[coordinator] workload {workload_id} {record['status']}",
                   flush=True)
             mark(f"workload:{workload_id}")
@@ -3360,7 +3569,10 @@ def main(argv=None) -> int:
                  "rr-p3-soak-17", "rr-p3-soak-19",
                  # Phase G additive: qualification 없이 서비스 구간만 수행한다.
                  # 기존 phase의 command sequence는 이 추가로 바뀌지 않는다.
-                 "mass-roc-service", "mass-roc-session"),
+                 "mass-roc-service", "mass-roc-session",
+                 # readiness cold path: GAIN_CALIBRATION config, gain artifact 없음, 같은 session에서
+                 # CFO/ADAPTIVE seal 뒤 fresh host fit → service (operational_readiness spec §5.1.1).
+                 "mass-roc-session-cold"),
     )
     parser.add_argument("--edge", choices=("MASS-A", "MASS-B"), default=None,
                         help="p1 signed qualification edge")
@@ -3401,6 +3613,12 @@ def main(argv=None) -> int:
             raise SystemExit(
                 "mass-roc-session에는 --gain-artifact가 필요합니다 "
                 "(OPERATIONAL config의 RX gain 결속)")
+    if arguments.phase == "mass-roc-session-cold":
+        # cold path는 gain artifact가 **없어야** 한다 — 이 session이 candidate를 만든다.
+        if arguments.gain_artifact is not None:
+            raise SystemExit(
+                "mass-roc-session-cold는 --gain-artifact를 받지 않습니다 "
+                "(GAIN_CALIBRATION config; calibration candidate는 이 session이 봉인합니다)")
     if arguments.phase == "mass-roc-service":
         # service-only phase는 시나리오 하나를 독립 session으로 돈다.
         # 공유 session(all)은 이 경로에서 허용하지 않는다 (Phase G 계약).
@@ -3416,7 +3634,8 @@ def main(argv=None) -> int:
             )
 
     # v0.9.1 I항: hardware configure/spawn 전에 profile 결속을 검증한다.
-    validate_rr_binding(arguments, _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
+    validate_rr_binding(_binding_gate_arguments(arguments),
+                        _load_run_metadata(arguments.configs_dir, arguments.gain_artifact))
 
     from vdeter.b210_system.coordinator import RuntimeCoordinator
     from vdeter.b210_system.hw_operations import read_monotonic_raw_ns
@@ -3430,7 +3649,7 @@ def main(argv=None) -> int:
     is_rr_service = arguments.phase in (
         "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17", "rr-p3-soak-19",
         # Phase G additive: service-only/session phase도 TEST adapter가 필요하다.
-        "mass-roc-service", "mass-roc-session",
+        "mass-roc-service", "mass-roc-session", "mass-roc-session-cold",
     )
     test_plan_sha = None
     if is_rr_service:
@@ -3518,8 +3737,8 @@ def main(argv=None) -> int:
                 configs_dir=arguments.configs_dir,
                 test_plan_sha=test_plan_sha,
             )
-        elif arguments.phase == "mass-roc-session":
-            # Phase G 최종 모델: bounded persistent session.
+        elif arguments.phase in ("mass-roc-session", "mass-roc-session-cold"):
+            # Phase G 최종 모델: bounded persistent session (cold = readiness calibration 선행).
             phase_result = run_mass_roc_session(
                 coordinator, resolved, plan, arguments.run_root,
                 run_id=arguments.run_id,
@@ -3528,6 +3747,7 @@ def main(argv=None) -> int:
                 gain_artifact_path=arguments.gain_artifact,
                 test_plan_sha=test_plan_sha,
                 processes=processes,
+                readiness_cold=(arguments.phase == "mass-roc-session-cold"),
             )
         elif arguments.phase == "mass-roc-service":
             # Phase G additive 분기 — 기존 RR phase 경로에는 영향이 없다.

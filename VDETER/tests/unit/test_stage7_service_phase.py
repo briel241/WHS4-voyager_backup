@@ -226,10 +226,11 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
         run_rr_p0(Pi powered-USB3-hub profile, 2026-09-10),
         run_rr_p3_fault(Phase I)} + 3-1 진단 게이트로 재고정한
         {_open_session_trace, _spawn_mass_roc_controller} + 3-3 종료 대기
-        구조 변경으로 재고정한 {main, run_mass_roc_service}; 추가 함수는
+        구조 변경으로 재고정한 {main, run_mass_roc_service} + operational
+        readiness(2026-09-17)로 재고정한 {main, run_mass_roc_session}; 추가 함수는
         Phase G helper 2개 + Phase I `_p3_fault_status` + powered-hub
         helper 2개 + 3-1 `_diagnostics_enabled` + 3-3 `_await_launcher_exits`
-        로 한정.
+        + readiness `_run_readiness_cold_calibration` 로 한정.
 
         기대 집합은 fixture 에서 합성하되 **정확 일치**로 판정한다 — 승인
         기록에 없는 함수가 하나라도 바뀌면 실패다."""
@@ -248,9 +249,11 @@ class TC_QUALIFIED_PATH_INVARIANT(unittest.TestCase):
                                    "run_rr_p3_fault"])
         added = sorted(set(self.new) - set(self.old))
         self.assertEqual(added, ["_await_launcher_exits",
+                                 "_binding_gate_arguments",
                                  "_diagnostics_enabled",
                                  "_expected_usb_speed",
                                  "_p3_fault_status",
+                                 "_run_readiness_cold_calibration",
                                  "_service_session_terminal_status",
                                  "_shared_hub_topology_check",
                                  "_terminate_process_bounded"],
