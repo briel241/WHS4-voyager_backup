@@ -38,7 +38,7 @@ VDETER/
 
 | 파일 | 역할 |
 | --- | --- |
-| `coordinator_main.py` | Runtime Coordinator 프로세스. `vdeter run`/`qualify`가 명시적 argv로 spawn |
+| `coordinator_main.py` | Runtime Coordinator 프로세스. `vdeter run`/`qualify`가 명시적 argv로 spawn. phase `mass-roc-session`(warm)·`mass-roc-session-cold`(readiness cold calibration, 2026-09-17)·RR phase |
 | `endpoint_launcher.py` | endpoint(MASS-A/MASS-B/ROC) 프로세스 launcher. coordinator가 spawn |
 | `scenario_controller.py` | TEST-only Scenario Controller 실행기 |
 | `stage0_endpoint.py` | 계층 조립·설정 검증용 빈 endpoint |

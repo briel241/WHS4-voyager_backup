@@ -48,6 +48,13 @@
 | `run_phy_awgn_tests.py` | Link 17·19 AWGN characterization·noise-only 병렬 실행 |
 | `run_resampler_gate_tests.py` | 변환 경계 gate(`TC-PHY-MULTI-011` 입력) |
 
+## 운용 readiness 시간 최적화 판정 (RF-off, 2026-09-17)
+
+| 도구 | 용도 |
+| --- | --- |
+| `readiness_host_time_replay.py` | OPT-01: 저장 runtime evidence의 host-time accepted series를 baseline(`RESTART_SERIES_V1`)·후보(`REJECT_BRACKET_KEEP_SERIES_V1`) 규칙에 replay + synthetic adversarial(wide bracket·역행·regime change) 대조. 출력 JSON 1개, 장치 없음 |
+| `readiness_rf_time_occupancy.py` | OPT-02: C1~C6 RF-time 경로의 정적 점유 matrix와 순차 처리기 충돌 모델로 부분 병렬 활성화 여부를 판정(현재 `DISABLED`). 출력 JSON 1개 |
+
 ## 벡터·manifest 생성
 
 | 도구 | 용도 |

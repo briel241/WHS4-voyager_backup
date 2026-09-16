@@ -17,7 +17,15 @@ cd <repository>
 vdeter qualify --yes          # software 묶음 → RF 사다리 → reference 발급
 vdeter run all
 vdeter results
+vdeter status                 # current_authority / operational_readiness / qualification (장치 미개방)
 ```
+
+- **운용 readiness(2026-09-17, §16)**: `vdeter run`은 qualification과 별도로 설치의 운용
+  가능 상태(`UNVERIFIED / OPERATIONAL_READY / QUALIFIED`)를 세션마다 실증한다. 자격이
+  없거나 stale이면 같은 세션 안에서 cold calibration → readiness 준비 → 내부 Link 17
+  probe → (사용자 workload) → cleanup·재발견 → readiness 승격을 수행한다.
+  `OPERATIONAL_READY`는 qualification이 아니다 — 공식 release·공개 evidence·baseline
+  동결에는 여전히 `vdeter qualify` 전체가 필요하다.
 
 - `setup` 이후 Git 불필요: setup·qualify·run·results는 `git`을 호출하지 않고
   `.git`·`standalone-binding.json`·기준선 Markdown을 읽지 않는다. `.git` 없는
@@ -69,11 +77,19 @@ Windows host, SSH(자기참조 포함), Git(host·대상 모두), baseline Markd
 vdeter qualify     # 단독 RR 재자격 (수 시간, RF 송신). 전체 PASS 시에만
                    # active reference(v2) 원자적 발급. 그 전까지 UNQUALIFIED.
 vdeter run         # 일상 실행 (완전 오프라인). 메뉴 또는 비대화형 인자.
+                   # 한 프로세스 안에서 static preflight → B210 open → host/RF-time →
+                   # admission → 내부 Link 17 probe → READY_FOR_WORKLOAD → workload →
+                   # STOP/cleanup/재발견 → readiness 승격(§16). bring-up 재시도 0회.
+vdeter status      # 권위 투영(current_authority 등)만 출력. 장치 미개방·송신 없음.
 vdeter results     # 최근 run 목록·요약 재열람.
 ```
 
-새 기계·의존성 버전 변경·`--new-identity` 재생성 환경은 UNQUALIFIED로
-시작하며, `vdeter run`은 이를 RF 접근 전에 거부한다 (결정 7·10·11·13).
+새 기계·의존성 버전 변경·`--new-identity` 재생성 환경은 `UNVERIFIED`로 시작한다.
+`vdeter run`은 이 상태에서 일반 scenario/PoC RF를 **곧바로** 허용하지 않고, 같은
+세션의 유계 readiness 준비(cold calibration 포함, §16.3)가 PASS한 뒤에만 workload를
+받는다. `diag`·`--rf-off-software`·critical-check 경로(legacy gate,
+`readiness_enabled=False`)는 예전처럼 UNQUALIFIED를 exit 4로 거부한다
+(결정 7·10·11·13은 qualification 권위에 대해 그대로다).
 
 ## 2. 상태 배치
 
@@ -92,6 +108,12 @@ vdeter results     # 최근 run 목록·요약 재열람.
                        # 포인터의 reference_sha256 결속으로만 한다.
                        # 이전 release가 곧 불변 이력이다.
   installation/        # setup 실측 manifest 4종 (installation/rf/operation/tooling)
+                       #   + marker readiness_state_required=true / readiness_state_schema_version=1
+  readiness/           # 운용 readiness (§16) — qualification namespace와 분리
+    state.json         #   단일 writer(generation 단조)·lock-free reader 상태 파일
+    releases/<id>/     #   불변 readiness record + .sha256 sidecar + evidence-index
+    inhibits/<id>/     #   불변 inhibit record (readiness 실패 사유 코드)
+    candidate/         #   run 진행 중 scratch (승격 전)
   diagnostic/          # vdeter diag authorization·ledger (§7A)
   runs/<run-id>/       # run별 evidence (resolved-configs/, session/, logs/, ...)
   lock                 # 단일 인스턴스 flock 대상 (내용은 진단 정보만)
@@ -466,6 +488,14 @@ RF 거부):
 **기록만 하고 차단하지 않는 값** (결정 12·13): USB 포트 경로, 위 4종 외의
 패키지 버전. 환경 manifest **정확 일치**는 qualify·audit 전용.
 
+**readiness 실행 게이트(2026-09-17, §16.2)** — 일반 `run`은 위 대조에 앞서 설치
+closure를 세 층으로 검증한다: (1) record 무결성(installation manifest 4종 canonical
+digest·sidecar), (2) readiness-bound closure(rf·operation 영역 전 파일 + tooling
+allowlist 8종 재측정; 하나라도 다르면 현재 투영 `UNVERIFIED`), (3) inventory-only
+(나머지 tooling·non_binding은 기록만). 통과한 closure sha256이 readiness binding의
+`installation` 그룹이다. qualification의 `active.json`·reference 대조 규칙은 변경하지
+않았다 — readiness는 qualification namespace를 읽기만 하고 쓰지 않는다.
+
 ## 9. Preflight (결정 12·13)
 
 - platform_profile=`pi`: `vcgencmd get_throttled == throttled=0x0` 필수 +
@@ -501,12 +531,12 @@ coordinator cleanup의 순서 계약 (기존 구현 그대로, 로컬 계층은 
   간주하지 않는다** — 실패로 정직 보고하고 잔존 검사 결과를 함께 출력.
 - 오류 종료도 동일 close 경로. 어떤 경로든 그 시점까지의 evidence 보존.
 
-bring-up 자동 재시도 (결정 16): host-time 획득의 일시적 실패로 **명확히
-분류된** 첫 시도 fail-closed에 한해, cleanup PASS + 잔존 프로세스 0 + B210
-3대 재발견을 모두 확인한 뒤 새 run-id로 세션 전체를 최대 1회 재시도.
-설정 오류·장비 불일치·키 오류·UNQUALIFIED·cleanup 실패는 재시도 없이 즉시
-종료. 두 시도의 evidence 모두 보존. 성공률은 보장값이 아니며 Phase I
-반복시험으로 평가한다.
+bring-up 자동 재시도 (결정 16)는 **2026-09-17 readiness 경로에서 0회로 고정**됐다
+(`--no-retry`는 호환용 no-op, 도움말에 명시). 첫 시도가 fail-closed면 그 사유를
+classifier(§16.4)가 분류해 inhibit record 또는 "no issuance"로 기록하고 종료한다 —
+같은 세션에서 RF를 다시 열지 않는다. 호출자가 원인·변경·기대 판별을 기록한 뒤
+새 `run`으로 재시도한다. legacy/diag 경로의 재시도 코드는 남아 있으나 readiness
+경로에서는 호출되지 않는다.
 
 ## 11. CLI 출력 규격 (결정 21)
 
@@ -517,8 +547,13 @@ bring-up 자동 재시도 (결정 16): host-time 획득의 일시적 실패로 *
   received/verdict) 단위. controller에 이벤트 추가 없음.
 - 타임스탬프: bring-up 줄 = 세션 시작 기준 `[MM:SS]`, 시나리오 줄 = 해당
   workload 시작 기준(각 0:00부터). 절대시각은 evidence trace에 이미 존재.
-- 비대화형 실행 마지막 줄: `RESULT overall=<PASS|FAIL> scenarios=<n>/<m>
-  run-id=<id> evidence=<path>`. `--json` 시 요약 JSON 출력.
+- 비대화형 실행 마지막 줄: `RESULT overall=<PASS|FAIL|NO_USER_WORKLOAD>
+  scenarios=<n>/<m> run-id=<id> evidence=<path> authority=<…> readiness=<…>
+  qualification=<…>` (2026-09-17: 접미 3필드 추가; `NO_USER_WORKLOAD`는 명시적
+  `quit`로 workload 0건 종료 — readiness 승격 가능, application 판정 없음).
+  `--json` 시 요약 JSON 출력(`termination`·`readiness`·`readiness_probe` 포함).
+  시작 시 `current_authority=… operational_readiness=… qualification=…` 한 줄과
+  cold 경로 여부(`[readiness] …`)를 먼저 출력한다.
 - 색상: TTY에서만 PASS/FAIL 강조, 비-TTY 자동 무색. spinner·progress bar 금지.
 - 오류 3요소 고정 형식: what was rejected & why / impact / what to do.
 
@@ -643,3 +678,93 @@ provisioning 불가. legacy profile에서 MASS-B 5000M 또는 DC asset 누락은
 test_stage7_configuration.py::TC_STAGE7_HOST_PROFILE_PI_POWERED_HUB`,
 `tests/fixtures/stage7_phase_i_function_bindings.json`(run_rr_p0 재고정; CPython
 3.12.3/3.12.13 해시 동일 확인).
+
+## 16. 운용 readiness (2026-09-17, `docs/core/operational_readiness_and_bringup_spec.md`)
+
+명세 SHA-256 `654377ffda189156fd00929d5f6c115576884cf41d8393ee6e0f53161a0dac79`(FINAL SPEC).
+구현 모듈: `readiness.py`(상태 저장소·record·권위 투영), `readiness_closure.py`(설치 closure),
+`readiness_classifier.py`(실패 분류), `readiness_probe.py`(내부 Link 17 probe),
+`readiness_run.py`(binding·calibration 출처·계획·admission·판정), `status_cmd.py`(`vdeter status`),
+`run_cmd.py`(경로 통합). coordinator 쪽은 `VDETER/apps/coordinator_main.py`의 phase
+`mass-roc-session-cold`(§16.3)와 `ready.json` 확장뿐이다.
+
+### 16.1 상태와 권위 투영
+
+- 상태 세 단계 `UNVERIFIED / OPERATIONAL_READY / QUALIFIED`. 투영 규칙: qualification
+  reference가 현재 결속에 적용 가능하면 `QUALIFIED`; 아니면 active readiness record가
+  적용 가능하면 `OPERATIONAL_READY`; 둘 다 아니면 `UNVERIFIED`. `OPERATIONAL_READY`는
+  qualification 명칭·판정·evidence를 사칭하지 않으며 자동으로 `QUALIFIED`가 되지 않는다.
+- `operational_readiness` 세부 상태: `APPLICABLE / STALE / INHIBITED / ABSENT /
+  MIGRATION_REQUIRED`(+ 읽기 실패 `STATE_UNREADABLE`, 손상 `STATE_CORRUPT`는 fail-closed).
+  `var/readiness/state.json`은 generation 단조 증가 단일 writer(`var/lock` 아래)만 쓰고,
+  reader는 lock 없이 3×50 ms 재시도로 읽는다. `promotion_history`/`inhibit_history`는
+  append-only이며 orphan(state에 없는 release 디렉터리)은 승격하지 않고 `INHIBITED`로 닫는다.
+- installation manifest marker(`readiness_state_required=true`,
+  `readiness_state_schema_version=1`)가 없는 설치는 `MIGRATION_REQUIRED`다. `vdeter setup`이
+  marker와 초기 state(generation 1, active/inhibit 없음)를 RF 없이 만든다(기존 manifest는
+  marker만 추가 — digest 불변).
+- readiness binding 그룹: `rf`(resolved RF config canonical digest)·`hardware`(B210 serial·
+  역할·speed_class·USB topology·host profile)·`platform`(machine-id·kernel·라이브러리
+  critical subset)·`installation`(§16.2 closure)·`calibration`(gain artifact SHA, 마지막에
+  비교). 하나라도 다르면 `STALE`이며 과거 record는 이력으로 보존한다.
+
+### 16.2 설치 closure (실행 게이트)
+
+§8의 세 층 검증. tooling allowlist는 `qualify_cmd`·`qualification_domains`·`setup_cmd`·
+`installation_manifest`·`provenance`·`run_profile`·`requirements-standalone.lock`·`bin/vdeter`
+8종이다. closure 결과는 run evidence `readiness/closure-report.json`에 남는다.
+
+### 16.3 warm / cold 경로 (한 `vdeter run` 프로세스)
+
+| 구간 | warm(`mass-roc-session`) | cold(`mass-roc-session-cold`) |
+| --- | --- | --- |
+| calibration 출처 | qualification reference · stale-qualification의 calibration · readiness release 중 결속 일치하는 것 | 없음 → RR-P1과 같은 `start_cfo` + `ADAPTIVE_SEARCH_AND_SEAL`(bursts {120: 501, 240: 313}) + 공통 gain 재검증을 **같은 B210 open 세션**에서 수행 |
+| host-time | fit 1회 | fit #1(교정 전) + fit #2(교정 뒤, fresh) |
+| bring-up 상한 | 2700 s (`WARM_BRINGUP_TIMEOUT_S`) | 3900 s (`READINESS_COLD_PREPARATION_S`; coordinator cold guard도 3900) |
+| 이후 | PRE → bridge → POST → admission → 내부 Link 17 probe → `READY_FOR_WORKLOAD` | 동일 |
+
+공통 상수: session 절대 마감 7200 s(`ready.json`의
+`session_absolute_deadline_monotonic_s`), workload 900 s, close 600 s, child term/kill 30/10 s,
+안전 여유 60 s, **workload admission reserve 1600 s**(= 900+600+30+10+60; READY 시점과 각
+workload 직전, `run all` 포함, 잔여 시간이 이보다 작으면 workload를 받지 않고 정상 종료).
+내부 probe `READINESS-LINK17-PROBE`는 SC-VDE-005 evidence에서 고정한 벡터 2건(sha 결속,
+전송당 240 s, payload ≤ 65531 B)이며 `workload_kind=readiness_probe`로 사용자 workload와
+구분해 기록한다. 종료 분류: `explicit_quit`(workload 0건이면 `NO_USER_WORKLOAD`) ·
+`plan_complete` · `admission_reserve` = 정상; `user_cancelled`(Ctrl+C/SIGTERM) · `input_lost`
+(EOF) · `session_error` · `probe_failed` · `bringup_failed`는 readiness를 **발급하지 않는다**.
+
+### 16.4 판정·classifier·발급
+
+- readiness 승격 조건: 준비 PASS ∧ probe PASS ∧ 종료 정상 ∧ close cleanup PASS ∧ 잔존
+  프로세스 0 ∧ USB fd 0 ∧ B210 3대 재발견. application 판정(scenario FAIL)은 readiness와
+  분리한다: `VDETER_READINESS_FAILURE_CLASSIFIER_V1`은 구조화 코드만 보며
+  allowlist(`SCENARIO_ASSERTION_FAILED`, `EXPECTED_APPLICATION_OUTCOME_NOT_OBSERVED`)는
+  application-only, 그 외 transport/timing/closure 계열 prefix는 inhibit 사유다.
+- 승격은 `var/readiness/candidate/` → releases 이동(fsync) → state generation+1 원자 교체
+  순서다. 실패는 inhibit record(`operational-inhibit.json`)로 남기고 active를 `INHIBITED`로
+  닫는다. run evidence에는 `plans/readiness-plan.json`·`readiness/closure-report.json`·
+  `readiness/preparation.json`·probe 결과·evidence-index(SHA)가 남는다.
+- `vdeter status`는 위 투영과 사유 코드·조치, readiness 이력, orphan, qualification
+  reference 적용 여부를 출력한다(장치 미개방, 송신 없음, `--json`).
+
+### 16.5 시간 최적화 결정 (OPT-01 / OPT-02)
+
+- **OPT-01 host-time bracket 선택**: 후보 규칙 `REJECT_BRACKET_KEEP_SERIES_V1`(wide bracket만
+  reject, 시리즈 유지)은 `hw_operations.HostTimeSelectionShadow`로 **shadow 평가만** 하고
+  production은 baseline `RESTART_SERIES_V1` 그대로다(fit gate 상수 불변). 저장 evidence
+  replay 143/143 동일·regime-change false accept 0 (`VDETER/tools/readiness_host_time_replay.py`).
+  활성화는 별도 승인 항목이며 상태는 `PROPOSED/DISABLED`.
+- **OPT-02 RF-time 부분 병렬**: 정적 점유 matrix(`VDETER/tools/readiness_rf_time_occupancy.py`)
+  에서 명세 후보 그룹이 전부 같은 device의 동시 TX 또는 동시 RX를 요구해 적격 그룹이
+  없다 → `DISABLED`, 순차 처리 유지.
+
+### 16.6 변경하지 않은 것 · qualification 호환
+
+RF/PHY/MAC/TDMA·timing threshold·scenario 판정·warm phase 명령 순서·`mark()` 구조·
+cleanup 합격 기준·launcher 종료 대기·`vdeter qualify` 사다리/plan/schema·reference builder
+RF-off 계약·domain 분류·`active.json`은 변경하지 않았다. readiness는 qualification
+namespace를 쓰지 않고, qualification은 readiness inhibit를 우회하지 않는다.
+결속 fixture는 `tests/fixtures/stage7_phase_i_function_bindings.json`(main·
+run_mass_roc_session 재핀, 변경 기록 포함)과 `stage7_operational_readiness_function_bindings.json`
+(새 helper)이다. 이 기능의 첫 상태는 **OPERATIONAL_FREEZE / OPERATIONALLY_VALIDATED /
+NOT_QUALIFIED**이며 full qualification은 별도 일정이다.
