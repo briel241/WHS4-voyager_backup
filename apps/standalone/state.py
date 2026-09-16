@@ -83,12 +83,24 @@ class StatePaths:
         self.diagnostic_dir = self.var_dir / "diagnostic"
         self.diagnostic_authorization = self.diagnostic_dir / "authorization.json"
         self.diagnostic_ledger = self.diagnostic_dir / "ledger.json"
+        #: operational readiness namespace (operational_readiness_and_bringup_spec §9) —
+        #: qualification 디렉터리와 완전히 분리된다. `state.json` 하나가 유일한 mutable
+        #: control pointer(active + inhibit)이며 candidate/releases/inhibits는 불변 기록이다.
+        #: `state.json` 자체는 setup/migration이 원자 생성한다 (`ensure_var()`는 만들지 않는다 —
+        #: 부재는 MIGRATION_REQUIRED 또는 STATE_UNREADABLE의 의미를 가진다).
+        self.readiness_dir = self.var_dir / "readiness"
+        self.readiness_candidate = self.readiness_dir / "candidate"
+        self.readiness_releases = self.readiness_dir / "releases"
+        self.readiness_inhibits = self.readiness_dir / "inhibits"
+        self.readiness_state = self.readiness_dir / "state.json"
 
     def ensure_var(self) -> None:
         """`var/` 계열 영속 디렉터리를 보장한다 (identity는 setup 소관)."""
         for directory in (
             self.var_dir, self.runs_dir, self.qualification_dir,
             self.qualification_releases, self.qualification_candidate,
+            self.readiness_dir, self.readiness_candidate,
+            self.readiness_releases, self.readiness_inhibits,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

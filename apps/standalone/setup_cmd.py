@@ -37,6 +37,7 @@ from pathlib import Path
 
 from apps.standalone import hardware_draft, hardware_profiles
 from apps.standalone import identity, installation_manifest, local_config
+from apps.standalone import readiness
 from apps.standalone.state import StatePaths, write_json_atomic
 
 #: apt 의존성 (결정 10 — 대상 Ubuntu 패키지명). python3-venv는 깨끗한
@@ -394,18 +395,30 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
         except installation_manifest.InstallationError:
             previous = None
     record = installation_manifest.measure(paths.root)
+    # readiness migration marker (operational_readiness_and_bringup_spec §9): readiness-enabled
+    # 설치는 manifest에 marker를 갖고, 그 marker가 있는 설치는 state.json 부재를 fail-closed로
+    # 본다. marker는 파일 map·digest에 들어가지 않으므로 기존 자격 결속을 바꾸지 않는다.
+    record.update(readiness.MANIFEST_MARKER)
     previous_digests = (installation_manifest.digests_of(previous)
                         if previous is not None else None)
     current_digests = installation_manifest.digests_of(record)
     digests_unchanged = previous_digests == current_digests
     files_unchanged = (previous is not None
                        and previous.get("files") == record["files"])
+    marker_migrated = False
     if previous is not None and files_unchanged:
         written = {**current_digests, "file_count": previous["file_count"],
                    "domain_file_count": {
                        d: previous["domains"][d]["file_count"]
                        for d in installation_manifest.domains.BOUND_DOMAINS}}
         reused = True
+        if not readiness.manifest_has_marker(previous):
+            # 기존 설치의 RF-free migration: 파일 map은 그대로(digest 불변) 두고 marker만 더해
+            # 다시 쓴다 — 자격 무효화 없음, 파일 SHA 변경 없음.
+            migrated = dict(previous)
+            migrated.update(readiness.MANIFEST_MARKER)
+            installation_manifest.write_installation(paths, migrated)
+            marker_migrated = True
     else:
         written = installation_manifest.write_installation(paths, record)
         reused = False
@@ -425,6 +438,21 @@ def run_setup(paths: StatePaths, *, runner=subprocess.run,
         "reused": reused,
         "changed_domains": changed_domains,
         "qualification_invalidated": had_previous and not digests_unchanged,
+        "readiness_marker_migrated": marker_migrated,
+    }
+
+    # readiness state bootstrap (RF-free): 최초 유효 state(generation=1, active=null,
+    # inhibit=null)를 원자 생성·fsync·재독해 검증한다. 이미 있으면 검증만 하고 덮어쓰지 않는다.
+    # setup은 readiness/qualification을 발급하지 않는다 — 이 state만이 정상 ABSENT의 근거다.
+    step("readiness state (RF-free migration)")
+    state_result = readiness.ensure_initial_state(paths, now=now)
+    report["steps"]["readiness_state"] = {
+        "path": str(paths.readiness_state),
+        "created": state_result["created"],
+        "generation": state_result["state"]["generation"],
+        "active": state_result["state"]["active"],
+        "inhibit": state_result["state"]["inhibit"],
+        "manifest_marker": dict(readiness.MANIFEST_MARKER),
     }
 
     step("environment record")
