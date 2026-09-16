@@ -1,93 +1,58 @@
-# VDETER Standalone (Phase I) — 설계 명세
+# VDETER Standalone — 실행 계층 설계·계약
 
-문서 지위: Phase I W1 산출물. 2026-09-03~04 설계 협의(결정 22건)와 구현 승인
-조건 4건을 코드 계약 수준으로 명문화한다. 이 문서가 W2~W6 구현의 기준이며,
-기존 코드·evidence 계약과 어긋나는 서술이 발견되면 코드 계약이 우선한다.
-
-대상 독자: 이 저장소를 처음 받은 운용자(§1~§2, §10~§11)와 구현·감사자(전체).
+`apps/standalone/`(`vdeter` CLI)의 동작 계약을 적는다. 코드 계약과 어긋나는 서술이
+있으면 코드가 우선한다. 운용자는 §0~§2·§10~§11, 구현·감사자는 전체를 본다.
+Stage 8 PoC 실행(`--poc`)·capability 증언은 각각 `poc_run.py`·`capability_issue_cmd.py`
+docstring과 `docs/` 명세가 권위다.
 
 ---
 
-## 0. Quick Start (clone-bootstrap v2, 2026-09-05)
+## 0. Quick Start
 
 ```
 git clone <repository>
 cd <repository>
-./bin/vdeter setup
-# hardware.toml 편집·approved=true
-vdeter qualify --yes
+./bin/vdeter setup            # 기계당 1회, 멱등
+# hardware.toml 편집 · wiring.approved = true
+vdeter qualify --yes          # software 묶음 → RF 사다리 → reference 발급
 vdeter run all
 vdeter results
 ```
 
-- `setup` 이후 Git 불필요: 대상 기계의 setup·qualify·run·results는 `git`
-  명령을 호출하지 않고 `.git`·`standalone-binding.json`도 읽지 않는다 — Git
-  정보는 관측 자체를 하지 않으며 reference·git_state의 git 필드는 항상 null
-  이다. 기준선 Markdown도 읽지 않는다. `.git` 없는 **tar/USB 복사본**도
-  동일하게 동작한다.
-- 일반 실행은 오프라인. 새 환경은 qualification 1회. 현재 Pi의 기존
-  qualification(v1 reference)은 **기존 설치본을 건드리지 않았기 때문에**
-  보존된다. 그 설치 root를 이 main으로 갱신하면 v1 reference로는 v2 실행이
-  거부되므로 `vdeter qualify`(전체 RF 사다리)를 다시 통과해야 한다.
-- amd64 지원 코드는 구현됐지만 실제 amd64 시험은 유보. 자격은 외부 공인
-  인증이 아닌 RESEARCH_READY 내부 자격.
-- `bin/vdeter`(저장소 launcher)는 venv가 없으면 `setup`만 시스템 python3로
-  허용하고, 있으면 `var/venv/bin/python3`로 CLI를 exec한다. setup이
-  `~/.local/bin/vdeter` 사용자 launcher를 설치한다(타 프로그램 덮어쓰기 없음,
-  멱등 갱신, 저장소 이동 시 stale 오류). 최상위 `vdeter` 파일이 아닌 이유는
-  `VDETER/` 디렉터리와 대소문자 무시 파일시스템 충돌 때문이다.
+- `setup` 이후 Git 불필요: setup·qualify·run·results는 `git`을 호출하지 않고
+  `.git`·`standalone-binding.json`·기준선 Markdown을 읽지 않는다. `.git` 없는
+  tar/USB 복사본도 동일하게 동작한다. 일반 실행은 오프라인이다.
+- `bin/vdeter`는 venv가 없으면 `setup`만 시스템 python3로 허용하고, 있으면
+  `var/venv/bin/python3`로 CLI를 exec한다. setup이 `~/.local/bin/vdeter` 사용자
+  launcher를 설치한다(멱등, 다른 프로그램 덮어쓰기 없음). 최상위 `vdeter` 파일이
+  아닌 이유는 `VDETER/` 디렉터리와 대소문자 무시 파일시스템 충돌 때문이다.
+- 자격은 외부 공인 인증이 아닌 RESEARCH_READY 내부 자격. amd64 지원 코드는
+  구현됐지만 실제 amd64 시험은 유보.
 
-**v2 결속 요약** — Git 기반 `standalone-binding.json`은 필수 입력에서 제거됐다.
-`./bin/vdeter setup`이 설치 파일을 실측해 `var/installation/`에 네 manifest
+**결속 요약(v2)** — `setup`이 설치 파일을 실측해 `var/installation/`에 네 manifest
 (`installation-manifest.json`, `rf-manifest.json`, `operation-manifest.json`,
-`tooling-manifest.json`; canonical JSON, 파일별 SHA-256, 영역별 SHA-256,
-atomic write, `var/` 제외)를 만든다. 영역 분류(`qualification_domains.py`):
-rf(PHY/MAC/Link/Radio·coordinator·launcher·pi_runtime·RF config·RF phase
-인자/run mode·RF config 생성 코드) / operation(run_cmd·local_session·
-local_config·local_preflight·identity·MASS/ROC application·scenario controller
-·Service API 결속) / tooling(setup·qualify 비RF·verification bundle·final
-builder·reference 발급/검증·분류기·qualification 시험 코드) / 비결속(Markdown·
-보고서·이미지). 미분류 실행 파일은 operation, 교차영향 파일은 여러 영역에
-중복 결속. reference **v2**는 installation/rf/operation/tooling SHA·파일별
-SHA map·환경/라이브러리 버전·B210 serial과 역할·USB speed_class·배선 승인·
-gain artifact·identity fingerprint·resolved config SHA·TC 결과·evidence SHA·
-qualification method·limitations를 결속한다. `provenance`에는 기준선 pin만
-있고 `git`은 항상 null이다(실행 환경에서 Git 정보를 관측하지 않음). v1
-reference는 과거 evidence 조회용으로 계속 읽힌다. coordinator 계약
-(`git_state.json`)은 무수정이며 git 필드는 항상 null, `installation-state.json`
-(v2)을 additive로 함께 쓴다.
-`baseline_sha256` 인자는 커밋 상수 pin(`provenance.STAGE7_BASELINE_PIN`)이다.
+`tooling-manifest.json`; canonical JSON, 파일별 SHA-256, 영역별 SHA-256, atomic
+write, `var/` 제외)를 만든다. 영역 분류는 `qualification_domains.py` 한곳이다:
+**rf**(`VDETER/src/vdeter/**`·coordinator·launcher·RF config·RF phase 인자/run
+mode 생성 코드) / **operation**(run_cmd·local_session·local_config·local_preflight·
+identity·MASS/ROC 응용·scenario controller) / **tooling**(setup·qualify 비RF·
+verification bundle·final builder·reference 발급/검증·자격 시험 코드) /
+**non_binding**(Markdown·보고서·이미지). 미분류 실행 파일은 operation, 교차영향
+파일은 여러 영역에 중복 결속. reference **v2**는 installation/rf/operation/tooling
+digest·파일별 SHA map·라이브러리 버전·B210 serial과 역할·USB speed_class·배선
+승인·gain artifact·identity fingerprint·resolved config SHA·TC 결과·evidence SHA·
+qualification method·limitations를 결속한다. `provenance.git`은 항상 null이다.
+`baseline_sha256`는 커밋 상수 pin(`provenance.STAGE7_BASELINE_PIN`)이다.
 
-**검증 범위 (2026-09-05 clean checkout 실측)** — ignored 산출물이 없는 새
-checkout에서 root 시험(standalone·MASS/ROC·host/v1 계약) 260 passed·2 skipped
-(POSIX 전용), integration `-k stage7` 10 passed. 반면 `VDETER/tests` unit+
-contract는 13건이 실패하는데, 이는 standalone 기능이 아니라 과거 evidence
-(`VDETER/results/runs/…`)·`VDETER/legacy`·docs/core 같은 저장소 외부 자료를
-요구하는 governance 시험이다(standalone bundle은 그중 6 node-id를 명시
-deselect). 따라서 **"전체 저장소의 모든 시험이 clean clone에서 통과한다"고는
-말할 수 없다**. standalone 동결의 blocker는 아니며, VDETER 시험 인프라 정리
-(fixture화 또는 governance 표시)를 후속 항목으로 남긴다.
-
-**진행 표시(presentation)** — `progress.py`(표준 라이브러리). setup·qualify·
-run bring-up: TTY 20칸 유니코드 바(불가 시 ASCII), 같은 줄 갱신, 단계 전환
-시 확정; non-TTY/nohup/redirect: CR·ANSI 없는 UTC 줄 로그, 상태 변화·30초
-heartbeat. **각 줄(단계)의 퍼센트는 그 단계 자체의 진행률**(0→100%, 단계 안에서만
-단조)이고, 사다리·bring-up 전체 진행률은 `overall=NN%` 필드다. 세 의미: exact
-(실제 분모, `estimated` 없음)/estimated(가중치, 퍼센트 뒤 `estimated`)/waiting
-(host-time 등 완료 불명, 퍼센트 정지). `--no-progress`.
-READY 이후 시나리오 구간은 **저 I/O 경로**(2026-09-06 R1 선택 롤백, 88fa6df와
-동일): `running SC-…` 한 줄, workload trace 행(세션의 trace tail, on_trace)과
-종료 시 `result: PASS/FAIL · 소요 · quiescence` 요약만 터미널에 낸다.
-service_events 폴링·실시간 [TX]/[RX]/[STEP] 세로 블록·transfer별 강제 trace
-flush·presentation 파일 갱신은 **실행 경로에 없다**(mirror는 READY에서 끊는다).
-상세 분석은 종료 후 evidence(`workloads/<id>/`, `evidence/service_events/`)와
-`vdeter results`로 한다. bring-up 단계 줄은 영어(coordinator의 `연결됨`은
-표시에서 `connected`).
-CLI 출력·오류 메시지·setup이 쓰는 hardware.toml 초안 주석은 모두 영어다(2026-09-05
-사용자 결정; 소스 주석·docstring·이 README는 한국어 유지). coordinator·launcher가
-직접 내는 콘솔 원문(예: `config 적재 실패`)은 RF 계층 무수정 원칙에 따라 그대로다.
-파생값은 `derived=true`. 같은 정보를 `var/runs/<id>/presentation/`·
-`var/progress/*.log`에 보존한다. 판정·threshold·deadline·retry는 불변.
+**진행 표시** — `progress.py`(표준 라이브러리). TTY: 20칸 바를 같은 줄에서 갱신,
+단계 전환 시 확정. non-TTY/nohup/redirect: CR·ANSI 없는 UTC 줄 로그, 상태 변화·30초
+heartbeat. 각 줄의 퍼센트는 그 단계 자체의 진행률, 전체는 `overall=NN%`. 의미 세 가지:
+exact / estimated(퍼센트 뒤 `estimated`) / waiting(퍼센트 정지). `--no-progress`로
+줄 단위 상태만 출력. READY 이후 시나리오 구간은 저 I/O 경로 — `running SC-…` 한 줄,
+workload trace 행, 종료 시 `result: PASS/FAIL · 소요 · quiescence` 요약만 낸다.
+상세는 종료 후 evidence(`workloads/<id>/`, `evidence/service_events/`)와
+`vdeter results`. CLI 출력·오류 메시지·hardware.toml 초안 주석은 영어, 소스 주석·
+이 README는 한국어. coordinator·launcher가 직접 내는 콘솔 원문은 그대로다.
 
 ## 1. 개요와 명령 생애주기
 
@@ -126,6 +91,8 @@ vdeter results     # 최근 run 목록·요약 재열람.
                        # 어느 순간에도 "active 없음" 창이 없다. 적재는
                        # 포인터의 reference_sha256 결속으로만 한다.
                        # 이전 release가 곧 불변 이력이다.
+  installation/        # setup 실측 manifest 4종 (installation/rf/operation/tooling)
+  diagnostic/          # vdeter diag authorization·ledger (§7A)
   runs/<run-id>/       # run별 evidence (resolved-configs/, session/, logs/, ...)
   lock                 # 단일 인스턴스 flock 대상 (내용은 진단 정보만)
 <root>/identity/
@@ -224,45 +191,22 @@ approved = true                    # "현재 배선이 선언대로"를 사용�
 
 ## 5. standalone-binding (legacy — v2에서 필수 입력 아님)
 
-> **v2 (2026-09-05)**: 대상 기계 실행 경로는 이 파일을 더 이상 요구하지 않는다.
-> 결속은 §0의 installation manifest(`var/installation/`)로 대체됐다. 이 절은
-> 개발 PC 패키징 도구(`deploy_standalone_to_pi.py`)와 과거 evidence 이해를
-> 위한 이력이다. 파일이 남아 있어도 참고 provenance로만 기록되고 설치 스캔에서
-> 제외된다.
+`VDETER/configs/b210_system/standalone-binding.json`. 대상 기계의 setup·qualify·run은
+이 파일을 **읽지 않는다** — 결속은 §0의 installation manifest로 대체됐다. 파일이 남아
+있어도 참고 provenance로만 기록되고 설치 스캔에서 제외되며, Git에 커밋하지 않는다
+(커밋하면 HEAD가 바뀌어 `source_head`와 어긋난다).
 
-일반 실행·qualify가 host Git·Markdown을 읽지 않기 위한 **결속 상수 파일**.
-경로: `VDETER/configs/b210_system/standalone-binding.json`.
+생성 주체는 개발 PC 패키징 도구 `VDETER/tools/make_standalone_binding.py`(git 필요,
+dirty 트리 거부)다. 내용: `artifact_type=STAGE7_STANDALONE_BINDING_V1`, `source_head`
+(배포물이 잘린 commit), `source_worktree_dirty=false`, `baseline_version`/`baseline_sha256`
+(기준선 Markdown 실측), `frozen_files`(`stage7_frozen_hash_audit.FROZEN_FILES` 14개의
+정규화(LF) 내용 SHA-256).
 
-**생성 주체는 개발 환경 전용 패키징 도구 `VDETER/tools/
-make_standalone_binding.py` (신규 파일 계획에 포함, git 필요)** 이며 대상
-기계에서는 읽기 전용이다. **대상 기계의 setup은 Git을 읽지 않는다.**
-정적 커밋이 아니라 배포물 생성 시점 산출인 이유: `source_head`는 배포물이
-잘린 commit이라 커밋 후 고정될 수 없다.
-
-```jsonc
-{
-  "artifact_type": "STAGE7_STANDALONE_BINDING_V1",
-  "generated_utc": "...",
-  "source_head": "<40-hex git head — 배포물 원본 commit>",
-  "source_worktree_dirty": false,        // dirty 트리에서 패키징 금지
-  "baseline_version": "0.9.23",
-  "baseline_sha256": "2a87c1d0f7bee78c13def8b153745ecbe42ac7dcf701d69abffc9141bc9cc026",
-  "frozen_files": { "src/vdeter/config/models.py": "<정규화(LF) sha256>", ... }
-                                         // stage7_frozen_hash_audit.FROZEN_FILES 14개
-}
-```
-
-- `baseline_sha256`는 자격이 승계할 **이력 metadata**다. 일반 실행·qualify는
-  Markdown을 다시 읽거나 SHA를 재계산하지 않는다. 문서 실물 대조는 문서가
-  존재하는 host 감사 환경(audit)에서만 수행한다 (결정 8·20-2).
-- **배포 패키지**(V2 b안): `VDETER/tools/deploy_standalone_to_pi.py`가 지정
-  commit의 추적 파일(`git archive` 원본) + 생성된 binding + 자기 기술
-  manifest를 하나로 묶어 SSH/SCP **1회**로 전송하고 원격에서 전수 SHA·
-  binding head를 대조한다. results/·var/·identity/·hardware.toml·.git 제외.
-  전송 뒤 setup·qualify·run은 host 없이 동작한다 — 그것이 standalone 기준.
-  binding은 커밋하지 않는다(커밋하면 HEAD가 바뀌어 source_head와 어긋난다).
-- 확인 실측(2026-09-04): 현행 `docs/core/stage7_b210_system_baseline.md`
-  SHA-256 = 위 값과 정확 일치 (v0.9.23 자격 결속값 그대로).
+**배포 패키지**: `VDETER/tools/deploy_standalone_to_pi.py --commit <sha> --host <user@host>
+--remote-root <dir>`가 지정 commit의 추적 파일(`git archive`) + 생성된 binding +
+자기 기술 manifest(`deploy-package-manifest.json`)를 SSH/SCP **1회**로 전송하고 원격에서
+전수 SHA·binding head를 대조한다. results/·var/·identity/·hardware.toml·.git 제외.
+전송 뒤 setup·qualify·run은 host 없이 동작한다.
 
 ## 6. git_state.json 호환 생성 (승인 조건 1)
 
@@ -300,7 +244,7 @@ canonical JSON으로 로컬 생성한다.
 
 ## 7. vdeter qualify — RR 사다리와 reference 발급 (결정 20, 승인 조건 2·3)
 
-사다리 (사용자 확정 순서 · 2026-09-16 묶음 선행으로 개정):
+사다리 (2026-09-16 묶음 선행으로 개정):
 
 ```
 0. verification bundle         # RF 앞. 실패하면 RF phase 0건·승격 0건
@@ -313,108 +257,65 @@ canonical JSON으로 로컬 생성한다.
 7. 전체 PASS → candidate를 releases/<id>로 이동 후 active 포인터 원자 교체
 ```
 
-**묶음 선행(2026-09-16)**: 소프트웨어가 이미 실패한 후보가 RF 사다리를 다
-쓰고 나서야 그 사실을 알게 되던 구조를 바꿨다(09-13 사다리 실측: RF 94.7분
-뒤 묶음 FAIL). 실무가 이를 수동 사전 점검으로 막고 있었으므로 성공한 자격은
-같은 묶음을 두 번 돌리고 있었다 — 이제 **한 실행에 정확히 1회**다.
+**묶음 선행·같은 실행 재사용**: software 묶음은 한 실행에 정확히 1회다. 묶음 옆
+`verification/bundle-binding.json`에 `ladder_id`·installation digest·영역별 digest·
+환경 manifest digest·python 실행파일·시험 선택 조건(`UNIT_CONTRACT_TARGETS`·
+`INTEGRATION_TARGETS`·`GOVERNANCE_DESELECT`)·묶음 판정·산출물 4개의 SHA-256을
+남기고, **RF 진입 직전**과 **승격 직전**에 설치 manifest를 다시 적재·재측정해
+대조한다. 하나라도 어긋나면 묶음을 조용히 다시 돌리지 않고 fail-closed로 끝낸다
+(RF 미시작 또는 미승격, 기존 active 유지). 다른 run·과거 자격·수동 사전 점검의
+묶음은 `ladder_id` 불일치로 거부되고, 손상·부분 기록·산출물 누락도 PASS로 해석하지
+않는다. 성공 경로의 RF 시간은 줄지 않는다.
 
-재사용은 새 캐시가 아니다. 묶음 옆 `verification/bundle-binding.json`에
-`ladder_id`·installation digest·영역별 digest·환경 manifest digest·python
-실행파일·시험 선택 조건(`UNIT_CONTRACT_TARGETS`·`INTEGRATION_TARGETS`·
-`GOVERNANCE_DESELECT`)·묶음 판정·산출물 4개의 SHA-256을 남기고, **RF 진입
-직전**과 **승격 직전**에 설치 manifest 를 다시 적재·재측정해 대조한다.
-하나라도 어긋나면 묶음을 조용히 다시 돌리지 않고 fail-closed 로 끝낸다
-(RF 미시작 또는 미승격, 기존 active 유지). 다른 run·과거 자격·수동 사전
-점검의 묶음은 `ladder_id` 불일치로 거부되고, 손상·부분 기록·산출물 누락도
-PASS 로 해석하지 않는다. `vdeter qualify --reuse` 경로는 종전 그대로다.
+**verification bundle**(대상 기계에서 생성, final builder `--verification-root` 입력):
 
-이 변경의 주효과는 **software 실패를 RF 앞에서 차단하고 수동 사전 점검
-중복을 없애는 것**이다. 성공 경로의 RF 시간은 줄지 않는다.
+- `frozen-hash-audit.json` — v2 installation audit(`installation_sha256`·
+  `installation_verified`·rf 영역 파일별 대조). builder는 v1(`head_commit` ↔ git HEAD)과
+  v2(`installation_sha256` ↔ 현행 digest)를 필드명으로 구분해 병행 지원한다(40-hex ≠
+  64-hex). 하나라도 불일치·검증 불능이면 fail-closed.
+- `unit-contract.log` — `VDETER/tests/unit`+`contract` 완주 로그. governance 시험
+  6 node-id는 `GOVERNANCE_DESELECT`로 명시 deselect(목록·사유를 evidence에 기록).
+- `integration-stage7.log` — `VDETER/tests/integration -k stage7` 완주 로그.
 
-**Link 19 제외 (2026-09-04 정책 변경, 사용자 지시)**: RR-P2-19(TC-RR-006)는
-standalone 자격 사다리에서 제거했다. 근거 — 현재 프로젝트의 운용 시나리오
-3종은 Link 11/17만 쓰고, final builder는 v0.9.10부터 RR-006을 DEFERRED(기록
-전용)로 다룬다. 2차 ladder(qual-20260904-055636)가 rr-p2-19에서 ROC RX
-`LinkIdDetectionError`(frozen PHY 계층)로 정지한 것이 계기다. Link 19의
-PHY·profile·registry·단위시험 코드는 삭제·수정하지 않으며, 최종 reference와
-보고서에 다음 제한을 명시한다: *Link 19 implementation present / not
-exercised by standalone qualification / hardware performance not guaranteed /
-operational scenarios use Link 11/17 only* (`qualify_cmd.LINK19_LIMITATION`).
+**phase별 run_mode 고정**(`qualify_cmd.PHASE_RUN_MODE`): rr-p0 = RF_OFF_QUALIFICATION,
+rr-p1 = GAIN_CALIBRATION(gain 입력 없음, 새 gain artifact 산출), rr-p2-17·rr-p3-fault =
+OPERATIONAL(rr-p1 산출 gain 결속). endpoint runtime은 GAIN_CALIBRATION에서만 gain
+탐색을 수락한다. final builder 판정 필수 TC = RR-001~005 + RR-007
+(`stage7_rr_final_builder.REQUIRED_TCS`). RR-006은 DEFERRED(기록 전용), RR-008 soak은
+범위 제외. 어느 단계든 실패 시 candidate 미승격, 기존 active reference 유지. gain
+재측정 결과는 기록·비교만 한다(자동 해소로 간주하지 않음).
 
-자격 실행의 fail-closed 보강 (W5 승인 조건):
-- 각 phase는 독립 process group으로 실행한다. timeout·중단 시 group 전체를
-  TERM→KILL로 정리하고 **group 자체의 소멸**을 bounded 재확인한다. leader가
-  정상 rc=0으로 끝나도 손자가 남으면 자연 소멸을 짧게 기다린 뒤
-  `cleanup_anomaly`로 기록하고 강제 정리·재확인한다 — **정리에 성공해도
-  anomaly가 있으면 그 phase는 자격 실패**다(coordinator 자체 회수가 실패한
-  run). phase 후 잔존 프로세스 0 실측은 별도 사후 판정으로 유지한다.
-  verification pytest 실행에도 timeout이 있다.
-- GNU Radio·UHD·numpy·cryptography 버전 4종이 비어 있지 않은 문자열로
-  실측되지 않으면 **P0 시작 전에 거부**한다 — 부재를 자격값으로 기록하는
-  경로가 없다.
+**fail-closed 보강**:
 
-- RR-P3-soak(RR-008)은 범위 제외. 어느 단계든 실패 시 candidate 미승격,
-  기존 active reference 유지.
-- **phase별 run_mode는 명시 고정**(`qualify_cmd.PHASE_RUN_MODE`, 2026-09-04
-  승인): rr-p0 = RF_OFF_QUALIFICATION, **rr-p1 = GAIN_CALIBRATION**(gain
-  입력 없음, 새 gain artifact 산출), rr-p2-17·rr-p3-fault = OPERATIONAL
-  (rr-p1 산출 gain 결속). 1차 RF qualification이 rr-p1을 template 기본값
-  (RF_OFF)으로 생성해 `calibrate_rf PREPARE REJECTED`로 실패한 뒤 고정했다
-  — endpoint runtime은 GAIN_CALIBRATION에서만 gain 탐색을 수락한다.
-- final builder 판정 필수 TC = RR-001~005 + RR-007 (`stage7_rr_final_builder.
-  REQUIRED_TCS` 실측, 무변경). 사다리는 이를 정확히 산출한다. RR-006은
-  builder의 DEFERRED_TCS(기록 전용) 그대로이며 없거나 미실행이어도 판정에
-  들어가지 않는다.
-- gain 재측정 결과는 기록·비교한다. ROC lane1 75dB가 지속되면 기존 관찰·
-  물리 경로 점검 항목을 유지한다 (자동 해소로 간주하지 않음 — 결정 19).
+- 각 phase는 독립 process group으로 실행한다. timeout·중단 시 group 전체를 TERM→KILL로
+  정리하고 group 소멸을 bounded 재확인한다. leader가 rc=0으로 끝나도 손자가 남으면
+  `cleanup_anomaly`로 기록하고 강제 정리한다 — **정리에 성공해도 anomaly가 있으면 그
+  phase는 자격 실패**다. verification pytest 실행에도 timeout이 있다.
+- GNU Radio·UHD·numpy·cryptography 버전 4종이 비어 있지 않은 문자열로 실측되지 않으면
+  P0 시작 전에 거부한다.
 
-**RR-P3-fault 물리 USB detach 제외 (2026-09-04 정책 변경, 사용자 지시)**:
-TC-STAGE7-RR-007은 소프트웨어 장애 소항목 6개(stale-generation-command,
-worker-kill, coordinator-ipc-loss, restart-generation-fencing,
-scenario-controller-ipc-loss, stale-callback)로만 판정한다 — 6개 전부 PASS면
-PASS, 하나라도 FAIL이면 FAIL. **물리 USB detach·재연결·USB3 속도 복원·UHD
-재열거 복구**는 현재 프로젝트의 운용 시나리오와 무관한 하드웨어 장애 복구
-시험이라 standalone 자격 범위에서 제외했다(coordinator `run_rr_p3_fault`에서
-소항목 제거; HARDWARE_BLOCKED 생성·USER-ACTION 안내·
-`STAGE7_P3_USB_DETACH_WAIT_S`·물리 조작 대기 없음). 이것은 **VDE-TER 프로토콜
-판정 완화가 아니라 범위 제외**다. 제한 명시(`qualify_cmd.USB_DETACH_LIMITATION`,
-reference `limitations`): *physical USB detach recovery not exercised / B210
-hot-unplug/re-enumeration recovery not guaranteed / 정상 세션 종료와 다음 실행의
-B210 재발견은 기존대로 검증 / VDE-TER 정상 통신·Link 17·세 시나리오 보증에
-영향 없음*. 3차 ladder(qual-20260904-081804)가 usb-detach HARDWARE_BLOCKED로
-정지한 것이 계기이며, 그 evidence와 Phase F의 usb-detach PASS evidence는
-과거 기록으로 보존한다. **알려진 문제(미수정)**: coordinator
-`write_rr_evidence`의 `assert status in (PASS, FAIL, ABORTED)`는
-HARDWARE_BLOCKED를 거부해 TC 파일이 기록되지 않는다 — 해당 경로가 더 이상
-도달되지 않으므로 기록만 한다.
+**범위 제외(정책, `limitations`에 명시)**:
 
-**reference 발급 (승인 조건 2)**: `stage7_issue_qualification_reference.py`
-CLI는 SSH·Git 결합이라 직접 호출하지 않는다. 재사용하는 것 — import 폐포
-계산·critical manifest 조립 규칙·reference 스키마(`STAGE7_QUALIFICATION_
-REFERENCE` schema 1)·atomic publish 패턴·발급 직후 `run_profile` 재검증.
-대체하는 것 — 3중 대조(Phase F 기록/Pi 실측/로컬)를 **로컬 배포 tree 실측
-단일 기준 + deploy manifest 검증**으로, `require_clean_worktree`를 binding
-`source_worktree_dirty=false` + 배포 무결 검증으로. `qualified_source_commit`
-에는 binding `source_head`를 기록한다.
+- **Link 19**: RR-P2-19(TC-RR-006)는 사다리에서 제거. 운용 시나리오 3종은 Link 11/17만
+  쓴다. Link 19 코드는 삭제·수정하지 않는다(`qualify_cmd.LINK19_LIMITATION`).
+- **RR-P3-fault 물리 USB detach**: TC-RR-007은 소프트웨어 장애 소항목 6개
+  (stale-generation-command, worker-kill, coordinator-ipc-loss,
+  restart-generation-fencing, scenario-controller-ipc-loss, stale-callback)로만
+  판정한다 — 전부 PASS면 PASS. B210 hot-unplug·재열거 복구는 미보증
+  (`qualify_cmd.USB_DETACH_LIMITATION`). 판정 완화가 아니라 범위 제외다.
 
-**final builder 결속 (승인 조건 3 → v2)**: `build(..., head_provider=...)`에
-현행 **installation digest**를 돌려주는 provider를 주입한다. verification
-bundle의 `frozen-hash-audit.json`은 v2 installation audit(`installation_sha256`
-·`installation_verified`·rf 영역 파일별 대조)이며, builder는 v1(`head_commit`
-↔ git HEAD)과 v2(`installation_sha256` ↔ 현행 digest)를 필드명으로 구분해
-병행 지원한다(계약시험 `VDETER/tests/unit/test_stage7_rr_final_builder_
-installation_audit.py`). 두 값은 서로 위장할 수 없다(40-hex ≠ 64-hex).
+**reference 발급**: `stage7_issue_qualification_reference.py` CLI는 SSH·Git 결합이라
+직접 호출하지 않고 import 폐포 계산·critical manifest 조립·reference 스키마
+(`STAGE7_QUALIFICATION_REFERENCE` schema 1)·atomic publish·발급 직후 `run_profile`
+재검증만 재사용한다. 기준은 로컬 설치 tree 실측 단일 기준 + installation manifest
+검증이다. final builder에는 현행 installation digest를 돌려주는 `head_provider`를
+주입한다(계약 시험 `VDETER/tests/unit/test_stage7_rr_final_builder_installation_audit.py`).
 
-**verification bundle 로컬 생성**: final builder `--verification-root` 요구
-3종을 대상 기계에서 생성한다.
-
-- `frozen-hash-audit.json` — git blob 대조 대신 **frozen 14파일의 정규화(LF)
-  내용 sha256 ↔ binding `frozen_files` 대조** (동일 정규화 규칙 재사용).
-  `all_unchanged`·`files`·`head_commit`(=binding source_head)·
-  `worktree_dirty`(=배포 tree manifest 전수 검증 통과 시 false) 기록.
-  하나라도 불일치·검증 불능이면 fail-closed.
-- `unit-contract.log` — unit+contract suite 로컬 완주 로그.
-- `integration-stage7.log` — stage7 integration 부분집합 완주 로그.
+**evidence_reuse 발급**(`qualify_cmd.run_qualify_reuse`, CLI 옵션 아님): rf 영역 파일과
+RF-critical symbol(사다리 순서·run mode·phase 인자·gain 소비 phase·`default_phase_runner`)
+이 함수 단위 byte-identical이고 operation 영역도 byte-identical일 때만 이전 release의 RF
+evidence를 재사용해 `qualification_method=evidence_reuse` reference를 발급한다. 하나라도
+다르면 거부한다. `vdeter qualify` CLI는 항상 전체 사다리(`run_qualify`)다.
 
 ## 7A. vdeter diag — 개발용 통제 RF 진단 (2026-09-14, 실행 명세 §5A)
 
@@ -514,7 +415,7 @@ IQ 원파형 덤프(`evidence/iq_debug/`)는 이번에 **손대지 않았다** �
 (이름 허용목록이 아니므로 이후 추가 변경은 다시 거부된다). 비용 절감은 **측정하지 않았고**
 수치로 주장하지 않는다 — 근거는 구조 일관성(적재와 소비가 같은 조건)이다.
 
-### 7C. launcher 종료 대기 — 공통 마감시각 동시 관찰 (2026-09-16, 3-3)
+## 7C. launcher 종료 대기 — 공통 마감시각 동시 관찰 (2026-09-16, 3-3)
 
 같은 phase 의 launcher 종료를 endpoint 별로 **직렬** 대기하던 네 경로
 (`run_rr_p0`·`run_mass_roc_service`·`run_mass_roc_session` finally·`main`
@@ -649,117 +550,24 @@ RX 에너지 게이트·duplicate ACK 미검증 범위 — 알려진 한계로 �
 기준선 충돌 기록(동결 검토 시 재제시): host git/MD 결속 제거, 플랫폼
 일반화(Pi 5 전제), USB 포트 경로 비강제, 일반 실행 검증 범위 한정.
 
-## 14. Phase I 결과 기록 (2026-09-04/05, Pi 5 arm64 standalone)
+## 14. 자격 이력 (요약)
 
-이 절은 Phase I(standalone 실행 경로)의 **실측 결과와 보증 범위**를
-기록한다. §1–§13의 설계 명세는 변경하지 않는다.
+현행 자격 상태의 권위는 설치 root의 `var/qualification/active.json`(release 포인터)과
+그 release의 reference·`.sha256` sidecar다. 이 README는 자격값을 적지 않는다.
 
-### 14.1 최종 판정
+- Phase I(2026-09-04/05, Pi 5 arm64) standalone 생애주기 완주: QUALIFIED
+  (RESEARCH_READY), `vdeter run all` 4/4 PASS. 이때 확정한 정책 — 결속 3영역 분리,
+  governance 시험 6 node-id deselect, evidence_reuse 조건(rf·operation byte-identical),
+  `critical_endpoints_from_preflight()`의 `{serial, speed_class}` 기록 — 은 §7·§8에
+  반영돼 있다.
+- Pi powered-USB3-hub profile(2026-09-10)과 Stage 8 리팩터링·시간 최적화
+  (2026-09-16, §7 묶음 선행·§7B·§7C)는 각각 새 사다리로 재자격했다.
+- 보증 범위는 reference가 결속한 **동일 설치 tree·B210 3대·identity·라이브러리
+  조합**에 한정된다. 다른 장비·다른 설치본은 `vdeter qualify` 없이 UNQUALIFIED다.
 
-Raspberry Pi 5(Ubuntu 24.04, aarch64) standalone 배포 트리에서 `vdeter
-setup → qualify → run all → results` 생애주기를 완주했다. 자격은
-**QUALIFIED(final_status RESEARCH_READY, profile RESEARCH_READY_MINIMAL)**,
-운용 시험 `vdeter run all`은 **4/4 PASS**다. 이 자격은 외부 공인 인증이
-아닌 **프로젝트 내부 RESEARCH_READY 자격**이며, 통제된 conducted
-케이블 testbed에서의 연구 실험 진입 가능성만을 뜻한다.
-
-### 14.2 활성 qualification reference 결속값
-
-| 항목 | 값 |
-|---|---|
-| release / active pointer | `qual-20260904-134421-r2` (promoted 2026-09-04T18:39:00Z) |
-| reference SHA-256 | `aa72badcfbf24520552ccc3a57e495e312a616ea0669e988146222fb0614d46b` |
-| qualification_method | `evidence_reuse` — 전체 사다리 `qual-20260904-134421`의 RF evidence 재사용 (RR-P0 → RR-P1 → RR-P2-17 → RR-P3-fault, RR-001·002·003·004·005·007 PASS, baseline 0.9.23 / `2a87c1d0…`) |
-| supersedes | `qual-20260904-134421` reference `1ed9fb4f…` — 발급 결함(endpoints에 `speed_class` 누락)으로 대체, **삭제하지 않고 보존** |
-| qualified_source_commit | `88fa6dfcf133e047606de55c71849bdb32486368` (= standalone-binding head, frozen 14) |
-| deploy manifest | `21695f1227a104ec…` (519 files) — resolved config `deployment_manifest_sha256`와 동일 |
-| platform_profile | `pi` |
-| endpoints (critical `{serial, speed_class}`) | MASS-A `34D03DD`/super · MASS-B `3515425`/high · ROC `34D03E8`/super (usb_path·speed_mbps는 관측 metadata) |
-| identity fingerprint | `b7ea9461ea15` |
-| library versions | gnuradio 3.10.9.2 · UHD 4.6.0.0 · numpy 1.26.4 · cryptography 50.0.1 |
-| gain | MASS-A/MASS-B/ROC 69/69/69 dB (RR-P1 재측정, artifact `f086abcf…`) |
-| binding_domains | rf_evidence 205 files(이전 manifest `e74cb12b…` + qualify_cmd RF-critical symbol 5종 AST 해시) · operation 70 · qualification_tool 225 · test_doc(.md) 19 비결속 |
-| verification bundle (r2) | unit+contract 1037 passed / 10 skipped / **29 deselected**(governance 6 node-id, `verification/governance-deselected.json`) · integration `-k stage7` 10 passed · frozen-hash audit all_unchanged |
-
-evidence_reuse 자동 허용 조건은 **rf 영역 byte-identical AND operation
-영역 byte-identical**이며, RF-critical symbol(사다리 순서·run mode·phase
-인자·gain 소비 phase·`default_phase_runner`) 해시가 하나라도 다르면 거부한다.
-qualification 시험 파일·선택 목록 변경은 RF 재실행 없이 software bundle
-재실행을 요구하고, Markdown 변경은 자격에 영향이 없다.
-
-### 14.3 `vdeter run all` 결과 (run-20260904-184019)
-
-2026-09-04T18:40:20Z – 19:06:41Z(1580 s), bring-up 1회 READY, 자동 재시도
-0회. hardware lifecycle(host-time 획득·active bridge·B210 acquire·endpoint
-start/stop·rf_time pre/post·service admission) 각 1회.
-
-| workload | 판정 | 소요 |
-|---|---|---|
-| SC-VDE-005 (normal) | PASS | 43.0 s |
-| SC-VDE-006 (normal) | PASS | 75.2 s |
-| SC-VDE-001 normal | PASS | 18.9 s |
-| SC-VDE-001 forged | PASS (위조 인증서 `bad-signature` 거부, trust_store_size 0) | 17.7 s |
-
-wrong_dest·duplicates·mismatched_ack·failed 모두 0, payload 무결성·ACK
-correlation·quiescence 확인. 종료 후 workers_after_stop 0, 잔존 프로세스 0,
-cleanup PASS, B210 3대 재발견(5000/480/5000 Mbps), throttled 0x0. summary의
-`reference_sha256`는 활성 reference와 동일. MASS-B의 host-time bracket
-내부 재획득 1회는 run 수준 재시도가 아니며 알려진 가용성 제한이다.
-
-### 14.4 발견·수정한 결함
-
-- **RR-P1 TC-004 RAW-PHY 슬롯 정렬**: RX 캡처 슬롯 시간이 PRE_CORRECTION
-  기준이라 TX(active bridge correction, MASS-A +210.6 µs) 대비 burst onset이
-  복호 여유(≈60–70 sample) 안쪽으로 밀리는 잠복 결함. host 경로에도 존재하던
-  timing margin 결함이며 standalone 배포가 유발한 것이 아니다. `pi_runtime`
-  에서 RAW_PHY phase가 TX와 동일한 시간 변환 함수를 쓰도록 수정(commit
-  `2978e9c`), 오프라인 재생 18/18, 결정적 시험 12건, RF 재시험 C1–C6 PASS.
-- **verification bundle governance 시험**: docs/core·traceability·저장소
-  구조 의존 시험 6 node-id를 명시적 `--deselect`로 분리(코드·evidence에 목록과
-  사유 기록, host V1/CI에서는 계속 실행). import 격리 실패 4건은 별도
-  프로세스에서 PASS 확인.
-- **결속 3영역 분리**: 파일 전체 결속 때문에 tooling 수정만으로 RF 재실행이
-  강제되던 구조를 rf / operation / qualification_tool / test_doc으로 분리.
-- **발급 결함**: evidence_reuse 경로가 endpoints를 `{serial, usb_path,
-  speed_mbps}`로 기록해 `compare_critical`이 거부 → 두 발급 경로가 공통
-  `critical_endpoints_from_preflight()`로 `{serial, speed_class}`를 생성하고
-  발급 시 speed_class ∈ {super, high}를 검증하도록 수정(commit `88fa6df`),
-  r2로 재발급.
-
-### 14.5 마무리 감사 (2026-09-05, RF 없음)
-
-- 소프트웨어 시험: root(standalone·domains·run/CLI·reference·preflight)
-  231 passed / 1 skipped · VDETER unit+contract 1075 passed / 1 skipped ·
-  integration `-k stage7` 10 passed · `git diff --check` 이상 없음.
-- 결속 감사(실제 검증기 `load_reference`·`deploy_manifest.verify`·
-  `compare_critical`·preflight): 17/17 PASS.
-- evidence 보존: `VDETER/results/phase-i/PHASE-I-FINAL-AUDIT/`(git 비추적)
-  347 files, 42,331,378 bytes, Pi 원본 289 files SHA-256 전부 일치, JSON/JSONL
-  파싱 오류 0, 내부 참조(pointer→release→reference·sidecar·final-result 원본
-  결속·run summary·resolved config·supersedes) 전부 PASS. manifest
-  `EVIDENCE-MANIFEST.json` SHA-256 `cd522ec7992ab49dc8f272416ac5043bd2079973f525a9e14c9025a2ed62539b`.
-- secret 검사: evidence·보고서·추적 파일에 개인키 본문·PEM private 마커·
-  비밀번호/토큰·SSH 비밀·identity private 파일 없음(추적 `.pem` 2개는 공개
-  인증서·trust store). 공개 fingerprint·장비 serial은 허용된 공개 기록.
-- 생성형 `standalone-binding.json`은 release artifact로 배포 트리·package에만
-  보존하고 Git에 커밋하지 않는다.
-
-### 14.6 보증 범위와 유보 항목
-
-| 항목 | 상태 |
-|---|---|
-| Link 19 | 현재 운용 범위에서 제외 |
-| USB hot-unplug recovery | 미보증 |
-| 장기 soak | 미수행 |
-| host-time bracket 재획득 가능성 | 알려진 가용성 제한 |
-| amd64 Ubuntu (generic-pc) | 지원 경로 구현 완료, 실제 환경 검증은 장비 부재로 유보 (§12 V3 미수행). amd64 지원 구현 완료, 실제 환경 검증 미수행 |
-| 자격의 성격 | 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격 |
-| strict 하드닝 4건 (§13) | 알려진 한계로 승계 |
-
-보증 범위는 **위 결속값과 동일한 Pi 5 arm64 배포 트리·B210 3대·identity·
-라이브러리 조합**에 한정된다. 다른 장비·다른 배포 트리는 `vdeter qualify`
-재발급 없이는 UNQUALIFIED로 거부된다.
-
+유보 항목: Link 19(운용 범위 제외) · USB hot-unplug recovery(미보증) · 장기 soak(미수행)
+· host-time bracket 재획득(알려진 가용성 제한) · amd64 generic-pc(구현 완료, 실제 환경
+검증 미수행) · strict 하드닝 4건(§13).
 
 ## 15. Pi powered-USB3-hub host profile (2026-09-10, additive)
 
