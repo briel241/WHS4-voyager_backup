@@ -72,6 +72,94 @@ def collect_bracket(worker) -> BracketObservation:
     )
 
 
+#: host-time bracket 선택 규칙 (operational_readiness_and_bringup_spec §13.3, OPT-01).
+#: RESTART_SERIES_V1  — 현행(active): wide bracket(>2 ms) 또는 hardware 역행이면 시리즈 전체 폐기·재시작.
+#: REJECT_BRACKET_KEEP_SERIES_V1 — 후보(PROPOSED/DISABLED): wide bracket만 객관 기준으로 reject하고 accepted
+#:   series는 유지; hardware 역행은 clock epoch 손실로 보아 series 전체 reset. 최소 8개·2 s span·
+#:   u_beta ≤ 1 ppm·|d| ≤ 25 ppm·round-trip ≤ 1 ns·600 s hard cap·fit_affine의 residual gate는 동일.
+#: 활성화는 RF-off·저장 replay·synthetic adversarial·실물 side-by-side(shadow) 동등성 뒤 별도 승인
+#: 대상이다 — production `acquire_host_time`은 baseline을 호출하며 후보는 같은 bracket 스트림 위에서
+#: `HostTimeSelectionShadow`로만 병행 평가된다(active 경로 판정에 영향 없음).
+HOST_TIME_SELECTION_BASELINE = "RESTART_SERIES_V1"
+HOST_TIME_SELECTION_CANDIDATE = "REJECT_BRACKET_KEEP_SERIES_V1"
+
+
+def _try_fit(observations, min_observations, min_span_ns):
+    """공통 fit 게이트 — 두 규칙이 정확히 같은 판정 함수(fit_affine + round-trip)를 쓴다."""
+    if not (len(observations) >= min_observations
+            and observations[-1].m_sample_ns - observations[0].m_sample_ns >= min_span_ns):
+        return None, None
+    try:
+        fit = fit_affine(observations)
+        start = fit.coefficients.forward(observations[0].hardware_ns)
+        verify_round_trip(fit.coefficients, start, start + 120_000_000_000)
+        return fit, None
+    except TimeBridgeError as error:
+        return None, error
+
+
+class HostTimeSelectionShadow:
+    """OPT-01 후보 규칙을 **같은 bracket 스트림**에서 병행 평가한다 (판정에 영향 없음).
+
+    baseline이 폐기하는 bracket을 포함해 모든 관측을 받는다. 후보 규칙의 accepted/rejected/reset
+    이력과 첫 PASS 시점(관측 index·경과 ns)·fit 요약을 기록해 실물 side-by-side 근거를 남긴다."""
+
+    def __init__(self, *, min_observations: int = 8, min_span_ns: int = 2_000_000_000) -> None:
+        self.policy_id = HOST_TIME_SELECTION_CANDIDATE
+        self.min_observations = min_observations
+        self.min_span_ns = min_span_ns
+        self.accepted = []
+        self.rejected = []          # {"index", "u_sample_ns", "reason"}
+        self.resets = []            # {"index", "reason", "discarded"}
+        self.first_pass = None      # {"index", "elapsed_ns", "observations", "span_ns", ...}
+        self.fit_errors = 0
+        self.observed = 0
+
+    def observe(self, observation, *, index: int, elapsed_ns: int) -> None:
+        self.observed += 1
+        if observation.u_sample_ns > MAX_BRACKET_NS:
+            self.rejected.append({"index": index, "u_sample_ns": observation.u_sample_ns,
+                                  "reason": "bracket_wider_than_2ms"})
+            return
+        if self.accepted and observation.hardware_ns <= self.accepted[-1].hardware_ns:
+            self.resets.append({"index": index, "reason": "hardware_time_regression",
+                                "discarded": len(self.accepted)})
+            self.accepted = []
+            return
+        self.accepted.append(observation)
+        if self.first_pass is not None:
+            return
+        fit, error = _try_fit(self.accepted, self.min_observations, self.min_span_ns)
+        if error is not None:
+            self.fit_errors += 1
+        if fit is not None:
+            self.first_pass = {
+                "index": index, "elapsed_ns": int(elapsed_ns),
+                "observations": len(self.accepted), "span_ns": fit.span_ns,
+                "u_beta_ppm": fit.u_beta_ppm, "d_ppm_num": fit.d_ppm_num,
+                "d_ppm_den": fit.d_ppm_den, "max_u_sample_ns": fit.max_u_sample_ns,
+                "alpha_num": fit.coefficients.alpha_num, "alpha_den": fit.coefficients.alpha_den,
+                "beta_num": fit.coefficients.beta_num, "beta_den": fit.coefficients.beta_den,
+            }
+
+    def summary(self, *, baseline_first_pass_index=None, baseline_elapsed_ns=None,
+                baseline_restarts=None) -> dict:
+        return {
+            "kind": "host_time_selection_shadow",
+            "policy_id": self.policy_id,
+            "active_policy_id": HOST_TIME_SELECTION_BASELINE,
+            "activation": "PROPOSED/DISABLED — evaluated in shadow only",
+            "observed": self.observed,
+            "rejected_brackets": list(self.rejected),
+            "resets": list(self.resets),
+            "fit_errors_before_pass": self.fit_errors,
+            "candidate_first_pass": self.first_pass,
+            "baseline_first_pass_index": baseline_first_pass_index,
+            "baseline_elapsed_ns": baseline_elapsed_ns,
+            "baseline_restarts": list(baseline_restarts or []),
+        }
+
+
 def acquire_host_time_fit(
     worker,
     *,
@@ -81,17 +169,26 @@ def acquire_host_time_fit(
     max_acquisition_s: float = 600.0,
     restart_log: list | None = None,
     on_observation=None,
+    selection_policy: str = HOST_TIME_SELECTION_BASELINE,
+    shadow=None,
 ):
     """§13.2 adaptive acquisition. 실패는 `TimeBridgeError`다.
 
-    hardware time 역행·bracket 실패는 표본 선별 없이 해당 시리즈 전체를
-    폐기하고, 600초 예산 안이면 빈 시리즈에서 재시작한다 (`0.8.19`).
+    `selection_policy=RESTART_SERIES_V1`(기본, active): hardware time 역행·bracket 실패는 표본 선별
+    없이 해당 시리즈 전체를 폐기하고, 600초 예산 안이면 빈 시리즈에서 재시작한다 (`0.8.19`).
+    `selection_policy=REJECT_BRACKET_KEEP_SERIES_V1`(OPT-01 후보, RF-off/replay 전용): wide bracket만
+    reject하고 accepted series는 유지, 역행은 reset. fit 게이트·hard cap·주기는 동일하다.
+    `shadow`(HostTimeSelectionShadow)가 주어지면 후보 규칙을 같은 스트림에서 병행 평가한다.
     """
 
+    if selection_policy not in (HOST_TIME_SELECTION_BASELINE, HOST_TIME_SELECTION_CANDIDATE):
+        raise TimeBridgeError(f"unknown host-time selection policy: {selection_policy}")
+    keep_series = selection_policy == HOST_TIME_SELECTION_CANDIDATE
     observations = []
     started = read_monotonic_raw_ns()
     deadline = started + int(max_acquisition_s * 1e9)
     last_error = None
+    index = -1
 
     def _restart(reason: str):
         nonlocal observations, last_error
@@ -107,8 +204,17 @@ def acquire_host_time_fit(
                 f"600초 안에 host affine fit이 합격하지 못했습니다: {last_error}"
             )
         observation = collect_bracket(worker)
+        index += 1
+        if shadow is not None:
+            shadow.observe(observation, index=index, elapsed_ns=now - started)
         if observation.u_sample_ns > MAX_BRACKET_NS:
-            _restart("bracket 폭이 2,000,000 ns를 넘습니다")
+            if keep_series:
+                if restart_log is not None:
+                    restart_log.append({"reason": "bracket rejected (>2,000,000 ns), series kept",
+                                        "discarded": 0})
+                last_error = TimeBridgeError("bracket 폭이 2,000,000 ns를 넘습니다")
+            else:
+                _restart("bracket 폭이 2,000,000 ns를 넘습니다")
             _time.sleep(observation_period_s)
             continue
         if observations and observation.hardware_ns <= observations[-1].hardware_ns:
@@ -118,17 +224,11 @@ def acquire_host_time_fit(
         observations.append(observation)
         if on_observation is not None:
             on_observation()
-        if (
-            len(observations) >= min_observations
-            and observations[-1].m_sample_ns - observations[0].m_sample_ns >= min_span_ns
-        ):
-            try:
-                fit = fit_affine(observations)
-                start = fit.coefficients.forward(observations[0].hardware_ns)
-                verify_round_trip(fit.coefficients, start, start + 120_000_000_000)
-                return fit, tuple(observations)
-            except TimeBridgeError as error:
-                last_error = error
+        fit, error = _try_fit(observations, min_observations, min_span_ns)
+        if fit is not None:
+            return fit, tuple(observations)
+        if error is not None:
+            last_error = error
         _time.sleep(observation_period_s)
 
 

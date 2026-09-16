@@ -329,20 +329,35 @@ class PiOperations:
     # --- host affine time (§13.2) ------------------------------------------------
 
     def acquire_host_time(self, body):
+        from .hw_operations import HostTimeSelectionShadow, read_monotonic_raw_ns as _raw_ns
+
         self.acquisition_attempt = body["acquisition_attempt"]
         worker = self.radio.lease.worker
         restart_log = []
+        # OPT-01 shadow: 후보 선택 규칙을 같은 bracket 스트림에서 병행 평가한다. active 경로(baseline)
+        # 판정에는 관여하지 않으며 evidence로만 남는다 (활성화는 별도 승인 대상).
+        shadow = HostTimeSelectionShadow()
+        shadow_started = int(_raw_ns())
         try:
             fit, observations = acquire_host_time_fit(
                 worker, restart_log=restart_log,
                 on_observation=lambda: self._progress("host-time"),
+                shadow=shadow,
             )
         except Exception as error:  # noqa: BLE001
             self.evidence.append(
                 {"kind": "host_time_failed", "error": str(error),
                  "restarts": restart_log}
             )
+            self.evidence.append(shadow.summary(
+                baseline_first_pass_index=None,
+                baseline_elapsed_ns=int(_raw_ns()) - shadow_started,
+                baseline_restarts=restart_log))
             return None
+        self.evidence.append(shadow.summary(
+            baseline_first_pass_index=shadow.observed - 1,
+            baseline_elapsed_ns=int(_raw_ns()) - shadow_started,
+            baseline_restarts=restart_log))
         if restart_log:
             self.evidence.append(
                 {"kind": "host_time_restarts", "restarts": restart_log}
