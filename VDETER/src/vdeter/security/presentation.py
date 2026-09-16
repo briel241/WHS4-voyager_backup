@@ -1,6 +1,8 @@
 """Protect the codec body while retaining the exact VPFI/MF dispatch prefix."""
 
 from threading import Condition
+from time import perf_counter_ns
+from hashlib import sha256
 
 from ..common.errors import ErrorCode
 from ..common.results import Ok
@@ -23,6 +25,27 @@ class PresentationSecurity:
         self._closing = False
         self._closed = False
         self._inflight = 0
+        self.experiment_observer = None
+
+    def _observe(self, *, stage, wire, route, elapsed_ns=None, body=None, error=None,
+                 transfer_id=None):
+        observer = self.experiment_observer
+        if observer is not None:
+            source = route.original_source.station_id.value
+            destination = route.original_destination.address.station_id.value
+            # An opaque fingerprint of EXISTING dispatch/header/route fields links
+            # tag/ciphertext failures without logging the header, counter or nonce.
+            # It is diagnostic metadata, never proof of authenticated delivery.
+            fingerprint = None
+            if self.manager is not None and len(wire) >= 10 and stage != "protect_error":
+                fingerprint = sha256(wire[:10] + source.to_bytes(4, "big")
+                                     + destination.to_bytes(4, "big")).hexdigest()
+            observer.record(stage=stage, wire_sha256=sha256(wire).hexdigest(),
+                            security_message_fingerprint=fingerprint,
+                            source=source, destination=destination,
+                            pdu_bytes=len(wire), body_bytes=len(body) if body is not None else None,
+                            body_sha256=sha256(body).hexdigest() if body is not None else None,
+                            elapsed_ns=elapsed_ns, error=error, transfer_id=transfer_id)
 
     def encoded_overhead(self, entry) -> int:
         return PDU_OVERHEAD if self.policy.for_format(entry) is SecurityPolicy.REQUIRED else 0
@@ -59,11 +82,13 @@ class PresentationSecurity:
             raise SecurityFault(ErrorCode.PRESENTATION_SECURITY_POLICY_VIOLATION)
         return route.original_source.station_id, route.original_destination.address.station_id
 
-    def protect(self, *, entry, codec, plain_wire: bytes, route):
+    def protect(self, *, entry, codec, plain_wire: bytes, route, transfer_id=None):
         try:
             self._admit()
             try:
                 if self.policy.for_format(entry) is SecurityPolicy.DISABLED:
+                    self._observe(stage="protect", wire=plain_wire, route=route,
+                                  body=plain_wire[3:], transfer_id=transfer_id)
                     return Ok(plain_wire)
                 prefix = codec.discriminator.prefix
                 if type(plain_wire) is not bytes or not plain_wire.startswith(prefix):
@@ -78,21 +103,31 @@ class PresentationSecurity:
                 nonce = build_nonce(session.material.nonce_prefix, counter)
                 from .crypto.aes_gcm import encrypt_detached
 
+                started = perf_counter_ns() if self.experiment_observer is not None else None
                 ciphertext, tag = encrypt_detached(key=session.material.aes_key, nonce=nonce,
                                                    plaintext=body, aad=aad)
+                elapsed = perf_counter_ns() - started if started is not None else None
                 self.metrics.increment("security_encrypt_total")
-                return Ok(prefix + build_security_pdu(header, ciphertext, tag))
+                wire = prefix + build_security_pdu(header, ciphertext, tag)
+                self._observe(stage="protect", wire=wire, route=route, elapsed_ns=elapsed,
+                              body=body, transfer_id=transfer_id)
+                return Ok(wire)
             finally:
                 self._release()
         except SecurityFault as fault:
             self._record_fault(fault)
+            self._observe(stage="protect_error", wire=plain_wire, route=route,
+                          error=fault.code, transfer_id=transfer_id)
             return fault_result(fault)
 
     def unprotect(self, *, entry, codec, secure_wire: bytes, route):
+        elapsed = None
         try:
             self._admit()
             try:
                 if self.policy.for_format(entry) is SecurityPolicy.DISABLED:
+                    self._observe(stage="unprotect", wire=secure_wire, route=route,
+                                  body=secure_wire[3:])
                     return Ok(secure_wire)
                 prefix = codec.discriminator.prefix
                 if not secure_wire.startswith(prefix):
@@ -112,9 +147,12 @@ class PresentationSecurity:
                 try:
                     from .crypto.aes_gcm import decrypt_detached
 
+                    started = perf_counter_ns() if self.experiment_observer is not None else None
                     plaintext = decrypt_detached(key=session.material.aes_key, nonce=nonce,
                                                  ciphertext=ciphertext, tag=tag, aad=aad)
+                    elapsed = perf_counter_ns() - started if started is not None else None
                 except SecurityFault as fault:
+                    elapsed = perf_counter_ns() - started if started is not None else None
                     if fault.code == ErrorCode.PRESENTATION_SECURITY_AUTHENTICATION_FAILED:
                         session.store.commit_rx_authentication_failure(reservation)
                         self.metrics.increment("security_auth_failure_total")
@@ -130,11 +168,15 @@ class PresentationSecurity:
                     session.store.commit_rx_authenticated(reservation, snapshot.highest_counter, snapshot.replay_bitmap)
                     session.replay_window.commit(snapshot)
                 self.metrics.increment("security_decrypt_success_total")
+                self._observe(stage="unprotect", wire=secure_wire, route=route,
+                              elapsed_ns=elapsed, body=plaintext)
                 return Ok(prefix + plaintext)
             finally:
                 self._release()
         except SecurityFault as fault:
             self._record_fault(fault)
+            self._observe(stage="unprotect_error", wire=secure_wire, route=route,
+                          error=fault.code, elapsed_ns=elapsed)
             return fault_result(fault)
 
     def close_final(self, *, timeout_seconds: float) -> None:

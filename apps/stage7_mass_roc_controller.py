@@ -962,6 +962,9 @@ def _write_result(run_root: str, scenario_id: str, payload: dict) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--security-compare-config", default=None,
+                        help="Explicit isolated hardware comparison workload")
+    parser.add_argument("--security-compare-configs-dir", default=None)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-root", required=True)
     parser.add_argument("--test-plan-sha", required=True)
@@ -1071,8 +1074,18 @@ def main(argv=None) -> int:
     run_error: str | None = None
     cleanup_errors: list[str] = []
     try:
-        results = run_scenarios(controller, arguments.scenario_id,
-                                arguments.certificate_case, trace=trace)
+        if arguments.security_compare_config is not None:
+            from apps.aes_gcm_hardware_compare import read_config, run_experiment, hardware_settings
+            if not arguments.security_compare_configs_dir:
+                raise ValueError("Comparison needs resolved link/RF configuration directory")
+            results = {"AES-GCM-COMPARE": run_experiment(
+                inline_controller, events, read_config(arguments.security_compare_config),
+                os.path.join(arguments.run_root, "security-compare"),
+                run_id=arguments.run_id, backend="B210",
+                link_settings=hardware_settings(arguments.security_compare_configs_dir))}
+        else:
+            results = run_scenarios(controller, arguments.scenario_id,
+                                    arguments.certificate_case, trace=trace)
     except Exception as exc:  # noqa: BLE001 - 원래 예외를 evidence에 보존
         run_error = f"{type(exc).__name__}: {exc}"
         import traceback as _tb

@@ -1,0 +1,4 @@
+# Integrity-bound fixture: preserve exact bytes on every platform.
+/tests/fixtures/phase-g-reference/qualification-reference.json -text
+/tests/fixtures/phase-g-reference/gain_artifact.json -text
+/tests/fixtures/phase-g-reference/gain_artifact_input.json -text

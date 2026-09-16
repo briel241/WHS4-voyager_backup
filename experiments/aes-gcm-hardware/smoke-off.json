@@ -1,0 +1,11 @@
+{
+  "security": "OFF",
+  "body_sizes": [3, 7, 8, 10, 29, 39, 164],
+  "iterations": 1,
+  "interval_s": 2,
+  "timeout_s": 90,
+  "budget_s": 600,
+  "sender": "ROC",
+  "receiver": "MASS-A",
+  "ack_required": false
+}

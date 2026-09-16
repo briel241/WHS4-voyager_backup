@@ -66,14 +66,36 @@ class _DrivenEventLog:
         self._seen = {ep: 0 for ep in _STAGE5_ENDPOINT_BY_OURS}
 
     def poll(self) -> None:
+        if self._harness.diagnostics is not None:
+            began = time.perf_counter_ns()
+            simulated_before = self._harness._clock.now_monotonic().total_nanoseconds()
         self._harness.drive(self._steps)
         from apps.stage7_endpoint_launcher import service_event_record
 
         for endpoint_id, sink_events in self._harness.events_by_endpoint.items():
             new = sink_events[self._seen[endpoint_id]:]
             for event in new:
-                self.records[endpoint_id].append(service_event_record(event))
+                record = service_event_record(event)
+                self.records[endpoint_id].append(record)
+                if self._harness.diagnostics is not None:
+                    # No payload bytes, key, nonce or security header in diagnostics.
+                    self._harness.diagnostics.record(
+                        stage="software_service_event", endpoint_id=endpoint_id,
+                        event_id=event.event_id,
+                        simulated_occurred_ns=event.occurred_at.total_nanoseconds(),
+                        simulated_clock_id=event.occurred_at.clock_id,
+                        **{key: record.get(key) for key in (
+                            "event_type", "transfer_id", "transfer_state", "error_code",
+                            "payload_sha256", "payload_len", "payload_format",
+                            "original_source", "original_destination", "received_at_ns")})
             self._seen[endpoint_id] = len(sink_events)
+        if self._harness.diagnostics is not None:
+            self._harness.diagnostics.record(
+                stage="software_poll", steps=self._steps,
+                simulated_before_ns=simulated_before,
+                simulated_after_ns=self._harness._clock.now_monotonic().total_nanoseconds(),
+                wall_elapsed_ns=time.perf_counter_ns() - began,
+                record_counts={ep: len(rows) for ep, rows in self.records.items()})
 
     def wait(self, predicate, timeout_s: float):
         deadline = time.monotonic() + timeout_s
@@ -88,7 +110,7 @@ class _DrivenEventLog:
 class SoftwareMassRocHarness:
     """소프트웨어 무선 그룹 + TEST adapter + inline controller 한 벌."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, e2e_security_mode="ENFORCED", experiment=False) -> None:
         try:
             from tests.support.stage5 import (
                 MASS_A_STATION_ID,
@@ -121,7 +143,7 @@ class SoftwareMassRocHarness:
 
         try:
             self._clock, self._group = build_stage5_software_group(
-                service_sink_factory=sink_factory, e2e_security_mode="ENFORCED",
+                service_sink_factory=sink_factory, e2e_security_mode=e2e_security_mode,
             )
             start_stage5_group(self._clock, self._group)
         except Exception as exc:  # noqa: BLE001 - cryptography 등 조립 실패
@@ -129,6 +151,17 @@ class SoftwareMassRocHarness:
                 f"소프트웨어 무선 그룹 조립 실패: {exc}") from exc
 
         by_station = self._group.by_station()
+        self.experiment_buffers = {}
+        self.diagnostics = None
+        if experiment:
+            from vdeter.common.experiment import ExperimentBuffer
+            self.diagnostics = ExperimentBuffer()
+            for station, endpoint in by_station.items():
+                buffer = ExperimentBuffer()
+                endpoint._presentation._e2e_security.presentation_security.experiment_observer = buffer
+                endpoint._link.experiment_observer = buffer
+                endpoint.dependencies.internal_event_sink.experiment_observer = buffer
+                self.experiment_buffers[station] = buffer
         channels = {}
         self.adapters = {}
         for endpoint_id, station in self.station_by_endpoint.items():
@@ -151,6 +184,62 @@ class SoftwareMassRocHarness:
 
     def drive(self, steps: int) -> None:
         self._drive_fn(self._clock, self._group, steps)
+
+    def write_experiment_telemetry(self, run_root, *, run_id):
+        import hashlib
+        import json
+        from pathlib import Path
+        from uuid import uuid4
+        directory = Path(run_root) / "evidence/security_compare"
+        directory.mkdir(parents=True, exist_ok=True)
+        for station, buffer in self.experiment_buffers.items():
+            rows = buffer.drain()
+            rows.append(dict(stage="buffer_status", dropped=buffer.dropped))
+            path = directory / f"software-{station}-{uuid4().hex}.jsonl"
+            with path.open("x", encoding="utf-8") as handle:
+                for row in rows:
+                    row.update(run_id=run_id, station=station)
+                    handle.write(json.dumps(row) + "\n")
+        if self.diagnostics is not None:
+            # Existing in-memory sink already holds these events. Project only metadata
+            # after measurement; do not change scheduling or record raw DTO payloads.
+            selected = {"TRANSFER_ACCEPTED", "PRESENTATION_ENCODED", "TRANSFER_REQUIREMENT_READY",
+                        "TRANSMISSION_PLANNED", "PACKET_BUILT", "BURST_ENCODED", "BURST_SCHEDULED",
+                        "BURST_COMPLETED", "SAMPLES_RECEIVED", "PACKETS_RECOVERED",
+                        "PACKET_DECODE_REQUESTED", "MESSAGES_DECODED", "MAC_ACTIONS_READY",
+                        "APPLICATION_DATA_READY", "LAYER_ERROR", "INTERNAL_ERROR"}
+            for endpoint in self._group.endpoints:
+                for event in endpoint.dependencies.internal_event_sink.events():
+                    if event.event_type.value not in selected:
+                        continue
+                    correlation = event.correlation
+                    metadata = {}
+                    if event.event_type.value == "PACKETS_RECOVERED":
+                        metadata.update(recovered_packet_count=len(event.payload.packets),
+                                        recovery_status=event.payload.status.value)
+                    if event.event_type.value == "MAC_ACTIONS_READY":
+                        metadata["mac_action_count"] = len(event.payload.actions)
+                    if event.event_type.value == "PACKET_BUILT":
+                        metadata["packet_sha256"] = hashlib.sha256(event.payload.packet).hexdigest()
+                    if event.event_type.value == "PACKET_DECODE_REQUESTED":
+                        metadata["packet_sha256"] = hashlib.sha256(event.payload.packet.packet).hexdigest()
+                    # Packet IDs may be allocated separately at RX. Hash the existing
+                    # packet out of band to correlate TX/RX without changing its bytes.
+                    self.diagnostics.record(
+                        stage="software_internal_event", endpoint_id=endpoint.dependencies.configuration.endpoint.endpoint_id,
+                        event_type=event.event_type.value, event_id=event.event_id,
+                        simulated_occurred_ns=event.occurred_at.total_nanoseconds(),
+                        simulated_clock_id=event.occurred_at.clock_id,
+                        transfer_id=correlation.transfer_id.value if correlation.transfer_id else None,
+                        packet_id=correlation.packet_id.value if correlation.packet_id else None,
+                        burst_id=correlation.burst_id.value if correlation.burst_id else None,
+                        error=event.error.code if event.error else None, **metadata)
+            rows = self.diagnostics.drain()
+            rows.append(dict(stage="software_diagnostics_status", dropped=self.diagnostics.dropped,
+                             note="simulated timestamps are not wall clock or RF latency"))
+            with (directory / f"software-diagnostics-{uuid4().hex}.jsonl").open("x", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row | {"run_id": run_id}) + "\n")
 
     def close(self) -> None:
         try:

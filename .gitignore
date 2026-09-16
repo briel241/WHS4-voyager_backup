@@ -5,6 +5,21 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Machine-local credentials and durable AES experiment state are never backed up.
+.env
+.env.*
+materials.json
+state.sqlite3*
+state.lock
+
+# Generated comparison evidence stays local; configs and test fixtures are tracked.
+/results/security-compare-local/
+/results/issue-investigation/
 
 # ============================================================
 # macOS · 편집기

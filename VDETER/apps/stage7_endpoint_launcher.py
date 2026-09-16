@@ -250,6 +250,8 @@ def main(argv=None) -> int:
     parser.add_argument("--lifecycle-generation", type=int, required=True)
     parser.add_argument("--coordinator-pid", type=int, required=True)
     parser.add_argument("--e2e-security-mode", choices=("ENFORCED", "DISABLED"), required=True)
+    parser.add_argument("--security-compare-experiment", action="store_true",
+                        help="Opt-in metadata/timing capture for isolated ON/OFF comparison")
     parser.add_argument("--gain-artifact", default=None, help="OPERATIONAL 모드 gain artifact JSON")
     parser.add_argument(
         "--test-plan-sha", default=None,
@@ -447,6 +449,26 @@ def main(argv=None) -> int:
         print(f"[launcher] endpoint 조립 실패: {built.error}", file=sys.stderr)
         return 2
     endpoint = built.value
+    experiment_buffer = None
+    if arguments.security_compare_experiment:
+        from vdeter.common.experiment import ExperimentBuffer
+        experiment_buffer = ExperimentBuffer()
+        e2e_security.presentation_security.experiment_observer = experiment_buffer
+        endpoint._link.experiment_observer = experiment_buffer
+        endpoint.dependencies.internal_event_sink.experiment_observer = experiment_buffer
+
+    def flush_experiment():
+        if experiment_buffer is None:
+            return
+        directory = Path(arguments.run_root) / "evidence/security_compare"
+        directory.mkdir(parents=True, exist_ok=True)
+        rows = experiment_buffer.drain()
+        rows.append(dict(stage="buffer_status", dropped=experiment_buffer.dropped,
+                         security_mode=arguments.e2e_security_mode))
+        with (directory / f"{arguments.endpoint_id}.jsonl").open("a", encoding="utf-8") as handle:
+            for row in rows:
+                row.update(run_id=arguments.run_id, endpoint_id=arguments.endpoint_id)
+                handle.write(json.dumps(row) + "\n")
 
     import hashlib as _hashlib
     import threading as _threading
@@ -2838,6 +2860,7 @@ def main(argv=None) -> int:
             seen = 0
             events_warned = False
             while not _pump_stop.is_set():
+                flush_experiment()
                 try:
                     sink = endpoint.start_gate.application_sink
                     events = tuple(sink.events())
@@ -2919,6 +2942,7 @@ def main(argv=None) -> int:
         except Exception as error:
             print(f"[launcher] E2E security final close failed: {type(error).__name__}", file=sys.stderr)
             exit_code = 3
+        flush_experiment()
         try:
             endpoint.dependencies.radio.close_qualification_lease()
         except Exception:  # noqa: BLE001 - 종료 경로 최선 노력
