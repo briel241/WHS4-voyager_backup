@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """`vdeter` — standalone 단일 명령 진입점 (Phase I W6, 결정 4·5·21).
 
-    vdeter setup [--new-identity] [--no-apt]     기계당 1회 (인터넷 허용)
+    vdeter setup [--new-identity] [--no-apt]     기계당 1회 (인터넷 허용, RF-free readiness migration 포함)
     vdeter qualify [--yes]                        단독 RR 재자격 (수 시간, RF)
-    vdeter run [SCENARIO|all] [--case ...] [...]  일상 실행 (오프라인)
+    vdeter run [SCENARIO|all] [--case ...] [...]  일상 실행 (오프라인; 한 session에서 준비→workload→cleanup)
+    vdeter status [--json]                        현재 권위·readiness·qualification·live session 조회 (RF 없음)
     vdeter results [RUN-ID]                       run 목록·요약
 
 wrapper(`var/venv/bin/vdeter`)가 이 파일을 경로로 실행하므로 sys.path를
@@ -34,7 +35,7 @@ EXIT_INTERRUPTED = 130
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vdeter",
-        description="VDETER standalone: setup / qualify / run / results")
+        description="VDETER standalone: setup / qualify / run / status / results")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_progress_flag(sub_parser):
@@ -63,7 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_progress_flag(qualify)
 
     run = sub.add_parser("run", help="run scenarios on a hardware session "
-                         "(offline; requires an active v2 reference)")
+                         "(offline; one process owns static preflight -> live "
+                         "bring-up -> internal Link 17 probe -> workloads -> cleanup, "
+                         "then promotes an operational-readiness release; cold "
+                         "calibration is performed automatically when no applicable "
+                         "artifact exists)")
     add_progress_flag(run)
     run.add_argument("scenario", nargs="?", default=None,
                      help="SC-VDE-001 | SC-VDE-005 | SC-VDE-006 | all "
@@ -77,7 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true",
                      help="print the run summary as JSON at the end")
     run.add_argument("--no-retry", action="store_true",
-                     help="disable the single automatic bring-up retry")
+                     help="(no effect) the readiness path never retries a bring-up "
+                          "(implicit retry 0 for warm and cold preparation)")
     run.add_argument("--poc", default=None, metavar="PATH",
                      help="Stage 8: external PoC package <base>.py to run against "
                           "the selected scenario (opt-in; off by default)")
@@ -91,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     results = sub.add_parser("results", help="list runs or show one summary")
     results.add_argument("run_id", nargs="?", default=None)
+
+    status = sub.add_parser(
+        "status",
+        help="show current_authority / operational_readiness / qualification / live_session / "
+             "workload_rf and the reason (opens no device, transmits nothing)")
+    status.add_argument("--json", action="store_true",
+                        help="print the status report as JSON")
 
     capability = sub.add_parser(
         "capability",
@@ -384,6 +397,9 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
     if args.command == "results":
         from apps.standalone import results_cmd
         return results_cmd.main_results(paths, args.run_id, out=out)
+    if args.command == "status":
+        from apps.standalone import status_cmd
+        return status_cmd.main_status(paths, out=out, json_output=args.json)
     if args.command == "capability":
         from apps.standalone import capability_issue_cmd
         return capability_issue_cmd.main(args, paths, out=out)

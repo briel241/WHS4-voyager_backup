@@ -313,9 +313,18 @@ def test_normal_run_still_unqualified_with_diagnostic_authorization_present():
         assert paths.diagnostic_authorization.is_file()
         factory = rc.make_session_factory()
         code, lines = rc.run(paths, factory)
-        assert code == run_cmd.EXIT_UNQUALIFIED
-        assert any("UNQUALIFIED" in line and "vdeter qualify" in line for line in lines)
-        assert factory.instances == []
+        # readiness 계약: 정상 run은 UNVERIFIED에서 cold preparation을 수행한다. 진단
+        # authorization은 정상 경로의 권한·calibration source가 **아니다**.
+        assert code == run_cmd.EXIT_PASS, lines
+        text = "\n".join(lines)
+        assert "DIAGNOSTIC" not in text
+        assert "current_authority=UNVERIFIED" in text and "qualification=ABSENT" in text
+        assert "[readiness] calibration: COLD" in text
+        session = factory.instances[0]
+        summary = json.loads((session.run_root / "summary.json").read_text("utf-8"))
+        assert summary["reference_sha256"] is None
+        assert "diagnostic_authorization_sha256" not in summary
+        assert summary["readiness"]["issue_status"] == "PROMOTED"
         # 진단 authorization은 정상 경로의 reference 검증기를 통과할 수 없다.
         assert qualify_cmd.load_active_reference(paths) is None
         assert qualification_state(paths) == (False, [])
@@ -515,7 +524,10 @@ def test_diag_run_uses_normal_session_path_and_marks_not_qualified():
         assert qualification_state(paths) == (False, [])
         assert qualify_cmd.load_active_reference(paths) is None
         code, lines2 = rc.run(paths, rc.make_session_factory())
-        assert code == run_cmd.EXIT_UNQUALIFIED
+        # 정상 run은 UNVERIFIED에서 readiness preparation(cold)을 수행하며 진단 권한을 쓰지 않는다.
+        assert code == run_cmd.EXIT_PASS, lines2
+        assert not any("DIAGNOSTIC" in line for line in lines2)
+        assert qualify_cmd.load_active_reference(paths) is None
         entry = ledger(paths)["runs"][-1]
         assert entry["state"] == "FINISHED" and entry["exit_code"] == 0
         assert entry["invariants_unchanged"] is True

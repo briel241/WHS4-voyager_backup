@@ -214,7 +214,15 @@ def binding_differences(recorded: dict, current: dict) -> list:
         if a != b:
             reasons.append("%s: recorded %r, current %r" % (path, _short(a), _short(b)))
 
-    walk(recorded or {}, current or {}, "binding")
+    ordered = [g for g in BINDING_GROUPS if g != "calibration"] + ["calibration"]
+    recorded = recorded or {}
+    current = current or {}
+    for group in ordered:
+        if group in recorded or group in current:
+            walk(recorded.get(group), current.get(group), "binding." + group)
+    for key in sorted(set(recorded) | set(current)):
+        if key not in BINDING_GROUPS:
+            walk(recorded.get(key), current.get(key), "binding." + key)
     return reasons
 
 

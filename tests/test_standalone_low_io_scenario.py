@@ -53,7 +53,8 @@ class _OpenSpy:
         real = self._real
 
         def spy(file, mode="r", *args, **kwargs):
-            self.records.append((str(file), str(mode), bool(self.phase.get("ready"))))
+            self.records.append((str(file), str(mode),
+                                 bool(self.phase.get("ready")) and not self.phase.get("closing")))
             return real(file, mode, *args, **kwargs)
 
         builtins.open = spy
@@ -66,6 +67,8 @@ class _OpenSpy:
         return False
 
     def after_ready(self):
+        """READY 이후 ~ close 시작 전(시나리오 구간)의 open 기록. close 구간(readiness candidate/state
+        기록·run evidence 수집)은 시나리오 I/O 규율의 대상이 아니라 별도 evidence 계약이다."""
         return [(p, m) for p, m, ready in self.records if ready]
 
 
@@ -81,6 +84,8 @@ def _execute_with_spies(paths, factory, *, progress_ticker: bool):
 
     def out(text):
         lines.append(text)
+        if text.startswith("Closing session"):
+            phase["closing"] = True
         if "SESSION READY" in text:
             # bring-up의 마지막 줄. 이 줄 자체는 mirror(console.log)에 남는 것이
             # 계약이고(README: presentation은 bring-up 구간만), 그 다음 줄부터가

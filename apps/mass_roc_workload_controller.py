@@ -108,8 +108,26 @@ def _default_agents() -> tuple:
     )
 
 
+#: readiness 분류기(`VDETER_READINESS_FAILURE_CLASSIFIER_V1`)의 producer 측 code.
+#: 자유 형식 `reason`은 code가 아니다 — 분류기는 이 구조화 필드만 읽는다.
+READINESS_CLASSIFIER_POLICY_ID = "VDETER_READINESS_FAILURE_CLASSIFIER_V1"
+CODE_SCENARIO_ASSERTION_FAILED = "SCENARIO_ASSERTION_FAILED"
+CODE_EXPECTED_APPLICATION_OUTCOME_NOT_OBSERVED = "EXPECTED_APPLICATION_OUTCOME_NOT_OBSERVED"
+#: step 이름 → 실패 시 application-only code. 표에 없는 실패 step은 assertion 실패다. transport·
+#: 수신·주소 지정 실패는 `_deliver_command`가 별도 operational code로 적으므로 여기 오지 않는다.
+_APPLICATION_OUTCOME_STEPS = frozenset({
+    "005-ack-correlated", "006-idempotent-resend", "001-resend-ok", "001-idempotent-store",
+})
+#: transport/receive 단계의 step은 `_deliver_command`가 operational code를 이미 적었다 — 중복 없이
+#: application code를 붙이지 않는다.
+_TRANSPORT_STEPS = frozenset({
+    "005-command-transfer", "005-ack-transfer", "001-transfer", "005-mass-b-clean",
+    "006-mass-b-clean", "001-mass-b-clean", "006-control-resend",
+})
+
+
 class MassRocResult:
-    """한 시나리오 실행의 evidence 누적기 — step·transfer·counter."""
+    """한 시나리오 실행의 evidence 누적기 — step·transfer·counter·readiness 분류 code."""
 
     def __init__(self, scenario_id: str) -> None:
         self.scenario_id = scenario_id
@@ -126,6 +144,14 @@ class MassRocResult:
         }
         self.status = "PENDING"
         self.reason: str | None = None
+        #: readiness 분류 code (구조화; 문자열 reason과 독립).
+        self.codes: list[str] = []
+        self.missing_data_received = 0
+        self.non_terminal_transfers = 0
+
+    def code(self, value: str) -> None:
+        if value not in self.codes:
+            self.codes.append(value)
 
     def step(self, name: str, ok: bool, **detail) -> None:
         # 판정 키(name/status)는 detail이 덮어쓸 수 없다.
@@ -133,9 +159,26 @@ class MassRocResult:
         record["name"] = name
         record["status"] = "PASS" if ok else "FAIL"
         self.steps.append(record)
+        if not ok and name not in _TRANSPORT_STEPS:
+            self.code(CODE_EXPECTED_APPLICATION_OUTCOME_NOT_OBSERVED
+                      if name in _APPLICATION_OUTCOME_STEPS
+                      else CODE_SCENARIO_ASSERTION_FAILED)
 
     def transfer(self, record: dict) -> None:
         self.transfers.append(record)
+
+    def readiness_classification(self) -> dict:
+        """분류기 입력 — code 목록과 transfer health(구조화)."""
+        return {
+            "policy_id": READINESS_CLASSIFIER_POLICY_ID,
+            "codes": list(self.codes),
+            "transfers": {
+                "all_terminal": self.non_terminal_transfers == 0,
+                "failed": int(self.counters.get("transfers_failed", 0)),
+                "wrong_destination": int(self.counters.get("wrong_destination", 0)),
+                "missing_data_received": int(self.missing_data_received),
+            },
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -145,6 +188,7 @@ class MassRocResult:
             "steps": self.steps,
             "transfers": self.transfers,
             "counters": self.counters,
+            "readiness_classification": self.readiness_classification(),
         }
 
 
@@ -184,6 +228,8 @@ class MassRocScenarioController:
         self._receive_timeout_s = receive_timeout_s
         self._cancel_requested = False
         self._workload_guard = None
+        #: `_submit`이 SUBMIT 거부 code를 적을 현재 결과 (deliver 구간에서만 설정).
+        self._current_result = None
 
     def cancel_workload(self):
         self._cancel_requested = True
@@ -214,6 +260,8 @@ class MassRocScenarioController:
         )
         body = response.get("body") or {}
         if body.get("call_outcome") != "OK" or not body.get("transfer_id"):
+            if self._current_result is not None:
+                self._current_result.code("TRANSFER_SUBMIT_REJECTED")
             raise ScenarioError(
                 f"{step_id}: SUBMIT 실패 ({body.get('call_outcome')}, "
                 f"{body.get('public_error_code')})"
@@ -283,11 +331,15 @@ class MassRocScenarioController:
         dest_station = STATION_BY_ENDPOINT[receiver_ep]
         before = self._received_count(receiver_ep, sha)
         result.submitted_shas.append(sha)
-        transfer_id, submit_body = self._submit(
-            sender_ep, step_id=step, destination_station=dest_station,
-            payload_format=payload_format, payload=app_payload,
-            ack_required=ack_required,
-        )
+        self._current_result = result
+        try:
+            transfer_id, submit_body = self._submit(
+                sender_ep, step_id=step, destination_station=dest_station,
+                payload_format=payload_format, payload=app_payload,
+                ack_required=ack_required,
+            )
+        finally:
+            self._current_result = None
         self._trace.emit("submit", step=step, sender=sender_ep,
                          receiver=receiver_ep, transfer_id=transfer_id,
                          payload_format=payload_format,
@@ -323,6 +375,17 @@ class MassRocScenarioController:
             result.counters["transfers_completed"] += 1
         else:
             result.counters["transfers_failed"] += 1
+            if state is None:
+                # STATUS가 terminal에 이르지 못함 — terminal 미확정(operational).
+                result.non_terminal_transfers += 1
+                result.code("TERMINAL_TRANSFER_UNCONFIRMED")
+            else:
+                result.code("TRANSFER_%s" % state)
+        if received is None:
+            result.missing_data_received += 1
+            result.code("DATA_RECEIVED_MISSING")
+        if wrong:
+            result.code("DATA_RECEIVED_WRONG_DESTINATION")
 
         record = {
             "step": step,
@@ -360,6 +423,8 @@ class MassRocScenarioController:
                 "byte_exact": self._received_payload(received) == app_payload,
             }
             received_valid = all(checks.values())
+            if not received_valid:
+                result.code("DATA_RECEIVED_MISMATCH")
             record["received"] = {
                 "payload_sha256": received.get("payload_sha256"),
                 "payload_len": received.get("payload_len"),
@@ -389,6 +454,52 @@ class MassRocScenarioController:
                 f"original_source 불일치: {station!r} "
                 f"(기대 {expect_endpoint}={STATION_BY_ENDPOINT[expect_endpoint]})")
         return mmsi
+
+    # ---- readiness Link 17 양방향 probe (readiness 전용 내부 workload) --------------
+
+    def run_readiness_link17_probe(self) -> MassRocResult:
+        """readiness 전용 고정 vector probe (operational_readiness_and_bringup_spec §6.2).
+
+        `apps.standalone.readiness_probe.PROBE_VECTOR`의 두 transfer(ROC→MASS-A command 39 B,
+        MASS-A→ROC ack 3 B, 둘 다 ack_required)를 각 1회 제출하고 방향별 payload digest 일치와
+        protocol ACK(transfer COMPLETED)를 확인한다. 일반 scenario가 아니며(`not_a_scenario`),
+        application agent 상태를 만들지 않는다. 횟수·payload·timeout은 vector/limits로 고정된다."""
+        from apps.standalone import readiness_probe
+
+        result = MassRocResult(readiness_probe.PROBE_SCENARIO_ID)
+        problems = readiness_probe.verify_vector()
+        if problems:
+            result.status = "FAIL"
+            result.reason = "probe vector self-check failed: " + "; ".join(problems)
+            result.code(CODE_SCENARIO_ASSERTION_FAILED)
+            return result
+        try:
+            for entry in readiness_probe.PROBE_VECTOR:
+                delivered = self._deliver_command(
+                    result, step=entry["step"], sender_ep=entry["sender"],
+                    receiver_ep=entry["receiver"], payload_format=entry["payload_format"],
+                    app_payload=readiness_probe.payload_bytes(entry),
+                    ack_required=bool(entry["ack_required"]),
+                )
+                ok = (delivered["transfer_state"] == "COMPLETED"
+                      and delivered["received_valid"])
+                result.step(entry["step"] + "-ack-and-digest", ok,
+                            transfer_id=delivered["transfer_id"],
+                            state=delivered["transfer_state"],
+                            received_checks=delivered["received_checks"])
+                if delivered["received"] is None:
+                    raise ScenarioError("%s: DATA_RECEIVED not observed" % entry["step"])
+            mass_b_zero = all(self._received_count("MASS-B", sha) == 0
+                              for sha in result.submitted_shas)
+            result.step("probe-mass-b-clean", mass_b_zero)
+            passed = (all(s["status"] == "PASS" for s in result.steps)
+                      and result.counters["wrong_destination"] == 0
+                      and result.counters["transfers_completed"] == len(readiness_probe.PROBE_VECTOR))
+            result.status = "PASS" if passed else "FAIL"
+        except ScenarioError as exc:
+            result.status = "FAIL"
+            result.reason = str(exc)
+        return result
 
     # ---- SC-VDE-005 노선 계획 교환 ----------------------------------------
 
@@ -1150,7 +1261,7 @@ def main(argv=None) -> int:
                         help="START/STOP fixture 디렉터리 (RR controller와 공유)")
     parser.add_argument("--scenario-id", required=True,
                         choices=("SC-VDE-001", "SC-VDE-005", "SC-VDE-006", "all",
-                                 "none"))
+                                 "none", "READINESS-LINK17-PROBE"))
     parser.add_argument("--certificate-case", default="normal",
                         choices=("normal", "forged", "both"))
     parser.add_argument(
@@ -1705,7 +1816,11 @@ def run_scenarios(controller: MassRocScenarioController, scenario_id: str,
     results: dict = {}
     trace.emit("scenarios_begin", scenario_id=scenario_id,
                certificate_case=certificate_case)
-    if scenario_id == "all":
+    if scenario_id == "READINESS-LINK17-PROBE":
+        probe = controller.run_readiness_link17_probe().to_dict()
+        probe["not_a_scenario"] = True
+        results["READINESS-LINK17-PROBE"] = probe
+    elif scenario_id == "all":
         roc, mass = _default_agents()
         pre = controller.run_sc_vde_005(agents=(roc, mass))
         results["SC-VDE-005"] = pre.to_dict()
