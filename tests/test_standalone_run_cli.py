@@ -43,10 +43,48 @@ from apps.standalone import (  # noqa: E402
     installation_manifest,
     local_session,
     qualify_cmd,
+    readiness_probe,
     results_cmd,
     run_cmd,
     state,
 )
+
+PROBE = readiness_probe.PROBE_SCENARIO_ID
+
+
+def fake_probe_result(workload_id, run_id, *, fail=False):
+    """coordinator가 readiness probe workload에 대해 돌려주는 result (producer 계약 형태)."""
+    transfers = []
+    for entry in readiness_probe.PROBE_VECTOR:
+        transfers.append({
+            "transfer_id": "%s-%s" % (workload_id, entry["step"]), "step": entry["step"],
+            "final_transfer_state": "COMPLETED" if not fail else "FAILED",
+            "payload_sha256": entry["payload_sha256"], "payload_len": entry["payload_len"],
+            "payload_format": entry["payload_format"], "wrong_destination": 0,
+            "received": {"valid": not fail, "checks": {"byte_exact": not fail}}})
+    body = {"scenario_id": PROBE, "status": "FAIL" if fail else "PASS", "reason": None,
+            "steps": [{"name": e["step"], "status": "FAIL" if fail else "PASS"}
+                      for e in readiness_probe.PROBE_VECTOR],
+            "transfers": transfers,
+            "counters": {"transfers_completed": 0 if fail else 2,
+                         "transfers_failed": 2 if fail else 0, "wrong_destination": 0,
+                         "mismatched_ack": 0, "duplicates": 0},
+            "readiness_classification": {
+                "policy_id": "VDETER_READINESS_FAILURE_CLASSIFIER_V1",
+                "codes": ["TRANSFER_FAILED"] if fail else [],
+                "transfers": {"all_terminal": True, "failed": 2 if fail else 0,
+                              "wrong_destination": 0, "missing_data_received": 0}},
+            "not_a_scenario": True}
+    return {"status": "FAIL" if fail else "PASS",
+            "quiescence": {"pass": True, "non_terminal_transfers": 0, "workers_running": 3,
+                           "launchers_alive": 3, "faults": 0, "inhibited": False,
+                           "child_terminated": True},
+            "session_health_before": {"expected_launchers": 3},
+            "workload_kind": "readiness_probe", "wall_clock_s": 41.2,
+            "scenario": {"artifact_type": "STAGE7_MASS_ROC_SCENARIO_RESULT_V1",
+                         "scenario_id": PROBE, "workload_id": workload_id,
+                         "status": "FAIL" if fail else "PASS", "error": None,
+                         "cleanup_errors": [], "results": {PROBE: body}}}
 
 ENV_MANIFEST = fx.ENV_MANIFEST
 OBSERVED = fx.OBSERVED
@@ -168,6 +206,7 @@ def make_session_factory(script=None):
                 encoding="utf-8")
 
         def wait_ready(self, *, timeout_s=None, on_stage=None):
+            self.wait_ready_timeout_s = timeout_s
             if on_stage:
                 on_stage("MASS-A 연결됨")   # coordinator 원문(한국어) → 표시는 영어
                 on_stage("acquire_host_time COMPLETED")
@@ -214,10 +253,57 @@ def make_session_factory(script=None):
                 (wdir / "workload-trace.jsonl").write_bytes("".join(
                     json.dumps(r) + "\n" for r in fake_trace_rows(
                         wid, self.kwargs["run_id"], n, scenario_id, case)).encode("utf-8"))
-            return {"run_id": self.kwargs["run_id"]}
+            ready = {"run_id": self.kwargs["run_id"],
+                     "artifact_type": "STAGE7_SERVICE_SESSION_READY_V1",
+                     "judgement_scope": "OPERATIONAL_SERVICE",
+                     "ready_at_utc": "2026-09-05T00:00:00Z",
+                     "phase_elapsed_s": {"prepare_configure_arm": 14.0, "acquire_host_time": 400.0,
+                                         "rf_time_pre": 857.0, "active_bridge": 857.1,
+                                         "rf_time_post": 1314.0, "service_running": 1326.0},
+                     "health_baseline": {"bridge_generation": 0,
+                                         "active_clock_id": "stage7-pi-host-affine-v1:x:0"},
+                     "readiness_mode": "cold" if self.kwargs.get("phase") == "mass-roc-session-cold"
+                     else "warm"}
+            if "absolute_deadline" in script:
+                ready["session_absolute_deadline_monotonic_s"] = script["absolute_deadline"]()
+            if self.kwargs.get("phase") == "mass-roc-session-cold":
+                # coordinator cold path가 봉인하는 calibration candidate 흉내 (실 schema).
+                import hashlib as _hashlib
+                evidence = self.run_root / "evidence"
+                evidence.mkdir(parents=True, exist_ok=True)
+                artifact = json.dumps({"artifact_type": "STAGE7_GAIN_ARTIFACT_V1",
+                                       "run_id": self.kwargs["run_id"],
+                                       "endpoint_common_rx_gain_db": {"MASS-A": 66, "MASS-B": 63, "ROC": 72},
+                                       "lane_candidates": {}, "gain_plan_sha256": "77" * 32},
+                                      ensure_ascii=True, sort_keys=True, indent=1).encode()
+                artifact_sha = _hashlib.sha256(artifact).hexdigest()
+                gain_input = json.dumps({"endpoint_common_rx_gain_db": {"MASS-A": 66, "MASS-B": 63, "ROC": 72},
+                                         "source_gain_artifact_sha256": artifact_sha},
+                                        ensure_ascii=True, sort_keys=True, indent=1).encode()
+                (evidence / "gain_artifact.json").write_bytes(artifact)
+                (evidence / "gain_artifact_input.json").write_bytes(gain_input)
+                ready["calibration"] = {
+                    "artifact_sha256": artifact_sha,
+                    "artifact_input_sha256": _hashlib.sha256(gain_input).hexdigest(),
+                    "endpoint_common_rx_gain_db": {"MASS-A": 66, "MASS-B": 63, "ROC": 72},
+                    "gain_plan_sha256": "77" * 32, "cfo_plan_sha256": "88" * 32,
+                    "quiescent": not script.get("cold_not_quiescent"),
+                    "host_time_attempts": 2, "calibration_mode": "ADAPTIVE_SEARCH_AND_SEAL"}
+                if script.get("cold_tamper_artifact"):
+                    (evidence / "gain_artifact.json").write_bytes(artifact + b"\n")
+            return ready
+
+        supports_workload_kind = True
 
         def submit_workload(self, scenario_id, certificate_case="normal", *,
-                            on_settle=None):
+                            on_settle=None, workload_kind=None):
+            self.kinds = getattr(self, "kinds", [])
+            self.kinds.append(workload_kind)
+            if scenario_id == PROBE:
+                # readiness 내부 probe — user workload 목록(`submitted`)과 분리해 기록한다.
+                self.probes = getattr(self, "probes", [])
+                self.probes.append(workload_kind)
+                return "%s-readiness-link17-probe-%03d" % (self.kwargs["run_id"], len(self.probes))
             self.submitted.append((scenario_id, certificate_case))
             # I/O 격리 검증용: submit 시점의 out 길이 (이전 workload 블록이 끝난 뒤인지).
             probe = script.get("out_probe")
@@ -229,6 +315,9 @@ def make_session_factory(script=None):
 
         def wait_result(self, workload_id, *, timeout_s=None, on_trace=None,
                         on_poll=None):
+            if workload_id.split("-readiness-link17-probe-")[0] != workload_id:
+                return fake_probe_result(workload_id, self.kwargs["run_id"],
+                                         fail=bool(script.get("probe_fail")))
             # R1: READY 이후 폴링 훅은 실행 경로에 없어야 한다 — 받은 값을 기록만
             # 하고(호출하지 않음) 시험이 None임을 단언한다.
             self.polls.append(on_poll)
@@ -294,7 +383,7 @@ def run(paths, factory, **overrides):
         environment_manifest=dict(ENV_MANIFEST), repo_root=_REPO,
         hardware_path=Path(paths.var_dir).parent / "hardware.toml",
         out=lines.append, input_fn=lambda prompt: "q",
-        progress_ticker=False,
+        progress_ticker=False, machine_id=fx.MACHINE_ID, boot_id="boot-test",
     )
     kwargs.update(overrides)
     code = run_cmd.execute(paths, **kwargs)
@@ -420,13 +509,22 @@ def test_plan_for():
 
 def test_run_refuses_unqualified_hardware_and_critical_mismatch():
     with tempfile.TemporaryDirectory() as tmp:
+        # readiness 계약: qualification이 없어도 거부하지 않는다 — UNVERIFIED에서 cold
+        # CALIBRATION_PREPARATION → readiness preparation을 한 session에서 수행한다.
         paths, _ = fx.prepare_environment(tmp, qualified=False)
         factory = make_session_factory()
         code, lines = run(paths, factory)
-        assert code == run_cmd.EXIT_UNQUALIFIED
-        assert any("UNQUALIFIED" in line and "vdeter qualify" in line
-                   for line in lines)
-        assert factory.instances == []  # RF 세션은 만들어지지 않았다
+        assert code == run_cmd.EXIT_PASS, lines
+        text = "\n".join(lines)
+        assert "current_authority=UNVERIFIED operational_readiness=ABSENT qualification=ABSENT" in text
+        assert "[readiness] calibration: COLD" in text
+        assert "OPERATIONAL_READY is not QUALIFIED" in text
+        session = factory.instances[0]
+        assert session.kwargs["phase"] == "mass-roc-session-cold"
+        assert session.kwargs["gain_artifact_path"] is None
+        assert session.wait_ready_timeout_s == 3900.0
+        assert 'run_mode = "GAIN_CALIBRATION"' in (
+            session.run_root / "resolved-configs" / "endpoints" / "mass-b.toml").read_text("utf-8")
 
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp)
@@ -446,9 +544,13 @@ def test_run_refuses_unqualified_hardware_and_critical_mismatch():
         env = dict(ENV_MANIFEST)
         env["uhd_version"] = "4.7"
         code, lines = run(paths, factory, environment_manifest=env)
-        assert code == run_cmd.EXIT_UNQUALIFIED
-        assert any("uhd version" in line for line in lines)
-        assert factory.instances == []
+        # qualification은 STALE(거부 아님); 라이브러리가 달라 그 gain은 calibration source로도
+        # 부적합 → cold preparation. 세션은 만들어진다.
+        assert code == run_cmd.EXIT_PASS, lines
+        assert any("[qualification] STALE" in line and "uhd version" in line for line in lines)
+        assert any("qualification=STALE" in line for line in lines)
+        assert factory.instances and factory.instances[-1].kwargs["phase"] == "mass-roc-session-cold"
+        factory = make_session_factory()
 
         # installation manifest 변조 → 적재 거부 → UNQUALIFIED (실검증 연결).
         path = (installation_manifest.installation_dir(paths)
@@ -494,7 +596,13 @@ def test_run_noninteractive_all_pass_end_to_end():
         assert session.polls == [None] * len(run_cmd.DEFAULT_BATCH_PLAN)
 
         text = "\n".join(lines)
-        assert "QUALIFIED (reference" in text
+        assert "current_authority=QUALIFIED operational_readiness=ABSENT qualification=APPLICABLE" in text
+        assert "[readiness] calibration: WARM — qualification_reference:" in text
+        assert "[readiness] Link 17 probe PASS" in text
+        assert "[readiness] READY_FOR_WORKLOAD" in text
+        assert "[readiness] PROMOTED" in text
+        assert session.probes == ["readiness_probe"] and session.kinds[0] == "readiness_probe"
+        assert all(kind == "user" for kind in session.kinds[1:])
         assert "SESSION READY" in text
         assert "MASS-A connected" in text and "연결됨" not in text
         # bring-up 진행 표시(non-TTY 줄 로그)와 READY 이후 저 I/O 시나리오 출력
@@ -525,10 +633,17 @@ def test_run_noninteractive_all_pass_end_to_end():
         result_lines = [l for l in lines if l.startswith("RESULT ")]
         assert result_lines[-1].startswith(
             "RESULT overall=PASS scenarios=4/4 run-id=")
+        assert result_lines[-1].endswith(
+            "authority=QUALIFIED readiness=PROMOTED qualification=QUALIFIED")
         summary = json.loads((session.run_root / "summary.json"
                               ).read_text("utf-8"))
         assert summary["status"] == "PASS"
         assert summary["scenarios_passed"] == 4
+        assert summary["readiness"]["issue_status"] == "PROMOTED"
+        assert summary["readiness"]["mode"] == "warm"
+        assert summary["cancelled"] is False and summary["termination"] == "plan_complete"
+        state = json.loads(paths.readiness_state.read_text("utf-8"))
+        assert state["generation"] == 2 and state["active"]["release"] == summary["readiness"]["release"]
         run_json = json.loads((session.run_root / "run.json").read_text("utf-8"))
         assert run_json["installation_sha256"] == record["installation_sha256"]
         assert "deploy_manifest_sha256" not in run_json
@@ -568,28 +683,35 @@ def test_progress_toggle_keeps_judgement_and_evidence_identical():
 
 
 def test_run_retry_only_for_transient_host_time_failure():
+    """readiness 경로(명세 §5-7): host-time 일시 실패로 분류되더라도 **재시도하지 않는다**
+    (warm/cold implicit retry 0). legacy 분류(`classify_bringup_failure`)는 설명 줄에만 남고
+    어떤 값이어도 두 번째 bring-up을 만들지 않는다."""
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp)
         factory = make_session_factory({
             "bringup_fail_console": [
                 "[coordinator] phase 실패: MASS-B host affine fit FAIL", None]})
         code, lines = run(paths, factory)
-        assert code == run_cmd.EXIT_PASS, lines
-        assert len(factory.instances) == 2
-        first, second = factory.instances
-        assert first.closed and first.run_root != second.run_root
-        assert first.run_root.is_dir()
-        assert any("Retrying once with a new run-id" in l for l in lines)
-        assert any(l.strip() == "attempt 2/2" for l in lines)
+        assert code == run_cmd.EXIT_FAIL, lines
+        assert len(factory.instances) == 1
+        first = factory.instances[0]
+        assert first.closed and first.run_root.is_dir()
+        assert not any("Retrying once with a new run-id" in l for l in lines)
+        assert not any(l.strip() == "attempt 2/2" for l in lines)
         text = "\n".join(lines)
-        # bring-up 실패 상세 블록.
+        # bring-up 실패 상세 블록은 그대로 — 판정만 '재시도 없음'이다.
         assert "layer=ORCHESTRATION" in text
         assert "reason=HOST_AFFINE_FIT_FAILED" in text
-        assert "retry_eligible=true" in text and "attempt=1/2" in text
+        assert "attempt=1/1" in text
+        assert "No retry: the readiness path never retries a bring-up" in text
+        assert "[readiness] NOT PROMOTED" in text
         assert "evidence=%s" % first.run_root in text
-        summary = json.loads((second.run_root / "summary.json"
-                              ).read_text("utf-8"))
-        assert [a["bringup"] for a in summary["attempts"]] == ["FAILED", "READY"]
+        summary = json.loads((first.run_root / "summary.json").read_text("utf-8"))
+        assert [a["bringup"] for a in summary["attempts"]] == ["FAILED"]
+        assert summary["readiness"]["issue_status"] == "NOT_PROMOTED"
+        assert summary["readiness"]["termination"] == "bringup_failed"
+        # host-time 실패는 inhibit 사유가 아니다 — state는 generation 1 그대로.
+        assert json.loads(paths.readiness_state.read_text("utf-8"))["generation"] == 1
 
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp)
@@ -600,18 +722,17 @@ def test_run_retry_only_for_transient_host_time_failure():
         assert code == run_cmd.EXIT_FAIL
         assert len(factory.instances) == 1
         assert any(l.startswith("No retry:") for l in lines)
-        assert any("retry_eligible=false" in l for l in lines)
         assert any(l.startswith("RESULT overall=FAIL scenarios=0/4")
                    for l in lines)
 
     with tempfile.TemporaryDirectory() as tmp:
         paths, _ = fx.prepare_environment(tmp)
         factory = make_session_factory({
-            "bringup_fail_console": ["MASS-A host affine fit FAIL",
-                                     "MASS-A host affine fit FAIL"]})
-        code, lines = run(paths, factory)
+            "bringup_fail_console": ["MASS-A host affine fit FAIL"]})
+        code, lines = run(paths, factory, retry=False)
         assert code == run_cmd.EXIT_FAIL
-        assert len(factory.instances) == 2
+        assert len(factory.instances) == 1
+        assert any("--no-retry has no effect" in l for l in lines)
 
 
 def test_run_interactive_menu_and_workload_failure_stops_batch():

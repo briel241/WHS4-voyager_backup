@@ -47,6 +47,7 @@ vdeter run                    # 대화형 메뉴
 vdeter run all                # SC-VDE-005 → 006 → 001 normal → 001 forged
 vdeter run SC-VDE-001 --case forged --json
 vdeter results [run-id]       # run 목록 / 저장된 evidence 상세
+vdeter status [--json]        # current_authority / operational_readiness / qualification (장치 미개방)
 vdeter capability [show|issue]  # 설치 capability 증언 (RF-off)
 ```
 
@@ -54,13 +55,17 @@ vdeter capability [show|issue]  # 설치 capability 증언 (RF-off)
   돌리고, 통과했을 때만 RF 사다리(RR-P0 → RR-P1 gain → RR-P2-17 → RR-P3-fault)를 시작한다.
   전부 PASS면 active qualification reference를 원자적으로 발급한다.
 - 새 기계·새 설치본·새 identity·라이브러리 버전 변경·rf/operation 영역 파일 변경은
-  UNQUALIFIED로 시작하며 `vdeter run`은 RF 접근 전에 거부한다. tooling(자격 도구·시험
-  코드) 변경은 RF 사다리 없이 software 묶음 재검증(evidence reuse)만 요구하고, Markdown
-  변경은 자격에 영향이 없다.
+  `UNVERIFIED`(qualification 관점 UNQUALIFIED)로 시작한다. `vdeter run`은 이 상태에서
+  일반 scenario/PoC RF를 곧바로 허용하지 않고, 같은 세션 안의 유계 readiness 준비
+  (cold calibration → 내부 Link 17 probe → cleanup·재발견)가 PASS한 뒤에만 workload를
+  받으며, 세션 종료 시 `OPERATIONAL_READY` readiness를 발급한다(`apps/standalone/README.md`
+  §16). `OPERATIONAL_READY`는 qualification이 아니다 — 공식 release·baseline 동결에는
+  `vdeter qualify` 전체가 필요하다. tooling(자격 도구·시험 코드) 변경은 RF 사다리 없이
+  software 묶음 재검증(evidence reuse)만 요구하고, Markdown 변경은 자격에 영향이 없다.
 - 자격은 외부 공인 인증이 아닌 프로젝트 내부 RESEARCH_READY 자격이다.
 - amd64 Ubuntu 지원 코드는 구현돼 있으나 실제 amd64 시험은 장비 부재로 유보됐다.
 - 공통 옵션: `--no-progress`(진행바 대신 줄 단위 상태), `--diagnostics`(evidence 계측 상세),
-  `--no-retry`(bring-up 자동 재시도 1회 비활성).
+  `--no-retry`(호환용 — readiness 경로의 bring-up 재시도는 항상 0회).
 
 ### Stage 8 PoC 실행 (opt-in)
 

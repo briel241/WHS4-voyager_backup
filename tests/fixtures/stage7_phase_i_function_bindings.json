@@ -1,9 +1,11 @@
 {
  "added_functions": [
   "_await_launcher_exits",
+  "_binding_gate_arguments",
   "_diagnostics_enabled",
   "_expected_usb_speed",
   "_p3_fault_status",
+  "_run_readiness_cold_calibration",
   "_shared_hub_topology_check"
  ],
  "approved_utc": "2026-09-10",
@@ -15,8 +17,8 @@
  ],
  "functions": {
   "run_mass_roc_session": {
-   "ast_sha256": "dbce732facfe826c776088085a016ac82bc9841d2bb0da4c6786960b4850fadd",
-   "source_sha256": "c291d6aad05773b2cdeb7d9cd39993d2f2358a414055e823b19492aca40fa129"
+   "ast_sha256": "4b9c17d8cf237d13ffac11426bf95b57877ea581f1c248b45611ac5f3a96da04",
+   "source_sha256": "353a8fcb71dab567c3915710783da28b1597e471881275b0431f3dc9e46dd164"
   },
   "run_rr_p0": {
    "ast_sha256": "0eb91b75e7a778127067c38a120e176ad39e9b4eb22bd7a14746aaf5a4d935ac",
@@ -35,8 +37,8 @@
    "source_sha256": "3202d8a95f6043398861a8c27a0301ec44cd4c37a6ac0aa7c37b511fb42ff469"
   },
   "main": {
-   "ast_sha256": "0296974bf69972790ac6dd25054cb6df81360e6491660d6cb535b20d0fb3d337",
-   "source_sha256": "1b46f7ca828810a48d668cf4e4e0fd09f24d95411a5a51c81c48fb238d753317"
+   "ast_sha256": "1a8eb3346ae377e62afccb441c85c1852f977658f844ff6ab5956c7452765c5b",
+   "source_sha256": "24d37e85cc241f42f809f05ae2b97f427bcb7476b14eb58bfe8c557d5066bedf"
   },
   "run_mass_roc_service": {
    "ast_sha256": "6d20d0322dee06a948973e749098f40edd10a5eb18a14100612b9db61efe522a",
@@ -221,6 +223,43 @@
      "new": {
       "ast_sha256": "0eb91b75e7a778127067c38a120e176ad39e9b4eb22bd7a14746aaf5a4d935ac",
       "source_sha256": "d732e1cb9f6b22dd5d27a753487c9e75961ac7b1667df119f9bdff17a6b34d2e"
+     }
+    }
+   }
+  },
+  {
+   "reason": "Operational readiness + bring-up 단축 (docs/core/operational_readiness_and_bringup_spec.md SHA-256 654377ff…): readiness cold path(mass-roc-session-cold), ready.json 절대 deadline, workload_kind 전달",
+   "approved_utc": "2026-09-17",
+   "base_commit_before_change": "68b671d4d62f3c2b121b85ac9b9da23ba695e711",
+   "evidence": "output/operational-readiness-20260917/ (M0-REPORT.md, coordinator change scope in the M4 report)",
+   "functions_repinned": [
+    "main",
+    "run_mass_roc_session"
+   ],
+   "helpers_added": [
+    "_run_readiness_cold_calibration",
+    "_binding_gate_arguments"
+   ],
+   "behavior_change": "제한적 동작 변경이다. (1) 새 phase `mass-roc-session-cold`: GAIN_CALIBRATION config·gain artifact 없이 같은 B210-open session에서 `_run_readiness_cold_calibration`(start_cfo RR_CFO_PATHS → acquire_host_time attempt 1 → calibrate_rf ADAPTIVE_SEARCH_AND_SEAL + 공통 gain 재검증(RR-P1과 같은 plan·deadline 1200 s) → gain artifact/input fsync → inhibit 0·fault 0 quiescent)을 수행한 뒤 acquire_host_time attempt 2(fresh fit)로 기존 PRE/bridge/POST/admission을 그대로 진행한다. cold 전용 PhaseGuard 3900 s는 channel에 attach되어 READY까지 모든 barrier를 검사하고 READY에서 session guard로 복귀한다. (2) warm phase `mass-roc-session`의 명령 순서·plan·threshold·deadline(2700/7200/900/600)은 그대로다. (3) ready.json에 session_absolute_deadline_monotonic_s·readiness_mode·host_time_attempts·calibration을 추가하고, workload request의 workload_kind를 record와 workloads 목록에 그대로 전달한다. (4) main(): cold phase choice, cold는 --gain-artifact 거부, validate_rr_binding service 분기에 cold 추가, dispatch. mark()의 구조·_service_session_terminal_status·cleanup 합격 기준·escalation·launcher 종료 대기는 변경하지 않았다. RF·PHY·MAC·TDMA·timing·threshold·scenario 판정은 변경하지 않았다.",
+   "functions": {
+    "main": {
+     "previous": {
+      "ast_sha256": "0296974bf69972790ac6dd25054cb6df81360e6491660d6cb535b20d0fb3d337",
+      "source_sha256": "1b46f7ca828810a48d668cf4e4e0fd09f24d95411a5a51c81c48fb238d753317"
+     },
+     "new": {
+      "ast_sha256": "1a8eb3346ae377e62afccb441c85c1852f977658f844ff6ab5956c7452765c5b",
+      "source_sha256": "24d37e85cc241f42f809f05ae2b97f427bcb7476b14eb58bfe8c557d5066bedf"
+     }
+    },
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "dbce732facfe826c776088085a016ac82bc9841d2bb0da4c6786960b4850fadd",
+      "source_sha256": "c291d6aad05773b2cdeb7d9cd39993d2f2358a414055e823b19492aca40fa129"
+     },
+     "new": {
+      "ast_sha256": "4b9c17d8cf237d13ffac11426bf95b57877ea581f1c248b45611ac5f3a96da04",
+      "source_sha256": "353a8fcb71dab567c3915710783da28b1597e471881275b0431f3dc9e46dd164"
      }
     }
    }

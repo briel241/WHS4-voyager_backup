@@ -1,26 +1,33 @@
-"""`vdeter run` — 일상 실행 (Phase I W6, README §1·§8·§10·§11).
+"""`vdeter run` — 일상 실행 (Phase I W6 → operational readiness, README §1·§8·§10·§11).
 
 여기서 W3~W5의 재료가 **실제로 연결**된다 (이관 조건):
-    deploy manifest 실검증 → active 포인터 적재(SHA 결속) →
-    qualification-critical 대조(라이브러리 4종 포함) → 불일치 = UNQUALIFIED
-    → RF 접근 전 거부.
+    installation record 무결성 → readiness 실행 폐포 대조 → readiness state 적재 →
+    qualification reference(있으면) 대조 → calibration source 선택(warm/cold) →
+    stable binding → 준비 RF plan → 한 live session 안의 preparation → Link 17 probe →
+    process-local READY_FOR_WORKLOAD → workload → close → readiness 승격/inhibit.
 
-흐름 (결정 5·13·14·16·17·21, clone-bootstrap v2)
-    flock → hardware.toml → installation manifest 적재·재측정 검증 → active
-    reference(v2) → identity 정합 → 필수 preflight → critical 대조(installation/
-    rf/operation/tooling digest·serial·speed_class·gain·identity·라이브러리) →
-    run 디렉터리 할당 → resolved config(rr-p2-17·OPERATIONAL·reference gain) →
-    coordinator 세션(bring-up 1회) → 메뉴 또는 인자 workload N개 → close →
-    summary·RESULT 줄. Git 상태는 검사하지 않는다.
+흐름 (결정 5·13·14·16·17·21, clone-bootstrap v2, operational_readiness_and_bringup_spec §5–§9)
+    flock → hardware.toml → installation manifest 적재(무결성) → 3층 installation 검증(record
+    integrity / readiness-bound closure / inventory-only) → readiness state(state.json) →
+    active reference(v2, 선택) → identity → 필수 preflight → critical 대조(qualification 적용성) →
+    calibration source(warm: 적용 가능한 artifact / cold: RR-P1 ADAPTIVE_SEARCH_AND_SEAL 자동 수행) →
+    stable binding·applicability → run 디렉터리 → resolved config → coordinator 세션(bring-up 1회,
+    warm 2700 s / cold 3900 s) → workload admission reserve(1600 s) → 내부 Link 17 양방향 probe →
+    READY_FOR_WORKLOAD → 메뉴 또는 인자 workload N개 → close → 분류기 판정 → readiness 승격/inhibit
+    → summary·RESULT 줄. Git 상태는 검사하지 않는다.
 
-bring-up 자동 재시도(결정 16): host-time 획득의 일시적 실패로 **명확히
-분류된** 경우에만, cleanup PASS·잔존 0·B210 3대 재발견을 확인한 뒤 새
-run-id로 최대 1회. 설정·장비·키·UNQUALIFIED·cleanup 실패는 재시도 없음.
+readiness 경로의 bring-up 자동 재시도는 **0회**다(warm/cold 모두). 이전 결정 16의 host-time 단일
+재시도(`classify_bringup_failure`)는 이 경로에서 호출하지 않으며 실패 설명 줄에만 그 분류를 쓴다.
+실패·timeout·취소·signal은 bounded cleanup·잔존 0·B210 3대 재발견 뒤 사용자가 새 `vdeter run`을
+시작해야 한다.
 
-출력은 전부 영어. 시나리오 구간은 RF 활성 중에는 `running …`만 내고,
-workload 결과가 확정된 뒤 evidence를 한 번 읽어 전송 단위 세로 상세 블록
-(scenario_report — `vdeter results`와 같은 렌더러)과 result 요약을 낸다.
-종료 코드는 README §11.
+`workload_plan`(개발용 진단 `diag_cmd`)이나 `critical_check`(진단 authorization)이 주어진 실행은
+readiness를 발급·표시하지 않는다(`NOT_QUALIFIED` 진단 권한은 readiness/qualification으로 승격 금지).
+`--rf-off-software`(장치 없는 software double)도 readiness를 발급하지 않는다.
+
+출력은 전부 영어. 시나리오 구간은 RF 활성 중에는 `running …`만 내고, workload 결과가 확정된 뒤
+evidence를 한 번 읽어 전송 단위 세로 상세 블록(scenario_report)과 result 요약을 낸다. 종료 코드는
+README §11.
 """
 
 from __future__ import annotations
@@ -38,6 +45,11 @@ from apps.standalone import (
     progress as progress_module,
     provenance as provenance_module,
     qualify_cmd,
+    readiness,
+    readiness_classifier,
+    readiness_closure,
+    readiness_probe,
+    readiness_run,
     scenario_report,
 )
 from apps.standalone.local_session import (
@@ -71,11 +83,17 @@ SCENARIOS = {
     "SC-VDE-006": "MASS-ROC remote control",
 }
 
-#: bring-up 자동 재시도 상한 (총 시도 2회 — 결정 16).
+#: (legacy 결정 16) bring-up 시도 상한 — readiness 경로는 항상 1회다. 실패 설명 줄의 표기에만 쓴다.
 MAX_BRINGUP_ATTEMPTS = 2
+#: readiness 경로의 bring-up 시도 수 (warm/cold 공통, 명세 §5-7).
+READINESS_BRINGUP_ATTEMPTS = 1
 
 #: 일반 실행이 결속하는 서비스 phase (README §6 — coordinator 계약).
 RUN_RR_PHASE = "rr-p2-17"
+WARM_SESSION_PHASE = "mass-roc-session"
+COLD_SESSION_PHASE = "mass-roc-session-cold"
+
+PROBE_SCENARIO_ID = readiness_probe.PROBE_SCENARIO_ID
 
 
 class RunRefusal(Exception):
@@ -184,7 +202,8 @@ def compare_critical(reference: dict, *, installation: dict,
 
     `installation`은 현재 설치 재측정 record(또는 digest 부분집합). Git
     commit·branch·dirty·baseline Markdown SHA는 대조하지 않는다.
-    불일치 항목을 전부 모아 돌려준다 — 하나라도 있으면 UNQUALIFIED."""
+    불일치 항목을 전부 모아 돌려준다 — 하나라도 있으면 qualification STALE
+    (readiness 경로) / UNQUALIFIED(진단·legacy 경로)."""
     mismatches = []
     if reference.get("schema_version") != 2:
         mismatches.append("active reference is schema v%s (legacy git-bound "
@@ -304,31 +323,46 @@ def gain_input_from_reference(reference: dict) -> dict:
 
 def is_diagnostic_authority(reference: dict) -> bool:
     """개발용 진단 authorization인가 (`diag_cmd`, `not_a_qualification`)."""
-    return bool(reference.get("not_a_qualification"))
+    return bool(reference and reference.get("not_a_qualification"))
 
 
-def authority_fields(reference: dict) -> dict:
+def authority_fields(reference: dict | None, *, readiness_block: dict | None = None) -> dict:
     """run.json/summary.json의 권한 표기.
 
-    정상 run은 종전과 같이 `reference_sha256`만 기록한다. 진단 authorization은
+    정상 run은 종전과 같이 `reference_sha256`(있으면)을 기록한다. 진단 authorization은
     qualification reference로 기록하지 않는다 — `reference_sha256`은 null이고,
     `diagnostic_authorization_sha256`과 `qualification_status: NOT_QUALIFIED`를
-    별도 필드로 남긴다(재결속 위장 금지)."""
+    별도 필드로 남긴다(재결속 위장 금지). readiness 경로는 `current_authority`·
+    `qualification_status`를 함께 적는다."""
     if is_diagnostic_authority(reference):
-        return {"reference_sha256": None,
-                "diagnostic_authorization_sha256":
-                    reference.get("_reference_sha256"),
-                "qualification_status": "NOT_QUALIFIED"}
-    return {"reference_sha256": reference.get("_reference_sha256")}
+        fields = {"reference_sha256": None,
+                  "diagnostic_authorization_sha256":
+                      reference.get("_reference_sha256"),
+                  "qualification_status": "NOT_QUALIFIED"}
+    else:
+        fields = {"reference_sha256": (reference or {}).get("_reference_sha256")}
+    if readiness_block is not None:
+        fields["current_authority"] = readiness_block.get("current_authority")
+        fields["qualification_status"] = (
+            "QUALIFIED" if readiness_block.get("qualification") == "APPLICABLE"
+            else "NOT_QUALIFIED")
+        fields["operational_readiness_before"] = readiness_block.get("operational_readiness")
+    return fields
 
 
-def result_suffix(reference: dict) -> str:
-    """비대화형 `RESULT` 줄 접미 — 진단이면 자격 상태를 명시한다."""
-    return (" qualification=NOT_QUALIFIED"
-            if is_diagnostic_authority(reference) else "")
+def result_suffix(reference: dict | None, readiness_block: dict | None = None) -> str:
+    """비대화형 `RESULT` 줄 접미 — 진단이면 자격 상태를, readiness 경로면 권위·발급 상태를 명시한다."""
+    if is_diagnostic_authority(reference):
+        return " qualification=NOT_QUALIFIED"
+    if readiness_block is None:
+        return ""
+    return " authority=%s readiness=%s qualification=%s" % (
+        readiness_block.get("current_authority"),
+        readiness_block.get("issue_status"),
+        "QUALIFIED" if readiness_block.get("qualification") == "APPLICABLE" else "NOT_QUALIFIED")
 
 
-#: bring-up 실패 중 재시도를 **금지**하는 신호 (설정·장비·키·결속 오류).
+#: (legacy 결정 16) bring-up 실패 설명에 쓰는 신호 — readiness 경로는 이 분류로 **재시도하지 않는다**.
 _NON_TRANSIENT_MARKERS = (
     "BINDING_REJECTED", "config 적재 실패", "system plan 적재 실패",
     "spawn 실패", "spawn failed", "trust", "identity", "fingerprint",
@@ -340,7 +374,8 @@ _HOST_TIME_MARKERS = ("host affine fit FAIL", "acquire_host_time")
 
 def classify_bringup_failure(console_text: str, finalize_summary: dict,
                              usb_observed: dict, declared_serials) -> dict:
-    """결정 16의 재시도 허용 분류 — 보수적이다.
+    """(legacy 결정 16) 재시도 허용 분류 — 보수적이다. readiness 경로에서는 **설명 전용**이며
+    어떤 값이어도 재시도하지 않는다.
 
     transient=True 조건 전부: host-time 획득 실패 신호가 있고, 비일시적
     신호가 없고, closed.json의 cleanup PASS, 잔존 프로세스 0, 선언된 B210
@@ -366,19 +401,57 @@ def classify_bringup_failure(console_text: str, finalize_summary: dict,
 
 # ------------------------------------------------------------ 준비 단계
 
+def _refuse_readiness_state(snapshot: dict) -> RunRefusal:
+    status = snapshot["status"]
+    problems = "; ".join(snapshot.get("problems") or []) or status
+    if status == "MIGRATION_REQUIRED":
+        return RunRefusal(
+            EXIT_UNQUALIFIED,
+            "MIGRATION_REQUIRED: this installation has no readiness state marker. "
+            "Impact: workload RF is blocked until the RF-free migration is done. "
+            "Action: run `./bin/vdeter setup` (RF-free; creates var/readiness/state.json), "
+            "then run again.")
+    if status == "STATE_UNREADABLE":
+        return RunRefusal(
+            EXIT_UNQUALIFIED,
+            "INHIBITED / STATE_UNREADABLE: var/readiness/state.json is required by the "
+            "installation manifest but cannot be read (%s). Impact: RF is refused "
+            "(fail-closed; a deleted state is not a fresh install). Action: restore "
+            "var/readiness/state.json from the installation, or investigate before "
+            "any RF." % problems)
+    if status == "STATE_CORRUPT":
+        return RunRefusal(
+            EXIT_UNQUALIFIED,
+            "INHIBITED / STATE_CORRUPT: readiness state or its inhibit record is invalid "
+            "(%s). Impact: RF is refused. Action: investigate var/readiness; the state is "
+            "never regenerated silently." % problems)
+    return RunRefusal(
+        EXIT_UNQUALIFIED,
+        "READINESS ORPHAN_INVALID: an unreferenced readiness release is incomplete or "
+        "tampered (%s). Impact: RF is refused before any device access. Action: inspect "
+        "var/readiness/releases and remove or restore the invalid directory manually."
+        % problems)
+
+
 def prepare(paths: StatePaths, *, repo_root=None,
             hardware_path=None, preflight_fn=None, reference_loader=None,
             environment_manifest=None, progress=None,
-            critical_check=None) -> dict:
+            critical_check=None, readiness_enabled: bool = True,
+            machine_id=None, readiness_sleeper=None) -> dict:
     """RF 접근 전 게이트 전부. 실패는 RunRefusal(code, message).
 
-    Git·baseline Markdown·standalone-binding은 읽지 않는다. 결속은
-    var/installation manifest(적재 + 현재 파일 재측정)와 active reference
-    v2의 digest 대조로만 성립한다.
+    Git·baseline Markdown·standalone-binding은 읽지 않는다.
 
-    `reference_loader`/`critical_check`는 주입 seam이다 — 기본값(active
-    reference + `compare_critical`)이 정상 `vdeter run`이고, `diag_cmd`는
-    같은 게이트 순서를 유지한 채 권한 원천만 진단 authorization으로 바꾼다."""
+    readiness 경로(`readiness_enabled=True`, 정상 `vdeter run`): installation record 무결성 →
+    3층 installation 검증(bound 불일치 = 거부, inventory-only = 기록) → readiness state
+    (fail-closed 상태 거부) → active qualification reference(선택) → identity → preflight →
+    qualification 적용성(compare_critical; 불일치 = STALE, 거부 아님) → calibration source →
+    stable binding·applicability·current authority.
+
+    진단/legacy 경로(`readiness_enabled=False`, `diag_cmd`·`--rf-off-software`): 종전 그대로
+    active reference 필수 + `critical_check` 통과 + 전체 installation 일치.
+
+    `reference_loader`/`critical_check`는 주입 seam이다."""
     repo_root = Path(repo_root) if repo_root is not None else paths.root
     paths.ensure_var()
 
@@ -400,22 +473,46 @@ def prepare(paths: StatePaths, *, repo_root=None,
                          "Installation manifest unavailable or tampered: %s. "
                          "Action: run `./bin/vdeter setup`, then `vdeter "
                          "qualify`." % exc) from exc
-    install_check = installation_manifest.verify_installation(
-        repo_root, installation)
-    if not install_check["pass"]:
-        raise RunRefusal(
-            EXIT_UNQUALIFIED,
-            "Installation files differ from the setup manifest (%s). Impact: "
-            "the recorded installation binding no longer describes this "
-            "tree. Action: restore the files, or run `./bin/vdeter setup` "
-            "and `vdeter qualify` again."
-            % installation_manifest.describe_mismatch(install_check))
-    current_installation = install_check["current_record"]
+    closure_report = None
+    if readiness_enabled:
+        closure_report = readiness_closure.verify_readiness_installation(
+            paths, repo_root, record=installation)
+        bound = closure_report["readiness_bound"]
+        if not bound["pass"]:
+            raise RunRefusal(
+                EXIT_UNQUALIFIED,
+                "READINESS-BOUND FILES differ from the setup manifest (%s). Impact: the "
+                "recorded installation binding no longer describes the rf/operation tree "
+                "and no preparation RF is started. Action: restore the files, or run "
+                "`./bin/vdeter setup` (RF-free) to re-issue the installation manifest and "
+                "run again (a new bounded preparation follows)."
+                % readiness_closure.describe_bound_mismatch(closure_report))
+        current_installation = closure_report["current_record"]
+    else:
+        install_check = installation_manifest.verify_installation(repo_root, installation)
+        if not install_check["pass"]:
+            raise RunRefusal(
+                EXIT_UNQUALIFIED,
+                "Installation files differ from the setup manifest (%s). Impact: "
+                "the recorded installation binding no longer describes this "
+                "tree. Action: restore the files, or run `./bin/vdeter setup` "
+                "and `vdeter qualify` again."
+                % installation_manifest.describe_mismatch(install_check))
+        current_installation = install_check["current_record"]
+
+    readiness_snapshot = None
+    if readiness_enabled:
+        stage("readiness state")
+        readiness_snapshot = readiness.load_readiness_state(
+            paths, installation_record=installation,
+            **({"sleeper": readiness_sleeper} if readiness_sleeper is not None else {}))
+        if readiness_snapshot["fail_closed"]:
+            raise _refuse_readiness_state(readiness_snapshot)
 
     stage("active reference")
     loader = reference_loader or qualify_cmd.load_active_reference
     reference = loader(paths)
-    if reference is None:
+    if reference is None and not readiness_enabled:
         raise RunRefusal(
             EXIT_UNQUALIFIED,
             "UNQUALIFIED: no valid active qualification reference on this "
@@ -451,12 +548,14 @@ def prepare(paths: StatePaths, *, repo_root=None,
     stage("critical comparison")
     environment_manifest = (environment_manifest
                             or local_config.build_environment_manifest())
-    comparison = (critical_check or compare_critical)(
-        reference, installation=current_installation, hardware=hardware,
-        preflight=preflight,
-        identity_fingerprint=identity_check["fingerprint"],
-        environment_manifest=environment_manifest)
-    if not comparison["pass"]:
+    comparison = {"pass": False, "mismatches": ["no active qualification reference"]}
+    if reference is not None:
+        comparison = (critical_check or compare_critical)(
+            reference, installation=current_installation, hardware=hardware,
+            preflight=preflight,
+            identity_fingerprint=identity_check["fingerprint"],
+            environment_manifest=environment_manifest)
+    if not readiness_enabled and not comparison["pass"]:
         if is_diagnostic_authority(reference):
             raise RunRefusal(
                 EXIT_UNQUALIFIED,
@@ -480,14 +579,18 @@ def prepare(paths: StatePaths, *, repo_root=None,
                          f"({disk['free_bytes']} bytes). Action: move or "
                          "remove old evidence manually.")
 
-    return {
+    context = {
         "repo_root": repo_root, "hardware": hardware,
         "installation": current_installation,
+        "installation_record": installation,
         "installation_sha256": current_installation["installation_sha256"],
-        "installation_check": {k: v for k, v in install_check.items()
-                               if k != "current_record"},
+        "installation_check": ({k: v for k, v in closure_report.items() if k != "current_record"}
+                               if closure_report is not None else None),
         "provenance": provenance_module.build_provenance(repo_root),
         "reference": reference,
+        "qualification": {"present": reference is not None,
+                          "applicable": bool(reference is not None and comparison["pass"]),
+                          "mismatches": list(comparison.get("mismatches") or [])},
         "preflight": preflight, "identity": identity_check,
         "environment_manifest": environment_manifest, "disk": disk,
         "declared_serials": [
@@ -500,7 +603,53 @@ def prepare(paths: StatePaths, *, repo_root=None,
             role: (info or {}).get("usb_path")
             for role, info in sorted((((preflight.get("checks") or {}).get(
                 "b210") or {}).get("observed_by_role") or {}).items())},
+        "readiness_enabled": readiness_enabled,
+        "readiness_snapshot": readiness_snapshot,
     }
+    if not readiness_enabled:
+        return context
+
+    # --- readiness: calibration source → stable binding → applicability → authority ----
+    stage("readiness binding")
+    readiness_id = readiness.new_readiness_id()
+    if machine_id is None:
+        machine_id = readiness_run.read_machine_id()
+    if not machine_id:
+        raise RunRefusal(EXIT_CONFIG,
+                         "cannot read the stable machine identity (/etc/machine-id) required "
+                         "by the readiness binding; no preparation RF is started.")
+    placeholder = readiness_run.cold_calibration_placeholder(readiness_id)
+    partial = readiness_run.build_binding(
+        installation_record=installation, hardware=hardware, preflight=preflight,
+        identity_fingerprint=identity_check["fingerprint"], machine_id=machine_id,
+        repo_root=repo_root, calibration=placeholder)
+    selection = readiness_run.select_calibration_source(
+        reference=reference if not is_diagnostic_authority(reference) else None,
+        qualification_applicable=context["qualification"]["applicable"],
+        readiness_snapshot=readiness_snapshot, hardware=hardware, preflight=preflight,
+        environment_manifest=environment_manifest, installation_record=installation,
+        partial_binding=readiness_run.binding_without_calibration(partial))
+    calibration = selection["calibration"] or placeholder
+    binding = dict(partial)
+    binding["calibration"] = calibration
+    applicability = readiness.evaluate_applicability(readiness_snapshot, binding)
+    authority = readiness.project_authority(
+        qualification_applicable=context["qualification"]["applicable"],
+        readiness_applicable=applicability["operational_readiness"] == "APPLICABLE")
+    active = (readiness_snapshot.get("active") or {})
+    active_digest = ((active.get("record") or {}).get("readiness_digest_sha256")
+                     if active.get("valid") else None)
+    context.update({
+        "readiness_id": readiness_id,
+        "machine_id": machine_id,
+        "binding": binding,
+        "calibration": selection,
+        "applicability": applicability,
+        "current_authority": authority,
+        "active_same_binding": bool(active_digest and active_digest == readiness.readiness_digest(binding)),
+        "expected_generation": readiness_snapshot["generation"],
+    })
+    return context
 
 
 # ------------------------------------------------------------ 세션 실행
@@ -574,14 +723,22 @@ def _close_with_interrupt_guard(session, out) -> dict:
         return session.finalize()
 
 
+def _readiness_mode(context: dict) -> str:
+    if not context.get("readiness_enabled"):
+        return "legacy"
+    return context["calibration"]["mode"]
+
+
 def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
               diagnostics, out, clock, reporter=None, mirror=None,
               rf_off_software: bool = False) -> tuple:
     """run 디렉터리 할당 → config 생성 → 세션 spawn → READY 대기.
 
+    warm: OPERATIONAL config + 적용 가능한 gain artifact, phase `mass-roc-session`, 상한 2700 s.
+    cold: GAIN_CALIBRATION config(gain 없음), phase `mass-roc-session-cold`, cold lifecycle 3900 s
+          (`wait_ready(timeout_s=3900)` 명시 호출 — 기본 인자 2700은 바꾸지 않는다).
     실패는 BringupFailed(summary) — summary는 finalize 결과(정직).
-    `reporter`가 있으면 bring-up 진행바(BringupTracker)를 구동한다 — 표시
-    전용이며 timeout·판정에는 관여하지 않는다."""
+    `reporter`가 있으면 bring-up 진행바(BringupTracker)를 구동한다 — 표시 전용."""
     try:
         run_id, run_root = allocate_run_dir(paths.runs_dir, run_id)
     except StateError as exc:
@@ -592,6 +749,17 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
     if mirror is not None:
         mirror.set_path(presentation / "console.log")
     reference = context["reference"]
+    mode = _readiness_mode(context)
+    if mode == "cold":
+        run_mode, gain_input, phase = "GAIN_CALIBRATION", None, COLD_SESSION_PHASE
+        timeout_s = readiness_run.READINESS_COLD_PREPARATION_S
+    else:
+        run_mode, phase = "OPERATIONAL", WARM_SESSION_PHASE
+        timeout_s = None
+        if mode == "warm":
+            gain_input = readiness_run.gain_input_for(context["calibration"]["calibration"])
+        else:
+            gain_input = gain_input_from_reference(reference)
     try:
         generated = local_config.generate_run_configs(
             repo_root=context["repo_root"], run_root=run_root, run_id=run_id,
@@ -599,19 +767,62 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
             installation=context["installation"],
             installation_verified=True,
             provenance=context.get("provenance"),
-            run_mode="OPERATIONAL",
-            gain_input=gain_input_from_reference(reference),
+            run_mode=run_mode,
+            gain_input=gain_input,
             environment_manifest=context["environment_manifest"],
             usb_paths=context.get("usb_paths"))
     except local_config.ConfigGenerationError as exc:
         raise RunRefusal(EXIT_CONFIG, str(exc)) from exc
-    gain_path = Path(generated["configs_dir"]) / "gain_artifact_input.json"
-    write_json_atomic(gain_path, gain_input_from_reference(reference))
+    gain_path = None
+    if gain_input is not None:
+        gain_path = Path(generated["configs_dir"]) / "gain_artifact_input.json"
+        write_json_atomic(gain_path, gain_input)
     digests = installation_manifest.digests_of(context["installation"])
+    readiness_block = None
+    if context.get("readiness_enabled"):
+        readiness_block = {
+            "current_authority": context["current_authority"],
+            "operational_readiness": context["applicability"]["operational_readiness"],
+            "qualification": "APPLICABLE" if context["qualification"]["applicable"]
+            else ("STALE" if context["qualification"]["present"] else "ABSENT"),
+        }
+        plan = readiness_run.readiness_plan(
+            mode, readiness_id=context["readiness_id"], run_id=run_id,
+            calibration=context["calibration"]["calibration"],
+            preparation_cap_s=timeout_s or readiness_run.WARM_BRINGUP_TIMEOUT_S)
+        (run_root / "plans").mkdir(parents=True, exist_ok=True)
+        (run_root / "plans" / "readiness-plan.json").write_bytes(readiness_run.plan_bytes(plan))
+        (run_root / "readiness").mkdir(parents=True, exist_ok=True)
+        write_json_atomic(run_root / "readiness" / "closure-report.json", {
+            "artifact_type": "VDETER_READINESS_INSTALLATION_CHECK_V1",
+            **(context.get("installation_check") or {})})
+        write_json_atomic(run_root / "readiness" / "preparation.json", {
+            "artifact_type": "VDETER_READINESS_PREPARATION_CONTEXT_V1",
+            "readiness_id": context["readiness_id"],
+            "mode": mode,
+            "authority_scope": "RUN_READINESS_PREPARATION",
+            "qualification_status": "NOT_QUALIFIED",
+            "binding": context["binding"],
+            "readiness_digest_sha256": (
+                readiness.readiness_digest(context["binding"])
+                if mode != "cold" else None),
+            "calibration_selection": {k: v for k, v in context["calibration"].items()},
+            "applicability": context["applicability"],
+            "current_authority": context["current_authority"],
+            "qualification": context["qualification"],
+            "readiness_state": {
+                "status": context["readiness_snapshot"]["status"],
+                "generation": context["readiness_snapshot"]["generation"],
+                "active_release": ((context["readiness_snapshot"].get("active") or {}).get("release")),
+                "orphans": context["readiness_snapshot"]["orphans"],
+            },
+            "session_reuse_scope": "THIS_RUN_ONLY",
+            "cross_command_handoff_allowed": False,
+        })
     write_json_atomic(run_root / "run.json", {
         "artifact_type": "STAGE7_STANDALONE_RUN_V1",
         "run_id": run_id,
-        **authority_fields(reference),
+        **authority_fields(reference, readiness_block=readiness_block),
         "installation_sha256": digests["installation_sha256"],
         "rf_manifest_sha256": digests["rf_manifest_sha256"],
         "operation_manifest_sha256": digests["operation_manifest_sha256"],
@@ -619,6 +830,9 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         "identity_fingerprint": context["identity"]["fingerprint"],
         "requested_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "config_hashes": generated["resolved_sha256"],
+        "readiness_mode": mode,
+        "readiness_id": context.get("readiness_id"),
+        "session_phase": phase,
         # 이 실행에 **실제 적용된** 진단 설정. 요청값이 아니라 자식 env 를 만드는
         # 단일 출처(build_child_env)가 STAGE7_DIAG 를 넣었는지 읽는다.
         "diagnostics": build_child_env(
@@ -629,10 +843,15 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         repo_root=context["repo_root"], run_id=run_id, run_root=run_root,
         configs_dir=generated["configs_dir"], gain_artifact_path=gain_path,
         baseline_sha256=provenance_module.STAGE7_BASELINE_PIN["sha256"],
-        phase="mass-roc-session", diagnostics=diagnostics,
+        phase=phase, diagnostics=diagnostics,
         identity_root=paths.identity_dir, rf_off_software=rf_off_software)
     out(f"[config]    {run_id} generated and validated")
-    out("Bringing up hardware session (~20-23 min, once per run)")
+    if mode == "cold":
+        out("Bringing up hardware session — COLD calibration path (CFO -> host fit -> "
+            "ADAPTIVE_SEARCH_AND_SEAL -> fresh host fit -> RF-time PRE/POST); hard cap "
+            "%d s, no automatic retry" % int(timeout_s))
+    else:
+        out("Bringing up hardware session (~20-23 min, once per run; no automatic retry)")
     started = clock()
     tracker = None
 
@@ -658,7 +877,10 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
 
     try:
         session.start()
-        ready = session.wait_ready(on_stage=on_stage)
+        if timeout_s is not None:
+            ready = session.wait_ready(timeout_s=timeout_s, on_stage=on_stage)
+        else:
+            ready = session.wait_ready(on_stage=on_stage)
     except LocalSessionError as exc:
         phase_label = tracker.failed_at("FAILED") if tracker else None
         if reporter is not None:
@@ -669,7 +891,7 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         raise BringupFailed(summary, str(exc), run_root=run_root,
                             phase_label=phase_label) from exc
     except KeyboardInterrupt:
-        # bring-up(최대 ~20분) 중 Ctrl+C/SIGTERM — 전파시키지 않고 정상
+        # bring-up(최대 ~20분, cold 65분) 중 Ctrl+C/SIGTERM — 전파시키지 않고 정상
         # close(shutdown 마커→cleanup→B210 반환)를 먼저 마친다. close 중
         # 두 번째 인터럽트는 guard가 TERM/KILL로 에스컬레이션한다 (결정 17).
         if tracker is not None:
@@ -685,11 +907,19 @@ def _bring_up(context: dict, paths: StatePaths, *, run_id, session_factory,
         reporter.tick_hook = None
         reporter.close()  # READY 이후에는 진행바를 완전히 종료한다
     out("  %s SESSION READY" % stamp(clock() - started))
-    return session, run_id, run_root, ready
+    return session, run_id, run_root, ready, started
+
+
+def _submit(session, scenario_id, certificate_case, *, workload_kind, submit_kwargs):
+    """세션이 `workload_kind`를 알면 request에 싣는다 (readiness probe / user 구분)."""
+    if getattr(session, "supports_workload_kind", False):
+        submit_kwargs = dict(submit_kwargs, workload_kind=workload_kind)
+    return session.submit_workload(scenario_id, certificate_case, **submit_kwargs)
 
 
 def _run_workload(session, scenario_id, certificate_case, *, out, clock,
-                  index=None, total=None, poc_ctx=None, poc_id=None):
+                  index=None, total=None, poc_ctx=None, poc_id=None,
+                  workload_kind=readiness_probe.USER_WORKLOAD_KIND):
     """READY 이후 workload 하나 — 88fa6df와 같은 저 I/O 경로.
 
     RF 활성 구간(submit→result)에는 `running …`과 settle 안내만 표시하고
@@ -730,7 +960,8 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     }
     if poc_request is not None:
         submit_kwargs["poc"] = poc_request
-    workload_id = session.submit_workload(scenario_id, certificate_case, **submit_kwargs)
+    workload_id = _submit(session, scenario_id, certificate_case,
+                          workload_kind=workload_kind, submit_kwargs=submit_kwargs)
     started = clock()
     trace_rows = []
     result = session.wait_result(workload_id, on_trace=trace_rows.append)
@@ -738,6 +969,7 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     result.setdefault("workload_id", workload_id)
     result.setdefault("scenario_id", scenario_id)
     result.setdefault("certificate_case", certificate_case)
+    result.setdefault("workload_kind", workload_kind)
     # 결과 확정 후에만 evidence를 한 번 읽는다 (RF 활성 구간 출력 없음).
     try:
         for line in scenario_report.workload_report_lines(
@@ -753,6 +985,40 @@ def _run_workload(session, scenario_id, certificate_case, *, out, clock,
     return result
 
 
+def _run_probe(session, *, out, clock) -> dict:
+    """내부 Link 17 양방향 probe — readiness 전용 고정 vector·횟수·상한 (§6.2).
+
+    일반 scenario 성공으로 보고하지 않는다. 반환 {"result", "evaluation", "classification",
+    "pass", "workload_id"}. probe 뒤에는 STOP·장치 close·worker 회수·재발견을 하지 않는다."""
+    out("[readiness] internal Link 17 bidirectional probe (fixed vector %s, %d transfers, "
+        "per-transfer timeout %d s)" % (readiness_probe.probe_plan_sha256()[:12],
+                                        len(readiness_probe.PROBE_VECTOR),
+                                        readiness_probe.PROBE_LIMITS["status_timeout_s"]))
+    workload_id = _submit(session, PROBE_SCENARIO_ID, "normal",
+                          workload_kind=readiness_probe.PROBE_WORKLOAD_KIND,
+                          submit_kwargs={})
+    started = clock()
+    result = session.wait_result(workload_id, on_trace=lambda _row: None)
+    result.setdefault("workload_id", workload_id)
+    result.setdefault("scenario_id", PROBE_SCENARIO_ID)
+    result.setdefault("workload_kind", readiness_probe.PROBE_WORKLOAD_KIND)
+    result.setdefault("wall_clock_s", round(clock() - started, 1))
+    body = ((result.get("scenario") or {}).get("results") or {}).get(PROBE_SCENARIO_ID)
+    evaluation = readiness_probe.evaluate_probe_result(body)
+    classification = readiness_classifier.classify_workload(result)
+    passed = bool(evaluation["pass"] and classification["verdict"] == "PASS"
+                  and result.get("status") == "PASS")
+    problems = list(evaluation["problems"])
+    if classification["verdict"] != "PASS":
+        problems.append("classifier verdict %s (%s)" % (classification["verdict"],
+                                                        classification["codes"]))
+    out("[readiness] Link 17 probe %s (%.1f s)%s" % (
+        "PASS" if passed else "FAIL", result.get("wall_clock_s") or 0.0,
+        "" if passed else " — " + "; ".join(problems[:3])))
+    return {"result": result, "evaluation": evaluation, "classification": classification,
+            "pass": passed, "workload_id": workload_id, "problems": problems}
+
+
 _ESCAPE_SEQ_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z~]|\x1b[A-Za-z]|[\x00-\x1f\x7f]")
 
 
@@ -765,7 +1031,7 @@ def _clean_choice(raw: str) -> str:
 def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
     """catalog(`--poc-dir`) mode에서 scenario-호환 PoC를 대화형 선택한다(§6.1, R7). 반환 (kind, poc_id).
 
-    kind ∈ {"poc","baseline","rescan","quit","invalid"}. direct(`--poc`)면 ("poc", None): 고정 package.
+    kind ∈ {"poc","baseline","rescan","quit","invalid","eof"}. direct(`--poc`)면 ("poc", None): 고정 package.
     표시한 제어(q/r/none/숫자)를 그대로 poc_id로 넘기지 않고 menu.resolve로 해석한다.
     """
     if poc_ctx is None or not poc_ctx["option"].poc_dir:
@@ -778,7 +1044,7 @@ def _menu_poc_id(poc_ctx, scenario_id, *, out, input_fn):
         choice = _clean_choice(
             input_fn("  select poc [number / id / none / r=rescan / q=quit] > "))
     except EOFError:
-        return ("baseline", None)
+        return ("eof", None)
     return poc_ctx["module"].resolve_catalog_selection(
         poc_ctx["option"], scenario_id, choice, **selection_kwargs)
 
@@ -798,7 +1064,21 @@ def _stop_after_workload(result, out) -> bool:
     return False
 
 
-def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
+def _admit_or_stop(admission_fn, out) -> bool:
+    """workload 제출 직전 absolute reserve 검사 (§5.1.1). False면 제출하지 않고 정상 close만."""
+    if admission_fn is None:
+        return True
+    admission = admission_fn()
+    if admission["admitted"]:
+        return True
+    out("  workload admission refused: remaining absolute session budget %.0f s < reserve "
+        "%d s — no new workload is submitted; closing normally"
+        % (admission["remaining_s"] or 0.0, admission["reserve_s"]))
+    return False
+
+
+def _menu(session, *, out, input_fn, clock, poc_ctx=None, admission_fn=None) -> tuple:
+    """대화형 메뉴. 반환 (results, termination) — termination은 readiness_run.TERMINATION_*."""
     ordered = sorted(SCENARIOS)
     results = []
     while True:
@@ -810,21 +1090,27 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
         try:
             choice = _clean_choice(input_fn("select > "))
         except EOFError:
-            break
+            out("  input channel closed (EOF) — closing session; no readiness is issued")
+            return results, readiness_run.TERMINATION_INPUT_LOST
         if not choice:
             continue          # 빈 입력·방향키 등 제어 시퀀스만이면 다시 표시
         lowered = choice.lower()
         if lowered in ("q", "quit", "exit"):
-            break
+            return results, readiness_run.TERMINATION_EXPLICIT_QUIT
         if lowered in ("a", "all"):
             for number, (scenario_id, case) in enumerate(DEFAULT_BATCH_PLAN, 1):
                 kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out,
                                             input_fn=input_fn)
+                if kind == "eof":
+                    out("  input channel closed (EOF) — closing session; no readiness is issued")
+                    return results, readiness_run.TERMINATION_INPUT_LOST
                 if kind == "quit":
-                    return results
+                    return results, readiness_run.TERMINATION_EXPLICIT_QUIT
                 if kind in ("rescan", "invalid"):
                     out("  poc %s — no RF action for this scenario" % kind)
                     continue
+                if not _admit_or_stop(admission_fn, out):
+                    return results, readiness_run.TERMINATION_ADMISSION_RESERVE
                 result = _run_workload(session, scenario_id, case,
                                        out=out, clock=clock, index=number,
                                        total=len(DEFAULT_BATCH_PLAN),
@@ -833,7 +1119,7 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
                 results.append(result)
                 if result.get("status") != "PASS" or _stop_after_workload(result, out):
                     out("  stopping batch")
-                    return results
+                    return results, readiness_run.TERMINATION_WORKLOAD_STOP
             continue
         if choice.isdigit() and 1 <= int(choice) <= len(ordered):
             scenario_id = ordered[int(choice) - 1]
@@ -849,7 +1135,8 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
                     "  certificate case [normal/forged] (default normal) > "
                 ).strip().lower() or "normal"
             except EOFError:
-                break
+                out("  input channel closed (EOF) — closing session; no readiness is issued")
+                return results, readiness_run.TERMINATION_INPUT_LOST
             if answer not in ("normal", "forged"):
                 out("  unknown certificate case %r (no RF action taken)"
                     % answer)
@@ -857,21 +1144,25 @@ def _menu(session, *, out, input_fn, clock, poc_ctx=None) -> list:
             case = answer
         # R7: PoC 선택. q=session 종료, r=rescan(READY 유지), 무효=거부 — 모두 scenario submit 0.
         kind, poc_id = _menu_poc_id(poc_ctx, scenario_id, out=out, input_fn=input_fn)
+        if kind == "eof":
+            out("  input channel closed (EOF) — closing session; no readiness is issued")
+            return results, readiness_run.TERMINATION_INPUT_LOST
         if kind == "quit":
-            break
+            return results, readiness_run.TERMINATION_EXPLICIT_QUIT
         if kind == "rescan":
             out("  rescan — returning to menu (no RF action, READY preserved)")
             continue
         if kind == "invalid":
             out("  invalid poc selection (no RF action taken)")
             continue
+        if not _admit_or_stop(admission_fn, out):
+            return results, readiness_run.TERMINATION_ADMISSION_RESERVE
         result = _run_workload(session, scenario_id, case, out=out,
                                clock=clock, poc_ctx=poc_ctx,
                                poc_id=None if kind == "baseline" else poc_id)
         results.append(result)
         if _stop_after_workload(result, out):
-            break
-    return results
+            return results, readiness_run.TERMINATION_WORKLOAD_STOP
 
 
 def plan_for(scenario: str | None, certificate_case: str | None) -> list:
@@ -890,6 +1181,220 @@ def plan_for(scenario: str | None, certificate_case: str | None) -> list:
     return [(scenario, "normal")]
 
 
+# ------------------------------------------------------------ readiness 마감
+
+def _authority_lines(context: dict) -> list:
+    """§4 거부/상태 문구 — what/why, impact, action."""
+    lines = []
+    applicability = context["applicability"]
+    status = applicability["operational_readiness"]
+    qual = context["qualification"]
+    q_axis = "APPLICABLE" if qual["applicable"] else ("STALE" if qual["present"] else "ABSENT")
+    lines.append("VDETER standalone — current_authority=%s operational_readiness=%s "
+                 "qualification=%s (workload RF: REQUIRES_LIVE_PREPARATION)"
+                 % (context["current_authority"], status, q_axis))
+    if qual["present"] and not qual["applicable"]:
+        lines.append("[qualification] STALE: %s" % "; ".join(qual["mismatches"][:3]))
+    if context["current_authority"] != "QUALIFIED":
+        lines.append("[qualification] OPERATIONAL_READY is not QUALIFIED. A full `vdeter qualify` "
+                     "is required for official release, publication evidence, or baseline "
+                     "freeze.")
+    if status == "ABSENT":
+        lines.append("[readiness] UNVERIFIED: no applicable active operational-readiness record.")
+        lines.append("            Impact: workload RF is blocked until this run completes bounded "
+                     "readiness preparation.")
+        lines.append("            Action: allow the run preparation to complete, or restore the "
+                     "bound environment.")
+    elif status == "STALE":
+        lines.append("[readiness] READINESS STALE: %s differ from the active record."
+                     % "; ".join(applicability["reasons"][:3]))
+        lines.append("            Impact: the prior readiness record does not authorize workload "
+                     "RF in this environment.")
+        lines.append("            Action: restore the recorded values or let this run perform a "
+                     "new bounded preparation.")
+    elif status == "INHIBITED":
+        lines.append("[readiness] INHIBITED (%s): a prior run observed a safety failure on this "
+                     "stable binding. Impact: workload RF is blocked until this run's "
+                     "preparation PASSes and a new release is promoted. Action: verify the "
+                     "hardware, then let this run complete."
+                     % ((context["readiness_snapshot"].get("inhibit") or {}).get("reason_code")
+                        or "orphan inhibit"))
+    elif status == "APPLICABLE":
+        lines.append("[readiness] OPERATIONAL_READY: active record %s applies to this stable "
+                     "binding; live preparation is still performed in this new session."
+                     % (context["readiness_snapshot"]["active"]["release"]))
+    selection = context["calibration"]
+    if selection["mode"] == "warm":
+        lines.append("[readiness] calibration: WARM — %s (%s)" % (
+            selection["calibration"]["source"], selection["reason"]))
+    else:
+        lines.append("[readiness] calibration: COLD — %s; this run performs the bounded "
+                     "CALIBRATION_PREPARATION (RR-P1 ADAPTIVE_SEARCH_AND_SEAL contract) first "
+                     "(hard cap %d s, no retry)" % (selection["reason"],
+                                                     int(readiness_run.READINESS_COLD_PREPARATION_S)))
+    return lines
+
+
+def _absolute_deadline(ready: dict, spawn_monotonic: float) -> float:
+    """coordinator가 ready.json에 실은 절대 deadline(monotonic)과 spawn+7200 중 이른 값(보수)."""
+    conservative = spawn_monotonic + readiness_run.SESSION_ABSOLUTE_DEADLINE_S
+    reported = (ready or {}).get("session_absolute_deadline_monotonic_s")
+    if isinstance(reported, (int, float)) and not isinstance(reported, bool):
+        return min(float(reported), conservative)
+    return conservative
+
+
+def _finish_readiness(context: dict, paths: StatePaths, lock, *, run_root, run_id,
+                      outcome: dict, summary: dict, topology_after, probe: dict | None,
+                      ready: dict | None, admission: dict | None, boot_id, out,
+                      cold_calibration: dict | None, phase_marks: dict) -> dict:
+    """close 뒤 readiness 마감 — candidate 기록 → 승격, 또는 inhibit record → state 참조 추가.
+
+    반환 summary용 readiness block. 어떤 경로도 qualification namespace를 건드리지 않는다."""
+    snapshot = context["readiness_snapshot"]
+    binding = context["binding"]
+    mode = context["calibration"]["mode"]
+    block = {
+        "enabled": True, "not_a_qualification": True,
+        "readiness_id": context["readiness_id"], "mode": mode,
+        "status": outcome["readiness_status"], "issue_status": "NOT_PROMOTED",
+        "release": None, "generation": None, "inhibit": None,
+        "reasons": list(outcome["reasons"]), "termination": outcome["termination"],
+        "inhibit_codes": outcome["inhibit_codes"],
+        "probe": None if probe is None else {
+            "pass": probe["pass"], "workload_id": probe["workload_id"],
+            "problems": probe["problems"], "plan_sha256": readiness_probe.probe_plan_sha256()},
+        "admission": admission,
+        "current_authority": context["current_authority"],
+        "operational_readiness": context["applicability"]["operational_readiness"],
+        "qualification": ("APPLICABLE" if context["qualification"]["applicable"]
+                          else ("STALE" if context["qualification"]["present"] else "ABSENT")),
+        "calibration_source": (context["calibration"]["calibration"] or {}).get("source"),
+        "workload_verdicts": [
+            {"workload_id": r.get("workload_id"), "verdict": v["verdict"], "codes": v["codes"]}
+            for r, v in zip(outcome.get("_user_results", []), outcome["workload_verdicts"])],
+    }
+    close_class = readiness_classifier.classify_close(summary, topology_after)
+    checks = {
+        "preflight": {"pass": True, "checks": sorted((context["preflight"].get("checks") or {}).keys())},
+        "host_time": {"pass": "acquire_host_time" in phase_marks or "readiness_host_time" in phase_marks,
+                      "elapsed_s": phase_marks.get("acquire_host_time")},
+        "rf_time_pre": {"pass": "rf_time_pre" in phase_marks, "elapsed_s": phase_marks.get("rf_time_pre")},
+        "active_bridge": {"pass": "active_bridge" in phase_marks,
+                          "elapsed_s": phase_marks.get("active_bridge")},
+        "rf_time_post": {"pass": "rf_time_post" in phase_marks,
+                         "elapsed_s": phase_marks.get("rf_time_post")},
+        "service_admission": {"pass": "service_running" in phase_marks,
+                              "elapsed_s": phase_marks.get("service_running")},
+        "link17_bidirectional": None if probe is None else {
+            "pass": probe["pass"], "evaluation": probe["evaluation"],
+            "classification": probe["classification"]},
+        "pre_workload_quiescence": {"pass": bool(probe and probe["pass"]
+                                                and (probe["result"].get("quiescence") or {}).get("pass"))},
+        "calibration": cold_calibration,
+        "workload_admission_reserve_s": int(readiness_run.WORKLOAD_ADMISSION_RESERVE_S),
+    }
+    execution_close = {
+        "cleanup": {"pass": bool(summary.get("pass")), "problems": summary.get("problems"),
+                    "escalation": summary.get("escalation"),
+                    "coordinator_rc": summary.get("coordinator_rc"),
+                    "closed_status": (summary.get("closed") or {}).get("status"),
+                    "cleanup_detail": ((summary.get("closed") or {}).get("cleanup") or {}),
+                    "residual_processes": summary.get("residual_processes"),
+                    "classification": close_class},
+        "post_close_discovery": {"pass": topology_after["pass"] if topology_after else None,
+                                 "topology_after": topology_after},
+    }
+    session_block = {
+        "boot_id": boot_id, "session_id": run_id, "run_root": str(run_root),
+        "session_phase": COLD_SESSION_PHASE if mode == "cold" else WARM_SESSION_PHASE,
+        "ready_at_utc": (ready or {}).get("ready_at_utc"),
+        "bridge_generation": ((ready or {}).get("health_baseline") or {}).get("bridge_generation"),
+        "active_clock_id": ((ready or {}).get("health_baseline") or {}).get("active_clock_id"),
+        "cross_command_handoff_allowed": False, "session_reuse_scope": "THIS_RUN_ONLY",
+    }
+    extra = {"binding.json": readiness_run.plan_bytes(binding)}
+    evidence = readiness_run.collect_run_evidence(
+        run_root, probe_workload_id=(probe or {}).get("workload_id"), extra=extra)
+
+    if outcome["promote"]:
+        readiness_id = context["readiness_id"]
+        record = readiness.build_readiness_record(
+            readiness_id=readiness_id, binding=binding, status="PASS",
+            record_metadata={"source_run_id": run_id, "mode": mode},
+            preparation_checks=checks, execution_close=execution_close, session=session_block,
+            qualification_provenance=(
+                {"reference_sha256": (context["reference"] or {}).get("_reference_sha256"),
+                 "authority": "APPLICABLE"} if context["qualification"]["applicable"] else None),
+            observations={"phase_elapsed_s": phase_marks, "safety_policy": readiness_run.SAFETY_POLICY,
+                          "inventory_only": (context.get("installation_check") or {}).get("inventory_only"),
+                          "ready": {k: v for k, v in (ready or {}).items() if k != "note"}},
+            calibration_candidate=cold_calibration,
+            workloads=[{"workload_id": r.get("workload_id"), "scenario_id": r.get("scenario_id"),
+                        "certificate_case": r.get("certificate_case"), "status": r.get("status"),
+                        "workload_kind": r.get("workload_kind"), "verdict": v["verdict"]}
+                       for r, v in zip(outcome.get("_user_results", []), outcome["workload_verdicts"])])
+        try:
+            written = readiness.write_immutable_record(
+                paths.readiness_candidate / readiness_id, basename=readiness.RECORD_BASENAME,
+                record=record, evidence=evidence, producer="vdeter run")
+            writer = readiness.ReadinessWriter(paths, lock)
+            new_state = writer.promote(readiness_id, expected_generation=context["expected_generation"])
+        except readiness.StaleWriterError as exc:
+            block["issue_status"] = "NOT_PROMOTED"
+            block["reasons"].append("stale writer: %s" % exc)
+            out("[readiness] NOT PROMOTED — %s (candidate kept as inactive evidence)" % exc)
+            return block
+        except readiness.ReadinessError as exc:
+            block["issue_status"] = "NOT_PROMOTED"
+            block["reasons"].append("record/promotion error: %s" % exc)
+            out("[readiness] NOT PROMOTED — %s" % exc)
+            return block
+        block.update(issue_status="PROMOTED", release=readiness_id,
+                     generation=new_state["generation"], record_sha256=written["sha256"],
+                     readiness_digest_sha256=record["readiness_digest_sha256"])
+        out("[readiness] PROMOTED — new immutable release %s (generation %d, digest %s…); "
+            "OPERATIONAL_READY is not QUALIFIED"
+            % (readiness_id, new_state["generation"], record["readiness_digest_sha256"][:12]))
+        return block
+
+    if outcome["inhibit"]:
+        inhibit_id = readiness.new_readiness_id("inhibit")
+        reason_code = outcome["inhibit_codes"][0]
+        evidence_sha = readiness_run.evidence_sha256_of(evidence)
+        record = readiness.build_inhibit_record(
+            inhibit_id=inhibit_id, binding=binding, reason_code=reason_code,
+            source_run_id=run_id, evidence_sha256=evidence_sha,
+            detail={"codes": outcome["inhibit_codes"], "termination": outcome["termination"],
+                    "close": execution_close, "phase_elapsed_s": phase_marks},
+            active_release=((snapshot.get("active") or {}).get("release")),
+            observations={"session": session_block})
+        try:
+            readiness.write_immutable_record(
+                paths.readiness_inhibits / inhibit_id, basename=readiness.INHIBIT_BASENAME,
+                record=record, evidence=evidence, producer="vdeter run")
+            writer = readiness.ReadinessWriter(paths, lock)
+            new_state = writer.inhibit(inhibit_id, expected_generation=context["expected_generation"])
+        except readiness.ReadinessError as exc:
+            block["reasons"].append("inhibit record error: %s" % exc)
+            out("[readiness] INHIBIT NOT RECORDED — %s (state unchanged; investigate before RF)" % exc)
+            block["issue_status"] = "INHIBIT_RECORD_FAILED"
+            return block
+        block.update(issue_status="INHIBITED", generation=new_state["generation"],
+                     inhibit={"release": inhibit_id, "reason_code": reason_code,
+                              "codes": outcome["inhibit_codes"]})
+        out("[readiness] INHIBITED — active readiness %s is inhibited (%s); workload RF stays "
+            "blocked until a new preparation PASSes and promotes a new release"
+            % ((snapshot.get("active") or {}).get("release"), reason_code))
+        return block
+
+    out("[readiness] NOT PROMOTED — %s" % ("; ".join(block["reasons"]) or "no readiness issued"))
+    if outcome["inhibit_codes"] and not context.get("active_same_binding"):
+        out("[readiness] safety codes %s observed but no active release of this stable binding "
+            "exists; recorded in the run evidence only" % outcome["inhibit_codes"])
+    return block
+
+
 def execute(paths: StatePaths, *, scenario: str | None = None,
             certificate_case: str | None = None, run_id: str | None = None,
             diagnostics: bool = False, json_summary: bool = False,
@@ -902,7 +1407,8 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             progress_stream=None, progress_ticker: bool = True,
             topology_probe=None, rf_off_software: bool = False,
             critical_check=None, workload_plan=None,
-            hold_after_ready_s: float = 0.0) -> int:
+            hold_after_ready_s: float = 0.0, readiness_enabled=None,
+            machine_id=None, boot_id=None, readiness_sleeper=None) -> int:
     """`vdeter run` 본체. 반환: 종료 코드 (README §11).
 
     `progress=False`(`--no-progress`)면 진행바 없이 줄 단위 상태만 출력한다.
@@ -914,7 +1420,14 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
 
     `workload_plan`(개발용 진단 전용, `diag_cmd`)은 `(scenario_id, case)` 목록으로 비대화형
     계획을 직접 준다 — 빈 목록이면 bring-up→(선택적 `hold_after_ready_s` 동안 READY 유지)→
-    close만 수행하는 RX-only 세션이다. 정상 `vdeter run`은 이 인자를 쓰지 않는다."""
+    close만 수행하는 RX-only 세션이다. 정상 `vdeter run`은 이 인자를 쓰지 않는다.
+
+    `readiness_enabled`(기본 자동): 정상 run(workload_plan·critical_check 없음, `--rf-off-software`
+    아님)에서만 readiness preparation·probe·승격을 수행한다. `retry`는 readiness 경로에서 무시된다
+    (bring-up 시도는 항상 1회)."""
+    if readiness_enabled is None:
+        readiness_enabled = (workload_plan is None and critical_check is None
+                             and not rf_off_software)
     try:
         if workload_plan is not None:
             # 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`. poc_id는 catalog
@@ -931,6 +1444,9 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                                      "Unknown workload %r/%r in plan" % (scenario_id, case))
         else:
             plan = plan_for(scenario, certificate_case)
+            if scenario is not None and not plan:
+                raise RunRefusal(EXIT_CONFIG,
+                                 "non-interactive workload list is empty — no RF action")
     except RunRefusal as exc:
         out("Refused: " + str(exc))
         return exc.code
@@ -972,21 +1488,35 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         ticker=progress_ticker)
     out = reporter.log
     try:
-        gates = progress_module.GateProgress(reporter, total=5)
+        gates = progress_module.GateProgress(reporter, total=7 if readiness_enabled else 5)
         try:
             context = prepare(
                 paths, repo_root=repo_root,
                 hardware_path=hardware_path, preflight_fn=preflight_fn,
                 reference_loader=reference_loader,
                 environment_manifest=environment_manifest, progress=gates,
-                critical_check=critical_check)
+                critical_check=critical_check, readiness_enabled=readiness_enabled,
+                machine_id=machine_id, readiness_sleeper=readiness_sleeper)
         except RunRefusal as exc:
             reporter.finish("FAILED")
             out("Refused (exit %d): %s" % (exc.code, exc))
             return exc.code
         gates.done()
         reference = context["reference"]
-        if is_diagnostic_authority(reference):
+        readiness_block = None
+        if readiness_enabled:
+            for line in _authority_lines(context):
+                out(line)
+            if retry is False:
+                out("[readiness] note: --no-retry has no effect — the readiness path never retries")
+            readiness_block = {
+                "current_authority": context["current_authority"],
+                "operational_readiness": context["applicability"]["operational_readiness"],
+                "qualification": ("APPLICABLE" if context["qualification"]["applicable"]
+                                  else ("STALE" if context["qualification"]["present"] else "ABSENT")),
+                "issue_status": "NOT_PROMOTED",
+            }
+        elif is_diagnostic_authority(reference):
             # 개발용 진단 — QUALIFIED/RESEARCH_READY로 표시하지 않는다.
             out("VDETER standalone — DIAGNOSTIC, NOT_QUALIFIED (authorization "
                 "%s, issued %s; not a qualification, no reference is issued)"
@@ -1003,6 +1533,13 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             for role, info in sorted(observed.items()) if info))
         out("[preflight] identity, config schema, residual processes, "
             "installation manifest — OK")
+        if readiness_enabled:
+            inventory = (context.get("installation_check") or {}).get("inventory_only") or {}
+            changed = sum(len(inventory.get(k) or []) for k in ("added", "removed", "changed"))
+            if changed:
+                out("[preflight] inventory-only differences outside the readiness execution "
+                    "closure: %d file(s) (recorded in evidence; readiness RF not refused)"
+                    % changed)
         if hardware_profiles.is_pi_powered_hub(context["hardware"]):
             hub_decl = context["hardware"].get("usb_hub") or {}
             topo = context["preflight"]["checks"].get("usb_topology") or {}
@@ -1023,110 +1560,156 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
         if usb_probe is None:
             from apps.standalone.local_preflight import probe_usb_serials
             usb_probe = probe_usb_serials
+        if boot_id is None:
+            boot_id = readiness_run.read_boot_id()
 
         attempts = []
         session = None
         active_run_id = None
         run_root = None
-        for attempt in range(1, MAX_BRINGUP_ATTEMPTS + 1):
-            if attempt > 1:
-                out("attempt %d/%d" % (attempt, MAX_BRINGUP_ATTEMPTS))
+        ready = None
+        spawn_monotonic = None
+        # readiness 경로: bring-up 시도는 정확히 1회 (warm/cold 모두 implicit retry 0).
+        try:
+            session, active_run_id, run_root, ready, spawn_monotonic = _bring_up(
+                context, paths, run_id=run_id,
+                session_factory=session_factory, diagnostics=diagnostics,
+                out=out, clock=clock, reporter=reporter, mirror=mirror,
+                rf_off_software=rf_off_software)
+            attempts.append({"attempt": 1, "run_id": active_run_id, "bringup": "READY",
+                             "mode": _readiness_mode(context)})
+        except RunRefusal as exc:
+            out("Refused (exit %d): %s" % (exc.code, exc))
+            return exc.code
+        except BringupInterrupted as stopped:
+            # 재시도 없음. cleanup·잔존·B210 반환 결과를 evidence로 남긴다.
+            summary = stopped.summary
+            if summary["pass"]:
+                out("Closed — cleanup PASS, residual processes 0")
+            else:
+                out("Closed with problems: "
+                    + "; ".join(summary["problems"]))
+                for note in close_notes(summary):
+                    out("  note: " + note)
+            attempts.append({"attempt": 1, "run_id": stopped.run_id,
+                             "bringup": "INTERRUPTED",
+                             "finalize": summary})
+            if readiness_enabled:
+                readiness_block.update(
+                    enabled=True, not_a_qualification=True, readiness_id=context["readiness_id"],
+                    mode=_readiness_mode(context), status="CANCELLED",
+                    termination=readiness_run.TERMINATION_USER_CANCELLED,
+                    reasons=["interrupted during bring-up — no readiness is issued"])
+                out("[readiness] NOT PROMOTED — interrupted during bring-up")
+            write_json_atomic(stopped.run_root / "summary.json", {
+                "artifact_type": "STAGE7_STANDALONE_RUN_SUMMARY_V1",
+                "run_id": stopped.run_id, "status": "FAIL",
+                "interactive": interactive, "interrupted": True,
+                "cancelled": True,
+                "interrupted_during": "bring-up",
+                "scenarios_passed": 0, "scenarios_run": 0,
+                "scenarios_planned": len(plan),
+                "workloads": [], "close": summary,
+                "attempts": attempts,
+                "readiness": readiness_block,
+                "diagnostics": build_child_env(
+                    diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
+                **authority_fields(reference, readiness_block=readiness_block),
+                "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                              time.gmtime()),
+            })
+            out("Evidence: %s   (summary: vdeter results %s)"
+                % (stopped.run_root, stopped.run_id))
+            if not interactive:
+                out("RESULT overall=FAIL scenarios=0/%d run-id=%s "
+                    "evidence=%s (interrupted during bring-up)%s"
+                    % (len(plan), stopped.run_id, stopped.run_root,
+                       result_suffix(reference, readiness_block)))
+            return EXIT_INTERRUPTED
+        except BringupFailed as failed:
+            console_text = ""
             try:
-                session, active_run_id, run_root, _ready = _bring_up(
-                    context, paths, run_id=run_id if attempt == 1 else None,
-                    session_factory=session_factory, diagnostics=diagnostics,
-                    out=out, clock=clock, reporter=reporter, mirror=mirror,
-                    rf_off_software=rf_off_software)
-                attempts.append({"attempt": attempt, "run_id": active_run_id,
-                                 "bringup": "READY"})
-                break
-            except RunRefusal as exc:
-                out("Refused (exit %d): %s" % (exc.code, exc))
-                return exc.code
-            except BringupInterrupted as stopped:
-                # 재시도 없음. cleanup·잔존·B210 반환 결과를 evidence로 남긴다.
-                summary = stopped.summary
-                if summary["pass"]:
-                    out("Closed — cleanup PASS, residual processes 0")
-                else:
-                    out("Closed with problems: "
-                        + "; ".join(summary["problems"]))
-                    for note in close_notes(summary):
-                        out("  note: " + note)
-                attempts.append({"attempt": attempt, "run_id": stopped.run_id,
-                                 "bringup": "INTERRUPTED",
-                                 "finalize": summary})
-                write_json_atomic(stopped.run_root / "summary.json", {
+                console_text = Path(
+                    failed.summary.get("console_log_path")
+                    or "").read_text(encoding="utf-8", errors="replace")
+            except (OSError, TypeError):
+                pass
+            usb_now = usb_probe()
+            classification = classify_bringup_failure(
+                console_text, failed.summary, usb_now,
+                context["declared_serials"])
+            phase_marks = ((failed.summary.get("closed") or {}).get("phase_elapsed_s") or {})
+            structured = readiness_classifier.classify_bringup(phase_marks, True, ready=False)
+            attempts.append({"attempt": 1,
+                             "bringup": "FAILED", "error": failed.error,
+                             "finalize": failed.summary,
+                             "classification": classification,
+                             "readiness_classification": structured})
+            out("Bring-up failed: %s" % failed.error)
+            for line in progress_module.bringup_failure_lines(
+                    phase_label=failed.phase_label or "bring-up",
+                    finalize_summary=failed.summary,
+                    classification=classification,
+                    console_text=console_text,
+                    run_root=failed.run_root, attempt=1,
+                    max_attempts=READINESS_BRINGUP_ATTEMPTS if readiness_enabled
+                    else MAX_BRINGUP_ATTEMPTS,
+                    declared_serials=context["declared_serials"],
+                    usb_observed=usb_now,
+                    host_time_detail=(
+                        progress_module.host_time_detail_from_evidence(
+                            failed.run_root)
+                        if failed.run_root is not None else None)):
+                out(line)
+            out("No retry: the readiness path never retries a bring-up; start a new "
+                "`vdeter run` after checking the hardware"
+                if readiness_enabled else
+                "No retry: " + "; ".join(classification["reasons"] or ["diagnostic run"]))
+            if readiness_enabled and failed.run_root is not None:
+                close_class = readiness_classifier.classify_close(failed.summary, None)
+                outcome = readiness_run.decide_outcome(
+                    readiness_enabled=True, prepared=False, probe_pass=False,
+                    ready_issued=False, termination=readiness_run.TERMINATION_BRINGUP_FAILED,
+                    user_results=[], close_class=close_class, topology_after_pass=None,
+                    bringup_class=structured, active_same_binding=context["active_same_binding"],
+                    interactive=interactive)
+                outcome["_user_results"] = []
+                readiness_block = _finish_readiness(
+                    context, paths, lock, run_root=failed.run_root, run_id=run_id or "-",
+                    outcome=outcome, summary=failed.summary, topology_after=None, probe=None,
+                    ready=None, admission=None, boot_id=boot_id, out=out,
+                    cold_calibration=None, phase_marks=phase_marks)
+                write_json_atomic(failed.run_root / "summary.json", {
                     "artifact_type": "STAGE7_STANDALONE_RUN_SUMMARY_V1",
-                    "run_id": stopped.run_id, "status": "FAIL",
-                    "interactive": interactive, "interrupted": True,
-                    "interrupted_during": "bring-up",
-                    "scenarios_passed": 0, "scenarios_run": 0,
-                    "scenarios_planned": len(plan),
-                    "workloads": [], "close": summary,
-                    "attempts": attempts,
-                    "diagnostics": build_child_env(
-                        diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
-                    **authority_fields(reference),
-                    "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                  time.gmtime()),
+                    "run_id": failed.run_root.name, "status": "FAIL",
+                    "interactive": interactive, "interrupted": False, "cancelled": False,
+                    "bringup_failed": True,
+                    "scenarios_passed": 0, "scenarios_run": 0, "scenarios_planned": len(plan),
+                    "workloads": [], "close": failed.summary, "attempts": attempts,
+                    "readiness": readiness_block,
+                    "diagnostics": build_child_env(diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
+                    **authority_fields(reference, readiness_block=readiness_block),
+                    "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 })
-                out("Evidence: %s   (summary: vdeter results %s)"
-                    % (stopped.run_root, stopped.run_id))
-                if not interactive:
-                    out("RESULT overall=FAIL scenarios=0/%d run-id=%s "
-                        "evidence=%s (interrupted during bring-up)%s"
-                        % (len(plan), stopped.run_id, stopped.run_root,
-                           result_suffix(reference)))
-                return EXIT_INTERRUPTED
-            except BringupFailed as failed:
-                console_text = ""
-                try:
-                    console_text = Path(
-                        failed.summary.get("console_log_path")
-                        or "").read_text(encoding="utf-8", errors="replace")
-                except (OSError, TypeError):
-                    pass
-                usb_now = usb_probe()
-                classification = classify_bringup_failure(
-                    console_text, failed.summary, usb_now,
-                    context["declared_serials"])
-                attempts.append({"attempt": attempt,
-                                 "bringup": "FAILED", "error": failed.error,
-                                 "finalize": failed.summary,
-                                 "classification": classification})
-                out("Bring-up failed: %s" % failed.error)
-                for line in progress_module.bringup_failure_lines(
-                        phase_label=failed.phase_label or "bring-up",
-                        finalize_summary=failed.summary,
-                        classification=classification,
-                        console_text=console_text,
-                        run_root=failed.run_root, attempt=attempt,
-                        max_attempts=MAX_BRINGUP_ATTEMPTS,
-                        declared_serials=context["declared_serials"],
-                        usb_observed=usb_now,
-                        host_time_detail=(
-                            progress_module.host_time_detail_from_evidence(
-                                failed.run_root)
-                            if failed.run_root is not None else None)):
-                    out(line)
-                if (retry and attempt < MAX_BRINGUP_ATTEMPTS
-                        and classification["transient_host_time"]):
-                    out("Classified as transient host-time acquisition "
-                        "failure; cleanup confirmed. Retrying once with a "
-                        "new run-id (evidence of both attempts is kept).")
-                    continue
-                if classification["reasons"]:
-                    out("No retry: " + "; ".join(classification["reasons"]))
-                out("RESULT overall=FAIL scenarios=0/%d run-id=- evidence=%s"
-                    % (len(plan), paths.runs_dir))
-                return EXIT_FAIL
+            out("RESULT overall=FAIL scenarios=0/%d run-id=- evidence=%s%s"
+                % (len(plan), paths.runs_dir, result_suffix(reference, readiness_block)))
+            return EXIT_FAIL
         if session is None:
             return EXIT_FAIL
 
         results = []
         exit_code = EXIT_PASS
         interrupted = False
+        termination = readiness_run.TERMINATION_PLAN_COMPLETE
+        probe = None
+        ready_issued = False
+        admission = None
+        cold_calibration = None
+        deadline_monotonic = _absolute_deadline(ready, spawn_monotonic)
+
+        def admission_fn():
+            return readiness_run.workload_admission(deadline_monotonic - clock())
+
         # SESSION READY 이후: 88fa6df와 같은 저 I/O 경로. 진행바는 이미 닫혔고
         # (bring-up 끝), presentation mirror도 끊는다 — 시나리오 구간에는
         # service_events 폴링·실시간 추적·presentation 파일 갱신이 없다(R1).
@@ -1150,9 +1733,40 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                 % ("catalog" if poc_option.poc_dir else "direct",
                    ", rf-off-software" if rf_off_software else ""))
         try:
+            if readiness_enabled:
+                mode = _readiness_mode(context)
+                if mode == "cold":
+                    cold_calibration = _seal_cold_calibration(context, run_root, ready, out)
+                    if cold_calibration is None:
+                        termination = readiness_run.TERMINATION_BRINGUP_FAILED
+                        raise _ReadinessStop("cold calibration candidate not sealed in ready.json")
+                admission = admission_fn()
+                if not admission["admitted"]:
+                    termination = readiness_run.TERMINATION_NOT_ADMITTED
+                    out("[readiness] READY_FOR_WORKLOAD not issued: remaining absolute budget "
+                        "%.0f s < reserve %d s — closing normally without workload"
+                        % (admission["remaining_s"] or 0.0, admission["reserve_s"]))
+                    raise _ReadinessStop("admission reserve")
+                probe = _run_probe(session, out=out, clock=clock)
+                if not probe["pass"]:
+                    termination = readiness_run.TERMINATION_PROBE_FAILED
+                    exit_code = EXIT_FAIL
+                    raise _ReadinessStop("probe failed")
+                admission = admission_fn()
+                if not admission["admitted"]:
+                    termination = readiness_run.TERMINATION_NOT_ADMITTED
+                    out("[readiness] READY_FOR_WORKLOAD not issued after the probe: remaining "
+                        "%.0f s < reserve %d s — closing normally"
+                        % (admission["remaining_s"] or 0.0, admission["reserve_s"]))
+                    raise _ReadinessStop("admission reserve")
+                ready_issued = True
+                out("[readiness] READY_FOR_WORKLOAD (process-local lease, this run only; "
+                    "remaining absolute budget %.0f s, reserve %d s)"
+                    % (admission["remaining_s"], admission["reserve_s"]))
             if interactive:
-                results = _menu(session, out=out, input_fn=input_fn,
-                                clock=clock, poc_ctx=poc_ctx)
+                results, termination = _menu(session, out=out, input_fn=input_fn,
+                                             clock=clock, poc_ctx=poc_ctx,
+                                             admission_fn=admission_fn if readiness_enabled else None)
             elif rx_only:
                 # 개발용 진단 RX-only: workload 제출 0. READY를 유계 시간 동안 유지한 뒤
                 # 기존 close 경로로 닫는다(Ctrl+C는 아래 인터럽트 처리와 동일).
@@ -1170,11 +1784,11 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             else:
                 for number, entry in enumerate(plan, 1):
                     # 계획 항목은 `(scenario, case)` 또는 `(scenario, case, poc_id)`다.
-                    # 세 번째 값은 catalog(`--poc-dir`)에서 **prompt 없이** 고를 PoC id이며,
-                    # None/"none"이면 그 workload는 baseline(PoC 자원 0)이다. 선택 계약은
-                    # 대화형과 같은 `select_and_snapshot`을 그대로 쓴다(별도 선택기 없음).
                     scenario_id, case = entry[0], entry[1]
                     planned_poc_id = entry[2] if len(entry) > 2 else None
+                    if readiness_enabled and not _admit_or_stop(admission_fn, out):
+                        termination = readiness_run.TERMINATION_ADMISSION_RESERVE
+                        break
                     result = _run_workload(session, scenario_id, case,
                                            out=out, clock=clock,
                                            index=number, total=len(plan),
@@ -1183,14 +1797,19 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                     results.append(result)
                     # R2: scenario 실패·quiescence 실패·PoC SESSION_INHIBIT면 다음 workload 제출 0.
                     if result.get("status") != "PASS" or _stop_after_workload(result, out):
+                        termination = readiness_run.TERMINATION_WORKLOAD_STOP
                         break
+        except _ReadinessStop:
+            pass
         except KeyboardInterrupt:
             interrupted = True
+            termination = readiness_run.TERMINATION_USER_CANCELLED
             out("Interrupt — closing session (shutdown -> cleanup -> "
                 "release B210s). Press Ctrl+C again to force.")
         except LocalSessionError as exc:
             out("Session error: %s" % exc)
             exit_code = EXIT_FAIL
+            termination = readiness_run.TERMINATION_SESSION_ERROR
         finally:
             out("Closing session (endpoint STOP, releasing B210s)...")
             summary = _close_with_interrupt_guard(session, out)
@@ -1223,41 +1842,72 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
                            and passed == len(plan) else "FAIL")
             if topology_after is not None and not topology_after["pass"]:
                 overall = "FAIL"
-            # R2: PoC experiment 인프라 실패(ABORTED/ERROR)를 최종 판정·exit에 정직하게 반영한다
-            # (scenario verdict는 보존하되 experiment 실패를 숨기지 않는다). REQUEST_REJECTED 단일
-            # action 거부는 poc_infrastructure=COMPLETED이므로 여기 걸리지 않는다.
+            # R2: PoC experiment 인프라 실패(ABORTED/ERROR)를 최종 판정·exit에 정직하게 반영한다.
             def _poc_infra_ok(result):
-                poc = result.get("poc") or {}
-                infra = poc.get("poc_infrastructure")
+                poc_block = result.get("poc") or {}
+                infra = poc_block.get("poc_infrastructure")
                 if infra in (None, "COMPLETED"):
                     return True
                 # baseline(none) workload는 PoC를 **쓰지 않기로 한** 것이지 인프라 실패가 아니다.
-                # 실물 controller와 RF-off 세션 모두 {"status": "BASELINE",
-                # "poc_infrastructure": "NOT_RUN"} 짝으로만 NOT_RUN을 낸다. 이전에는 이 값이
-                # 인프라 실패로 집계돼 **scenario가 전부 PASS인 run이 FAIL**로 떨어졌다(동일
-                # 세션 baseline↔PoC 전환을 처음 태우면서 드러난 거짓 FAIL). NOT_RUN을 통째로
-                # 허용하지 않고 BASELINE 상태와 짝일 때만 허용한다 — ABORTED/ERROR는 그대로 FAIL.
-                return infra == "NOT_RUN" and poc.get("status") == "BASELINE"
+                return infra == "NOT_RUN" and poc_block.get("status") == "BASELINE"
 
             poc_infra_ok = all(_poc_infra_ok(r) for r in results)
             if not poc_infra_ok:
                 overall = "FAIL"
-            if overall != "PASS":
-                exit_code = exit_code or EXIT_FAIL
-            if interrupted:
-                exit_code = EXIT_INTERRUPTED
+            cancelled = False
+            phase_marks = ((summary.get("closed") or {}).get("phase_elapsed_s")
+                           or (ready or {}).get("phase_elapsed_s") or {})
+            if readiness_enabled:
+                close_class = readiness_classifier.classify_close(summary, topology_after)
+                bringup_class = readiness_classifier.classify_bringup(phase_marks, False, ready=True)
+                outcome = readiness_run.decide_outcome(
+                    readiness_enabled=True, prepared=True,
+                    probe_pass=bool(probe and probe["pass"]), ready_issued=ready_issued,
+                    termination=termination, user_results=results,
+                    close_class=close_class,
+                    topology_after_pass=None if topology_after is None else topology_after["pass"],
+                    bringup_class=bringup_class,
+                    active_same_binding=context["active_same_binding"],
+                    interactive=interactive)
+                outcome["_user_results"] = results
+                if not poc_infra_ok:
+                    outcome["promote"] = False
+                    outcome["reasons"].append("PoC infrastructure failure")
+                overall = outcome["summary_status"]
+                cancelled = outcome["cancelled"]
+                readiness_block = _finish_readiness(
+                    context, paths, lock, run_root=run_root, run_id=active_run_id,
+                    outcome=outcome, summary=summary, topology_after=topology_after,
+                    probe=probe, ready=ready, admission=admission, boot_id=boot_id, out=out,
+                    cold_calibration=cold_calibration, phase_marks=phase_marks)
+                if overall == "NO_USER_WORKLOAD":
+                    exit_code = EXIT_PASS
+                elif overall == "PASS":
+                    exit_code = exit_code or EXIT_PASS
+                elif overall == "USER_CANCELLED":
+                    exit_code = EXIT_INTERRUPTED
+                else:
+                    exit_code = exit_code or EXIT_FAIL
+            else:
+                if overall != "PASS":
+                    exit_code = exit_code or EXIT_FAIL
+                if interrupted:
+                    exit_code = EXIT_INTERRUPTED
             run_summary = {
                 "artifact_type": "STAGE7_STANDALONE_RUN_SUMMARY_V1",
                 "run_id": active_run_id, "status": overall,
                 "interactive": interactive, "interrupted": interrupted,
+                "cancelled": cancelled, "termination": termination,
                 "scenarios_passed": passed, "scenarios_run": len(results),
                 "scenarios_planned": planned,
                 "workloads": results, "close": summary,
                 "usb_topology_after_close": topology_after,
                 "attempts": attempts,
+                "readiness": readiness_block,
+                "readiness_probe": None if probe is None else probe["result"],
                 "diagnostics": build_child_env(
                     diagnostics=diagnostics).get("STAGE7_DIAG") == "1",
-                **authority_fields(reference),
+                **authority_fields(reference, readiness_block=readiness_block),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                               time.gmtime()),
             }
@@ -1267,7 +1917,7 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
             if not interactive:
                 out("RESULT overall=%s scenarios=%d/%d run-id=%s evidence=%s%s"
                     % (overall, passed, len(plan), active_run_id, run_root,
-                       result_suffix(reference)))
+                       result_suffix(reference, readiness_block)))
             if json_summary:
                 out(json.dumps(run_summary, ensure_ascii=True, indent=1,
                                default=str))
@@ -1275,3 +1925,72 @@ def execute(paths: StatePaths, *, scenario: str | None = None,
     finally:
         reporter.close()
         lock.release()
+
+
+class _ReadinessStop(Exception):
+    """READY 이후 workload 없이 정상 close로 가는 내부 신호 (probe 실패·admission 부족)."""
+
+
+def _seal_cold_calibration(context: dict, run_root: Path, ready: dict, out) -> dict | None:
+    """cold path: coordinator가 ready.json에 실은 calibration candidate를 검증하고 binding을 채운다.
+
+    ready.json의 `calibration`(artifact/input SHA·공통 gain)과 run evidence 파일의 실측 SHA가 같아야
+    한다. 하나라도 다르면 None — workload 없이 close한다(§5.1.1 6단계 CALIBRATION_CANDIDATE_DURABLE)."""
+    calibration = (ready or {}).get("calibration") or {}
+    artifact_path = run_root / "evidence" / "gain_artifact.json"
+    input_path = run_root / "evidence" / "gain_artifact_input.json"
+    problems = []
+    try:
+        artifact_bytes = artifact_path.read_bytes()
+        input_bytes = input_path.read_bytes()
+    except OSError as exc:
+        out("[readiness] cold calibration candidate missing in run evidence: %s" % exc)
+        return None
+    artifact_sha = readiness.sha256_hex(artifact_bytes)
+    input_sha = readiness.sha256_hex(input_bytes)
+    if calibration.get("artifact_sha256") != artifact_sha:
+        problems.append("gain_artifact.json sha differs from ready.json")
+    if calibration.get("artifact_input_sha256") != input_sha:
+        problems.append("gain_artifact_input.json sha differs from ready.json")
+    try:
+        gain_input = json.loads(input_bytes.decode("utf-8"))
+        common = {k: int(v) for k, v in gain_input["endpoint_common_rx_gain_db"].items()}
+        if gain_input.get("source_gain_artifact_sha256") != artifact_sha:
+            problems.append("gain_artifact_input.json does not reference gain_artifact.json")
+    except (ValueError, KeyError, TypeError) as exc:
+        problems.append("gain_artifact_input.json unreadable: %s" % exc)
+        common = {}
+    if set(common) != {"MASS-A", "MASS-B", "ROC"}:
+        problems.append("endpoint common gain incomplete: %s" % sorted(common))
+    if calibration.get("quiescent") is not True:
+        problems.append("coordinator did not confirm CALIBRATION_TO_SERVICE_QUIESCENT")
+    if problems:
+        out("[readiness] cold calibration candidate rejected: " + "; ".join(problems))
+        return None
+    sealed = {
+        "source": "readiness_calibration:%s" % context["readiness_id"],
+        "artifact_sha256": artifact_sha, "artifact_input_sha256": input_sha,
+        "endpoint_common_rx_gain_db": common,
+        "calibration_policy_id": readiness_run.CALIBRATION_POLICY_ID,
+    }
+    context["binding"]["calibration"] = sealed
+    context["calibration"]["calibration"] = sealed
+    # cold binding이 확정됐으니 applicability를 다시 계산한다 (active와 같은 binding일 수 있다).
+    context["applicability"] = readiness.evaluate_applicability(
+        context["readiness_snapshot"], context["binding"])
+    active = context["readiness_snapshot"].get("active") or {}
+    active_digest = ((active.get("record") or {}).get("readiness_digest_sha256")
+                     if active.get("valid") else None)
+    context["active_same_binding"] = bool(
+        active_digest and active_digest == readiness.readiness_digest(context["binding"]))
+    out("[readiness] cold calibration candidate sealed: artifact %s… common gain %s "
+        "(inactive until this run's readiness release is promoted)"
+        % (artifact_sha[:12], common))
+    return {
+        **sealed,
+        "gain_plan_sha256": calibration.get("gain_plan_sha256"),
+        "cfo_plan_sha256": calibration.get("cfo_plan_sha256"),
+        "host_time_attempts": calibration.get("host_time_attempts"),
+        "phase_elapsed_s": calibration.get("phase_elapsed_s"),
+        "not_yet_applicable": True,
+    }

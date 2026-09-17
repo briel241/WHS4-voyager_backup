@@ -131,6 +131,9 @@ class LocalCoordinatorSession:
 
     # Both production and RF-off requests are owned by the coordinator child.
     poc_workloads_in_coordinator = True
+    #: request에 `workload_kind`(readiness_probe | user)를 실을 수 있다 — coordinator가 record에
+    #: 그대로 전달한다. 시험용 fake 세션은 이 속성이 없으면 종전 signature로 호출된다.
+    supports_workload_kind = True
 
     def __init__(self, *, repo_root: Path | str, run_id: str,
                  run_root: Path | str, configs_dir: Path | str,
@@ -150,7 +153,8 @@ class LocalCoordinatorSession:
         self.run_id = run_id
         self.run_root = Path(run_root)
         self.configs_dir = Path(configs_dir)
-        self.gain_artifact_path = Path(gain_artifact_path)
+        self.gain_artifact_path = (Path(gain_artifact_path)
+                                   if gain_artifact_path is not None else None)
         self.baseline_sha256 = baseline_sha256
         self.phase = phase
         self.python_executable = python_executable or sys.executable
@@ -190,6 +194,8 @@ class LocalCoordinatorSession:
 
         self.process = None
         self.launch_attempted = False
+        #: 마지막으로 읽은 `ready.json` (readiness가 absolute deadline·calibration을 읽는다).
+        self.ready_payload = None
         self._console_tail = _FileTail(self.console_log_path)
         self._console_handle = None
         self._workload_counter = 0
@@ -209,7 +215,7 @@ class LocalCoordinatorSession:
                 "--run-id", self.run_id,
                 "--run-root", str(self.run_root),
             ]
-        return [
+        argv = [
             self.python_executable,
             str(self.repo_root / "VDETER" / "apps"
                 / "coordinator_main.py"),
@@ -217,9 +223,13 @@ class LocalCoordinatorSession:
             "--phase", self.phase,
             "--run-root", str(self.run_root),
             "--configs-dir", str(self.configs_dir),
-            "--gain-artifact", str(self.gain_artifact_path),
-            "--baseline-sha256", self.baseline_sha256,
         ]
+        # cold readiness session(`mass-roc-session-cold`)은 gain artifact 없이 GAIN_CALIBRATION
+        # config로 뜬다 — coordinator가 CFO·ADAPTIVE_SEARCH_AND_SEAL로 candidate를 만든다.
+        if self.gain_artifact_path is not None:
+            argv += ["--gain-artifact", str(self.gain_artifact_path)]
+        argv += ["--baseline-sha256", self.baseline_sha256]
+        return argv
 
     def build_env(self) -> dict:
         """`build_child_env` 위임 — run/qualify 공통 env 정책 (README §3-3)."""
@@ -287,6 +297,7 @@ class LocalCoordinatorSession:
         while self.clock() < deadline:
             ready = _read_json_if_complete(ready_path)
             if ready is not None:
+                self.ready_payload = ready
                 return ready
             if on_stage is not None:
                 for line in self.console_stage_lines():
@@ -328,7 +339,7 @@ class LocalCoordinatorSession:
 
     def submit_workload(self, scenario_id: str,
                         certificate_case: str = "normal", *,
-                        on_settle=None, poc=None) -> str:
+                        on_settle=None, poc=None, workload_kind=None) -> str:
         """request를 원자 발행한다 (임시명은 `.json`으로 끝나지 않는다 —
         coordinator의 `endswith('.json')` 목록에 미완성본이 잡히지 않게).
         발행 전에 host 계약대로 정착 대기를 적용한다.
@@ -352,6 +363,8 @@ class LocalCoordinatorSession:
         }
         if poc is not None:
             request["poc"] = dict(poc)
+        if workload_kind is not None:
+            request["workload_kind"] = str(workload_kind)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         final = self.requests_dir / (workload_id + ".json")
         tmp = self.requests_dir / (workload_id + ".json.tmp")

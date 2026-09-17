@@ -428,7 +428,7 @@ def test_run_records_read_the_applied_value_from_the_single_source():
         for key, value in zip(node.keys, node.values):
             if (isinstance(key, ast.Constant) and key.value == "diagnostics"):
                 values.append(ast.unparse(value))
-    assert len(values) == 3, values  # run.json 1 + summary.json 2
+    assert len(values) == 4, values  # run.json 1 + summary.json 3 (bring-up interrupted / failed / closed)
     for expression in values:
         assert "build_child_env(diagnostics=diagnostics)" in expression
         assert "STAGE7_DIAG" in expression

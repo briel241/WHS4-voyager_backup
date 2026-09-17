@@ -19,6 +19,7 @@ from apps.service_trace import NullTrace
 from stage7_binding_fixtures import (approved_rename_pins,
                                      diagnostics_gating_pins,
                                      launcher_shutdown_pins,
+                                     operational_readiness_pins,
                                      legacy_phase_i_pins)
 
 
@@ -191,6 +192,10 @@ def _rebind_for_phase_i(profile: dict, source: str, *,
             spec["qualified_functions"][_name] = dict(_pinned)
     # 3-3 종료 대기 구조 변경(제한적 동작 변경)으로 바뀐 자격 함수의 고정 해시.
     for _name, _pinned in launcher_shutdown_pins().items():
+        if _name in spec["qualified_functions"]:
+            spec["qualified_functions"][_name] = dict(_pinned)
+    # operational readiness(2026-09-17, cold path/ready deadline/binding gate 별칭)로 바뀐 main.
+    for _name, _pinned in operational_readiness_pins().items():
         if _name in spec["qualified_functions"]:
             spec["qualified_functions"][_name] = dict(_pinned)
     if pin_run_rr_p3_fault:
@@ -511,6 +516,27 @@ def test_launcher_shutdown_rebinding_is_hash_pinned_not_a_name_allowlist():
     target = "run_mass_roc_service"
     assert target in pinned_names, pinned_names
 
+    source = _current_coordinator_source()
+    profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
+    mutated = _mutate_function(source, target)
+    spec = profile["_reference"]["qualification_critical_manifest"][
+        "function_bound_files"][_COORDINATOR_REL_AT_QUALIFIED_COMMIT]
+    spec["phase_g_file_sha256"] = hashlib.sha256(
+        mutated.encode("utf-8")).hexdigest()
+    try:
+        service_layer._verify_function_bound(
+            profile, "$HOME/deploy", _serving_runner(mutated))
+        raise AssertionError(
+            "재결속 대상 함수의 추가 변경이 통과했다 — 고정 해시가 아니라 이름 허용목록이 됐다")
+    except service_layer.ServiceSessionError as exc:
+        assert target in str(exc), str(exc)
+
+
+def test_operational_readiness_rebinding_is_hash_pinned_not_a_name_allowlist():
+    """operational readiness 로 재결속한 `main` 이라도 **그 뒤의 추가 변경**은 다시 거부된다."""
+    pinned_names = sorted(operational_readiness_pins())
+    assert pinned_names == ["main"], pinned_names
+    target = "main"
     source = _current_coordinator_source()
     profile = _rebind_for_phase_i(_phase_g_profile_copy(), source)
     mutated = _mutate_function(source, target)

@@ -27,8 +27,12 @@ from apps.standalone import (  # noqa: E402
     installation_manifest,
     provenance,
     qualify_cmd,
+    readiness,
     state,
 )
+
+#: readiness binding의 stable machine identity (시험 주입값 — /etc/machine-id 대신).
+MACHINE_ID = "test-machine-id-0001"
 
 REPO = Path(_REPO)
 
@@ -100,10 +104,17 @@ def write_hardware_toml(path: Path, *, approved: bool = True) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def install_into(paths: state.StatePaths) -> dict:
-    """setup의 installation 단계 재현: 실제 저장소 실측 → tmp var/installation."""
+def install_into(paths: state.StatePaths, *, readiness_marker: bool = True) -> dict:
+    """setup의 installation 단계 재현: 실제 저장소 실측 → tmp var/installation.
+
+    `readiness_marker=True`면 setup과 같이 migration marker를 manifest에 적고 최초
+    `var/readiness/state.json`(generation=1, active/inhibit null)을 만든다."""
     record = repo_installation_record()
+    if readiness_marker:
+        record.update(readiness.MANIFEST_MARKER)
     installation_manifest.write_installation(paths, record)
+    if readiness_marker:
+        readiness.ensure_initial_state(paths)
     return record
 
 
@@ -130,14 +141,17 @@ def issue_v2_reference(record: dict, fingerprint: str, *, ladder_id="qual-test",
     return qualify_cmd.issue_reference(**kwargs)
 
 
-def prepare_environment(tmp, *, qualified: bool = True) -> tuple:
-    """setup(+qualify)이 끝난 기계 상태 (RF 없이). 반환 (paths, record)."""
+def prepare_environment(tmp, *, qualified: bool = True,
+                        readiness_marker: bool = True) -> tuple:
+    """setup(+qualify)이 끝난 기계 상태 (RF 없이). 반환 (paths, record).
+
+    `readiness_marker=False`는 marker 없는 기존 설치(MIGRATION_REQUIRED)를 재현한다."""
     paths = state.StatePaths(tmp)
     paths.root = REPO  # template·vdeter 실물 (설치본 = 저장소 트리)
     paths.ensure_var()
     ident = identity.ensure_identity(paths)
     write_hardware_toml(Path(tmp) / "hardware.toml")
-    record = install_into(paths)
+    record = install_into(paths, readiness_marker=readiness_marker)
     if qualified:
         reference = issue_v2_reference(record, ident["fingerprint"])
         qualify_cmd.write_reference(paths.qualification_candidate, reference)

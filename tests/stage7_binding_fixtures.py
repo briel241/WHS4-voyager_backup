@@ -19,6 +19,8 @@ _DIAG_FIXTURE = (_ROOT /
                  "tests/fixtures/stage7_diagnostics_gating_function_bindings.json")
 _SHUTDOWN_FIXTURE = (_ROOT /
                      "tests/fixtures/stage7_launcher_shutdown_function_bindings.json")
+_READINESS_FIXTURE = (_ROOT /
+                      "tests/fixtures/stage7_operational_readiness_function_bindings.json")
 _SOURCE = _ROOT / "VDETER/apps/coordinator_main.py"
 
 #: 과거 자격 기록(phase-g reference·profile)의 **당시 경로** -> 현재 경로.
@@ -106,6 +108,21 @@ def diagnostics_gating_pins(*, bindings=None):
         bindings = _json.loads(_DIAG_FIXTURE.read_text(encoding="utf-8"))
     if bindings.get("artifact_type") != "STAGE7_DIAGNOSTICS_GATING_FUNCTION_HASHES_V1":
         raise ValueError("unsupported diagnostics-gating hash contract")
+    return {name: dict(spec) for name, spec in bindings["functions"].items()}
+
+
+def operational_readiness_pins(*, bindings=None):
+    """operational readiness(2026-09-17) 변경으로 해시가 바뀐 `main`의 **고정 해시**.
+
+    종료 대기 기록 뒤에 적용한다 — 같은 함수(main)가 두 기록에 걸치므로 나중 승인이 이긴다.
+    `run_mass_roc_session`은 Phase-I fixture가 재고정한다. 이름 allow-list 가 아니라 고정 해시다.
+    """
+    import json as _json
+
+    if bindings is None:
+        bindings = _json.loads(_READINESS_FIXTURE.read_text(encoding="utf-8"))
+    if bindings.get("artifact_type") != "STAGE7_OPERATIONAL_READINESS_FUNCTION_HASHES_V1":
+        raise ValueError("unsupported operational-readiness hash contract")
     return {name: dict(spec) for name, spec in bindings["functions"].items()}
 
 
