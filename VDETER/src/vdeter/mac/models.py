@@ -293,7 +293,12 @@ class LcAllocation:
 
     @property
     def key(self) -> tuple:
-        return (self.logical_channel_tx, self.logical_channel_rx, self.owner_station_id_value)
+        base = (self.logical_channel_tx, self.logical_channel_rx, self.owner_station_id_value)
+        # Heard occupancy is not a grant to this station. Keep it in a separate
+        # key namespace so another addressee's renewal cannot replace our grant.
+        if self.state is LcState.EXTERNAL_RESERVED:
+            return (*base, "external", self.peer_station_id_value)
+        return base
 
 
 @dataclass(frozen=True, slots=True)

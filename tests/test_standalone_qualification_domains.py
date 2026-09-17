@@ -24,7 +24,7 @@ for _entry in (os.path.join(_REPO, "VDETER"),
 
 from pathlib import Path
 
-from apps.standalone import deploy_manifest
+from apps.standalone import installation_manifest as im
 from apps.standalone import qualification_domains as qd
 
 
@@ -32,21 +32,35 @@ def _manifest_from(paths):
     return {"files": [{"path": p, "sha256": s} for p, s in paths.items()]}
 
 
+def _repo_v1_manifest() -> dict:
+    """실제 설치 tree를 production 측정기(installation_manifest.measure, v2)로 실측해
+    v1 manifest 모양(`files: [{path, sha256}]`)으로 투영한다.
+
+    v1 producer였던 apps/standalone/deploy_manifest.py는 production 호출자가 없어
+    제거됐다(2026-09-15). 파일 집합은 배포 prefix가 아니라 설치 scan(제외 규칙 적용)
+    이며, 아래 partition·핵심 영역 계약은 그 집합 위에서 그대로 성립해야 한다."""
+    record = im.measure(Path(_REPO))
+    return {"file_count": record["file_count"],
+            "files": [{"path": path, "sha256": entry["sha256"]}
+                      for path, entry in sorted(record["files"].items())]}
+
+
 # --------------------------------------------------------- classification
 
 def test_known_files_classify_to_expected_domain():
     cases = {
-        "VDETER/apps/stage7_coordinator_main.py": qd.RF,
-        "VDETER/apps/stage7_endpoint_launcher.py": qd.RF,
-        "VDETER/apps/stage7_scenario_controller.py": qd.RF,   # 주영역(rf+operation)
-        "VDETER/src/vdeter/stage7/pi_runtime.py": qd.RF,
+        "VDETER/apps/coordinator_main.py": qd.RF,
+        "VDETER/apps/endpoint_launcher.py": qd.RF,
+        "VDETER/apps/scenario_controller.py": qd.RF,   # 주영역(rf+operation)
+        "VDETER/src/vdeter/b210_system/pi_runtime.py": qd.RF,
         "VDETER/src/vdeter/phy/resampling.py": qd.RF,
-        "VDETER/configs/stage7/system.toml": qd.RF,
-        "VDETER/configs/stage7/endpoints/mass-a.toml": qd.RF,
-        "VDETER/configs/stage7/profiles/data-profile.toml": qd.RF,
+        "VDETER/configs/b210_system/system.toml": qd.RF,
+        "VDETER/configs/b210_system/endpoints/mass-a.toml": qd.RF,
+        "VDETER/configs/b210_system/profiles/data-profile.toml": qd.RF,
         "apps/standalone/qualify_cmd.py": qd.TOOLING,
         "apps/standalone/qualification_domains.py": qd.TOOLING,
         "apps/standalone/setup_cmd.py": qd.TOOLING,
+        "apps/standalone/hardware_draft.py": qd.TOOLING,
         "VDETER/tools/stage7_rr_final_builder.py": qd.TOOLING,
         "apps/standalone/templates/hardware.toml.example": qd.TOOLING,
         "tools/check_docs.py": qd.TOOLING,
@@ -56,8 +70,8 @@ def test_known_files_classify_to_expected_domain():
         "apps/standalone/local_preflight.py": qd.OPERATION,
         "apps/standalone/identity.py": qd.OPERATION,
         "apps/standalone/local_config.py": qd.RF,   # 주영역 rf (rf+operation)
-        "apps/stage7_mass_roc_controller.py": qd.OPERATION,
-        "apps/stage7_service_layer.py": qd.OPERATION,
+        "apps/mass_roc_workload_controller.py": qd.OPERATION,
+        "apps/service_layer.py": qd.OPERATION,
         "common/codec.py": qd.OPERATION,
         "MASS/mass_agent.py": qd.OPERATION,
         "VDETER/apps/stage0_endpoint.py": qd.OPERATION,
@@ -78,13 +92,13 @@ def test_known_files_classify_to_expected_domain():
 
 
 def test_classify_domains_multi_membership_v2():
-    assert qd.classify_domains("VDETER/apps/stage7_scenario_controller.py") == (
+    assert qd.classify_domains("VDETER/apps/scenario_controller.py") == (
         qd.RF, qd.OPERATION)
     assert qd.classify_domains("apps/standalone/local_config.py") == (
         qd.RF, qd.OPERATION)
     assert qd.classify_domains("apps/standalone/installation_manifest.py") == (
         qd.TOOLING, qd.OPERATION)
-    assert qd.classify_domains("apps/stage7_profile.py") == (qd.TOOLING, qd.OPERATION)
+    assert qd.classify_domains("apps/run_profile.py") == (qd.TOOLING, qd.OPERATION)
     assert qd.classify_domains("requirements-standalone.lock") == (
         qd.TOOLING, qd.OPERATION)
     assert qd.classify_domains("bin/vdeter") == (qd.TOOLING, qd.OPERATION)
@@ -101,9 +115,9 @@ def _files_v2(mapping):
 
 
 _BASE_V2 = {
-    "VDETER/apps/stage7_coordinator_main.py": "rf1",
-    "VDETER/src/vdeter/stage7/pi_runtime.py": "rf2",
-    "VDETER/apps/stage7_scenario_controller.py": "x1",   # rf+operation
+    "VDETER/apps/coordinator_main.py": "rf1",
+    "VDETER/src/vdeter/b210_system/pi_runtime.py": "rf2",
+    "VDETER/apps/scenario_controller.py": "x1",   # rf+operation
     "apps/standalone/local_config.py": "x2",              # rf+operation
     "apps/standalone/cli.py": "op1",
     "apps/standalone/run_cmd.py": "op2",
@@ -122,11 +136,11 @@ def test_evaluate_reuse_v2_rules():
     same = qd.evaluate_reuse_v2(base, base)
     assert same["eligible"] and not same["tooling_changed"]
     # RF 파일 변경 → RF 재자격 필요(재사용 거부).
-    cur = dict(_BASE_V2); cur["VDETER/src/vdeter/stage7/pi_runtime.py"] = "NEW"
+    cur = dict(_BASE_V2); cur["VDETER/src/vdeter/b210_system/pi_runtime.py"] = "NEW"
     r = qd.evaluate_reuse_v2(base, _files_v2(cur))
-    assert not r["eligible"] and "rf:changed:VDETER/src/vdeter/stage7/pi_runtime.py" in r["blocking_files"]
+    assert not r["eligible"] and "rf:changed:VDETER/src/vdeter/b210_system/pi_runtime.py" in r["blocking_files"]
     # 교차영향 파일(scenario controller) 변경 → rf·operation 둘 다 차단.
-    cur = dict(_BASE_V2); cur["VDETER/apps/stage7_scenario_controller.py"] = "NEW"
+    cur = dict(_BASE_V2); cur["VDETER/apps/scenario_controller.py"] = "NEW"
     r = qd.evaluate_reuse_v2(base, _files_v2(cur))
     assert not r["rf_identical"] and not r["operation_identical"]
     # operation 변경 → 자동 재사용 거부(현 정책).
@@ -163,9 +177,9 @@ def test_evaluate_reuse_v2_rules():
 
 
 def test_every_deployed_file_classifies_into_exactly_one_domain():
-    """실제 배포 tree measure로 completeness/partition을 고정한다."""
-    manifest = deploy_manifest.measure(Path(_REPO))
-    assert manifest["file_count"] > 400  # 배포 규모 sanity
+    """실제 설치 tree 실측(v2 measure → v1 투영)으로 completeness/partition을 고정한다."""
+    manifest = _repo_v1_manifest()
+    assert manifest["file_count"] > 400  # 설치 규모 sanity
     split = qd.split_manifest(manifest)
     # 모든 영역 키 존재.
     assert set(split) == set(qd.DOMAINS)
@@ -185,11 +199,11 @@ def test_every_deployed_file_classifies_into_exactly_one_domain():
 
 
 def test_rf_domain_contains_core_and_tests_are_tooling():
-    manifest = deploy_manifest.measure(Path(_REPO))
+    manifest = _repo_v1_manifest()
     split = qd.split_manifest(manifest)
     rf = split[qd.RF]["files"]
-    assert "VDETER/apps/stage7_coordinator_main.py" in rf
-    assert "VDETER/src/vdeter/stage7/pi_runtime.py" in rf
+    assert "VDETER/apps/coordinator_main.py" in rf
+    assert "VDETER/src/vdeter/b210_system/pi_runtime.py" in rf
     assert "apps/standalone/qualify_cmd.py" not in rf
     tooling = split[qd.TOOLING]["files"]
     assert "apps/standalone/qualify_cmd.py" in tooling
@@ -198,10 +212,9 @@ def test_rf_domain_contains_core_and_tests_are_tooling():
         assert not any(p.startswith("VDETER/tests/")
                        for p in split[d]["files"])
     # v2 실측: 결속 파일은 비결속과 겹치지 않고 교차영향 파일은 두 영역에.
-    from apps.standalone import installation_manifest as im
     record = im.measure(Path(_REPO))
     files = record["files"]
-    assert set(files["VDETER/apps/stage7_scenario_controller.py"]["domains"]) == {
+    assert set(files["VDETER/apps/scenario_controller.py"]["domains"]) == {
         qd.RF, qd.OPERATION}
     assert set(files["apps/standalone/local_config.py"]["domains"]) == {
         qd.RF, qd.OPERATION}
@@ -251,9 +264,9 @@ def test_rf_symbol_diff_empty_when_identical():
 # ------------------------------------------------------------- reuse guard
 
 _BASE = {
-    "VDETER/apps/stage7_coordinator_main.py": "rf1",
-    "VDETER/src/vdeter/stage7/pi_runtime.py": "rf2",
-    "VDETER/configs/stage7/standalone-binding.json": "rf3",
+    "VDETER/apps/coordinator_main.py": "rf1",
+    "VDETER/src/vdeter/b210_system/pi_runtime.py": "rf2",
+    "VDETER/configs/b210_system/standalone-binding.json": "rf3",
     "apps/standalone/cli.py": "op1",
     "apps/standalone/run_cmd.py": "op2",
     "common/codec.py": "op3",
@@ -284,17 +297,17 @@ def test_tooling_only_change_is_eligible():
 
 
 def test_rf_change_refuses_reuse():
-    cur = dict(_BASE); cur["VDETER/src/vdeter/stage7/pi_runtime.py"] = "rf2-NEW"
+    cur = dict(_BASE); cur["VDETER/src/vdeter/b210_system/pi_runtime.py"] = "rf2-NEW"
     r = qd.evaluate_reuse(_manifest_from(_BASE), _manifest_from(cur))
     assert r["eligible"] is False
     assert r["rf_identical"] is False
-    assert any("rf:changed:VDETER/src/vdeter/stage7/pi_runtime.py" == b
+    assert any("rf:changed:VDETER/src/vdeter/b210_system/pi_runtime.py" == b
                for b in r["blocking_files"])
 
 
 def test_rf_file_removed_or_added_refuses_reuse():
-    cur = dict(_BASE); del cur["VDETER/apps/stage7_coordinator_main.py"]
-    cur["VDETER/src/vdeter/stage7/new_rf.py"] = "rfX"
+    cur = dict(_BASE); del cur["VDETER/apps/coordinator_main.py"]
+    cur["VDETER/src/vdeter/b210_system/new_rf.py"] = "rfX"
     r = qd.evaluate_reuse(_manifest_from(_BASE), _manifest_from(cur))
     assert r["eligible"] is False
     assert any(b.startswith("rf:removed:") for b in r["blocking_files"])

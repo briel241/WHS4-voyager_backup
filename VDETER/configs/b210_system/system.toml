@@ -1,0 +1,23 @@
+# Stage 7 Runtime Coordinator deployment 입력 (`stage7_b210_system_baseline.md` §15).
+# application과 독립된 system plan이며 endpoint protocol configuration이 아니다.
+
+[system]
+profile = "STAGE7_PI5_THREE_ENDPOINT_V1"
+runtime_coordinator_protocol = "vdeter.b210_system.runtime-coordinator.v1"
+runtime_body_schema = "STAGE7_RUNTIME_BODY_V1"
+socket_root = "/run/user/<uid>/vdeter-stage7/runtime"
+member_count = 3
+service_start_intent_timeout_ns = 30000000000
+service_start_tbb_publish_timeout_ns = 90000000000
+
+[[members]]
+endpoint_id = "MASS-A"
+config_relpath = "configs/b210_system/endpoints/mass-a.toml"
+
+[[members]]
+endpoint_id = "MASS-B"
+config_relpath = "configs/b210_system/endpoints/mass-b.toml"
+
+[[members]]
+endpoint_id = "ROC"
+config_relpath = "configs/b210_system/endpoints/roc.toml"

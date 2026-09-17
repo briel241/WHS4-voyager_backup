@@ -13,7 +13,7 @@
     빼지 않고 중단한다. 동적 import 는 `--dynamic-import` 로 명시 결속한다.
   - Phase F evidence 는 복사하지 않고 합격 조건을 실제로 검사한다.
   - 산출은 임시 디렉터리에서 만든 뒤 atomic publish 하며 기존 디렉터리를
-    덮어쓰지 않는다. 발급 직후 stage7_profile 로 재검증한다.
+    덮어쓰지 않는다. 발급 직후 run_profile 로 재검증한다.
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ SEARCH_PATHS = (os.path.join(REPO, "src"), REPO)
 #: 결속 진입점. coordinator 는 orchestration 분기가 additive 로 늘어나므로
 #: 전체 파일이 아니라 함수 단위로 결속한다(strict 목록에서 제외).
 ENTRY_POINTS = (
-    PREFIX + "apps/stage7_endpoint_launcher.py",
-    PREFIX + "apps/stage7_coordinator_main.py",
+    PREFIX + "apps/endpoint_launcher.py",
+    PREFIX + "apps/coordinator_main.py",
 )
-FUNCTION_BOUND = PREFIX + "apps/stage7_coordinator_main.py"
+FUNCTION_BOUND = PREFIX + "apps/coordinator_main.py"
 
 #: 저장소 안 패키지 최상위 이름. 여기서 시작하는 import 는 반드시 해석돼야
 #: 하며, 그 밖(표준·서드파티)은 경계로 두고 환경 manifest 가 버전을 묶는다.
@@ -55,11 +55,11 @@ ORCHESTRATION_PATH = ROOT
 
 #: RF config 원본 — 정확한 allowlist. trust/개인키는 절대 포함하지 않는다.
 CONFIG_ALLOWLIST = (
-    PREFIX + "configs/stage7/endpoints/mass-a.toml",
-    PREFIX + "configs/stage7/endpoints/mass-b.toml",
-    PREFIX + "configs/stage7/endpoints/roc.toml",
-    PREFIX + "configs/stage7/profiles/data-profile.toml",
-    PREFIX + "configs/stage7/system.toml",
+    PREFIX + "configs/b210_system/endpoints/mass-a.toml",
+    PREFIX + "configs/b210_system/endpoints/mass-b.toml",
+    PREFIX + "configs/b210_system/endpoints/roc.toml",
+    PREFIX + "configs/b210_system/profiles/data-profile.toml",
+    PREFIX + "configs/b210_system/system.toml",
 )
 
 REQUIRED_TCS = ("TC-STAGE7-RR-002", "TC-STAGE7-RR-003", "TC-STAGE7-RR-004")
@@ -324,7 +324,7 @@ def coordinator_binding(phase_f_sha) -> dict:
     functions, constants, imports = {}, {}, []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            # apps/stage7_service_layer.py 검증자와 정확히 같은 산정법 —
+            # apps/service_layer.py 검증자와 정확히 같은 산정법 —
             # 키 구조·해시 입력이 1비트라도 다르면 RF 접근이 거부된다.
             functions[node.name] = {
                 "ast_sha256": hashlib.sha256(
@@ -352,7 +352,7 @@ def coordinator_binding(phase_f_sha) -> dict:
     }
 
 
-#: 검증자(apps/stage7_service_layer.py)의 phase 이름 집합과 동일.
+#: 검증자(apps/service_layer.py)의 phase 이름 집합과 동일.
 _DISPATCH_PHASE_NAMES = frozenset({
     "p0", "hold", "p1", "p2", "gaincal", "rr-p0", "rr-p1",
     "rr-p2-17", "rr-p2-19", "rr-p3-fault", "rr-p3-soak-17",
@@ -363,7 +363,7 @@ _DISPATCH_PHASE_NAMES = frozenset({
 def _rr_phase_dispatch(tree, source: str) -> dict:
     """`--phase X` 분기가 어떤 run_* 함수를 부르는지 정적으로 뽑는다.
 
-    apps/stage7_service_layer.py의 검증 알고리즘을 그대로 미러한다 —
+    apps/service_layer.py의 검증 알고리즘을 그대로 미러한다 —
     독자 해석(텍스트 창 등)은 expected≠actual 불일치로 RF 거부를 부른다.
     """
 
@@ -737,7 +737,7 @@ def issue_profile(args) -> int:
 
     # 발급 직후 정식 로더로 재검증한다 — 수동 전사 오류를 여기서 잡는다.
     sys.path.insert(0, ROOT)
-    from apps.stage7_profile import load_profile, validate_local_bindings
+    from apps.run_profile import load_profile, validate_local_bindings
     loaded = load_profile(os.path.join(args.out_dir, "stage7-profile.json"))
     report = validate_local_bindings(loaded)
     if report.get("pass") is False:

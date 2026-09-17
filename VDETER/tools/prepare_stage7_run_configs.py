@@ -104,9 +104,9 @@ def main(argv=None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    from vdeter.stage7.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+    from vdeter.b210_system.configuration import (
+        ConfigurationLoader,
+        OperationalGainInput,
     )
 
     gain_input_data = None
@@ -134,17 +134,17 @@ def main(argv=None) -> int:
     print(f"[environment] {environment_path} sha256={environment_sha}")
 
     with open(
-        os.path.join(VDETER_ROOT, "configs", "stage7", "profiles", "data-profile.toml"),
+        os.path.join(VDETER_ROOT, "configs", "b210_system", "profiles", "data-profile.toml"),
         "r", encoding="utf-8",
     ) as handle:
         data_profile_text = handle.read()
 
-    loader = Stage7ConfigurationLoader()
+    loader = ConfigurationLoader()
     blockers = []
     written = []
     for endpoint in ENDPOINTS:
         template_path = os.path.join(
-            VDETER_ROOT, "configs", "stage7", "endpoints", f"{endpoint}.toml"
+            VDETER_ROOT, "configs", "b210_system", "endpoints", f"{endpoint}.toml"
         )
         with open(template_path, "r", encoding="utf-8") as handle:
             text = handle.read()
@@ -183,7 +183,7 @@ def main(argv=None) -> int:
             common = gain_input_data["endpoint_common_rx_gain_db"]
             endpoint_key = endpoint.upper()
             value = common[endpoint_key] if isinstance(common, dict) else common
-            operational_gain = Stage7OperationalGainInput(
+            operational_gain = OperationalGainInput(
                 endpoint_common_rx_gain_db=int(value),
                 source_gain_artifact_sha256=gain_input_data[
                     "source_gain_artifact_sha256"
@@ -204,7 +204,7 @@ def main(argv=None) -> int:
         print(f"[config] {endpoint} resolved_sha256={loaded.value.resolved_sha256}")
 
     for name in ("system.toml",):
-        source = os.path.join(VDETER_ROOT, "configs", "stage7", name)
+        source = os.path.join(VDETER_ROOT, "configs", "b210_system", name)
         with open(source, "rb") as handle:
             payload = handle.read()
         with open(os.path.join(out_dir, name), "wb") as handle:
@@ -282,7 +282,7 @@ def main(argv=None) -> int:
     if needs_fixtures:
         import base64
 
-        from vdeter.stage7.canonical_json import encode_canonical_json
+        from vdeter.b210_system.canonical_json import encode_canonical_json
 
         def payload_bytes(length, seed):
             return bytes((i * 7 + seed) % 256 for i in range(length))
@@ -363,7 +363,7 @@ def main(argv=None) -> int:
                 )
         subprocess.run(
             ["scp", "-q",
-             os.path.join(VDETER_ROOT, "configs", "stage7", "profiles", "data-profile.toml"),
+             os.path.join(VDETER_ROOT, "configs", "b210_system", "profiles", "data-profile.toml"),
              f"{arguments.host}:{remote_config_dir}/profiles/"],
             timeout=60, check=True,
         )

@@ -1,0 +1,26 @@
+{
+ "artifact_type": "STAGE7_OPERATIONAL_READINESS_FUNCTION_HASHES_V1",
+ "reason": "Operational readiness + bring-up 단축 — readiness cold path phase, ready.json 절대 deadline, workload_kind 전달, binding gate 별칭 (docs/core/operational_readiness_and_bringup_spec.md SHA-256 654377ffda189156fd00929d5f6c115576884cf41d8393ee6e0f53161a0dac79)",
+ "approved_utc": "2026-09-17",
+ "base_commit_before_change": "68b671d4d62f3c2b121b85ac9b9da23ba695e711",
+ "evidence": "output/operational-readiness-20260917/ (M0-REPORT.md, M4 coordinator change scope)",
+ "hash_method": "service_layer._verify_function_bound (ast.dump / ast.unparse, SHA-256) — derived on CPython 3.12.13",
+ "behavior_change": "제한적 동작 변경이다. main(): 새 phase choice `mass-roc-session-cold`(gain artifact 거부), binding gate에는 phase 이름만 `mass-roc-session`으로 별칭한 사본을 넘겨 qualified `validate_rr_binding`을 byte-identical로 보존하고(규칙 완화 없음), dispatch에서 readiness_cold 인자를 전달한다. run_mass_roc_session은 Phase-I fixture가 재고정한다(cold prelude·fresh host fit·ready.json deadline·workload_kind). 이 기록 뒤의 추가 변경은 다시 검출된다.",
+ "note": "이름 allow-list 가 아니라 고정 해시다. 이후 추가 변경은 다시 검출된다.",
+ "functions": {
+  "main": {
+   "ast_sha256": "1a8eb3346ae377e62afccb441c85c1852f977658f844ff6ab5956c7452765c5b",
+   "source_sha256": "428048631a7156d3e592a43e514eb327557a46833db3a66fba0cc3448b39cca4"
+  }
+ },
+ "previous": {
+  "main": {
+   "ast_sha256": "0296974bf69972790ac6dd25054cb6df81360e6491660d6cb535b20d0fb3d337",
+   "source_sha256": "58095e393374a1765c048c75e3575e074adeb050d2661f369784951d67f58c9d"
+  }
+ },
+ "also_repinned_by_phase_i_fixture": [
+  "main",
+  "run_mass_roc_session"
+ ]
+}

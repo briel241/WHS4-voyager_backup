@@ -2,7 +2,7 @@
 
 hardware.toml carries only the operator-approved environment intent. Its
 schema selects the host profile whose rules are defined **once** in
-`vdeter.stage7.host_profiles` (speed class per role, canonical usb_transport,
+`vdeter.b210_system.host_profiles` (speed class per role, canonical usb_transport,
 power source, shared-hub contract):
 
   schema_version = 1   STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1 (legacy Pi profile)
@@ -23,6 +23,10 @@ What software can and cannot prove is kept apart: the hub descriptor
 observations (preflight/RR-P0); "the external supply is connected" and "no
 per-B210 DC brick is used" are operator attestations recorded with their
 source. Both must hold. Nothing here reads Git or the network.
+
+The setup-time draft (hub candidate detection and rendering) lives in
+`apps.standalone.hardware_draft`; this module keeps the schema, its validation
+and the qualification-critical subset.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ for _entry in (_REPO_ROOT / "VDETER", _REPO_ROOT / "VDETER" / "src"):
     if str(_entry) not in sys.path:
         sys.path.insert(0, str(_entry))
 
-from vdeter.stage7 import host_profiles  # noqa: E402
+from vdeter.b210_system import host_profiles  # noqa: E402
 
 LEGACY_PI_PROFILE = host_profiles.LEGACY_PI_PROFILE
 PI_POWERED_HUB_PROFILE = host_profiles.PI_POWERED_HUB_PROFILE
@@ -250,87 +254,3 @@ def topology_observations(preflight: dict) -> dict:
                             "the connected external supply is an operator attestation "
                             "recorded in standalone_critical.usb_topology.power"),
     }
-
-
-# ------------------------------------------------------------ setup draft
-
-def hub_draft_candidate(topology: dict) -> dict:
-    """Setup-time observation: are exactly three B210s below one self-powered
-    SuperSpeed hub? Roles are never assigned automatically."""
-    devices = (topology or {}).get("devices") or {}
-    b210 = {name: d for name, d in sorted(devices.items())
-            if d.get("vid_pid") == host_profiles.B210_VID_PID}
-    serials = [d.get("serial") for d in b210.values()]
-    result = {"candidate": False, "b210_count": len(b210), "reasons": [],
-              "devices": [{"usb_path": name, "hub_port": d.get("port"),
-                           "serial": d.get("serial"), "speed_mbps": d.get("speed_mbps"),
-                           "parent": d.get("parent")} for name, d in b210.items()]}
-    if len(b210) != 3 or len(set(serials)) != 3 or None in serials:
-        result["reasons"].append("exactly three B210s with distinct serials are required")
-        return result
-    probe = host_profiles.check_shared_powered_hub(
-        {f"B210-{i}": serial for i, serial in enumerate(serials, 1)}, topology)
-    hub = probe.get("hub") or {}
-    result.update({
-        "candidate": bool(probe["pass"]),
-        "reasons": list(probe["errors"]),
-        "hub_path": hub.get("usb_path"),
-        "hub_vid_pid": hub.get("vid_pid"),
-        "hub_speed_mbps": hub.get("speed_mbps"),
-        "hub_product": hub.get("product"),
-        "hub_descriptor_self_powered": hub.get("descriptor_self_powered"),
-    })
-    return result
-
-
-def render_pi_powered_hub_draft(candidate: dict) -> str:
-    """hardware.toml draft text for the powered-hub profile — observation as
-    comments, roles/asset/attestations left to the operator (fail-closed
-    defaults: the draft does not validate until every attestation is set)."""
-    device_lines = [
-        "#   hub port %s / %s: serial %s %sM" % (
-            d.get("hub_port"), d.get("usb_path"), d.get("serial"), d.get("speed_mbps"))
-        for d in candidate.get("devices") or []]
-    return "\n".join([
-        "# VDETER standalone hardware declaration — edited and approved by the operator.",
-        "# Profile draft: %s" % PI_POWERED_HUB_PROFILE,
-        "# (Raspberry Pi 5, three B210s on ONE self-powered USB3 hub, all 5000M, hub bus power,",
-        "#  no per-B210 DC asset). Observed at setup — paths, ports and device numbers are",
-        "#  recorded for reference only and are never declared or bound:",
-        "#   hub: VID:PID %s at %s, %sM, product %r, descriptor self-powered bit=%s" % (
-            candidate.get("hub_vid_pid"), candidate.get("hub_path"),
-            candidate.get("hub_speed_mbps"), candidate.get("hub_product"),
-            candidate.get("hub_descriptor_self_powered")),
-        *device_lines,
-        "# The role (MASS-A/MASS-B/ROC) to serial mapping cannot be decided automatically:",
-        "# the operator who knows the RF wiring must fill it in. The hub's external supply",
-        "# and the absence of per-B210 DC supplies cannot be measured by software: set the",
-        "# two attestations below only after checking the physical setup.",
-        "",
-        "schema_version = 2",
-        'platform_profile = "pi"',
-        'hardware_profile = "%s"' % PI_POWERED_HUB_PROFILE,
-        "",
-        "[usb_hub]",
-        'asset_id = "%s"               # physical asset ID of the powered USB3 hub' % DRAFT,
-        'vid_pid = "%s"                      # observed; must match the hub above the B210s'
-        % candidate.get("hub_vid_pid"),
-        "self_powered = false                     # set true after verifying the hub's external supply is connected",
-        'self_powered_source = "%s"' % OPERATOR_ATTESTED,
-        "individual_b210_dc = true                # set false after verifying no per-B210 DC brick is used",
-        'individual_b210_dc_source = "%s"' % OPERATOR_ATTESTED,
-        "",
-        "[endpoints.MASS-A]",
-        'serial = "%s"' % DRAFT,
-        "",
-        "[endpoints.MASS-B]",
-        'serial = "%s"                    # 5000M on the hub — no external_power_asset here' % DRAFT,
-        "",
-        "[endpoints.ROC]",
-        'serial = "%s"' % DRAFT,
-        "",
-        "[wiring]",
-        'profile = "C1-C6-STANDARD"',
-        "approved = false   # set to true after verifying the wiring; required to run",
-        "",
-    ])

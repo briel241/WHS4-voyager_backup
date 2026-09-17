@@ -15,7 +15,7 @@ import os
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-LAUNCHER = os.path.join(REPO, "VDETER", "apps", "stage7_endpoint_launcher.py")
+LAUNCHER = os.path.join(REPO, "VDETER", "apps", "endpoint_launcher.py")
 MAC = os.path.join(REPO, "VDETER", "src", "vdeter", "mac", "coordinator.py")
 REASSEMBLY = os.path.join(
     REPO, "VDETER", "src", "vdeter", "link", "data_session", "reassembly.py")
@@ -44,7 +44,7 @@ def test_tbb_active_emit_has_a_retry_path():
 
 def test_emit_tbb_active_sets_state_before_sending():
     """위 시험의 전제(state 선변경)가 실제로 성립하는지 고정한다."""
-    client = _read(os.path.join(REPO, "VDETER", "src", "vdeter", "stage7",
+    client = _read(os.path.join(REPO, "VDETER", "src", "vdeter", "b210_system",
                                 "runtime_client.py"))
     tree = ast.parse(client)
     node = next(n for n in ast.walk(tree)

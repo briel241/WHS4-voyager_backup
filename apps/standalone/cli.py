@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """`vdeter` — standalone 단일 명령 진입점 (Phase I W6, 결정 4·5·21).
 
-    vdeter setup [--new-identity] [--no-apt]     기계당 1회 (인터넷 허용)
+    vdeter setup [--new-identity] [--no-apt]     기계당 1회 (인터넷 허용, RF-free readiness migration 포함)
     vdeter qualify [--yes]                        단독 RR 재자격 (수 시간, RF)
-    vdeter run [SCENARIO|all] [--case ...] [...]  일상 실행 (오프라인)
+    vdeter run [SCENARIO|all] [--case ...] [...]  일상 실행 (오프라인; 한 session에서 준비→workload→cleanup)
+    vdeter status [--json]                        현재 권위·readiness·qualification·live session 조회 (RF 없음)
     vdeter results [RUN-ID]                       run 목록·요약
 
 wrapper(`var/venv/bin/vdeter`)가 이 파일을 경로로 실행하므로 sys.path를
@@ -34,7 +35,7 @@ EXIT_INTERRUPTED = 130
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vdeter",
-        description="VDETER standalone: setup / qualify / run / results")
+        description="VDETER standalone: setup / qualify / run / status / results")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_progress_flag(sub_parser):
@@ -63,7 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_progress_flag(qualify)
 
     run = sub.add_parser("run", help="run scenarios on a hardware session "
-                         "(offline; requires an active v2 reference)")
+                         "(offline; one process owns static preflight -> live "
+                         "bring-up -> internal Link 17 probe -> workloads -> cleanup, "
+                         "then promotes an operational-readiness release; cold "
+                         "calibration is performed automatically when no applicable "
+                         "artifact exists)")
     add_progress_flag(run)
     run.add_argument("scenario", nargs="?", default=None,
                      help="SC-VDE-001 | SC-VDE-005 | SC-VDE-006 | all "
@@ -77,10 +82,86 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true",
                      help="print the run summary as JSON at the end")
     run.add_argument("--no-retry", action="store_true",
-                     help="disable the single automatic bring-up retry")
+                     help="(no effect) the readiness path never retries a bring-up "
+                          "(implicit retry 0 for warm and cold preparation)")
+    run.add_argument("--poc", default=None, metavar="PATH",
+                     help="Stage 8: external PoC package <base>.py to run against "
+                          "the selected scenario (opt-in; off by default)")
+    run.add_argument("--poc-dir", default=None, metavar="DIR",
+                     help="Stage 8: external PoC catalog directory for interactive "
+                          "scenario-first PoC selection (opt-in; interactive only)")
+    run.add_argument("--rf-off-software", action="store_true",
+                     help="Stage 8: run the PoC through a real coordinator process in RF-off "
+                          "software mode (no B210; hardware boundary is an explicit software "
+                          "double). Verification only, not for production hardware runs.")
 
     results = sub.add_parser("results", help="list runs or show one summary")
     results.add_argument("run_id", nargs="?", default=None)
+
+    status = sub.add_parser(
+        "status",
+        help="show current_authority / operational_readiness / qualification / live_session / "
+             "workload_rf and the reason (opens no device, transmits nothing)")
+    status.add_argument("--json", action="store_true",
+                        help="print the status report as JSON")
+
+    capability = sub.add_parser(
+        "capability",
+        help="show, or verify-and-issue, this installation's dual-channel capability "
+             "attestation (RF-off verification only; starts no transmission and does "
+             "not qualify the installation)")
+    capability.add_argument(
+        "action", nargs="?", default="show", choices=("show", "issue"),
+        help="show the current attestation (default), or run this installation's "
+             "RF-off verification and issue an attestation bound to it")
+
+    # 개발용 통제 RF 진단 — 정상 `run`의 UNQUALIFIED 거부는 그대로다. 별도 authorization
+    # (var/diagnostic)에만 결속되며 reference를 발급·승격하지 않는다 (실행 명세 §5A).
+    diag = sub.add_parser(
+        "diag",
+        help="development-time controlled RF diagnostics on an UNQUALIFIED candidate "
+             "(separate authorization; never a qualification, never promotes)")
+    diag_sub = diag.add_subparsers(dest="diag_command", required=True)
+    diag_authorize = diag_sub.add_parser(
+        "authorize",
+        help="issue a diagnostic authorization bound to this installation, hardware "
+             "declaration, identity, a verified calibration source and a test plan "
+             "(RF-off; opens no device)")
+    diag_authorize.add_argument(
+        "--calibration-reference", required=True, metavar="PATH",
+        help="qualification reference (with its .sha256 sidecar) whose gain artifact is "
+             "the calibration source; refused unless its hardware/wiring/profile/library "
+             "bindings equal this candidate")
+    diag_authorize.add_argument(
+        "--plan", required=True, metavar="PATH",
+        help="JSON test plan: label, allowed_scenarios, poc_allowed, max_runs, "
+             "max_workloads_per_run, expires_utc [, max_hold_after_ready_s]")
+    diag_run = diag_sub.add_parser(
+        "run",
+        help="run the authorized diagnostic session (one bring-up attempt, no automatic "
+             "retry; the result is always NOT_QUALIFIED)")
+    add_progress_flag(diag_run)
+    diag_run.add_argument(
+        "scenario", nargs="*", default=[],
+        help="zero or more of SC-VDE-001 | SC-VDE-005 | SC-VDE-006 (none = RX-only "
+             "session: bring-up, optional hold, close)")
+    diag_run.add_argument(
+        "--hold-after-ready", type=float, default=0.0, metavar="SECONDS",
+        help="RX-only: keep the READY session up this long before closing "
+             "(bounded by the plan)")
+    diag_run.add_argument("--diagnostics", action="store_true",
+                          help="raise evidence instrumentation detail")
+    diag_run.add_argument("--json", action="store_true",
+                          help="print the run summary as JSON at the end")
+    diag_run.add_argument("--poc", default=None, metavar="PATH",
+                          help="Stage 8 PoC package <base>.py (only if the plan allows PoC)")
+    diag_run.add_argument("--poc-dir", default=None, metavar="DIR",
+                          help="Stage 8 PoC catalog directory (only if the plan allows PoC)")
+    diag_run.add_argument(
+        "--rf-off-software", action="store_true",
+        help="RF-off software session (no B210; verification only)")
+    diag_sub.add_parser("status",
+                        help="show the diagnostic authorization and its ledger")
     return parser
 
 
@@ -166,7 +247,20 @@ def _cmd_setup(args, paths: StatePaths, out) -> int:
     out("  hardware:   %s %s" % (
         "draft written to" if draft["created"] else "existing", draft["path"]))
     if draft["created"]:
-        out("              edit serial/role mapping and set wiring.approved="
+        label = draft.get("expected_label")
+        if label:
+            applied = draft.get("expected_applied") or {}
+            roles = applied.get("endpoints") or {}
+            out("              expected profile %s: %s; hub asset %s (expected values, "
+                "not confirmed)" % (
+                    label,
+                    ", ".join("%s=%s" % (role, roles.get(role) or "REQUIRED_FILL")
+                              for role in ("MASS-A", "MASS-B", "ROC")),
+                    applied.get("usb_hub.asset_id") or "REQUIRED_FILL"))
+            for note in draft.get("mismatches") or []:
+                out("              mismatch: " + note)
+        out("              review the values, fill REQUIRED_FILL, record the power "
+            "attestations only after a physical check, then set wiring.approved="
             "true before `vdeter qualify`")
     inst = steps["installation"]
     out("  install:    installation %s (%d files; rf %s · operation %s · "
@@ -195,8 +289,12 @@ def _cmd_qualify(args, paths: StatePaths, out, input_fn) -> int:
     from apps.standalone import progress as progress_module
     from apps.standalone import qualify_cmd
     out("vdeter qualify — RR qualification ladder (RF transmission)")
-    out("  steps: RR-P0 -> RR-P1 (+gain) -> candidate -> RR-P2-17 -> "
-        "RR-P3-fault -> verification bundle -> final builder -> promote")
+    out("  steps: verification bundle -> RR-P0 -> RR-P1 (+gain) -> "
+        "candidate -> RR-P2-17 -> RR-P3-fault -> bundle re-check -> "
+        "final builder -> promote")
+    out("  the software bundle runs first: if it fails, no RF phase is "
+        "run and nothing is promoted. It runs exactly once per "
+        "qualification and the final builder reuses that same bundle.")
     out("  scope: Link 19 implementation present, not exercised by this "
         "qualification, hardware performance not guaranteed; operational "
         "scenarios use Link 11/17 only")
@@ -271,10 +369,40 @@ def main(argv=None, *, paths: StatePaths | None = None, out=print,
             run_id=args.run_id, diagnostics=args.diagnostics,
             json_summary=args.json, retry=not args.no_retry,
             progress=not getattr(args, "no_progress", False),
+            poc=getattr(args, "poc", None), poc_dir=getattr(args, "poc_dir", None),
+            rf_off_software=getattr(args, "rf_off_software", False),
             out=out, input_fn=input_fn)
+    if args.command == "diag":
+        from apps.standalone import diag_cmd
+        if args.diag_command == "authorize":
+            try:
+                diag_cmd.authorize(
+                    paths, calibration_reference=args.calibration_reference,
+                    plan_path=args.plan, out=out)
+            except diag_cmd.DiagError as exc:
+                out("Refused (exit %d): %s" % (exc.code, exc))
+                return exc.code
+            return EXIT_PASS
+        if args.diag_command == "run":
+            return diag_cmd.run(
+                paths, scenarios=list(args.scenario), poc=args.poc,
+                poc_dir=args.poc_dir, rf_off_software=args.rf_off_software,
+                diagnostics=args.diagnostics,
+                hold_after_ready_s=args.hold_after_ready, json_summary=args.json,
+                progress=not getattr(args, "no_progress", False),
+                out=out, input_fn=input_fn)
+        if args.diag_command == "status":
+            return diag_cmd.status(paths, out=out)
+        return EXIT_CONFIG
     if args.command == "results":
         from apps.standalone import results_cmd
         return results_cmd.main_results(paths, args.run_id, out=out)
+    if args.command == "status":
+        from apps.standalone import status_cmd
+        return status_cmd.main_status(paths, out=out, json_output=args.json)
+    if args.command == "capability":
+        from apps.standalone import capability_issue_cmd
+        return capability_issue_cmd.main(args, paths, out=out)
     return EXIT_CONFIG
 
 

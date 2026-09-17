@@ -1,28 +1,58 @@
 {
- "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V1",
- "approved_utc": "2026-09-10",
- "policy": "Phase I (standalone) approved change (2026-09-04): run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). Pi powered-USB3-hub host profile (2026-09-10, user-approved option (b)): run_rr_p0 derives the approved USB link speed of each endpoint from the resolved host_execution.usb_transport through the single profile definition vdeter.stage7.host_profiles (legacy Pi values unchanged: 5000/480/5000; STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1: 5000/5000/5000) and, for the powered-hub profile only, additionally verifies the live sysfs shared self-powered hub topology; helper functions _expected_usb_speed/_shared_hub_topology_check were added. No RF threshold, deadline, gain, PHY/MAC, waveform, retry or scenario judgement changed. This fixture pins every approved implementation by AST and source SHA-256 (verified identical on CPython 3.12.3 and 3.12.13) so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
- "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
- "functions": {
-  "run_rr_p0": {
-   "ast_sha256": "f11e7b9c690606452fc8455469fd379f06b004f56b02aa59c70e6eb50098c1c6",
-   "source_sha256": "b2f13db6e7f37171a88fd02bb9c3d63cd95657858a206e26846deb38d1b2b5be"
-  },
-  "run_rr_p3_fault": {
-   "ast_sha256": "df8ad6de57d7d74509afc1c5c481bb41ae1a794cd60c87c7ec4ff76607507ae0",
-   "source_sha256": "39d83fb2d3dbcb88d2688a8dd61a29c0395774e5c959120b9aa8138a97b7ab78"
-  }
- },
  "added_functions": [
+  "_await_launcher_exits",
+  "_binding_gate_arguments",
+  "_diagnostics_enabled",
   "_expected_usb_speed",
   "_p3_fault_status",
+  "_run_readiness_cold_calibration",
   "_shared_hub_topology_check"
  ],
+ "approved_utc": "2026-09-10",
+ "artifact_type": "STAGE7_PHASE_I_APPROVED_FUNCTION_HASHES_V2",
  "expected_changed_vs_qualified_commit": [
+  "_spawn_mass_roc_controller",
+  "main",
+  "run_mass_roc_service",
   "run_mass_roc_session",
   "run_rr_p0",
-  "run_rr_p3_fault"
+  "run_rr_p3_fault",
+  "spawn_and_connect"
  ],
+ "functions": {
+  "run_mass_roc_session": {
+   "ast_sha256": "4b9c17d8cf237d13ffac11426bf95b57877ea581f1c248b45611ac5f3a96da04",
+   "source_sha256": "353a8fcb71dab567c3915710783da28b1597e471881275b0431f3dc9e46dd164"
+  },
+  "run_rr_p0": {
+   "ast_sha256": "0eb91b75e7a778127067c38a120e176ad39e9b4eb22bd7a14746aaf5a4d935ac",
+   "source_sha256": "d732e1cb9f6b22dd5d27a753487c9e75961ac7b1667df119f9bdff17a6b34d2e"
+  },
+  "run_rr_p3_fault": {
+   "ast_sha256": "164498f8564ebc2bac697eeacabacc46c48833a8392d6b82b3e38e62738b5a35",
+   "source_sha256": "1d3325b93a046430e121e0069e61852bb0b0987d86fff2450e3547f343abc628"
+  },
+  "_open_session_trace": {
+   "ast_sha256": "f7a39868b3cf5472bb04855af2241c56667ccd40f88a746cbcadd24a4fa73ea2",
+   "source_sha256": "f6a81c440cd8cbe29de1ddc7e910ebdb17ec2f153e2ff20842f4e75bd4978039"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "09541eb8ba335e2b255da65ff29ab2d566bca6246c5ea4cae9349ebbf524cab4",
+   "source_sha256": "f6a5ed3736e4ba7d866699c9d7db21598b2f2b7905804f455abeaa6a5943f6ea"
+  },
+  "main": {
+   "ast_sha256": "37c1fd01442e56a10b14f60c2b3a41ca744ac3a053de009f79a9c58dfd3615c3",
+   "source_sha256": "016bff06d952218b8e848f89c1d841622a42a1b55838f3217db86d6d4ab5caf7"
+  },
+  "run_mass_roc_service": {
+   "ast_sha256": "02b696235bcac64a106f0cf963ef7df66c073d5aabda9f78f53b38dd6f9701c7",
+   "source_sha256": "f8dd375b4097cba5441b139f9ee468b3d00a4f3ea52eaa74c908cf92dc41410b"
+  },
+  "spawn_and_connect": {
+   "ast_sha256": "343a2b8e668d82daa68e79ebb94b07551aaa9fba46c4e39a814c686ea7335a85",
+   "source_sha256": "c7b95a7fcb0eb366d731e3928c9f36f188c387db7ebd8da51472f688516e5247"
+  }
+ },
  "pi_powered_usb3_hub_2026_09_10": {
   "functions_repinned": [
    "run_rr_p0"
@@ -32,5 +62,272 @@
    "_shared_hub_topology_check"
   ],
   "reason": "Raspberry Pi 5 with the three B210s on one self-powered USB3 hub (all 5000M, hub bus power, no per-B210 DC asset); legacy Pi profile and its RR-P0 expectations preserved verbatim"
- }
+ },
+ "policy": "Phase I (standalone) approved change (2026-09-04): run_rr_p3_fault judges the six software fault subcases only; the physical USB detach subcase is excluded from the qualification scope (user policy 2026-09-04). Pi powered-USB3-hub host profile (2026-09-10, user-approved option (b)): run_rr_p0 derives the approved USB link speed of each endpoint from the resolved host_execution.usb_transport through the single profile definition vdeter.b210_system.host_profiles (legacy Pi values unchanged: 5000/480/5000; STAGE7_PI5_POWERED_USB3_HUB_3XUSB3_V1: 5000/5000/5000) and, for the powered-hub profile only, additionally verifies the live sysfs shared self-powered hub topology; helper functions _expected_usb_speed/_shared_hub_topology_check were added. No RF threshold, deadline, gain, PHY/MAC, waveform, retry or scenario judgement changed. This fixture pins every approved implementation by AST and source SHA-256 (verified identical on CPython 3.12.3 and 3.12.13) so that any later change is detected again. All other Phase F/G qualification-path functions must still match the qualified commit exactly.",
+ "qualified_commit": "419bfef529d4907f77bca54c6b3e4d484afb260f",
+ "source_sha256_binding": {
+  "method_id": "literal-source-lf-v1",
+  "legacy_consumer_policy": "Host tests validate canonical source against these fixed AST/literal pins before translating approved functions to interpreter-local ast.unparse hashes in an in-memory synthetic reference. Production Phase-G verification and historical reference bytes remain unchanged. Unknown method/version is rejected.",
+  "changed_utc": "2026-09-13",
+  "method": "SHA-256 of the function's literal source text in the approved file (decorators included, LF-normalized, comments and whitespace included)",
+  "previous_method": "SHA-256 of ast.unparse(node)",
+  "reason": "ast.unparse output depends on the CPython patch version (PEP 701 f-string quote reuse). The 2026-09-12 run_mass_roc_session pin was derived on CPython 3.12.13; the Pi candidate runs 3.12.3, where the same unmodified source serialises differently. Qualification qual-20260913 therefore failed TC_QUALIFIED_PATH_INVARIANT with pinned_mismatch ['run_mass_roc_session'] although ast.dump matched exactly and the function was never edited (the file is byte-identical across 90d9fe8, ee2c167 and f3d246e; its last change was 2026-09-12). Literal source text is interpreter-independent and strictly stricter than unparse.",
+  "verified_interpreters": {
+   "3.12.3": "Raspberry Pi 5 candidate venv — all three pinned functions match",
+   "3.12.13": "CPython 3.12.13 (the interpreter the previous pins were derived on) — all three match",
+   "3.13.2": "CPython 3.13.2 — all three match (ast.dump differs on 3.13; source binding does not)"
+  },
+  "mutation_detection": "verified: inserting one statement into run_rr_p3_fault is detected by the literal binding (pinned_mismatch), as it is by ast.dump",
+  "drift_check": "verified against git blob 419bfef529d4907f77bca54c6b3e4d484afb260f:VDETER/apps/coordinator_main.py — under literal binding the changed-function set is exactly ['run_mass_roc_session', 'run_rr_p0', 'run_rr_p3_fault'], identical to the ast.dump and ast.unparse result; no additional function is flagged"
+ },
+ "stage8_poc_lifecycle_2026_09_12": {
+  "derived_from": {
+   "method": "ast.dump / literal source text of the actual function in the working tree (source_sha256 method changed 2026-09-13 — see source_sha256_binding; ast_sha256 unchanged)",
+   "parent_commit": "f340646665b3fb2c9c86847fd0eadac0fc98fc27",
+   "relpath": "VDETER/apps/coordinator_main.py"
+  },
+  "functions_repinned": [
+   "run_mass_roc_session"
+  ],
+  "note": "Historical (2026-09-12): source_sha256 was CPython-patch-version dependent (ast.unparse PEP 701 f-string quote reuse) and was derived on CPython 3.12.13, the only interpreter whose output matched this fixture; on the Pi's 3.12.3 the identical source produced a different hash and the binding test failed. Superseded 2026-09-13 by the interpreter-independent literal source binding (see source_sha256_binding); ast_sha256 is unchanged. This does not modify the frozen Phase-G qualification reference.",
+  "reason": "Stage 8 PoC workload lifecycle on the normal dispatch (user-approved 2026-09-12): run_mass_roc_session reads the request's optional poc field, hands it to the workload controller child as a file path, reads back the child's poc-result.json, and fails the workload when PoC evidence is requested but absent. The scenario path with no poc field is unchanged."
+ },
+ "rebinding_history": [
+  {
+   "reason": "Stage 8 2-3 구조 정리 — 승인된 이름·경로 치환에 한정된 변경",
+   "base_commit_before_rename": "93bebbd4ce6bfd314be964c25c6b56f52f9b599f",
+   "evidence": "step2-3-impl-20260915/rename-only-proof.json (직전 커밋 원문 + 승인 대응표 == 현재 파일, byte-identical)",
+   "functions": {
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "d830088991262e43918d06cf0d9abcd5b0123150a06bbd60b8397aca6bcc1bdd",
+      "source_sha256": "d3b3f95f7111bbbb0cccd60237a7b7f7f0403e5c5255fc0918757967c0ab67e5"
+     },
+     "new": {
+      "ast_sha256": "6ed24b222084fe25e326d66d0751c3eb745efddfb414d0652cbfa2ea26fb3eef",
+      "source_sha256": "2261dd4b1fa73108e9e390533150e4691fbf3ac598460caf607500765b89e849"
+     }
+    },
+    "run_rr_p0": {
+     "previous": {
+      "ast_sha256": "f11e7b9c690606452fc8455469fd379f06b004f56b02aa59c70e6eb50098c1c6",
+      "source_sha256": "f278848edd72e851b1266ec4a4c1bec824449153f786cd652ab3fe63cbf5f01b"
+     },
+     "new": {
+      "ast_sha256": "df18a264d2f5c13c7101b2b184344001eeeacba74e8e77fc47697f0799275054",
+      "source_sha256": "55b978a4f2dc0e53f273a7ef59897716c572521f1f6b6028b988de57ac95359b"
+     }
+    },
+    "run_rr_p3_fault": {
+     "previous": {
+      "ast_sha256": "df8ad6de57d7d74509afc1c5c481bb41ae1a794cd60c87c7ec4ff76607507ae0",
+      "source_sha256": "173c432c05d5d91c6c8965b717f069dfa910e8348dd8bbe81491e1ebc080887c"
+     },
+     "new": {
+      "ast_sha256": "164498f8564ebc2bac697eeacabacc46c48833a8392d6b82b3e38e62738b5a35",
+      "source_sha256": "1d3325b93a046430e121e0069e61852bb0b0987d86fff2450e3547f343abc628"
+     }
+    }
+   }
+  },
+  {
+   "reason": "Stage 8 3-1 진단·계측 정리 — 선택적 이벤트·수집을 기존 진단 스위치에 연결한 제한적 동작 변경(자격 판정 입력은 불변)",
+   "approved_utc": "2026-09-16",
+   "base_commit_before_change": "7d0d1d40d57c067c48ff5ac6e0404c7c65f6eee9",
+   "evidence": "step3-1-impl-20260916/change-scope-proof.json (승인 편집만 되돌린 AST == 직전 커밋 AST)",
+   "functions_repinned": [
+    "_open_session_trace",
+    "_spawn_mass_roc_controller",
+    "run_mass_roc_session"
+   ],
+   "helpers_added": [
+    "_diagnostics_enabled"
+   ],
+   "behavior_change": "제한적 동작 변경이다. diagnostics OFF 에서 (1) coordinator trace 가 더 이상 항상 상세 모드가 아니고, (2) 선택적 이벤트 phase_mark·intent_wait·tbb_wait 가 기록되지 않는다. diagnostics ON 에서는 workload controller 자식에게 --diagnostics 가 전달된다. 단계 시각의 인메모리 적재·guard 진행 통지·phase_elapsed_s·최종 판정·필수 이벤트는 양쪽에서 불변이다. RF·PHY·MAC·TDMA·타이밍·임계값·시나리오 판정은 변경하지 않았다.",
+   "functions": {
+    "_open_session_trace": {
+     "previous": {
+      "ast_sha256": "34283644376bae9e3e5dd0dadee9a40fb0e5df08934176e96f2a7d6889467eb2",
+      "source_sha256": "b82cf7f7fc193ccc3619f2aa60acc7fc162235da8054a4845cfa3af05e17311f"
+     },
+     "new": {
+      "ast_sha256": "f7a39868b3cf5472bb04855af2241c56667ccd40f88a746cbcadd24a4fa73ea2",
+      "source_sha256": "f6a81c440cd8cbe29de1ddc7e910ebdb17ec2f153e2ff20842f4e75bd4978039"
+     }
+    },
+    "_spawn_mass_roc_controller": {
+     "previous": {
+      "ast_sha256": "4f9d6f0a4333fc926d4d9375a599794fce0b497aa9a856ac7f78be40f2d7a8c6",
+      "source_sha256": "238715334944d84cf37575f442771b282049a6de4fe8a61ec44e7660f89c762e"
+     },
+     "new": {
+      "ast_sha256": "6566802500be253e2693800831097ac78a923bbe97ed7c29601196798587d91e",
+      "source_sha256": "3202d8a95f6043398861a8c27a0301ec44cd4c37a6ac0aa7c37b511fb42ff469"
+     }
+    },
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "6ed24b222084fe25e326d66d0751c3eb745efddfb414d0652cbfa2ea26fb3eef",
+      "source_sha256": "2261dd4b1fa73108e9e390533150e4691fbf3ac598460caf607500765b89e849"
+     },
+     "new": {
+      "ast_sha256": "dd004cd1a31c0faf4338f0fb3cddfaf14982dd963246394092277b15da7165a1",
+      "source_sha256": "b31cd8b0b1e490cd82801e3842b5e036c97df551249e3407fb61768c7401851d"
+     }
+    }
+   }
+  },
+  {
+   "reason": "Stage 8 3-3 다중 launcher 종료 대기 — 공통 마감시각 기반 동시 관찰",
+   "approved_utc": "2026-09-16",
+   "base_commit_before_change": "00d73f35053c71a64871fd2a221504b7aeff5106",
+   "evidence": "step3-3-impl-20260916/change-scope-proof.json (AST 노드 단위 diff 가 종료 대기·정리 어휘만 건드린다; rename-only 증명도 3-1 되돌리기 증명도 재사용하지 않는다)",
+   "functions_repinned": [
+    "main",
+    "run_mass_roc_service",
+    "run_mass_roc_session",
+    "run_rr_p0"
+   ],
+   "helpers_added": [
+    "_await_launcher_exits"
+   ],
+   "behavior_change": "제한적 동작 변경이다. 같은 phase 의 launcher 종료 대기가 endpoint 별 직렬 (60 s × N / 30 s × N)에서 **하나의 공통 monotonic 마감시각까지 동시 관찰**로 바뀐다. 상한 값(60 s·30 s)·종료 요청 순서·자연 종료 판정·기존 escalation (_terminate_process_bounded, main 의 terminate)·cleanup 합격 기준은 그대로다. 마감 뒤 남은 프로세스에만 기존 escalation 을 적용하고, 종료되지 않은 endpoint 를 성공으로 합성하지 않는다. endpoint 별 종료 상태를 launcher_exits 로 남긴다. RF·PHY·MAC·TDMA·타이밍·임계값·시나리오 판정은 변경하지 않았다.",
+   "functions": {
+    "main": {
+     "previous": {
+      "ast_sha256": "4b3ebcf2a74ac747f8a373e0ea4a80479cee54006d573c06ba77d7f38634ace8",
+      "source_sha256": "c618f6251e26f9a9e71b755a8c4d9ce67bef1257be79ceef8223d517ff589f0c"
+     },
+     "new": {
+      "ast_sha256": "0296974bf69972790ac6dd25054cb6df81360e6491660d6cb535b20d0fb3d337",
+      "source_sha256": "1b46f7ca828810a48d668cf4e4e0fd09f24d95411a5a51c81c48fb238d753317"
+     }
+    },
+    "run_mass_roc_service": {
+     "previous": {
+      "ast_sha256": "17f44e8bc341dc2bc74b7bb9f012ee422b2cdadd340840bca58520ae9096b102",
+      "source_sha256": "4047c01258bc5704a52f65b3fc37f699fef3961033a1da0c8db80e37d58ae3ab"
+     },
+     "new": {
+      "ast_sha256": "6d20d0322dee06a948973e749098f40edd10a5eb18a14100612b9db61efe522a",
+      "source_sha256": "244d20438ce3d49564da82825fb2a4e30e5a1dc5efd7ab7c98d27d2fbfbb7405"
+     }
+    },
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "dd004cd1a31c0faf4338f0fb3cddfaf14982dd963246394092277b15da7165a1",
+      "source_sha256": "b31cd8b0b1e490cd82801e3842b5e036c97df551249e3407fb61768c7401851d"
+     },
+     "new": {
+      "ast_sha256": "dbce732facfe826c776088085a016ac82bc9841d2bb0da4c6786960b4850fadd",
+      "source_sha256": "c291d6aad05773b2cdeb7d9cd39993d2f2358a414055e823b19492aca40fa129"
+     }
+    },
+    "run_rr_p0": {
+     "previous": {
+      "ast_sha256": "df18a264d2f5c13c7101b2b184344001eeeacba74e8e77fc47697f0799275054",
+      "source_sha256": "55b978a4f2dc0e53f273a7ef59897716c572521f1f6b6028b988de57ac95359b"
+     },
+     "new": {
+      "ast_sha256": "0eb91b75e7a778127067c38a120e176ad39e9b4eb22bd7a14746aaf5a4d935ac",
+      "source_sha256": "d732e1cb9f6b22dd5d27a753487c9e75961ac7b1667df119f9bdff17a6b34d2e"
+     }
+    }
+   }
+  },
+  {
+   "reason": "Operational readiness + bring-up 단축 (docs/core/operational_readiness_and_bringup_spec.md SHA-256 654377ff…): readiness cold path(mass-roc-session-cold), ready.json 절대 deadline, workload_kind 전달",
+   "approved_utc": "2026-09-17",
+   "base_commit_before_change": "68b671d4d62f3c2b121b85ac9b9da23ba695e711",
+   "evidence": "output/operational-readiness-20260917/ (M0-REPORT.md, coordinator change scope in the M4 report)",
+   "functions_repinned": [
+    "main",
+    "run_mass_roc_session"
+   ],
+   "helpers_added": [
+    "_run_readiness_cold_calibration",
+    "_binding_gate_arguments"
+   ],
+   "behavior_change": "제한적 동작 변경이다. (1) 새 phase `mass-roc-session-cold`: GAIN_CALIBRATION config·gain artifact 없이 같은 B210-open session에서 `_run_readiness_cold_calibration`(start_cfo RR_CFO_PATHS → acquire_host_time attempt 1 → calibrate_rf ADAPTIVE_SEARCH_AND_SEAL + 공통 gain 재검증(RR-P1과 같은 plan·deadline 1200 s) → gain artifact/input fsync → inhibit 0·fault 0 quiescent)을 수행한 뒤 acquire_host_time attempt 2(fresh fit)로 기존 PRE/bridge/POST/admission을 그대로 진행한다. cold 전용 PhaseGuard 3900 s는 channel에 attach되어 READY까지 모든 barrier를 검사하고 READY에서 session guard로 복귀한다. (2) warm phase `mass-roc-session`의 명령 순서·plan·threshold·deadline(2700/7200/900/600)은 그대로다. (3) ready.json에 session_absolute_deadline_monotonic_s·readiness_mode·host_time_attempts·calibration을 추가하고, workload request의 workload_kind를 record와 workloads 목록에 그대로 전달한다. (4) main(): cold phase choice, cold는 --gain-artifact 거부, validate_rr_binding service 분기에 cold 추가, dispatch. mark()의 구조·_service_session_terminal_status·cleanup 합격 기준·escalation·launcher 종료 대기는 변경하지 않았다. RF·PHY·MAC·TDMA·timing·threshold·scenario 판정은 변경하지 않았다.",
+   "functions": {
+    "main": {
+     "previous": {
+      "ast_sha256": "0296974bf69972790ac6dd25054cb6df81360e6491660d6cb535b20d0fb3d337",
+      "source_sha256": "1b46f7ca828810a48d668cf4e4e0fd09f24d95411a5a51c81c48fb238d753317"
+     },
+     "new": {
+      "ast_sha256": "1a8eb3346ae377e62afccb441c85c1852f977658f844ff6ab5956c7452765c5b",
+      "source_sha256": "24d37e85cc241f42f809f05ae2b97f427bcb7476b14eb58bfe8c557d5066bedf"
+     }
+    },
+    "run_mass_roc_session": {
+     "previous": {
+      "ast_sha256": "dbce732facfe826c776088085a016ac82bc9841d2bb0da4c6786960b4850fadd",
+      "source_sha256": "c291d6aad05773b2cdeb7d9cd39993d2f2358a414055e823b19492aca40fa129"
+     },
+     "new": {
+      "ast_sha256": "4b9c17d8cf237d13ffac11426bf95b57877ea581f1c248b45611ac5f3a96da04",
+      "source_sha256": "353a8fcb71dab567c3915710783da28b1597e471881275b0431f3dc9e46dd164"
+     }
+    }
+   }
+  },
+  {
+   "reason": "User-requested main -> AES-256-GCM integration merge. Fixed test-only pins for existing AES mode propagation and isolated ON/OFF experiment; cold session now requires ENFORCED too.",
+   "recorded_date": "2026-09-17",
+   "team_main": "f1879a8b7b9b7d119931b8655b6477bcf038e296",
+   "pre_integration": "3fdf0011bc7e8de177d5ce59f3fc66b71ba99925",
+   "functions_repinned": [
+    "_spawn_mass_roc_controller",
+    "main",
+    "run_mass_roc_service",
+    "spawn_and_connect"
+   ],
+   "functions": {
+    "_spawn_mass_roc_controller": {
+     "previous": {
+      "ast_sha256": "6566802500be253e2693800831097ac78a923bbe97ed7c29601196798587d91e",
+      "source_sha256": "3202d8a95f6043398861a8c27a0301ec44cd4c37a6ac0aa7c37b511fb42ff469"
+     },
+     "new": {
+      "ast_sha256": "09541eb8ba335e2b255da65ff29ab2d566bca6246c5ea4cae9349ebbf524cab4",
+      "source_sha256": "f6a5ed3736e4ba7d866699c9d7db21598b2f2b7905804f455abeaa6a5943f6ea"
+     }
+    },
+    "main": {
+     "previous": {
+      "ast_sha256": "1a8eb3346ae377e62afccb441c85c1852f977658f844ff6ab5956c7452765c5b",
+      "source_sha256": "24d37e85cc241f42f809f05ae2b97f427bcb7476b14eb58bfe8c557d5066bedf"
+     },
+     "new": {
+      "ast_sha256": "37c1fd01442e56a10b14f60c2b3a41ca744ac3a053de009f79a9c58dfd3615c3",
+      "source_sha256": "016bff06d952218b8e848f89c1d841622a42a1b55838f3217db86d6d4ab5caf7"
+     }
+    },
+    "run_mass_roc_service": {
+     "previous": {
+      "ast_sha256": "6d20d0322dee06a948973e749098f40edd10a5eb18a14100612b9db61efe522a",
+      "source_sha256": "244d20438ce3d49564da82825fb2a4e30e5a1dc5efd7ab7c98d27d2fbfbb7405"
+     },
+     "new": {
+      "ast_sha256": "02b696235bcac64a106f0cf963ef7df66c073d5aabda9f78f53b38dd6f9701c7",
+      "source_sha256": "f8dd375b4097cba5441b139f9ee468b3d00a4f3ea52eaa74c908cf92dc41410b"
+     }
+    },
+    "spawn_and_connect": {
+     "previous": {
+      "ast_sha256": "02346e16cadd8fce0fe3c352bb33e6891f20b460a5f2bc19fbcac140db142f6c",
+      "source_sha256": "73f5319c8c278edd4b6d44c6cabcc914943acc0c68c2c1b6c62e7897891beee2"
+     },
+     "new": {
+      "ast_sha256": "343a2b8e668d82daa68e79ebb94b07551aaa9fba46c4e39a814c686ea7335a85",
+      "source_sha256": "c7b95a7fcb0eb366d731e3928c9f36f188c387db7ebd8da51472f688516e5247"
+     }
+    }
+   },
+   "scope_proof": "Against fetched team main, exactly these four top-level functions change; no function added or removed. All other coordinator functions have identical AST and literal source hashes.",
+   "policy": "No RF, timing, gain, nonce, counter, replay, authentication or qualification criterion relaxed. Historical references and production verification are unchanged. These test-only pins do not issue hardware qualification; additional source or statement changes must fail."
+  }
+ ],
+ "expected_changed_note": "`expected_changed_vs_qualified_commit` 는 **이 fixture 만으로** 승인되는 변경 목록이다(phase-g 재결속에서 다른 fixture 가 이미 현재 값으로 고정한 함수는 여기에 들어가지 않는다). 승인 rename·진단 게이트로 재고정된 함수는 각 rebinding_history 항목의 functions_repinned 에 있다."
 }

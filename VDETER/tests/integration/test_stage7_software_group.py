@@ -13,8 +13,8 @@ from vdeter.common.addressing import Addressed
 from vdeter.common.contracts.service import ServiceStartRequest, SubmitTransferRequest
 from vdeter.common.events import ServiceEventType
 from vdeter.common.identifiers import PayloadFormat, StationId
-from vdeter.stage7.coordinator import Stage7BarrierFailure
-from vdeter.stage7.ipc import ENDPOINT_IDS, body_set_sha256
+from vdeter.b210_system.coordinator import BarrierFailure
+from vdeter.b210_system.ipc import ENDPOINT_IDS, body_set_sha256
 
 from tests.support.stage4 import HAS_CRYPTO
 from tests.support.stage7 import (
@@ -38,7 +38,7 @@ def bring_group_to_admission(coordinator, members, resolved_by_endpoint, host_ra
         {
             m: {
                 "deployment_sha256": resolved_by_endpoint[m].deployment_manifest_sha256,
-                "endpoint_plan_relpath": f"configs/stage7/endpoints/{m.lower()}.toml",
+                "endpoint_plan_relpath": f"configs/b210_system/endpoints/{m.lower()}.toml",
                 "endpoint_plan_sha256": resolved_by_endpoint[m].resolved_sha256,
                 "environment_manifest_sha256": _sha("environment"),
                 "member_set_sha256": _sha("member-set"),

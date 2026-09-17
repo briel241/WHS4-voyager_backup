@@ -1,0 +1,30 @@
+{
+ "artifact_type": "STAGE7_DIAGNOSTICS_GATING_FUNCTION_HASHES_V1",
+ "reason": "Stage 8 3-1 진단·계측 정리 — 선택적 trace 이벤트와 선택적 수집을 이미 있던 진단 스위치(STAGE7_DIAG)에 연결한 제한적 동작 변경",
+ "approved_utc": "2026-09-16",
+ "base_commit_before_change": "7d0d1d40d57c067c48ff5ac6e0404c7c65f6eee9",
+ "evidence": "step3-1-impl-20260916/change-scope-proof.json (승인 편집만 되돌린 AST == 직전 커밋 AST; rename-only 증명 재사용 아님)",
+ "hash_method": "service_layer._verify_function_bound (ast.dump / ast.unparse, SHA-256)",
+ "behavior_change": "제한적 동작 변경이다. diagnostics OFF 에서 (1) coordinator trace 가 더 이상 항상 상세 모드가 아니고, (2) 선택적 이벤트 phase_mark·intent_wait·tbb_wait 가 기록되지 않는다. diagnostics ON 에서는 workload controller 자식에게 --diagnostics 가 전달된다. 단계 시각의 인메모리 적재·guard 진행 통지·phase_elapsed_s·최종 판정·필수 이벤트는 양쪽에서 불변이다. RF·PHY·MAC·TDMA·타이밍·임계값·시나리오 판정은 변경하지 않았다.",
+ "note": "이름 allow-list 가 아니라 고정 해시다. 이후 추가 변경은 다시 검출된다.",
+ "functions": {
+  "_open_session_trace": {
+   "ast_sha256": "f7a39868b3cf5472bb04855af2241c56667ccd40f88a746cbcadd24a4fa73ea2",
+   "source_sha256": "842a3a39a44d0f62dc102395c182e97b592b5906cd0f2542cb519b583199545c"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "6566802500be253e2693800831097ac78a923bbe97ed7c29601196798587d91e",
+   "source_sha256": "e9b5ef8ba6c194d32d50bc73ce7e499100ae441a4fd3564a7619d35442ee75a8"
+  }
+ },
+ "previous": {
+  "_open_session_trace": {
+   "ast_sha256": "34283644376bae9e3e5dd0dadee9a40fb0e5df08934176e96f2a7d6889467eb2",
+   "source_sha256": "d0148f94d8f4ee07a38a647b8d4e06930156767bd471a1bfae273139590ceba6"
+  },
+  "_spawn_mass_roc_controller": {
+   "ast_sha256": "4f9d6f0a4333fc926d4d9375a599794fce0b497aa9a856ac7f78be40f2d7a8c6",
+   "source_sha256": "fc2584142990c6432876b05a89c7557721914ebad8c8cecea3b465628cd1f8d7"
+  }
+ }
+}

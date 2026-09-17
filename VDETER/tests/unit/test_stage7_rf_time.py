@@ -3,8 +3,8 @@
 import unittest
 from fractions import Fraction
 
-from vdeter.stage7.rf_time import (
-    Stage7RfTimeError,
+from vdeter.b210_system.rf_time import (
+    RfTimeError,
     build_rf_time_measurement_summary,
     check_fanout_same_window,
     evaluate_pre_correction_set,
@@ -98,7 +98,7 @@ class TC_STAGE7_RF_TIME_SET(unittest.TestCase):
         summaries = self._set(
             {"C1": 0, "C2": 0, "C3": 900_000, "C4": 0, "C5": 0, "C6": 0}
         )
-        with self.assertRaises(Stage7RfTimeError):
+        with self.assertRaises(RfTimeError):
             evaluate_pre_correction_set(summaries)
 
     def test_p1_pair_subset(self):
@@ -109,13 +109,13 @@ class TC_STAGE7_RF_TIME_SET(unittest.TestCase):
 
     def test_missing_path_rejected(self):
         summaries = self._set({"C1": 0})
-        with self.assertRaises(Stage7RfTimeError):
+        with self.assertRaises(RfTimeError):
             evaluate_pre_correction_set(summaries, present_pairs=("RA",))
 
     def test_fail_summary_rejected_in_set(self):
         summaries = self._set({"C1": 0, "C2": 0})
         summaries["C2"] = _summary("C2", [0, 60_000] + list(range(8)))
-        with self.assertRaises(Stage7RfTimeError):
+        with self.assertRaises(RfTimeError):
             evaluate_pre_correction_set(summaries, present_pairs=("RA",))
 
     def test_fanout_same_window_gate(self):

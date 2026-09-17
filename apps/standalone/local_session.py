@@ -1,6 +1,6 @@
 """로컬 coordinator 세션 계층 — SSH 없는 Stage 7 세션 구동 (Phase I W2).
 
-host측 `apps/stage7_session.py`의 로컬 대응물. coordinator·launcher와
+host측 `apps/service_session.py`의 로컬 대응물. coordinator·launcher와
 세션 디렉터리 파일 IPC 계약(`session/requests|results|shutdown`·`ready.json`·
 `closed.json`·`done.rc`)은 **무수정**으로 쓴다 (README §3·§10, 결정 6·17).
 
@@ -32,8 +32,8 @@ from pathlib import Path
 # 파일 IPC·정착 계약 — host 세션 계층과 단일 출처 공유 (읽기 전용 재사용).
 # SETTLE 계약: SC-VDE-001 직후에는 RX 파이프라인 배수 30초를 기다려야
 # 다음 workload가 배압 꼬리에 착지하지 않는다 (host 실측 근거는
-# apps/stage7_session.py의 상수 주석 참조 — standalone도 동일 적용).
-from apps.stage7_session import (  # noqa: F401
+# apps/service_session.py의 상수 주석 참조 — standalone도 동일 적용).
+from apps.service_session import (  # noqa: F401
     SESSION_CLOSED,
     SESSION_DIR_NAME,
     SESSION_READY,
@@ -129,6 +129,12 @@ class _FileTail:
 class LocalCoordinatorSession:
     """coordinator 프로세스 하나를 로컬 자식으로 소유·감시·회수한다."""
 
+    # Both production and RF-off requests are owned by the coordinator child.
+    poc_workloads_in_coordinator = True
+    #: request에 `workload_kind`(readiness_probe | user)를 실을 수 있다 — coordinator가 record에
+    #: 그대로 전달한다. 시험용 fake 세션은 이 속성이 없으면 종전 signature로 호출된다.
+    supports_workload_kind = True
+
     def __init__(self, *, repo_root: Path | str, run_id: str,
                  run_root: Path | str, configs_dir: Path | str,
                  gain_artifact_path: Path | str,
@@ -141,12 +147,14 @@ class LocalCoordinatorSession:
                  residual_probe=None,
                  use_process_group: bool | None = None,
                  group_signal=None,
-                 identity_root: Path | str | None = None) -> None:
+                 identity_root: Path | str | None = None,
+                 rf_off_software: bool = False) -> None:
         self.repo_root = Path(repo_root)
         self.run_id = run_id
         self.run_root = Path(run_root)
         self.configs_dir = Path(configs_dir)
-        self.gain_artifact_path = Path(gain_artifact_path)
+        self.gain_artifact_path = (Path(gain_artifact_path)
+                                   if gain_artifact_path is not None else None)
         self.baseline_sha256 = baseline_sha256
         self.phase = phase
         self.python_executable = python_executable or sys.executable
@@ -167,9 +175,12 @@ class LocalCoordinatorSession:
         self.group_signal = group_signal
         #: standalone identity 저장소 root — 지정 시 launcher가 배포 tree
         #: 밖 identity(키·trust store)를 쓴다 (W4 보완 1). None이면 기존
-        #: configs/stage7/trust 동작 그대로.
+        #: configs/b210_system/trust 동작 그대로.
         self.identity_root = (Path(identity_root)
                               if identity_root is not None else None)
+        #: Stage 8 RF-off software 모드 — coordinator를 B210 없이 in-process PoC 실행 세션으로
+        #: 띄운다(하드웨어 경계 명시 double 검증 전용). production 실장비 실행은 False.
+        self.rf_off_software = bool(rf_off_software)
         #: 정착 대기 상태 (host 계약 승계).
         self._last_workload_end = None
         self._last_scenario_id = None
@@ -183,6 +194,8 @@ class LocalCoordinatorSession:
 
         self.process = None
         self.launch_attempted = False
+        #: 마지막으로 읽은 `ready.json` (readiness가 absolute deadline·calibration을 읽는다).
+        self.ready_payload = None
         self._console_tail = _FileTail(self.console_log_path)
         self._console_handle = None
         self._workload_counter = 0
@@ -191,18 +204,33 @@ class LocalCoordinatorSession:
     # ---- spawn ----------------------------------------------------------
 
     def build_argv(self) -> list:
-        return [
+        if self.rf_off_software:
+            # Stage 8 RF-off software 세션은 **검증 전용**이므로 자격 결속된
+            # `coordinator_main.main()`을 거치지 않고 자체 entry point로 띄운다.
+            # (그 함수에 분기를 넣으면 Phase-I function binding이 바뀌어 RF 접근이 거부된다 —
+            #  자격 경로는 byte-identical로 보존한다.) B210 launcher는 spawn하지 않는다.
+            return [
+                self.python_executable,
+                str(self.repo_root / "apps" / "rf_off_software_session.py"),
+                "--run-id", self.run_id,
+                "--run-root", str(self.run_root),
+            ]
+        argv = [
             self.python_executable,
             str(self.repo_root / "VDETER" / "apps"
-                / "stage7_coordinator_main.py"),
+                / "coordinator_main.py"),
             "--run-id", self.run_id,
             "--phase", self.phase,
             "--e2e-security-mode", "ENFORCED" if self.phase.startswith("mass-roc") else "DISABLED",
             "--run-root", str(self.run_root),
             "--configs-dir", str(self.configs_dir),
-            "--gain-artifact", str(self.gain_artifact_path),
-            "--baseline-sha256", self.baseline_sha256,
         ]
+        # cold readiness session(`mass-roc-session-cold`)은 gain artifact 없이 GAIN_CALIBRATION
+        # config로 뜬다 — coordinator가 CFO·ADAPTIVE_SEARCH_AND_SEAL로 candidate를 만든다.
+        if self.gain_artifact_path is not None:
+            argv += ["--gain-artifact", str(self.gain_artifact_path)]
+        argv += ["--baseline-sha256", self.baseline_sha256]
+        return argv
 
     def build_env(self) -> dict:
         """`build_child_env` 위임 — run/qualify 공통 env 정책 (README §3-3)."""
@@ -270,6 +298,7 @@ class LocalCoordinatorSession:
         while self.clock() < deadline:
             ready = _read_json_if_complete(ready_path)
             if ready is not None:
+                self.ready_payload = ready
                 return ready
             if on_stage is not None:
                 for line in self.console_stage_lines():
@@ -311,10 +340,18 @@ class LocalCoordinatorSession:
 
     def submit_workload(self, scenario_id: str,
                         certificate_case: str = "normal", *,
-                        on_settle=None) -> str:
+                        on_settle=None, poc=None, workload_kind=None) -> str:
         """request를 원자 발행한다 (임시명은 `.json`으로 끝나지 않는다 —
         coordinator의 `endswith('.json')` 목록에 미완성본이 잡히지 않게).
-        발행 전에 host 계약대로 정착 대기를 적용한다."""
+        발행 전에 host 계약대로 정착 대기를 적용한다.
+
+        `poc`(dict)를 주면 request에 실어 coordinator가 workload-local PoC를 실행하게 한다.
+        None이면 기존 scenario workload 그대로다.
+
+        일반 dispatch도 이제 PoC를 처리한다: coordinator가 요청을 workload child에 넘기고, child가
+        PoC supervisor를 호스팅한 뒤 evidence를 결과에 싣는다. PoC를 요청했는데 evidence가 없으면
+        coordinator가 workload를 FAIL로 확정하므로, PoC 없이 시나리오만 돌고 PASS로 보고되는 거짓
+        성공은 성립하지 않는다."""
         self.settle_before_next_workload(on_settle=on_settle)
         workload_id = self.next_workload_id(scenario_id, certificate_case)
         self._pending_scenario[workload_id] = scenario_id
@@ -325,6 +362,10 @@ class LocalCoordinatorSession:
             "requested_at_utc": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if poc is not None:
+            request["poc"] = dict(poc)
+        if workload_kind is not None:
+            request["workload_kind"] = str(workload_kind)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         final = self.requests_dir / (workload_id + ".json")
         tmp = self.requests_dir / (workload_id + ".json.tmp")
@@ -437,7 +478,7 @@ class LocalCoordinatorSession:
         import shutil as _shutil
         if _shutil.which("pgrep") is None:
             return None
-        from apps.stage7_service_layer import _COMPETING_PROCESS_PATTERN
+        from apps.service_layer import _COMPETING_PROCESS_PATTERN
         done = subprocess.run(
             ["pgrep", "-af", _COMPETING_PROCESS_PATTERN],
             capture_output=True, text=True, timeout=30)

@@ -231,6 +231,17 @@ def _probe_usb_devices(sysfs_root: str = "/sys/bus/usb/devices") -> str:
     return "\n".join(lines)
 
 
+def environment_manifest_digest(manifest: dict) -> str:
+    """환경 manifest 의 결속 digest — 생성된 config 에 심기는 값과 같다.
+
+    직렬화 형식을 두 곳에서 따로 적으면 조용히 어긋난다(qualify 의 묶음
+    재사용 판정이 같은 값을 봐야 한다). 여기 하나만 쓴다.
+    """
+    return _sha256_bytes(json.dumps(
+        manifest, ensure_ascii=True, sort_keys=True,
+        indent=1).encode("utf-8"))
+
+
 def build_environment_manifest(*, prober=None) -> dict:
     """로컬 환경 manifest (host ENVIRONMENT_PROBE의 로컬판).
 
@@ -371,13 +382,13 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
     provenance = provenance or {}
 
     _ensure_vdeter_importable(repo_root)
-    from vdeter.stage7.canonical_json import encode_canonical_json
-    from vdeter.stage7.configuration import (
-        Stage7ConfigurationLoader,
-        Stage7OperationalGainInput,
+    from vdeter.b210_system.canonical_json import encode_canonical_json
+    from vdeter.b210_system.configuration import (
+        ConfigurationLoader,
+        OperationalGainInput,
     )
 
-    template_dir = repo_root / "VDETER" / "configs" / "stage7"
+    template_dir = repo_root / "VDETER" / "configs" / "b210_system"
     try:
         host_definition = hardware_profiles.definition_of(hardware)
     except ValueError as exc:
@@ -409,7 +420,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         manifest, ensure_ascii=True, sort_keys=True, indent=1).encode("utf-8")
     manifest_path = out_dir / "environment_manifest.json"
     manifest_path.write_bytes(manifest_bytes)
-    manifest_sha = _sha256_bytes(manifest_bytes)
+    manifest_sha = environment_manifest_digest(manifest)
 
     data_profile_text = (template_dir / "profiles"
                          / "data-profile.toml").read_text(encoding="utf-8")
@@ -417,7 +428,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
         data_profile_text, encoding="utf-8", newline="\n")
 
     endpoints_decl = hardware.get("endpoints") or {}
-    loader = Stage7ConfigurationLoader()
+    loader = ConfigurationLoader()
     resolved_sha = {}
     for endpoint in ENDPOINTS:
         text = (endpoint_template_dir
@@ -466,7 +477,7 @@ def generate_run_configs(*, repo_root: Path | str, run_root: Path | str,
             common = gain_input["endpoint_common_rx_gain_db"]
             key = endpoint.upper()
             value = common[key] if isinstance(common, dict) else common
-            operational_gain = Stage7OperationalGainInput(
+            operational_gain = OperationalGainInput(
                 endpoint_common_rx_gain_db=int(value),
                 source_gain_artifact_sha256=gain_input[
                     "source_gain_artifact_sha256"],

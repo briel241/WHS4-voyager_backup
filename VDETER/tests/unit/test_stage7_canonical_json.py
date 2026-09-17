@@ -2,7 +2,7 @@
 
 import unittest
 
-from vdeter.stage7.canonical_json import (
+from vdeter.b210_system.canonical_json import (
     CanonicalJsonError,
     canonical_sha256,
     decode_canonical_json,

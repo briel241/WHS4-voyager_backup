@@ -1,7 +1,7 @@
 """Stage 7 TEST TBB signer/trust 자료 provisioning (`stage7` §7, §13.4).
 
 프로젝트 TEST 전용 P-256 signer key, self-signed certificate와 trust store를
-`configs/stage7/trust/`에 생성한다. 이 identity는 재현 가능한 TEST profile
+`configs/b210_system/trust/`에 생성한다. 이 identity는 재현 가능한 TEST profile
 전용이며 실제 운용 신원을 주장하지 않는다. private key는 log/evidence에
 복사하지 않는다.
 
@@ -20,7 +20,7 @@ for path in (VDETER_ROOT, os.path.join(VDETER_ROOT, "src")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-TRUST_DIR = os.path.join(VDETER_ROOT, "configs", "stage7", "trust")
+TRUST_DIR = os.path.join(VDETER_ROOT, "configs", "b210_system", "trust")
 KEY_PATH = os.path.join(TRUST_DIR, "roc_tbb_signer_key.pem")
 CERT_PATH = os.path.join(TRUST_DIR, "roc_tbb_signer_cert.pem")
 STORE_PATH = os.path.join(TRUST_DIR, "tbb_trust_store.pem")

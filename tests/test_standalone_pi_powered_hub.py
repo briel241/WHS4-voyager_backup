@@ -2,7 +2,7 @@
 
 증명하는 것 (apps/standalone/README.md §4·§8·§9·§15)
   단일 정의  : legacy Pi 상수(ROLE_SPEED_CLASS·coordinator _EXPECTED_USB_SPEED·
-               USB_TRANSPORTS)가 vdeter.stage7.host_profiles의 legacy 정의와
+               USB_TRANSPORTS)가 vdeter.b210_system.host_profiles의 legacy 정의와
                값 동일 — 규칙은 한 곳에서만 나온다.
   legacy 보존: schema 1 선언·preflight·loader가 종전과 같이 MASS-B 480M +
                외부 DC asset을 요구하고, 5000M·asset 누락·powered-hub 키 혼입은
@@ -12,7 +12,7 @@
                + hub asset/attestation 결속; 480M·다른 hub/root·bus-powered
                hub·cascade·asset/attestation 누락·모순·serial 불일치·초과
                장치는 전부 fail-closed.
-  계약 일치  : setup 초안 → hardware.toml → 실제 Stage7ConfigurationLoader →
+  계약 일치  : setup 초안 → hardware.toml → 실제 ConfigurationLoader →
                preflight → RR-P0 기대값(coordinator)이 모두 같은 profile
                정의에서 나온다.
   결속       : issue_reference/compare_critical의 host_profile·usb_topology,
@@ -51,7 +51,7 @@ from apps.standalone import (  # noqa: E402
     setup_cmd,
     state,
 )
-from vdeter.stage7 import configuration, host_profiles  # noqa: E402
+from vdeter.b210_system import configuration, host_profiles  # noqa: E402
 
 REPO = Path(_REPO)
 HUB = host_profiles.PI_POWERED_HUB_PROFILE
@@ -216,7 +216,7 @@ def preflight_kwargs(tmp, hardware, sysfs):
 def load_coordinator():
     spec = importlib.util.spec_from_file_location(
         "stage7_coordinator_main_pi_hub_test",
-        REPO / "VDETER" / "apps" / "stage7_coordinator_main.py")
+        REPO / "VDETER" / "apps" / "coordinator_main.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -241,7 +241,7 @@ def generate(tmp, hardware, *, usb_paths=None, machine_id=MACHINE_ID, phase="rr-
 
 def test_single_definition_legacy_constants_are_derived_not_duplicated():
     legacy = host_profiles.LEGACY_PI
-    assert legacy.name == LEGACY == configuration.STAGE7_HOST_PROFILE
+    assert legacy.name == LEGACY == configuration.HOST_PROFILE
     assert local_preflight.ROLE_SPEED_CLASS == legacy.speed_classes == {
         "MASS-A": "super", "MASS-B": "high", "ROC": "super"}
     coordinator = load_coordinator()
@@ -249,7 +249,7 @@ def test_single_definition_legacy_constants_are_derived_not_duplicated():
         role: legacy.expected_sysfs_speed(role) for role in ROLES} == {
         "MASS-A": "5000", "MASS-B": "480", "ROC": "5000"}
     assert configuration.USB_TRANSPORTS == host_profiles.USB_TRANSPORTS
-    assert configuration.STAGE7_HOST_PROFILES == host_profiles.HOST_PROFILES == (LEGACY, HUB)
+    assert configuration.HOST_PROFILE_TABLE == host_profiles.HOST_PROFILES == (LEGACY, HUB)
     hub = host_profiles.PI_POWERED_HUB
     assert hub.speed_classes == {role: "super" for role in ROLES}
     assert hub.platform_profiles == ("pi",)
@@ -336,10 +336,10 @@ def test_legacy_config_generation_and_loader_rules_unchanged():
         assert 'profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"' in mass_b
         assert generated["git_state"]["hardware"]["host_profile"] == LEGACY
         assert generated["installation_state"]["endpoint_template_dir"] == (
-            "VDETER/configs/stage7/endpoints")
+            "VDETER/configs/b210_system/endpoints")
         # legacy MASS-B must not accept the powered-hub power token as a DC asset.
-        loader = configuration.Stage7ConfigurationLoader()
-        profile_text = (REPO / "VDETER/configs/stage7/profiles/data-profile.toml").read_text(
+        loader = configuration.ConfigurationLoader()
+        profile_text = (REPO / "VDETER/configs/b210_system/profiles/data-profile.toml").read_text(
             encoding="utf-8")
         forged = mass_b.replace('external_power_asset = "AT2024T"',
                                 'external_power_asset = "POWERED_USB3_HUB_BUS_POWER"')
@@ -499,8 +499,8 @@ def test_hub_config_generation_with_real_loader_and_fail_closed_provisioning():
         assert generated["git_state"]["hardware"]["host_profile"] == HUB
         assert generated["installation_state"]["host_profile"] == HUB
         assert generated["installation_state"]["endpoint_template_dir"] == (
-            "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub")
-        loader = configuration.Stage7ConfigurationLoader()
+            "VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub")
+        loader = configuration.ConfigurationLoader()
         profile_text = (configs / "profiles" / "data-profile.toml").read_text(encoding="utf-8")
         for endpoint, role in (("mass-a", "MASS-A"), ("mass-b", "MASS-B"), ("roc", "ROC")):
             text = (configs / "endpoints" / f"{endpoint}.toml").read_text(encoding="utf-8")
@@ -539,7 +539,7 @@ def test_loader_refuses_mixed_or_relaxed_hub_configs():
         configs = Path(generated["configs_dir"])
         profile_text = (configs / "profiles" / "data-profile.toml").read_text(encoding="utf-8")
         text = (configs / "endpoints" / "mass-b.toml").read_text(encoding="utf-8")
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
 
         def load(mutated):
             return loader.load_endpoint_configuration(
@@ -573,7 +573,7 @@ def test_rr_p0_expected_speed_and_hub_check_derive_from_resolved_profile():
     coordinator = load_coordinator()
     with tempfile.TemporaryDirectory() as tmp:
         sysfs = make_topology(tmp)
-        loader = configuration.Stage7ConfigurationLoader()
+        loader = configuration.ConfigurationLoader()
         resolved = {}
         for hardware, usb_paths in ((HUB_HARDWARE, hub_usb_paths()), (LEGACY_HARDWARE, None)):
             generated = generate(tmp + "/" + str(hardware["schema_version"]), hardware,
@@ -643,9 +643,18 @@ def test_setup_draft_selects_profile_from_observed_topology_and_stays_fail_close
                 assert 'hardware_profile = "%s"' % HUB in text
                 assert 'vid_pid = "2109:0817"' in text
                 assert "self_powered = false" in text and "individual_b210_dc = true" in text
-                assert 'asset_id = "REQUIRED_FILL"' in text
+                # HW-01 (2026-09-15): this fixture IS the lab default topology
+                # (expected serials + hub 2109:0817 observed), so the draft
+                # prefills the expected role mapping and hub asset as
+                # *expected* values; approval/attestations stay unwritten.
+                assert 'asset_id = "HUB-VIA-2109-0817-01"' in text
+                assert 'serial = "34D03DD"' in text.split("[endpoints.MASS-A]")[1].split("[endpoints.MASS-B]")[0]
+                assert 'serial = "3515425"' in text.split("[endpoints.MASS-B]")[1].split("[endpoints.ROC]")[0]
+                assert 'serial = "34D03E8"' in text.split("[endpoints.ROC]")[1].split("[wiring]")[0]
+                assert "NOT approved" in text and "approved = false" in text
+                assert draft["mismatches"] == [] and draft["expected_label"] == "lab-default"
                 assert "hub port 1 / 5-1.1: serial 3515425 5000M" in text
-                assert "external_power_asset" not in text.split("[endpoints.MASS-A]")[1].split("[wiring]")[0].replace("# 5000M on the hub — no external_power_asset here", "")
+                assert "external_power_asset" not in text.split("[endpoints.MASS-A]")[1].split("[wiring]")[0].replace("5000M on the hub — no external_power_asset here", "")
             else:
                 assert "schema_version = 1" in text
                 assert 'external_power_asset = "REQUIRED_FILL"' in text
@@ -842,10 +851,10 @@ def test_run_topology_after_close_is_recorded_and_fail_closed():
 # ---------------------------------------------------------------- 14. manifest 영역·digest
 
 def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
-    assert qd.classify_domains("VDETER/src/vdeter/stage7/host_profiles.py") == (qd.RF,)
+    assert qd.classify_domains("VDETER/src/vdeter/b210_system/host_profiles.py") == (qd.RF,)
     for endpoint in ("mass-a", "mass-b", "roc"):
         assert qd.classify_domains(
-            f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml") == (qd.RF,)
+            f"VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/{endpoint}.toml") == (qd.RF,)
     assert qd.classify_domains("apps/standalone/hardware_profiles.py") == (qd.RF, qd.OPERATION)
     assert qd.classify_domains(
         "apps/standalone/templates/hardware.pi-powered-usb3-hub.toml.example") == (qd.TOOLING,)
@@ -854,15 +863,15 @@ def test_new_files_classify_into_bound_domains_and_digests_are_deterministic():
     second = installation_manifest.measure(REPO, now="T1")
     assert installation_manifest.digests_of(first) == installation_manifest.digests_of(second)
     files = first["files"]
-    assert files["VDETER/src/vdeter/stage7/host_profiles.py"]["domains"] == ["rf"]
+    assert files["VDETER/src/vdeter/b210_system/host_profiles.py"]["domains"] == ["rf"]
     assert files["apps/standalone/hardware_profiles.py"]["domains"] == ["rf", "operation"]
     for endpoint in ("mass-a", "mass-b", "roc"):
-        path = f"VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/{endpoint}.toml"
+        path = f"VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/{endpoint}.toml"
         assert files[path]["domains"] == ["rf"]
-        assert files[f"VDETER/configs/stage7/endpoints/{endpoint}.toml"]["domains"] == ["rf"]
+        assert files[f"VDETER/configs/b210_system/endpoints/{endpoint}.toml"]["domains"] == ["rf"]
     rf_files = installation_manifest.domain_manifest(first, qd.RF)["files"]
-    assert "VDETER/src/vdeter/stage7/host_profiles.py" in rf_files
-    assert "VDETER/configs/stage7/endpoints-pi-powered-usb3-hub/mass-b.toml" in rf_files
+    assert "VDETER/src/vdeter/b210_system/host_profiles.py" in rf_files
+    assert "VDETER/configs/b210_system/endpoints-pi-powered-usb3-hub/mass-b.toml" in rf_files
 
 
 if __name__ == "__main__":

@@ -202,7 +202,7 @@ def test_build_argv_env_and_spawn_contract():
 
         argv = seen["argv"]
         assert isinstance(argv, list)  # shell 문자열 금지 — 명시적 argv
-        assert argv[1].endswith("stage7_coordinator_main.py")
+        assert argv[1].endswith("coordinator_main.py")
         assert argv[argv.index("--phase") + 1] == "mass-roc-session"
         assert argv[argv.index("--baseline-sha256") + 1] == "ab" * 32
         kwargs = seen["kwargs"]

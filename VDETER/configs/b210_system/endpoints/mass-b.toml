@@ -1,0 +1,137 @@
+# Stage 7 MASS-B endpoint source template (`stage7_b210_system_baseline.md` §15).
+# `REQUIRED_UNSET`은 exact serial, host_execution provisioning field와
+# [[radio.channels]].rx_gain_db에만 허용된다. run resolve 시 deployment tooling이
+# run_mode/deployment manifest/rx gain을 채워 immutable run config를 만든다.
+# external_power_asset은 실제 외부 DC 전원 inventory 값이 필요한 provisioning
+# 항목이며 임의 값을 만들지 않는다.
+
+schema_version = 4
+
+[endpoint]
+id = "MASS-B"
+role = "SHIP"
+station_id = 333333333
+scope = "TEST"
+code_version = "stage7-b210-system"
+
+[service]
+max_payload_bytes = 65531
+max_concurrent_transfers = 8
+
+[link]
+supported_link_ids = [11, 17, 19]
+
+[mac]
+link_id = 11
+tx_channel = "VDETER_LOWER_100_TEST"
+rx_channel = "VDETER_UPPER_100_TEST"
+transmit_lead_nanoseconds = 250000000
+
+[phy]
+sample_rate_hz = 307200
+
+[radio]
+adapter = "b210-stage7-affine"
+device_selector = "serial=3515425"
+clock_reference = "INTERNAL"
+sample_format = "cf32le"
+
+[radio.timing]
+profile = "INTERNAL_FREE_RUNNING"
+clock_source = "INTERNAL"
+time_source = "INTERNAL"
+pps_source = "NONE"
+mapping_attempt_count = 8
+mapping_valid_for_nanoseconds = 1000000000
+max_mapping_uncertainty_ns = 10000000
+
+[radio.resource_limits]
+tx_queue_max_count = 64
+tx_queue_max_bytes = 33554432
+rx_window_max_count = 64
+rx_queue_max_count = 256
+rx_queue_max_bytes = 67108864
+stop_timeout_ns = 5000000000
+
+[radio.b210_stream]
+master_clock_rate_hz = 30720000
+cpu_format = "fc32"
+otw_format = "sc16"
+
+[[radio.channels]]
+name = "VDETER_LOWER_100_TEST"
+center_frequency_hz = 157237500
+sample_rate_hz = 307200
+tx_gain_db = 0
+rx_gain_db = 0
+waveform_bandwidth_hz = 100000
+analog_bandwidth_hz = 200000
+tx_enabled = true
+rx_enabled = false
+
+[[radio.channels]]
+name = "VDETER_UPPER_100_TEST"
+center_frequency_hz = 161837500
+sample_rate_hz = 307200
+tx_gain_db = 0
+rx_gain_db = "REQUIRED_UNSET"
+waveform_bandwidth_hz = 100000
+analog_bandwidth_hz = 200000
+tx_enabled = true
+rx_enabled = true
+
+[sources]
+time = "SYSTEM"
+random = "SYSTEM"
+id = "UUID4"
+
+[logging]
+jsonl_enabled = true
+console_enabled = false
+
+[security]
+private_key_ref = ""
+certificate_ref = ""
+trust_store_ref = "configs/b210_system/trust/tbb_trust_store.pem"
+
+[host_execution]
+profile = "STAGE7_PI5_NATIVE_2XUSB3_1XUSB2_V1"
+provider_id = "none"
+provider_version = "none"
+host_os_id = "ubuntu"
+host_os_version = "24.04"
+host_machine_id = "a70b2048eb6743bd83ac9e0920b8d0b2"
+pi_model_revision = "Raspberry Pi 5 Model B Rev 1.1 (d04171)"
+pi_power_profile = "PI5_5V5A_HIGH_CURRENT"
+usb_transport = "DIRECT_USB2_480M_EXTERNAL_DC"
+usb_physical_path = "4-2"
+external_power_asset = "REQUIRED_UNSET"
+environment_manifest_path = "REQUIRED_UNSET"
+environment_manifest_sha256 = "REQUIRED_UNSET"
+
+[stage7]
+run_mode = "RF_OFF_QUALIFICATION"
+lane_map_profile = "STAGE7_C1_C6_TRIANGLE_V1"
+frequency_translation_hz = 2290000000
+lower_rf_tune_hz = 2447237500
+upper_rf_tune_hz = 2451837500
+phy_facade = "STAGE7_DIAGNOSTIC_PHY_V1"
+timing_status_projection = "STAGE7_PUBLIC_UNAVAILABLE_PRIVATE_AFFINE_V1"
+clock_bridge_profile = "STAGE7_PI_HOST_AFFINE_TIME_V1"
+max_bridge_generations = 3
+host_time_min_observations = 8
+host_time_min_span_s = 2
+host_time_max_acquisition_s = 600
+host_time_observation_period_s = 1
+host_time_max_bracket_ns = 2000000
+host_time_tracking_period_s = 5
+rf_time_reference_max_gap_s = 5
+rf_time_loss_gap_s = 10
+active_command_horizon_s = 120
+cfo_profile = "STAGE7_RAW_TONE_CFO_V1"
+cfo_numeric_profile = "STAGE7_NUMPY_FFT3072_BINARY64_V1"
+cfo_accept_bound_hz = 1800
+deployment_manifest_relpath = "REQUIRED_UNSET"
+deployment_manifest_sha256 = "REQUIRED_UNSET"
+registry_fingerprint = "0a2b8cb8a72727bd54c05c5dd6e6ac5aeeec7a0b51f6ebe41a72bfa2482ae5d2"
+tbb_fixture_id = "VDETER_WIDEBAND_100_TBB_V3"

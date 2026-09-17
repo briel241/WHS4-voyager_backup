@@ -17,7 +17,7 @@ import sys
 import tempfile
 import unittest
 
-import apps.stage7_coordinator_main as coordinator_main
+import apps.coordinator_main as coordinator_main
 
 
 class _FakePopen:
@@ -114,9 +114,9 @@ class TC_CONTROLLER_SPAWN(unittest.TestCase):
             self.assertEqual(command[0], sys.executable)
             # repo-root apps/의 MASS/ROC controller를 가리킨다 (RR과 별개 파일).
             script = command[1].replace("\\", "/")
-            self.assertTrue(script.endswith("apps/stage7_mass_roc_controller.py"),
+            self.assertTrue(script.endswith("apps/mass_roc_workload_controller.py"),
                             script)
-            self.assertNotIn("stage7_scenario_controller.py", script)
+            self.assertNotIn("scenario_controller.py", script)
 
             def value_of(flag):
                 return command[command.index(flag) + 1]
@@ -144,7 +144,7 @@ class TC_CONTROLLER_SPAWN(unittest.TestCase):
             self.assertEqual(len(fake.spawned), 1)
             command = process.command
             script = command[1].replace("\\", "/")
-            self.assertTrue(script.endswith("apps/stage7_scenario_controller.py"),
+            self.assertTrue(script.endswith("apps/scenario_controller.py"),
                             script)
 
             def value_of(flag):

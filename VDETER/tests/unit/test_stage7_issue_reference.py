@@ -29,15 +29,15 @@ def test_closure_covers_config_allowlist_and_excludes_secrets():
 
 
 def test_closure_includes_runtime_package_init():
-    """`vdeter.stage7.support` import 는 `stage7/__init__.py` 를 실행한다."""
+    """`vdeter.b210_system.support` import 는 `stage7/__init__.py` 를 실행한다."""
 
     paths, _ = issue.strict_file_list()
-    assert "VDETER/src/vdeter/stage7/__init__.py" in paths
+    assert "VDETER/src/vdeter/b210_system/__init__.py" in paths
 
 
 def test_orchestration_layer_is_a_boundary_not_a_silent_drop():
     _, boundary = issue.strict_file_list()
-    assert "apps/stage7_trace.py" in boundary
+    assert "apps/service_trace.py" in boundary
     paths, _ = issue.strict_file_list()
     assert not [p for p in paths if p.startswith("apps/")], \
         "orchestration 계층은 결속하지 않는다"
@@ -59,12 +59,12 @@ def test_unresolved_internal_import_aborts(monkeypatch):
 def test_ambiguous_import_aborts(monkeypatch):
     monkeypatch.setattr(os.path, "isfile", lambda _p: True)
     with pytest.raises(issue.IssueError, match="모호하다"):
-        issue._resolve("vdeter.stage7.support")
+        issue._resolve("vdeter.b210_system.support")
 
 
 @pytest.mark.parametrize("tampered", ["local", "pi", "deploy_record"])
 def test_triple_check_fails_when_any_source_is_tampered(tampered):
-    paths = ["VDETER/src/vdeter/stage7/support.py"]
+    paths = ["VDETER/src/vdeter/b210_system/support.py"]
     good = {paths[0]: "a" * 64}
     local, remote, record = dict(good), dict(good), dict(good)
     {"local": local, "pi": remote, "deploy_record": record}[tampered][paths[0]] = "b" * 64
@@ -73,7 +73,7 @@ def test_triple_check_fails_when_any_source_is_tampered(tampered):
 
 
 def test_triple_check_passes_when_all_three_agree():
-    paths = ["VDETER/src/vdeter/stage7/support.py"]
+    paths = ["VDETER/src/vdeter/b210_system/support.py"]
     same = {paths[0]: "c" * 64}
     report = issue.triple_check(paths, dict(same), dict(same), dict(same))
     assert report["pass"] is True

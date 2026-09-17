@@ -20,9 +20,9 @@ import types
 import unittest
 from fractions import Fraction
 
-from vdeter.stage7.pi_runtime import Stage7PiOperations
-from vdeter.stage7.rf_time import PATH_ENDPOINTS
-from vdeter.stage7.time_bridge import AffineCoefficients
+from vdeter.b210_system.pi_runtime import PiOperations
+from vdeter.b210_system.rf_time import PATH_ENDPOINTS
+from vdeter.b210_system.time_bridge import AffineCoefficients
 
 #: 4차 ladder 실측 correction (coordinator console): ROC 기준 c_R=0,
 #: MASS-A = 421137/2 ns = +210568.5 ns(+210.6µs), MASS-B = 190427/4 ns.
@@ -57,11 +57,11 @@ def _rt(fit, correction):
     stub = types.SimpleNamespace()
     stub.provisional_fit = types.SimpleNamespace(coefficients=fit)
     stub.active_correction = correction
-    stub._CORRECTED_TIME_PHASES = Stage7PiOperations._CORRECTED_TIME_PHASES
+    stub._CORRECTED_TIME_PHASES = PiOperations._CORRECTED_TIME_PHASES
     for name in ("_rf_time_correction", "_host_raw_to_hardware",
                  "_plan_times_to_hardware"):
         setattr(stub, name,
-                types.MethodType(getattr(Stage7PiOperations, name), stub))
+                types.MethodType(getattr(PiOperations, name), stub))
     return stub
 
 def _corr(stub, phase):

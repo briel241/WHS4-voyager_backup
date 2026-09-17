@@ -37,7 +37,7 @@ import standalone_v2_fixtures as fx  # noqa: E402
 import test_mass_roc_stage7_backend as backend  # noqa: E402
 import test_standalone_local_session as ls  # noqa: E402
 import test_standalone_run_cli as rc  # noqa: E402
-from apps import stage7_trace  # noqa: E402
+from apps import service_trace  # noqa: E402
 from apps.standalone import local_session, progress as pg, run_cmd  # noqa: E402
 
 
@@ -53,7 +53,8 @@ class _OpenSpy:
         real = self._real
 
         def spy(file, mode="r", *args, **kwargs):
-            self.records.append((str(file), str(mode), bool(self.phase.get("ready"))))
+            self.records.append((str(file), str(mode),
+                                 bool(self.phase.get("ready")) and not self.phase.get("closing")))
             return real(file, mode, *args, **kwargs)
 
         builtins.open = spy
@@ -66,6 +67,8 @@ class _OpenSpy:
         return False
 
     def after_ready(self):
+        """READY 이후 ~ close 시작 전(시나리오 구간)의 open 기록. close 구간(readiness candidate/state
+        기록·run evidence 수집)은 시나리오 I/O 규율의 대상이 아니라 별도 evidence 계약이다."""
         return [(p, m) for p, m, ready in self.records if ready]
 
 
@@ -81,6 +84,8 @@ def _execute_with_spies(paths, factory, *, progress_ticker: bool):
 
     def out(text):
         lines.append(text)
+        if text.startswith("Closing session"):
+            phase["closing"] = True
         if "SESSION READY" in text:
             # bring-up의 마지막 줄. 이 줄 자체는 mirror(console.log)에 남는 것이
             # 계약이고(README: presentation은 bring-up 구간만), 그 다음 줄부터가
@@ -233,18 +238,18 @@ def _run_with_trace_spy(scenario: str):
     """backend 하네스 + 실제 TraceWriter: flush 호출자 이름을 기록한다."""
 
     callers = []
-    original_flush = stage7_trace.TraceWriter.flush
+    original_flush = service_trace.TraceWriter.flush
 
     def spy_flush(self):
         callers.append(sys._getframe(1).f_code.co_name)
         return original_flush(self)
 
-    stage7_trace.TraceWriter.flush = spy_flush
+    service_trace.TraceWriter.flush = spy_flush
     try:
         with tempfile.TemporaryDirectory() as run_root:
             _services, controller = backend.build_harness(run_root)
             trace_path = os.path.join(run_root, "workload-trace.jsonl")
-            trace = stage7_trace.TraceWriter(trace_path, session_id="r2", workload_id="w")
+            trace = service_trace.TraceWriter(trace_path, session_id="r2", workload_id="w")
             controller._trace = trace
             if scenario == "005":
                 status = controller.run_sc_vde_005().to_dict()["status"]
@@ -256,7 +261,7 @@ def _run_with_trace_spy(scenario: str):
             trace.close()
             closed_lines = open(trace_path, "r", encoding="utf-8").read().splitlines()
     finally:
-        stage7_trace.TraceWriter.flush = original_flush
+        service_trace.TraceWriter.flush = original_flush
     return status, during, list(callers), closed_lines
 
 
@@ -280,11 +285,11 @@ def test_production_sources_have_no_tracer_or_on_poll_references():
         Path(_REPO) / "apps" / "standalone" / "run_cmd.py",
         Path(_REPO) / "apps" / "standalone" / "local_session.py",
         Path(_REPO) / "apps" / "standalone" / "progress.py",
-        Path(_REPO) / "apps" / "stage7_mass_roc_controller.py",
+        Path(_REPO) / "apps" / "mass_roc_workload_controller.py",
     ]
     for path in sources:
         text = path.read_text(encoding="utf-8")
         assert "ScenarioTracer" not in text, path
         assert "on_poll" not in text, path
-    assert "flush()" not in (Path(_REPO) / "apps" / "stage7_mass_roc_controller.py").read_text(
+    assert "flush()" not in (Path(_REPO) / "apps" / "mass_roc_workload_controller.py").read_text(
         encoding="utf-8").split("class MassRocScenarioController", 1)[1].split("def run_scenarios", 1)[0]

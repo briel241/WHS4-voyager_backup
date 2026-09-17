@@ -70,7 +70,7 @@ class _DrivenEventLog:
             began = time.perf_counter_ns()
             simulated_before = self._harness._clock.now_monotonic().total_nanoseconds()
         self._harness.drive(self._steps)
-        from apps.stage7_endpoint_launcher import service_event_record
+        from apps.endpoint_launcher import service_event_record
 
         for endpoint_id, sink_events in self._harness.events_by_endpoint.items():
             new = sink_events[self._seen[endpoint_id]:]
@@ -121,8 +121,8 @@ class SoftwareMassRocHarness:
                 start_stage5_group,
             )
             from vdeter.service import HandlerServiceEventSink
-            from vdeter.stage7.testing.adapter import Stage7ServiceApiTestAdapter
-            from vdeter.stage7.testing.controller import Stage7ScenarioController
+            from vdeter.b210_system.control_plane.adapter import ServiceApiTestAdapter
+            from vdeter.b210_system.control_plane.controller import ScenarioController
         except ImportError as exc:
             raise SoftwareHarnessUnavailable(f"VDETER import 실패: {exc}") from exc
 
@@ -165,7 +165,7 @@ class SoftwareMassRocHarness:
         channels = {}
         self.adapters = {}
         for endpoint_id, station in self.station_by_endpoint.items():
-            adapter = Stage7ServiceApiTestAdapter(
+            adapter = ServiceApiTestAdapter(
                 endpoint_id=endpoint_id,
                 service=by_station[station],
                 resolved_test_plan_sha256=_TEST_PLAN_SHA,
@@ -174,7 +174,7 @@ class SoftwareMassRocHarness:
             self.adapters[endpoint_id] = adapter
             channels[endpoint_id] = _LocalChannel(adapter)
 
-        self.controller = Stage7ScenarioController(
+        self.controller = ScenarioController(
             run_id="software-mass-roc",
             resolved_test_plan_sha256=_TEST_PLAN_SHA,
             adapter_channels=channels,
@@ -251,7 +251,7 @@ class SoftwareMassRocHarness:
 
 def build_software_scenario_controller():
     """(harness, MassRocScenarioController) 한 벌을 만든다."""
-    from apps.stage7_mass_roc_controller import MassRocScenarioController
+    from apps.mass_roc_workload_controller import MassRocScenarioController
 
     harness = SoftwareMassRocHarness()
     controller = MassRocScenarioController(

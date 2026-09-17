@@ -1,6 +1,6 @@
 """Codec-valid ON/OFF workload on the existing Service API and radio stack.
 
-Hardware execution is owned by stage7_coordinator_main, never this CLI.
+Hardware execution is owned by coordinator_main, never this CLI.
 The CLI offers a software-radio check and offline result summarization.
 """
 
@@ -184,7 +184,7 @@ def hardware_command(config_path, output, *, prepare_only=False):
         # Copy the resolved, non-secret config to prevent edits between preparation and child launch.
         resolved_experiment = output / "experiment.json"
         write_json_atomic(resolved_experiment, config)
-        command = [sys.executable, str(ROOT / "VDETER/apps/stage7_coordinator_main.py"),
+        command = [sys.executable, str(ROOT / "VDETER/apps/coordinator_main.py"),
                    "--run-id", run_id, "--phase", "mass-roc-service",
                    "--e2e-security-mode", "ENFORCED" if config["security"] == "ON" else "DISABLED",
                    "--security-compare-config", str(resolved_experiment),

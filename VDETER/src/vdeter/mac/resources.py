@@ -219,7 +219,8 @@ def conflicting_allocation(
 
     wanted = set(pair)
     for allocation in allocations:
-        if allocation.owner_station_id_value == owner_station_id_value:
+        if (allocation.state is not LcState.EXTERNAL_RESERVED
+                and allocation.owner_station_id_value == owner_station_id_value):
             continue
         if allocation.last_valid_frame_ordinal < frame_ordinal:
             continue
@@ -248,12 +249,28 @@ def find_allocation_for_tx(
     frame_ordinal: int,
 ) -> LcAllocation | None:
     for allocation in allocations:
+        if allocation.state in (LcState.EXTERNAL_RESERVED, LcState.FREE):
+            continue
         if allocation.logical_channel_tx != logical_channel_tx:
             continue
         if allocation.last_valid_frame_ordinal < frame_ordinal:
             continue
         return allocation
     return None
+
+
+def externally_reserved(allocations, logical_channel: int, frame_ordinal: int) -> bool:
+    """Heard reservations block new PoC use; they never authorize transmission.
+
+    Reservations protect the interval before activation as well as the active
+    lease. Expired entries do not block even before the next prune tick.
+    """
+    return any(
+        item.state is LcState.EXTERNAL_RESERVED
+        and item.last_valid_frame_ordinal >= frame_ordinal
+        and logical_channel in (item.logical_channel_tx, item.logical_channel_rx)
+        for item in allocations
+    )
 
 
 # --- Type 90 검증 ---

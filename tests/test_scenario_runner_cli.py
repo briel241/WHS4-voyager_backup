@@ -26,7 +26,7 @@ from common.textout import ensure_utf8_output
 ensure_utf8_output()
 
 import apps.scenario_runner as runner
-import apps.stage7_run as stage7_run
+import apps.service_run as service_run
 
 NOW = 1_760_000_000.0
 
@@ -144,12 +144,12 @@ def test_duplicate_run_id_rejected_before_any_spawn():
         configs = _make_valid_configs(tmp, "dup-run")
         os.makedirs(os.path.join(tmp, "results", "runs", "dup-run"))
         try:
-            stage7_run.run_stage7(
+            service_run.run_service_session(
                 scenario_id="SC-VDE-005", run_id="dup-run",
                 configs_dir=configs,
                 results_dir=os.path.join(tmp, "results"), spawn=spawn)
             raise AssertionError("중복 run-id가 거부되지 않았다")
-        except stage7_run.Stage7RequestError as exc:
+        except service_run.ServiceRequestError as exc:
             assert "이미" in str(exc)
     assert spawn.calls == []  # 어떤 endpoint도 시작하기 전에 거부됐다
 
@@ -158,12 +158,12 @@ def test_missing_configs_dir_rejected():
     spawn = _SpawnRecorder()
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            stage7_run.run_stage7(
+            service_run.run_service_session(
                 scenario_id="SC-VDE-005", run_id="r1",
                 configs_dir=os.path.join(tmp, "없는-디렉터리"),
                 results_dir=os.path.join(tmp, "results"), spawn=spawn)
             raise AssertionError("없는 configs-dir이 거부되지 않았다")
-        except stage7_run.Stage7RequestError:
+        except service_run.ServiceRequestError:
             pass
     assert spawn.calls == []
 
@@ -173,12 +173,12 @@ def test_metadata_run_id_mismatch_rejected():
     with tempfile.TemporaryDirectory() as tmp:
         configs = _make_valid_configs(tmp, "other-run")   # metadata는 other-run
         try:
-            stage7_run.run_stage7(
+            service_run.run_service_session(
                 scenario_id="SC-VDE-005", run_id="requested-run",
                 configs_dir=configs,
                 results_dir=os.path.join(tmp, "results"), spawn=spawn)
             raise AssertionError("metadata run-id 불일치가 거부되지 않았다")
-        except stage7_run.Stage7RequestError as exc:
+        except service_run.ServiceRequestError as exc:
             assert "run-id" in str(exc)
     assert spawn.calls == []
 
@@ -189,7 +189,7 @@ def test_stage7_spawn_failure_is_explicit_fail_not_fallback():
     spawn = _SpawnRecorder(error=OSError("coordinator 실행 파일 없음"))
     with tempfile.TemporaryDirectory() as tmp:
         configs = _make_valid_configs(tmp, "fail-run")
-        rc = stage7_run.run_stage7(
+        rc = service_run.run_service_session(
             scenario_id="SC-VDE-005", run_id="fail-run", configs_dir=configs,
             results_dir=os.path.join(tmp, "results"), spawn=spawn)
         assert rc == 1
@@ -209,7 +209,7 @@ def test_stage7_spawn_failure_is_explicit_fail_not_fallback():
 
 def test_stage7_cli_failure_does_not_run_direct():
     """CLI 층에서도 stage7 실패가 direct 실행으로 새지 않는다."""
-    original_run_stage7 = stage7_run.run_stage7
+    original_run_stage7 = service_run.run_service_session
     original_report = runner._run_and_report
     calls = {"stage7": 0}
 
@@ -220,13 +220,13 @@ def test_stage7_cli_failure_does_not_run_direct():
     def forbidden_direct(*_a, **_k):
         raise AssertionError("stage7 실패가 direct 시나리오 실행으로 샜다")
 
-    stage7_run.run_stage7 = fake_run_stage7
+    service_run.run_service_session = fake_run_stage7
     runner._run_and_report = forbidden_direct
     try:
         rc = runner.main(["run", "SC-VDE-005", "--transport", "stage7",
                           "--run-id", "r", "--configs-dir", "c"])
     finally:
-        stage7_run.run_stage7 = original_run_stage7
+        service_run.run_service_session = original_run_stage7
         runner._run_and_report = original_report
     assert rc == 1
     assert calls["stage7"] == 1
@@ -258,7 +258,7 @@ def test_cleanup_on_coordinator_hang_preserves_evidence():
     process = _HangingProcess()
     with tempfile.TemporaryDirectory() as tmp:
         configs = _make_valid_configs(tmp, "hang-run")
-        rc = stage7_run.run_stage7(
+        rc = service_run.run_service_session(
             scenario_id="SC-VDE-005", run_id="hang-run", configs_dir=configs,
             results_dir=os.path.join(tmp, "results"),
             spawn=lambda _cmd, **_k: process,

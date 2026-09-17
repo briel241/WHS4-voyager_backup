@@ -26,9 +26,9 @@ for path in (VDETER_ROOT, os.path.join(VDETER_ROOT, "src")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from vdeter.stage7.testing.evidence import (  # noqa: E402
+from vdeter.b210_system.testing.evidence import (  # noqa: E402
     ALL_TEST_CASES,
-    Stage7EvidenceBundle,
+    EvidenceBundle,
     sha256_file,
 )
 
@@ -170,13 +170,26 @@ def frozen_hash_audit() -> dict:
 
 
 def import_graph_audit() -> dict:
-    """core→TEST import 0, application→Coordinator import 0 (§18.3, §22.14)."""
+    """core->TEST import 0, frozen core->B210 시스템 역참조 0 (§18.3, §22.14).
 
+    규칙은 그대로다. 2-3 구조 정리에서 package 이름이 `stage7` -> `b210_system`,
+    런타임 제어면이 `testing` -> `control_plane`으로 바뀌었으므로 **같은 규칙을 새
+    이름으로** 검사한다. 이름만 옛것으로 남기면 아무것도 찾지 못한 채 항상 통과한다.
+
+    시험 전용 자료(`b210_system.testing`: 시험계획·evidence)는 core 가 import하면 안 된다.
+    런타임 제어면(`b210_system.control_plane`)은 진입점이 실행 중에 쓰는 production 경로라
+    이 금지 대상이 아니다.
+    """
+
+    package = "b210_system"
+    test_only = package + ".testing"
     violations = []
     core_root = os.path.join(VDETER_ROOT, "src", "vdeter")
-    test_pattern = re.compile(r"from\s+\S*stage7\.testing|import\s+\S*stage7\.testing")
+    test_pattern = re.compile(
+        r"from\s+\S*" + re.escape(test_only) + r"|import\s+\S*" + re.escape(test_only))
+    test_only_dir = os.path.join(package, "testing")
     for root, _dirs, files in os.walk(core_root):
-        if os.path.join("stage7", "testing") in root:
+        if test_only_dir in root:
             continue
         for name in files:
             if not name.endswith(".py"):
@@ -186,11 +199,13 @@ def import_graph_audit() -> dict:
                 text = handle.read()
             if test_pattern.search(text):
                 violations.append(os.path.relpath(path, VDETER_ROOT))
-    # frozen 코드가 stage7 package를 역참조하는지도 검사한다.
+    # frozen 코드가 B210 시스템 package 를 역참조하는지도 검사한다.
     frozen_refs = []
-    stage7_pattern = re.compile(r"from\s+\S*\bstage7\b|import\s+\S*\bstage7\b")
+    package_pattern = re.compile(
+        r"from\s+\S*(?<![A-Za-z0-9_])" + re.escape(package) + r"(?![A-Za-z0-9_])"
+        r"|import\s+\S*(?<![A-Za-z0-9_])" + re.escape(package) + r"(?![A-Za-z0-9_])")
     for root, _dirs, files in os.walk(core_root):
-        if os.sep + "stage7" in root:
+        if os.sep + package in root:
             continue
         for name in files:
             if not name.endswith(".py"):
@@ -198,9 +213,12 @@ def import_graph_audit() -> dict:
             path = os.path.join(root, name)
             with open(path, "r", encoding="utf-8") as handle:
                 text = handle.read()
-            if stage7_pattern.search(text):
+            if package_pattern.search(text):
                 frozen_refs.append(os.path.relpath(path, VDETER_ROOT))
     return {
+        "core_imports_test_only": violations,
+        "frozen_imports_b210_system": frozen_refs,
+        # 옛 키 이름도 유지한다 — 소비자(보고·evidence)가 참조한다.
         "core_imports_testing": violations,
         "frozen_imports_stage7": frozen_refs,
         "pass": not violations and not frozen_refs,
@@ -237,7 +255,7 @@ def main(argv=None) -> int:
         "stage7-software-%Y%m%dT%H%M%SZ"
     )
     bundle_root = os.path.join(VDETER_ROOT, "results", "runs", run_id)
-    bundle = Stage7EvidenceBundle(bundle_root, run_id=run_id, judgement_scope="SOFTWARE_ONLY")
+    bundle = EvidenceBundle(bundle_root, run_id=run_id, judgement_scope="SOFTWARE_ONLY")
 
     frozen = frozen_hash_audit()
     frozen_artifact = bundle.write_artifact("artifacts/frozen_hash_audit.json", frozen)

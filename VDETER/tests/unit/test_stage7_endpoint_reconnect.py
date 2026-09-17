@@ -2,7 +2,7 @@
 
 import threading
 
-from apps.stage7_endpoint_launcher import _serve_test_adapter_peers
+from apps.endpoint_launcher import _serve_test_adapter_peers
 
 
 class _Connection:

@@ -230,6 +230,8 @@ def test_hardware_prepare_only_generates_mode_bound_command(tmp_path, monkeypatc
     prepared = json.loads((output / "prepared-command.json").read_text())
     assert prepared["rf_started"] is False
     command = prepared["command"]
+    assert Path(command[1]).name == "coordinator_main.py"
+    assert Path(command[1]).is_file()
     assert command[command.index("--e2e-security-mode") + 1] == "DISABLED"
     assert "--security-compare-config" in command
 

@@ -32,11 +32,11 @@ ensure_utf8_output()
 
 # `vdeter` 패키지를 **영속 저장소 트리**에서 먼저 적재한다. 아래 시험은 임시
 # 복사본(setup 시 sys.path에 삽입됨)에서 identity를 만드는데, 그 복사본이
-# 삭제된 뒤 다른 시험이 `vdeter.stage7`를 처음 import하면 캐시된 패키지
+# 삭제된 뒤 다른 시험이 `vdeter.b210_system`를 처음 import하면 캐시된 패키지
 # 경로가 사라져 ModuleNotFoundError가 난다 (Pi clean-clone 시험에서 실측).
 import vdeter.link.tbb.crypto  # noqa: E402,F401
-import vdeter.stage7.canonical_json  # noqa: E402,F401
-import vdeter.stage7.configuration  # noqa: E402,F401
+import vdeter.b210_system.canonical_json  # noqa: E402,F401
+import vdeter.b210_system.configuration  # noqa: E402,F401
 
 from standalone_v2_fixtures import (  # noqa: E402
     ENV_MANIFEST,
@@ -75,7 +75,7 @@ def copy_tracked_tree(tmp) -> Path:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
     assert not (root / ".git").exists()
-    assert not (root / "VDETER" / "configs" / "stage7"
+    assert not (root / "VDETER" / "configs" / "b210_system"
                 / "standalone-binding.json").exists()
     assert not (root / "var").exists() and not (root / "identity").exists()
     assert not (root / "hardware.toml").exists()
@@ -183,15 +183,24 @@ def test_prepare_paths_of_run_and_qualify_work_without_git():
             assert context["provenance"]["git"] is None
             assert context["provenance"]["stage7_baseline"]["version"] == "0.9.23"
 
-            # UNQUALIFIED 상태의 run은 RF 전 거부(exit 4) — Git 없음이 원인이 아니다.
+            # legacy/diag gate(readiness_enabled=False): UNQUALIFIED 상태의 run은 RF 전 거부(exit 4)
+            # — Git 없음이 원인이 아니다.
             try:
                 run_cmd.prepare(paths, repo_root=root,
                                 preflight_fn=fake_preflight,
-                                environment_manifest=dict(ENV_MANIFEST))
+                                environment_manifest=dict(ENV_MANIFEST),
+                                readiness_enabled=False)
                 raise AssertionError("UNQUALIFIED가 거부되지 않았다")
             except run_cmd.RunRefusal as exc:
                 assert exc.code == run_cmd.EXIT_UNQUALIFIED
                 assert "UNQUALIFIED" in str(exc)
+            # readiness 경로: qualification 없이도 UNVERIFIED로 준비(cold)를 계획한다 — Git 없음.
+            context = run_cmd.prepare(paths, repo_root=root, preflight_fn=fake_preflight,
+                                      environment_manifest=dict(ENV_MANIFEST),
+                                      machine_id="nogit-machine")
+            assert context["current_authority"] == "UNVERIFIED"
+            assert context["calibration"]["mode"] == "cold"
+            assert context["readiness_snapshot"]["status"] == "ABSENT"
 
             # v2 reference 발급(RF 없이 시험용) 후 run 준비 경로 통과.
             reference = issue_v2_reference(record, fingerprint,

@@ -41,12 +41,12 @@ def make_root(tmp) -> Path:
                  root / "apps" / "standalone" / "qualify_cmd.py")
     (root / "apps" / "standalone" / "cli.py").write_text("CLI = 1\n")
     (root / "apps" / "standalone" / "local_config.py").write_text("LC = 1\n")
-    (root / "VDETER" / "src" / "vdeter" / "stage7").mkdir(parents=True)
-    (root / "VDETER" / "src" / "vdeter" / "stage7" / "pi_runtime.py"
+    (root / "VDETER" / "src" / "vdeter" / "b210_system").mkdir(parents=True)
+    (root / "VDETER" / "src" / "vdeter" / "b210_system" / "pi_runtime.py"
      ).write_text("RF = 1\n")
-    (root / "VDETER" / "configs" / "stage7").mkdir(parents=True)
-    (root / "VDETER" / "configs" / "stage7" / "system.toml").write_text("a=1\n")
-    (root / "VDETER" / "configs" / "stage7"
+    (root / "VDETER" / "configs" / "b210_system").mkdir(parents=True)
+    (root / "VDETER" / "configs" / "b210_system" / "system.toml").write_text("a=1\n")
+    (root / "VDETER" / "configs" / "b210_system"
      / "standalone-binding.json").write_text("{}")   # legacy: 제외
     (root / "VDETER" / "tests" / "unit").mkdir(parents=True)
     (root / "VDETER" / "tests" / "unit" / "test_x.py").write_text("T = 1\n")
@@ -73,7 +73,7 @@ def test_scan_excludes_state_and_git_and_generated_files():
         assert "apps/standalone/qualify_cmd.py" in files
         assert "README.md" in files
         for excluded in ("hardware.toml", ".git",
-                         "VDETER/configs/stage7/standalone-binding.json",
+                         "VDETER/configs/b210_system/standalone-binding.json",
                          "var/installation/junk.json",
                          "identity/private/key.pem", "apps/__pycache__/x.pyc"):
             assert excluded not in files, excluded
@@ -84,7 +84,7 @@ def test_classification_multi_domain_and_fail_safe():
     with tempfile.TemporaryDirectory() as tmp:
         record = im.measure(make_root(tmp))
         files = record["files"]
-        assert files["VDETER/src/vdeter/stage7/pi_runtime.py"]["domains"] == ["rf"]
+        assert files["VDETER/src/vdeter/b210_system/pi_runtime.py"]["domains"] == ["rf"]
         assert files["apps/standalone/local_config.py"]["domains"] == [
             "rf", "operation"]                       # 교차영향: RF config 생성
         assert files["apps/standalone/qualify_cmd.py"]["domains"] == ["tooling"]
@@ -117,7 +117,7 @@ def test_digests_are_canonical_and_nonbinding_changes_do_not_affect_them():
         assert third["installation_sha256"] == first["installation_sha256"]
         assert third["files"]["README.md"]["sha256"] != first["files"]["README.md"]["sha256"]
         # rf 파일 변경 → rf digest·installation digest만 변경, 나머지 불변.
-        (root / "VDETER" / "src" / "vdeter" / "stage7" / "pi_runtime.py"
+        (root / "VDETER" / "src" / "vdeter" / "b210_system" / "pi_runtime.py"
          ).write_text("RF = 2\n")
         fourth = im.measure(root)
         assert fourth["domains"]["rf"]["sha256"] != first["domains"]["rf"]["sha256"]
@@ -215,7 +215,7 @@ def test_real_repo_measure_is_self_consistent():
     for path in record["files"]:
         assert not path.startswith(("var/", "identity/", ".git/"))
         assert path != ".git"
-    assert "VDETER/apps/stage7_coordinator_main.py" in qd.domain_files_v2(
+    assert "VDETER/apps/coordinator_main.py" in qd.domain_files_v2(
         record["files"], qd.RF)
     assert "apps/standalone/run_cmd.py" in qd.domain_files_v2(
         record["files"], qd.OPERATION)
